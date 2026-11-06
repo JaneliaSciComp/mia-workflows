@@ -309,8 +309,10 @@ How a node was made is the [`provenance:` Zarr convention](https://github.com/Bi
   per axis with its `source` (`record | file | assumed | synthetic`, plus `basis` and `range` for an assumed value);
   `inputs` the record (`id`) and every source file (`uri`, `name` the archive member, `checksum` sha256 when the
   cache has it); `outputs` the artifact id; `started` and `ended`. The root's step lists every group's inputs.
-- **Check step** (`check-stage`, §6): the harness at its commit, `parameters.schemas_commit`, `status` `ok` or
-  `failed`, `started` and `ended`. A re-run replaces it.
+- **Check step** (`check-stage`, §6): the harness at its commit, `parameters.schemas_commit`, `started` and
+  `ended`, written only when the check passes. A re-run replaces it; a failed re-run removes it. The convention
+  records what happened to the data, not how the computation went, so a step carries no status and a failed stage
+  job never publishes; the check's findings stay under `mia.checks`.
 
 `attributes.mia` (`"schema": 2`, `mia_harness.provenance.Provenance`) keeps only what neither OME-Zarr nor the
 convention carries and the reader or checker needs:
