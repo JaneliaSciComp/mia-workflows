@@ -304,11 +304,12 @@ How a node was made is the [`provenance:` Zarr convention](https://github.com/Bi
 `provenance:steps`:
 
 - **Staging step** (`Sparse OME-Zarr staging`): `software` the harness at its commit; `environment` the harness
-  `pixi.lock` by sha256 (`env_digest`) at that commit; `runtime_dependencies` the snippets loaded, each at `snippets_commit`;
+  `pixi.lock` by sha256 (`env_digest`) at that commit;
   `parameters` exactly what the command received, the binding verbatim, the plan rule verbatim and the voxel size
   per axis with its `source` (`record | file | assumed | synthetic`, plus `basis` and `range` for an assumed value);
-  `inputs` the record (`id`) and every source file (`uri`, `name` the archive member, `checksum` sha256 when the
-  cache has it); `outputs` the artifact id; `started` and `ended`. The root's step lists every group's inputs.
+  `inputs` the record (`id`), every source file (`uri`, `name` the archive member, `checksum` sha256 when the
+  cache has it) and each snippet that read them (`uri` its `snippet.py` pinned to `snippets_commit`, `name`
+  `snippet`: code the environment does not pin is an input like any other); `outputs` the artifact id; `started` and `ended`. The root's step lists every group's inputs.
 - **Check step** (`check-stage`, §6): the harness at its commit, `parameters.schemas_commit`, `started` and
   `ended`, written only when the check passes. A re-run replaces it; a failed re-run removes it. The convention
   records what happened to the data, not how the computation went, so a step carries no status and a failed stage
@@ -328,7 +329,7 @@ convention carries and the reader or checker needs:
   `schema` and the merged geometry check.
 
 Dropped from schema 1 as duplicates: `artifact` (the id is the step's output, the rest is in `parameters` or
-stage.json), `derived_from` (`inputs` and `runtime_dependencies`), `voxel_size` (`parameters`; the reader takes nm from the
+stage.json), `derived_from` (`inputs`), `voxel_size` (`parameters`; the reader takes nm from the
 level-0 scale), `plan.rule` and `digest`, `downsampling` (`multiscales[].metadata`), `kind` and `label_key`
 (OME), `geometry.levels` (the transforms and arrays), `verification` (the check step and `checks`).
 `harness add-provenance ROOT` upgrades artifacts written under schema 1 in place.
