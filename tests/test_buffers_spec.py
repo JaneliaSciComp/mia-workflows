@@ -130,6 +130,12 @@ def test_prep_spec_refused(body, needle):
         load_prep_text(yaml.safe_dump(data))
 
 
+def test_buffer_spec_refuses_a_prep_request_by_name():
+    data = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "c" * 40}, "records": ["a"]}
+    with pytest.raises(SpecError, match="prep:go"):
+        load_spec_text(yaml.safe_dump(data))
+
+
 def test_sample_plan_defaults_and_must_match_splits():
     data = yaml.safe_load((FIXTURES / "spec.yaml").read_text())
     assert load_spec_text(yaml.safe_dump(data)).sampling.plan.samples == {"train": 1000, "val": 20, "test": 20}

@@ -285,6 +285,10 @@ def load_spec_text(text: str) -> Spec:
         data = yaml.safe_load(text)
         if isinstance(data, dict) and "warnings" in data:
             raise SpecError("warnings is not a spec field")
+        if isinstance(data, dict) and data.get("kind") == "preparation":
+            raise SpecError(
+                "this is a preparation request, not a buffer spec: it takes the prep:go label, not buffer:go"
+            )
         return Spec.model_validate(data)
     except (yaml.YAMLError, ValidationError) as error:
         raise SpecError(str(error)) from error
