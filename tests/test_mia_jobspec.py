@@ -218,9 +218,11 @@ def test_match_job(tmp_path):
     assert not any("github" in h or "anthropic" in h or "claude" in h for h in s.allow_hosts)
     assert s.agent == "claude" and f"--max-budget-usd {cfg.limits.agent_max_budget_usd}" in s.command
     assert '--allowedTools "Bash(harness smoke:*),Read,Write,Glob,Grep"' in s.command and "> claude.json" in s.command
+    snap = str(cfg.paths.work_root / "_snapshots" / pins.snippets_commit)
+    assert '--tools "Bash,Read,Write,Glob,Grep"' in s.command and "--restricted" in s.command
+    assert "--strict-mcp-config" in s.command and f"--add-dir {snap}" in s.command
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert cache in s.ro_mounts and s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_WRITABLE"] == "0"
-    snap = str(cfg.paths.work_root / "_snapshots" / pins.snippets_commit)
     hsnap = str(cfg.paths.work_root / "_harness" / pins.harness_commit)
     assert sorted(s.ro_mounts) == sorted([str(cfg.harness.dir), hsnap, snap, cache]) and snap in s.command
     assert (s.env["MIA_HARNESS_COMMIT"], s.env["MIA_HARNESS_ENV_DIGEST"]) == (pins.harness_commit, pins.env_digest)

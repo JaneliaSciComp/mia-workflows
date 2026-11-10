@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 MATCH_TOOLS = "Bash(harness smoke:*),Read,Write,Glob,Grep"
+MATCH_AVAILABLE = "Bash,Read,Write,Glob,Grep"  # --tools: what exists; MATCH_TOOLS is what runs unprompted
 HARNESS_ENV = (
     "MIA_HARNESS_JOB_BYTES",
     "MIA_HARNESS_COMMIT",
@@ -353,7 +354,8 @@ def match_job(cfg: Config, args: JobArgs) -> JobSpec:
         f"ln -sfn {quote(str(snapshot_dir))} snapshot && \\\n"
         f'claude -p "$(cat prompt.md)" --model {quote(cfg.agent.model)} '
         f"--max-budget-usd {cfg.limits.agent_max_budget_usd} --output-format json \\\n"
-        f'  --allowedTools "{MATCH_TOOLS}" > claude.json 2> claude.err'
+        f'  --allowedTools "{MATCH_TOOLS}" --tools "{MATCH_AVAILABLE}" --restricted --strict-mcp-config \\\n'
+        f"  --add-dir {quote(str(snapshot_dir))} > claude.json 2> claude.err"
     )
     return _spec(
         cfg,

@@ -98,7 +98,9 @@ The workflow sets `data:matching` and submits the **match job**: a Claude agent,
 with the record, the downloads entry, a read-only snapshot of mia-snippets at a pinned commit and the harness
 CLI. It picks a snippet for each raw and label array and writes a **binding**, a small YAML saying which files
 to read with which snippet and parameters, with reasons. It may run `harness smoke` to try bindings, but may
-not change snippet code. Its outcome is `matched`, `needs_snippet` or `blocked`.
+not change snippet code. The job runs Claude Code restricted to five built-in tools, with no settings files and no
+MCP servers; the sandbox mounts are the other half of that restriction. Its outcome is `matched`, `needs_snippet`
+or `blocked`.
 
 The worker never trusts the agent's claim. It checks the binding (right record and commit, URLs from the
 record, https only, snippets exist) and runs its own **smoke job**, a plain `harness smoke` with no agent. Only
