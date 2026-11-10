@@ -4,7 +4,6 @@ import respx
 from autodev_helpers import API, R
 
 from autodev.github import GitHub
-from autodev.models import Feedback
 from autodev.review import Reviewers, approved, combine_checks, feedback, handled_ids, latest_round_at
 
 MP = "<!-- autodev:"
@@ -85,7 +84,33 @@ def test_feedback_from_reviews_and_revise_comments_oldest_first():
         cm(12, "bot", f"/revise {MP} x -->"),
     ]
     fb = feedback(reviews, inline, comments, BOT)
-    assert fb == [Feedback("comment-10", "also update docs"), Feedback("review-3", "rename foo\n- `a.py` line 4: here")]
+    assert [(f.id, f.text) for f in fb] == [
+        ("comment-10", "also update docs"),
+        ("review-3", "rename foo\n- `a.py` line 4: here"),
+    ]
+    assert [(f.author, f.at) for f in fb] == [("admin", "2026-10-10T00:30:00Z"), ("alice", "2026-10-10T01:00:00Z")]
+
+
+def test_an_approval_supersedes_the_approvers_earlier_requests_only():
+    """A reviewer who asked for changes and then approved this head has withdrawn the request; another
+    reviewer's request still stands (spec autonomous-gates §3)."""
+    reviews = [
+        rv(3, "alice", "CHANGES_REQUESTED", body="rename foo", at="2026-10-10T01:00:00Z"),
+        rv(4, "admin", "CHANGES_REQUESTED", body="split it", at="2026-10-10T01:10:00Z"),
+        rv(5, "alice", "APPROVED", at="2026-10-10T01:30:00Z"),
+    ]
+    assert [f.id for f in feedback(reviews, [], [], BOT, head_sha=HEAD)] == ["review-4"]
+    assert [f.id for f in feedback(reviews, [], [], BOT)] == ["review-3", "review-4"]  # no head: nothing dropped
+    assert feedback(reviews, [], [], BOT, head_sha="0ld")[0].author == "alice"  # an approval of another head
+
+
+def test_an_approve_comment_supersedes_an_earlier_revise_not_a_later_one():
+    comments = [
+        cm(10, "alice", "/revise also docs", at="2026-10-10T00:30:00Z"),
+        cm(11, "alice", f"/approve {HEAD}", at="2026-10-10T00:40:00Z"),
+        cm(12, "alice", "/revise and tests", at="2026-10-10T00:50:00Z"),
+    ]
+    assert [f.id for f in feedback([], [], comments, BOT, head_sha=HEAD)] == ["comment-12"]
 
 
 def test_handled_ids_come_from_our_markers():

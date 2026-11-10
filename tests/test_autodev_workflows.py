@@ -208,9 +208,10 @@ async def test_feedback_revised_once(env):
     assert m.of("publish")[1].feedback_id == "review-1" and m.of("merge")[0].sha == "h2"
 
 
-async def test_revision_limit_escalates_but_approval_still_merges(env):
+async def test_revision_limit_escalates_and_the_requesters_approval_merges(env):
+    """`_snapshot` drops a request its author withdrew by approving, so the approving snapshot carries none."""
     f1, f2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
-    m = Mocks([snap(feedback=[f1]), snap(feedback=[f1, f2]), snap(feedback=[f1, f2], approved=True)])
+    m = Mocks([snap(feedback=[f1]), snap(feedback=[f1, f2]), snap(approved=True)])
     assert await run(env, m, IssueInput(7, max_revisions=1)) == "merged"
     assert len(m.of("prepare")) == 2
     assert any("revision limit" in c.body for c in m.of("comment"))
@@ -219,10 +220,18 @@ async def test_revision_limit_escalates_but_approval_still_merges(env):
 async def test_escalation_is_raised_once_then_waits(env):
     f1, f2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
     stuck = snap(feedback=[f1, f2])
-    m = Mocks([snap(feedback=[f1]), stuck, stuck, stuck, snap(feedback=[f1, f2], approved=True)])
+    m = Mocks([snap(feedback=[f1]), stuck, stuck, stuck, snap(approved=True)])
     assert await run(env, m, IssueInput(7, max_revisions=1)) == "merged"
     assert m.names().count("observe") == 5
     assert sum("revision limit" in c.body for c in m.of("comment")) == 1
+
+
+async def test_an_outsiders_pending_request_blocks_the_merge_at_the_limit(env):
+    """An escalation leaves the PR in a human's hands (the workflow keeps watching); closing it ends the run."""
+    f1, f2 = Feedback("review-1", "a", "alice"), Feedback("review-2", "b", "admin")
+    m = Mocks([snap(feedback=[f1]), snap(feedback=[f1, f2], approved=True), snap(state="closed")])
+    assert await run(env, m, IssueInput(7, max_revisions=1)) == "closed"
+    assert any("unaddressed change requests" in c.body for c in m.of("comment")) and "merge" not in m.names()
 
 
 async def test_closed_pr_stops(env):

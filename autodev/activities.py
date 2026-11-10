@@ -319,7 +319,9 @@ class Activities:
             frozenset(self.cfg.github.trusted_bots),
         )
         handled = handled_ids(comments, reviewers)
-        pending = [item for item in feedback(reviews, inline_comments, comments, reviewers) if item.id not in handled]
+        pending = [
+            item for item in feedback(reviews, inline_comments, comments, reviewers, head_sha) if item.id not in handled
+        ]
         is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
         return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)

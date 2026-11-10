@@ -12,7 +12,7 @@ from temporalio.exceptions import ApplicationError
 from autodev.activities import Activities, neutralize
 from autodev.github import GitHub
 from autodev.gitops import GitError, Mirror
-from autodev.models import FailureInput, Feedback, ObserveInput, PublishInput, RoundInput, StageInput
+from autodev.models import FailureInput, ObserveInput, PublishInput, RoundInput, StageInput
 
 
 @pytest.fixture(autouse=True)
@@ -232,7 +232,7 @@ async def test_observe_skips_handled_feedback(tmp_path, gh):
     respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": []}))
     respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
     snap = await acts(tmp_path, gh).observe_pr(ObserveInput(5))
-    assert snap.feedback == [Feedback("comment-10", "also docs")]
+    assert [(item.id, item.text) for item in snap.feedback] == [("comment-10", "also docs")]
     assert (snap.state, snap.head_sha, snap.approved, snap.checks) == ("open", head, False, "none")
 
 

@@ -33,6 +33,8 @@ class Feedback:
 
     id: str  # "review-<id>" | "comment-<id>"
     text: str
+    author: str = ""  # the reviewer's login; an approval by the same author later withdraws the request
+    at: str = ""  # GitHub's ISO-8601 UTC timestamp of the review or comment
 
 
 @dataclass

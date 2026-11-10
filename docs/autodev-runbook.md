@@ -9,7 +9,7 @@ request, and merges it after a human approves. Design: [agentic-dev-infrastructu
 |---|---|
 | add `autodev:go` to an issue (needs write access) | runs an agent round, opens PR `autodev/issue-N`, labels the issue `autodev:review` |
 | review with *Request changes*, or comment `/revise <what>` (write access) | runs another round on the same branch (up to `max_revisions`) |
-| approve the PR (or comment `/approve <sha>` under a personal token, after the latest round's summary) | squash-merges that exact commit, closes the issue |
+| approve the PR (or comment `/approve <sha>` under a personal token, after the latest round's summary) | squash-merges that exact commit, closes the issue (a change request you made earlier on the same head is withdrawn by your approval; anyone else's still blocks) |
 | close the PR | stops; re-add `autodev:go` to start over (closing the *issue* does not stop a running workflow) |
 | sees `autodev:needs-human` | read the failure comment, fix, re-add `autodev:go` (an open PR is resumed) |
 

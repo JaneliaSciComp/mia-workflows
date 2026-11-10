@@ -32,9 +32,15 @@ def test_approved_but_pending_waits_and_failing_escalates():
     assert decide(snap(approved=True, checks="failure"), [], 0, 3)[0] == ESCALATE
 
 
-def test_revision_limit_escalates_unless_approved():
+def test_revision_limit_escalates_even_when_approved():
+    """A pending human change request blocks a merge regardless of the retry counter (spec autonomous-gates §3);
+    `_snapshot` has already dropped requests their author superseded by approving."""
     assert decide(snap(feedback=[F1]), [], 3, 3) == (ESCALATE, "revision limit (3) reached")
-    assert decide(snap(approved=True, feedback=[F1]), [], 3, 3) == (MERGE, None)
+    assert decide(snap(approved=True, checks="success", feedback=[F1]), [], 3, 3) == (
+        ESCALATE,
+        "approved with unaddressed change requests (revision limit 3 reached)",
+    )
+    assert decide(snap(approved=True, checks="success"), [], 3, 3) == (MERGE, None)  # nothing pending: merges
 
 
 def test_raised_escalation_waits_until_the_head_changes():
