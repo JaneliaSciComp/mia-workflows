@@ -58,7 +58,8 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 # a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers
 Response = tuple[int, dict | bytes | None, dict[str, str]]
 
-UNAPPROVED = ("created", "planned", "sourcing", "staged")  # latest events of a round no human has approved yet
+SERVING = ("approved", "ready", "idle")  # latest events under which consumers draw
+UNAPPROVED = ("created", "planned", "sourcing", "staged")  # a round not yet approved: only picks the 409 message
 
 
 class _Strict(BaseModel):
@@ -275,16 +276,20 @@ class BufferService:
         return BufferConfig.model_validate(config)
 
     def _serving(self, buffer: str) -> BufferConfig:
-        """The config of a buffer consumers may use: 410 once its latest event is `retired`, 409 while the round has
-        not been approved yet (its latest event is from before the staged gate's approve, spec §15). A buffer with
-        no events (registered by hand) serves."""
+        """The config of a buffer consumers may use. An allowlist (spec autonomous-gates §3): the latest event must
+        be `approved`, `ready` or `idle`. `retired` is 410; a round not yet approved, a `needs-human`, or no event
+        at all (a hand registration that never authorized the buffer) is 409 with the reason."""
         config = self._config(buffer)
         kind = (self.ledger.latest_event(buffer) or {}).get("kind")
         if kind == "retired":
             raise HttpError(410, "buffer retired")
+        if kind in SERVING:
+            return config
+        if kind is None:
+            raise HttpError(409, "buffer has no approved event")
         if kind in UNAPPROVED:
             raise HttpError(409, "buffer not approved")
-        return config
+        raise HttpError(409, "buffer needs a human")
 
     def _consumer(self, buffer: str, query: dict[str, str]) -> str:
         consumer_id = query.get("consumer", "")

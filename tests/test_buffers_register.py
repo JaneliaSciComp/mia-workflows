@@ -225,6 +225,12 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
         "val": 4,
         "test": 4,
     }
+    events = httpx.get(f"{token_server}/buffers/demo/events").json()["events"]
+    assert [event["kind"] for event in events] == ["approved", "ready"] and out["events"] == ["approved", "ready"]
+    consumer = httpx.post(
+        f"{token_server}/buffers/demo/consumers", json={"name": "n", "host": "h", "pid": 1, "split": "train"}
+    )
+    assert consumer.status_code == 201  # a hand-registered buffer serves because register authorized it
 
 
 def test_single_plane_volumes_split_by_fraction_across_a_dataset(tmp_path, spec_2d):  # noqa: F811

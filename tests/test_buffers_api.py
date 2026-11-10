@@ -75,9 +75,15 @@ def call(s, method, path, query=None, payload=None):
     return s.handle(method, path, query or {}, json.dumps(payload).encode() if payload is not None else b"")
 
 
+def approve(s, buffer="b"):
+    """Authorize the buffer to serve: consumers are refused until its latest event is approved, ready or idle."""
+    return worker(s, "POST", f"/buffers/{buffer}/events", {"kind": "approved"})
+
+
 def test_register_and_draw(tmp_path):
     s = svc(tmp_path)
     assert call(s, "PUT", "/buffers/b", payload=CFG)[0] == 200
+    approve(s)
     assert call(s, "PUT", "/buffers/b/volumes/a", payload=body())[0] == 200
     status, out, _ = call(s, "PUT", "/buffers/b/volumes/small", payload=body("small", extent=1000))
     assert status == 422 and out["error"] == "footprint 1024 exceeds 1000×1000"
@@ -97,6 +103,7 @@ def test_register_and_draw(tmp_path):
 def test_frozen_split_is_stable_and_bounded(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     call(s, "PUT", "/buffers/b/volumes/a", payload=body())
     cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
     first = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})[1]
@@ -120,6 +127,7 @@ CANDS = [
 def test_frozen_list_stops_when_candidates_run_out(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)  # val list of 4
+    approve(s)
     call(s, "PUT", "/buffers/b/volumes/a", payload={**body(), "samples": {"val": CANDS[:2]}})
     cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
     head = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "1", "consumer": cid})[1]
@@ -135,6 +143,7 @@ def test_frozen_rows_stay_readable_when_a_volume_goes_missing(tmp_path):
     staged = tmp_path / "staged"
     s = BufferService(Ledger(tmp_path / "l.sqlite"), staged_root=staged)
     call(s, "PUT", "/buffers/b", payload=CFG)  # val list of 4
+    approve(s)
     for vid, candidates in (("a", CANDS[:2]), ("c", CANDS[2:])):
         (staged / vid / "v0.zarr").mkdir(parents=True)
         path = str(staged / vid / "v0.zarr")
@@ -152,6 +161,7 @@ def test_frozen_rows_stay_readable_when_a_volume_goes_missing(tmp_path):
 def test_zero_weight_candidates_end_the_list_without_an_error(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     call(s, "PUT", "/buffers/b/volumes/a", payload={**body("a"), "samples": {"val": CANDS[:1]}})
     call(s, "PUT", "/buffers/b/volumes/z", payload={**body("z"), "weight": 0.0, "samples": {"val": CANDS[1:3]}})
     cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
@@ -164,6 +174,7 @@ def test_zero_weight_candidates_end_the_list_without_an_error(tmp_path):
 def test_re_put_replaces_candidates_and_keeps_frozen(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     planned = {**body(), "samples": {"val": CANDS}}
     call(s, "PUT", "/buffers/b/volumes/a", payload=planned)
     cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
@@ -186,6 +197,7 @@ def test_re_put_under_a_new_artifact_clears_frozen(tmp_path):
     them (test_re_put_replaces_candidates_and_keeps_frozen)."""
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     planned = {**body(), "samples": {"val": CANDS}, "artifact": "aaaa"}
     assert call(s, "PUT", "/buffers/b/volumes/a", payload=planned)[1]["frozen_cleared"] == 0
     cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
@@ -201,6 +213,7 @@ def test_re_put_under_a_new_artifact_clears_frozen(tmp_path):
 def test_empty_split_is_204_and_bad_bodies_are_422(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     call(s, "PUT", "/buffers/b/volumes/a", payload=body(split_planes={"train": [0, 1, 2, 3, 4]}))
     cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
     status, out, headers = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "4", "consumer": cid})
@@ -217,6 +230,7 @@ def test_empty_split_is_204_and_bad_bodies_are_422(tmp_path):
 def test_concurrent_next_gives_unique_seqs(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     call(s, "PUT", "/buffers/b/volumes/a", payload=body())
     cids = [call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "pid": i})[1]["consumer_id"] for i in range(3)]
     seqs: list[int] = []
@@ -242,6 +256,7 @@ def test_over_http(tmp_path):
         auth = {"Authorization": "Bearer t"}
         assert httpx.put(f"{base}/buffers/b", json=CFG).status_code == 401
         assert httpx.put(f"{base}/buffers/b", json=CFG, headers=auth).status_code == 200
+        assert httpx.post(f"{base}/buffers/b/events", json={"kind": "approved"}, headers=auth).status_code == 200
         assert httpx.put(f"{base}/buffers/b/volumes/a", json=body(), headers=auth).status_code == 200
         cid = httpx.post(f"{base}/buffers/b/consumers", json=CONSUMER).json()["consumer_id"]
         r = httpx.get(f"{base}/buffers/b/next", params={"n": 2, "consumer": cid})
@@ -271,6 +286,7 @@ def test_consumer_and_read_routes_are_open(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="secret")
     ok = {"Authorization": "Bearer secret"}
     s.handle("PUT", "/buffers/b", {}, json.dumps(CFG).encode(), ok)
+    s.handle("POST", "/buffers/b/events", {}, json.dumps({"kind": "approved"}).encode(), ok)
     assert call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[0] == 201
     assert call(s, "GET", "/buffers/b/status")[0] == 200
     assert call(s, "GET", "/assets/raw")[0] == 200
@@ -279,6 +295,7 @@ def test_consumer_and_read_routes_are_open(tmp_path):
 def test_next_n_is_bounded_and_from_is_non_negative(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     call(s, "PUT", "/buffers/b/volumes/a", payload=body())
     cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
     assert call(s, "GET", "/buffers/b/next", {"n": "0", "consumer": cid})[0] == 422
@@ -310,6 +327,7 @@ def test_volume_levels_are_validated_and_errors_never_drop_the_connection(tmp_pa
 def test_restart_does_not_replay_the_train_stream(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     call(s, "PUT", "/buffers/b/volumes/a", payload=body())
     cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
     first = [
@@ -334,6 +352,7 @@ def test_consumer_lookup_is_by_id(tmp_path):
 def test_descriptor_carries_normalize(tmp_path):
     s = svc(tmp_path)
     assert call(s, "PUT", "/buffers/b", payload=CFG)[0] == 200
+    approve(s)
     bounds = {"lo": [1], "hi": [200]}
     assert call(s, "PUT", "/buffers/b/volumes/a", payload={**body(), "normalize": bounds})[0] == 200
     assert call(s, "PUT", "/buffers/b/volumes/c", payload=body("c", split_planes={"test": [0]}))[0] == 200
@@ -650,6 +669,7 @@ def test_status_board_routes(tmp_path):
 def test_retire_route_archives_and_frees_refs(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", archive_dir=tmp_path / "archive")
     worker(s, "PUT", "/buffers/b", CFG)
+    approve(s)
     worker(s, "PUT", "/buffers/b/volumes/a", {**body(), "artifact": "art1"})
     cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
     call(s, "GET", "/buffers/b/next", {"n": "3", "consumer": cid})
@@ -673,34 +693,41 @@ def test_events_accept_sourcing_and_staged(tmp_path):
     assert [e["kind"] for e in call(s, "GET", "/buffers/b/events")[1]["events"]] == ["sourcing", "staged"]
 
 
-def test_an_unapproved_buffer_serves_no_consumer(tmp_path):
-    """Until the approve at the staged gate (the `ready` event), consumers are refused with 409: the page still
-    reads the buffer; a hand-registered buffer (no events) stays servable; retired stays 410 (spec §15)."""
+def test_only_an_approved_buffer_serves(tmp_path):
+    """Serving needs an affirmative authorization (spec autonomous-gates §3): the latest event must be
+    `approved`, `ready` or `idle`. Anything else is 409 with a reason; `retired` stays 410; no events is 409."""
     s = BufferService(Ledger(tmp_path / "l.sqlite"))
     call(s, "PUT", "/buffers/b", payload=CFG)
     call(s, "PUT", "/buffers/b/volumes/a", payload=body())
-    for kind in ("created", "sourcing", "staged"):
+    no_events = (409, {"error": "buffer has no approved event"})
+    assert call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[:2] == no_events
+    for kind in ("created", "planned", "sourcing", "staged"):
         worker(s, "POST", "/buffers/b/events", {"kind": kind})
         waiting = (409, {"error": "buffer not approved"})
         assert call(s, "GET", "/buffers/b/next", {"consumer": "x"})[:2] == waiting, kind
         assert call(s, "GET", "/buffers/b/split/val", {"consumer": "x"})[:2] == waiting, kind
         assert call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[:2] == waiting, kind
+    worker(s, "POST", "/buffers/b/events", {"kind": "needs-human", "detail": "why"})
+    needs = (409, {"error": "buffer needs a human"})
+    assert call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[:2] == needs
     assert call(s, "GET", "/buffers/b/status")[0] == 200 and call(s, "GET", "/buffers/b/events")[0] == 200
     worker(s, "POST", "/buffers/b/events", {"kind": "approved"})
-    worker(s, "POST", "/buffers/b/events", {"kind": "ready"})
     cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    worker(s, "POST", "/buffers/b/events", {"kind": "ready"})
     assert call(s, "GET", "/buffers/b/next", {"consumer": cid})[0] == 200
+    worker(s, "POST", "/buffers/b/events", {"kind": "idle"})  # a returning consumer still draws
+    assert call(s, "GET", "/buffers/b/next", {"consumer": cid})[0] == 200
+    worker(s, "POST", "/buffers/b/events", {"kind": "needs-human", "detail": "degraded"})
+    assert call(s, "GET", "/buffers/b/next", {"consumer": cid})[:2] == needs
     worker(s, "POST", "/buffers/b/events", {"kind": "retired"})
     assert call(s, "GET", "/buffers/b/next", {"consumer": cid})[:2] == (410, {"error": "buffer retired"})
-    call(s, "PUT", "/buffers/hand", payload=CFG)  # `mia-buffers register`: no events, serves as before
-    call(s, "PUT", "/buffers/hand/volumes/a", payload=body())
-    assert call(s, "POST", "/buffers/hand/consumers", payload=CONSUMER)[0] == 201
 
 
 def test_a_retired_buffer_serves_no_consumer(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"))
     call(s, "PUT", "/buffers/b", payload=CFG)
     call(s, "PUT", "/buffers/b/volumes/a", payload=body())
+    call(s, "POST", "/buffers/b/events", payload={"kind": "approved"})
     cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
     call(s, "POST", "/buffers/b/events", payload={"kind": "retired"})
     gone = (410, {"error": "buffer retired"})
@@ -714,6 +741,7 @@ def test_status_stats_pyramids_and_next_skips_missing(tmp_path, monkeypatch):
     staged = tmp_path / "staged"
     s = BufferService(Ledger(tmp_path / "l.sqlite"), staged_root=staged)
     call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
     for vid in ("a", "c"):
         (staged / vid / "v0.zarr").mkdir(parents=True)
         call(s, "PUT", f"/buffers/b/volumes/{vid}", payload={**body(vid), "path": str(staged / vid / "v0.zarr")})
@@ -870,6 +898,7 @@ def test_usage_live_and_materialised(tmp_path, monkeypatch):
 
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", archive_dir=tmp_path / "archive")
     worker(s, "PUT", "/buffers/b", CFG)
+    approve(s)
     assert call(s, "GET", "/usage/zz")[0] == 404
     one, two = (call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"] for _ in range(2))
     assert call(s, "GET", "/buffers/b/next", {"consumer": one})[0] == 204  # no volume yet: two empty answers

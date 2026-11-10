@@ -81,6 +81,12 @@ never imports the activity implementations.
 reduce it to a small typed result before it enters workflow history, and run it through `neutralize` before
 posting it to GitHub.
 
+**Serving is authorized, never inferred.** `BufferService._serving` is an allowlist: a consumer draws only while the
+buffer's latest event is `approved`, `ready` or `idle`. `retired` is 410; a round before its approve is `409 buffer not
+approved`; `needs-human` is `409 buffer needs a human`; no event at all is `409 buffer has no approved event`. Nothing
+serves because no one said no, so a new event kind is unservable until it is added to `SERVING` on purpose;
+`mia-buffers register` writes `approved` and `ready` itself (spec autonomous-gates §3).
+
 **Shared helpers take a `Deployment`, not a `Config`.** autodev's auth, Temporal connection, logging and ops
 helpers are annotated with the `Deployment` protocol in `autodev/config.py`, which both packages' configs satisfy.
 If a helper needs a new config field, add it to the protocol and to both configs.
@@ -140,7 +146,8 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
    registers every pooled, staged volume. Planes are split by each plan row's `split` policy (see "The buffer's
    life after ready"; split key = volume plus plane). The buffer pins its recipe (tensorizer, params, the harness
    commit and env digest read from the configuration's harness pin) and the plan's hash (default: sha256 of the plan
-   file's text). Unstaged records are listed as skipped, volumes the coarsest crop does not fit as refused.
+   file's text). Unstaged records are listed as skipped, volumes the coarsest crop does not fit as refused. It
+   then writes the `approved` and `ready` events, without which buffer-api refuses consumers.
 5. **Consume.** In an environment with the harness importable (the mia-snippets `harness/` pixi env, with this
    repository on `PYTHONPATH`), plus torch and muvit for training, the demo notebook's dataset cell becomes
 
@@ -168,7 +175,9 @@ its stages change (`mia_core.registry.Registry`, best effort).
 
 Three capability levels, enforced per route: consumer routes (register a consumer, `next`, `split`, `status`) and read
 routes (every other `GET`, and `POST /plan`) are open; worker routes (every other `PUT`, `POST`, `DELETE`) need
-`Authorization: Bearer <contents of service.token_file>`, else `401 {"error": "unauthorized"}`.
+`Authorization: Bearer <contents of service.token_file>`, else `401 {"error": "unauthorized"}`. Consumer routes answer
+`409` unless the buffer's latest event is `approved`, `ready` or `idle` (an allowlist: a `needs-human` or a missing event
+never serves; spec autonomous-gates §3).
 
 Sync commands, for a fresh service or one that missed writes:
 

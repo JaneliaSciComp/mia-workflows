@@ -47,6 +47,7 @@ def buffer_server(tmp_path, monkeypatch):
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     cfg = {**CFG, "tensorizer_params": {"normalize": "percentile", "scope": "volume"}}
     assert httpx.put(f"{base}/buffers/b", json=cfg).status_code == 200
+    assert httpx.post(f"{base}/buffers/b/events", json={"kind": "approved"}).status_code == 200  # may serve
     volume = {**body(), "normalize": {"lo": [0], "hi": [9]}}
     assert httpx.put(f"{base}/buffers/b/volumes/a", json=volume).status_code == 200
     yield base
