@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from mia_buffers.config import HUMAN_LABELS, STAGES, Config, load_config
+from mia_buffers.config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES, Config, load_config
 
 
 def make_cfg(tmp_path: Path, **overrides) -> Config:
@@ -172,3 +172,16 @@ def test_keeper_cfg_defaults(tmp_path):
     assert make_cfg(tmp_path).keeper.minutes == 30
     with pytest.raises(ValidationError):
         make_cfg(tmp_path, keeper={"minutes": 0})
+
+
+def test_every_label_description_fits_github():
+    """GitHub refuses a label description over 100 characters (422 on init-labels)."""
+    from mia_data.config import EXTRA_LABELS
+    from mia_data.config import HUMAN_LABELS as DATA_HUMAN
+    from mia_data.config import STAGES as DATA_STAGES
+
+    tables = [DATA_STAGES, DATA_HUMAN, STAGES, HUMAN_LABELS, PREP_STAGES, PREP_HUMAN_LABELS]
+    descriptions = [spec[1] for table in tables for spec in table.values()] + [
+        spec[1] for spec in EXTRA_LABELS.values()
+    ]
+    assert all(len(text) <= 100 for text in descriptions), [text for text in descriptions if len(text) > 100]

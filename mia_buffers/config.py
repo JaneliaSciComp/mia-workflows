@@ -39,10 +39,7 @@ HUMAN_LABELS = {  # set by humans; the poller delivers each as the workflow sign
     "approve": ("0e8a16", "Approve the plan; start sourcing"),
     "keep": ("0e8a16", "Keep this idle buffer; back to ready"),
     "retire": ("b60205", "Retire this buffer: release its staged data"),
-    "revoke": (
-        "b60205",
-        "Revoke the records named as `/revoke <record>` lines in your comment: their volumes leave this buffer",
-    ),
+    "revoke": ("b60205", "Revoke the records named in your `/revoke <record>` comment lines: their volumes leave"),
 }
 # a preparation request's stages and human label: `prep:<stage>` on an issue of the same repo (milestone E)
 PREP_STAGES = {
