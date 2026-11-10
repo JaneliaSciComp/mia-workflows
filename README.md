@@ -31,7 +31,8 @@ sandbox matches the dataset to a reader snippet from [mia-snippets](https://gith
 and writes a binding; plain harness jobs check it, cut the round's crops, verify them and show them in the issue.
 A human approves with `data:approve`, and those crops are published to shared storage and a `galleries` branch; or
 rejects with `data:reject` and comments, which go to the agent fixing the snippet (a new snippet's PR, which autodev
-writes, is merged only when its crops are approved). Every stage is a label
+writes, is merged only when its crops are approved). Every verdict is recorded as an assessment, and `data:revoke`
+withdraws a published dataset later: nothing is deleted, the buffers that drew from it are degraded. Every stage is a label
 and a new comment with links to the folders involved. The whole flow, with a diagram and the component for each
 step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/mia-crops-spec.md`](docs/mia-crops-spec.md).
 
@@ -49,8 +50,9 @@ servable; the round is staged before a human approves it (`buffer:approve`; `buf
 plan), and the buffer is `ready` once every weighting group reaches the spec's minimum. A staged artifact is
 addressed by its recipe, so a later buffer with the same binding, levels and plan reuses it instead of staging
 again. After that the buffer lives as long as the issue: idle when no consumer has drawn for a while,
-`buffer:keep` to hold it, `buffer:retire` to release what it references; a keeper evicts unreferenced caches under
-the configured quotas and is the only code that deletes.
+`buffer:keep` to hold it, `buffer:retire` to release what it references, `buffer:revoke` (with `/revoke <record>`
+lines) to withdraw single records; a keeper evicts unreferenced caches under the configured quotas and is the only
+code that deletes.
 
 A dataset that is not prepared is out of the pool. A `prep:go` request issue hands its records to mia-data
 (`data:go` on their dataset issues) and follows them through the registry until each is prepared, so buffering
@@ -107,6 +109,6 @@ Agents are untrusted code driven by text from issues, so they never run on the h
 | `autodev/` | autodev: workflows, activities, CLI; GitHub client and csub job runner shared with the others |
 | `mia_data/` | mia-data: workflows, activities, harness job specs, CLI (`pixi run mia exec mia-data ...`) |
 | `mia_buffers/` | mia-buffers: the `MiaBuffer` and `MiaPrep` workflows, the planner, stage job specs, the cache keeper, buffer-api with its ledger, registry and page, and the `BufferDataset` client |
-| `mia_ops/` | `pixi run mia`: starts, stops and inspects every service in `mia.yaml` (Temporal, autodev, snippets, mia-data, mia-buffers, buffer-api), and `mia exec <service> <cmd>` runs an app command with that service's config |
+| `mia_ops/` | `pixi run mia`: starts, stops and inspects every service in `mia.yaml` (Temporal, autodev, snippets, mia-data, mia-buffers, buffer-api), and `mia exec <service> <cmd>` runs an app command with that service's config; `mia pause` / `mia resume` stop and release every workflow at its next job |
 | `docs/` | setup guides, the [mia-data workflow overview](docs/mia-data-workflow.md) and the [development guide](docs/development.md); design notes, the runbook, `specs/` and `plans/` |
 | `tests/` | unit tests (`pixi run test`); no GitHub, LSF or Temporal server needed. `pixi run lint` runs ruff, `pixi run typecheck` runs mypy |

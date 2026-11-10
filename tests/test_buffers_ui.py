@@ -58,3 +58,8 @@ def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
     hosts = set(re.findall(r"https?://[^/\"'`$\s)]+/?", PAGE))
     allowed = {"https://github.com/", "https://fonts.googleapis.com/", "http://www.w3.org/"}
     assert {h if h.endswith("/") else h + "/" for h in hosts} <= allowed
+
+
+def test_page_names_the_new_states_and_labels() -> None:
+    for needle in ('"revoked":', '"quarantined":', "buffer:revoke", "data:revoke", "paused by the operator"):
+        assert needle in PAGE, needle

@@ -419,6 +419,8 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>410 buffer retired</td><td>the buffer was retired: by a label, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
 <tr><td>the issue seems stuck for hours with no comment</td><td>the run may be frozen</td><td>close the issue, wait for its "issue closed" comment, reopen, <code>buffer:go</code></td></tr>
+<tr><td><code>needs-human</code> whose comment starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then add the label again</td></tr>
+<tr><td><code>needs-human</code> whose comment starts "revoked by", or a dataset row <code>revoked</code></td><td>a human withdrew the dataset's crops (<code>data:revoke</code>): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <code>data:go</code> on the dataset issue; a publication that succeeds repairs the row</td></tr>
 </table></div>
 
 <h2>Words the pages use</h2>
@@ -732,7 +734,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 </figure>
 
 <h3 style="font-size:16px;font-weight:600;margin:28px 0 6px">3b. The review loop</h3>
-<p>Every set of crops waits at <code>data:review</code>, including a set made from a snippet PR. <code>data:approve</code> publishes the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are published under the merge commit. <code>data:reject</code> sends every comment the reviewer wrote on the issue since the crops report to the agent. When the round is following a PR, the comments go as <code>/revise</code> on that PR. Otherwise they go as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves (spec §14).</p>
+<p>Every set of crops waits at <code>data:review</code>, including a set made from a snippet PR. <code>data:approve</code> publishes the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are published under the merge commit. <code>data:reject</code> sends every comment the reviewer wrote on the issue since the crops report to the agent. When the round is following a PR, the comments go as <code>/revise</code> on that PR. Otherwise they go as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves (spec §14). Every verdict is written to the registry as an assessment before anything acts on it, and <code>data:revoke</code> at any later time withdraws a published set: its artifacts are quarantined, the buffers that drew from it unregister the record, and a new <code>data:go</code> repairs it.</p>
 <figure>
 <svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset issue's stages: data:go, match and smoke, crops and verify, data:review, data:merging, data:done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are published; a merge whose snippet differs from the approved head is caught in the caption.">
 <defs><marker id="f3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -1114,6 +1116,7 @@ const PILL_HELP = {
   "in-progress": "The preparation pipeline is working on it; the stage column or the dataset issue says where it is.",
   "unprepared": "Nobody has asked for this dataset to be prepared.",
   "needs-human": "Stopped. The issue's latest comment says what it needs from a person.",
+  "revoked": "Withdrawn by a human after publication (data:revoke): nothing is selected or reused from it; a new data:go repairs it.",
   // a cache directory or a staged pyramid
   "cached": "The dataset's raw files are in the shared cache and no job is writing them; a buffer checks them against its binding before reusing them.",
   "fetching": "A fetch job is downloading the dataset's raw files into the cache.",
@@ -1123,6 +1126,7 @@ const PILL_HELP = {
   "missing": "Expected on disk but not found by the last scan.",
   "evicted": "Removed by the keeper to stay under quota; a buffer that needs it fetches or stages again.",
   "staged": "At least one pyramid of this dataset exists in the staged cache.",
+  "quarantined": "Kept on disk for autonomy.quarantine_days after a revocation; the keeper does not evict it while an investigation may need it.",
   // a buffer's stage (its issue's label)
   "new": "The issue is seen; nothing has run yet.",
   "planning": "Resolving the spec against the catalog.",
@@ -1162,7 +1166,7 @@ const pill = (text, kind, extra) => {
   return lines.length ? tipOn(node, lines) : node;
 };
 const GOOD = new Set(["prepared","ready","servable","pool","cached"]);
-const BAD = new Set(["failed","needs-human","missing","blocked","evicted","stale"]);
+const BAD = new Set(["failed","needs-human","missing","blocked","evicted","stale","revoked","quarantined"]);
 const statePill = s => s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "";
 // an asset's `ready` only says its directory is there and no job writes it: the page says "cached"
 const assetPill = s => statePill(s === "ready" ? "cached" : s);
@@ -1406,7 +1410,8 @@ const COLS = [
   { key: "state", label: "state", title: "preparation, then the raw cache's state, then \"staged\" when a pyramid of it exists",
     get: x => `${x.prepared === "prepared" ? 0 : 1}${x.raw?.data ? 0 : 1}${x.staged.some(stagedUsable) ? 0 : 1}`,
     cell: x => { const td = el("td", { class: "pills" }, statePill(x.prepared));
-      if (x.raw?.data) td.append(" ", assetPill(x.raw.data.state)); if (x.staged.some(stagedUsable)) td.append(" ", pill("staged", "pool")); return td; } },
+      if (x.raw?.data) td.append(" ", assetPill(x.raw.data.state)); if (x.staged.some(stagedUsable)) td.append(" ", pill("staged", "pool"));
+      if (x.staged.some(a => a.data?.quarantined)) td.append(" ", assetPill("quarantined")); return td; } },
   { key: "issue", label: "issue", num: true, get: x => x.ds?.issue || 0, cell: x => el("td", { class: "num" }, x.ds?.issue ? ghIssue(S.meta.datasets_repo, x.ds.issue) : "") },
   { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data?.bytes ? fmtBytes(x.raw.data.bytes) : "") },
   { key: "buffers", label: "buffers", get: x => (x.raw?.refs || []).length, cell: x => { const td = el("td"); (x.raw?.refs || []).forEach((b, i) => td.append(i ? " " : "", bufferLink(b))); return td; } },
@@ -1722,7 +1727,7 @@ async function viewCache() {
     card("Staged pyramids", "One row per staged artifact.", table([
       { label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) }, { label: "open", cell: a => folderLink(roots.staged_root, a.data?.levels_key && a.data?.record && `${a.data.levels_key}/${a.data.record}/${a.key}`) }, { label: "dataset", cell: a => a.data?.record || "" }, { label: "issue", cell: a => dsIssue(a.data?.record) },
       { label: "levels key", cell: a => el("code", {}, a.data?.levels_key || "") }, { label: "binding", cell: a => el("code", {}, short(a.data?.binding_hash, 10)) },
-      { label: "harness", cell: a => el("code", {}, short(a.data?.harness_commit, 10)) }, { label: "state", cell: a => assetPill(a.data?.state) },
+      { label: "harness", cell: a => el("code", {}, short(a.data?.harness_commit, 10)) }, { label: "state", cell: a => { const td = el("td", { class: "pills" }, assetPill(a.data?.state)); if (a.data?.quarantined) td.append(" ", assetPill("quarantined")); return td; } },
       { label: "bytes", num: true, cell: a => a.data?.bytes ? fmtBytes(a.data.bytes) : "" }, { label: "last used", cell: a => when(a.data?.last_used) },
       { label: "buffers", cell: a => { const s = el("span"); (a.refs || []).forEach((b, i) => s.append(i ? " " : "", bufferLink(b))); return s; } },
       { label: "job", cell: a => a.data?.job ? el("code", {}, a.data.job) : "" },

@@ -88,7 +88,8 @@ posting it to GitHub.
 buffer's latest event is `approved`, `ready` or `idle`. `retired` is 410; a round before its approve is `409 buffer not
 approved`; `needs-human` is `409 buffer needs a human`; no event at all is `409 buffer has no approved event`. Nothing
 serves because no one said no, so a new event kind is unservable until it is added to `SERVING` on purpose;
-`mia-buffers register` writes `approved` and `ready` itself (spec autonomous-gates §3). A buffer registered before
+`mia-buffers register` writes `approved` and `ready` itself (spec autonomous-gates §3). An approve is recorded as an
+assessment first (`GET /assessments`); the Decisions view of those records arrives with milestone M. A buffer registered before
 this rule answers `409 buffer has no approved event` (`GET /buffers` lists it with a null `latest_event`): re-run
 `mia-buffers register` with the same arguments, which re-puts the config and volumes (frozen lists survive under the
 same artifact) and writes the two events. The client's `BufferNotApproved` message repeats the service's reason.
