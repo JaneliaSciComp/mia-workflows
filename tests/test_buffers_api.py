@@ -999,3 +999,23 @@ def test_datasets_accept_the_revoked_state(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"))
     assert call(s, "PUT", "/datasets/rec", payload={"state": "revoked"})[1]["state"] == "revoked"
     assert call(s, "GET", "/datasets", {"state": "revoked"})[1]["datasets"][0]["id"] == "rec"
+
+
+def test_a_quarantined_volume_is_never_served_nor_counted(tmp_path):
+    """The deterministic backstop of a revocation: buffer-api itself stops serving the volume, before any keeper
+    pass or workflow reacts (spec autonomous-gates §6)."""
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    approve(s)
+    call(s, "PUT", "/buffers/b/volumes/rec%2Fv0.zarr", payload={**body("rec/v0.zarr"), "artifact": "art1"})
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    assert call(s, "GET", "/buffers/b/next", {"n": "2", "consumer": cid})[0] == 200
+    assert call(s, "GET", "/buffers/b/status")[1]["servable"] == {"train": 1, "val": 1}
+    call(s, "PUT", "/assets/staged/art1", payload={"quarantined": True, "quarantined_at": 1.0})
+    assert call(s, "GET", "/buffers/b/next", {"n": "2", "consumer": cid})[0] == 204
+    assert call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "1", "consumer": cid})[0] == 204
+    status = call(s, "GET", "/buffers/b/status")[1]
+    assert status["servable"] == {"train": 0, "val": 0} and status["quarantined"] == ["rec/v0.zarr"]
+    assert call(s, "GET", "/buffers")[1]["buffers"][0]["servable"] == {"train": 0, "val": 0}
+    call(s, "PUT", "/assets/staged/art1", payload={"quarantined": False})  # a repair released it
+    assert call(s, "GET", "/buffers/b/next", {"n": "2", "consumer": cid})[0] == 200

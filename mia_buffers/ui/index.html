@@ -1666,6 +1666,7 @@ async function viewBuffer(root, id, refresh) {
         ["recipe", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} @ ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
         ["plan hash", code(cfg.plan_hash, 12)], ["splits", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
         ["servable", servableText(status.servable)], ["volumes", num(status.volumes)], ["max empty", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
+        (status.quarantined || []).length ? ["quarantined", el("span", { class: "pills" }, assetPill("quarantined"), " " + status.quarantined.join(", "))] : null,
       ]) : el("div", { class: "empty" }, evs.length ? "not sourced yet" : "the buffer's status did not load"))),
     card("Events", null, table([
       { label: "#", num: true, cell: x => num(x.seq) }, { label: "kind", cell: x => statePill(x.kind) }, { label: "when", cell: x => when(x.at) },

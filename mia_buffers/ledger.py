@@ -225,8 +225,10 @@ class Ledger:
                 "SELECT DISTINCT buffer, NULL FROM buffer_events WHERE buffer NOT IN (SELECT id FROM buffers) ORDER BY 1"
             ).fetchall()
         out = []
+        quarantined = self._quarantined_artifacts()
         for buffer, config in configs:
             volumes = self.volumes(buffer)
+            live = [volume for volume in volumes if volume.artifact not in quarantined]
             with self._lock:
                 (seen,) = self._db.execute(
                     "SELECT MAX(last_seen) FROM consumers WHERE buffer = ?", (buffer,)
@@ -242,7 +244,7 @@ class Ledger:
                     "latest_event": self.latest_event(buffer),
                     "volumes": len(volumes),
                     "missing": sum(volume.missing for volume in volumes),
-                    "servable": {split: len(servable(volumes, split)) for split in splits},
+                    "servable": {split: len(servable(live, split)) for split in splits},
                     "consumers_seen": seen,
                     "draws_today": today,
                 }
@@ -647,12 +649,21 @@ class Ledger:
 
     def quarantined_volumes(self, buffer: str) -> list[str]:
         """The ids of the buffer's volumes whose staged artifact is quarantined."""
+        quarantined = self._quarantined_artifacts()
+        return [volume.id for volume in self.volumes(buffer) if volume.artifact in quarantined]
+
+    def live_volumes(self, buffer: str) -> list[Volume]:
+        """The buffer's volumes less those whose artifact is quarantined: what the service may draw from and count
+        as servable (spec autonomous-gates §6: a revocation stops serving at once, before anything else reacts)."""
+        quarantined = self._quarantined_artifacts()
+        return [volume for volume in self.volumes(buffer) if volume.artifact not in quarantined]
+
+    def _quarantined_artifacts(self) -> set[str]:
         with self._lock:
             rows = self._db.execute(
                 "SELECT key FROM assets WHERE kind = 'staged' AND json_extract(data, '$.quarantined') = 1"
             ).fetchall()
-        quarantined = {row[0] for row in rows}
-        return [volume.id for volume in self.volumes(buffer) if volume.artifact in quarantined]
+        return {row[0] for row in rows}
 
     # --- the registry ------------------------------------------------------------------------
 

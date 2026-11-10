@@ -135,7 +135,8 @@ If a helper needs a new config field, add it to the protocol and to both configs
   those artifact rows `quarantined` (`quarantined_at`, `quarantined_by`), flips the dataset row to `revoked`
   (`sync_datasets` never merges over it) and writes `revoked.json` beside the manifest last, so the folder is not
   prepared whatever else is on disk; the issue ends in needs-human naming the artifacts and the buffers that drew
-  from the record. The keeper holds a quarantined asset for `autonomy.quarantine_days` after its references are
+  from the record. From that moment buffer-api itself draws nothing from a quarantined volume and counts it
+  out of `servable` (`Ledger.live_volumes`), whatever the buffer's workflow or the keeper have done yet. The keeper holds a quarantined asset for `autonomy.quarantine_days` after its references are
   gone and, for a ready or idle buffer whose status lists quarantined volumes, sends the `revoked` signal: the
   buffer unregisters those volumes, fails the dataset with the reason and serves on at its floor, or ends in
   needs-human below it (`buffer:retire` stops it altogether, spec §12.10). A board approve never writes over an

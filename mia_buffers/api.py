@@ -634,7 +634,7 @@ class BufferService:
         consumer_id = self._consumer(buffer, query)
         n = _int(query, "n", 1, low=1, high=MAX_N)
         split = self._split_of(buffer, consumer_id)
-        volumes = self.ledger.volumes(buffer)
+        volumes = self.ledger.live_volumes(buffer)  # a quarantined (revoked) volume is never drawn
         with self._lock:
             if buffer not in self._rng:  # seed from what the ledger already served, so a restart draws fresh crops
                 self._rng[buffer] = random.Random(f"{config.seed}:{self.ledger.max_seq(buffer)}")
@@ -660,7 +660,7 @@ class BufferService:
         size = config.split_sizes.get(split, DEFAULT_SPLIT_SIZE)
         if start >= size:
             raise HttpError(416, f"from {start} is past the {split} list of {size}")
-        volumes = self.ledger.volumes(buffer)
+        volumes = self.ledger.live_volumes(buffer)  # a quarantined (revoked) volume is never listed
         if not servable(volumes, split):
             return self._no_content(buffer)
         candidates, exhausted = capacity(volumes, split), False
@@ -773,15 +773,17 @@ class BufferService:
                     self.ledger.set_volume_missing(buffer, volume.id, missing, volume.path)
                     volumes[index] = replace(volume, missing=missing)
         splits = sorted({split for volume in volumes for split in volume.split_planes})
+        quarantined = self.ledger.quarantined_volumes(buffer)
+        live = [volume for volume in volumes if volume.id not in quarantined]
         return (
             200,
             {
                 "buffer": buffer,
                 "config": config.model_dump(),
                 "volumes": len(volumes),
-                "servable": {split: len(servable(volumes, split)) for split in splits},
+                "servable": {split: len(servable(live, split)) for split in splits},
                 "missing": [volume.id for volume in volumes if volume.missing],
-                "quarantined": self.ledger.quarantined_volumes(buffer),
+                "quarantined": quarantined,
                 "draws": self.ledger.draws_per_volume(buffer),
                 "consumers": self.ledger.consumers(buffer, self.stale_s),
             },
