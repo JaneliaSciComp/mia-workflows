@@ -1,6 +1,8 @@
 # MIA: autonomous by default — AI judges where humans decided, humans where it costs — Spec
 
-**Status:** draft v0.2 · 2026-11-09 · not yet approved. v0.2 takes the architecture review in
+**Status:** draft v0.2 · 2026-11-09 · not yet approved as a whole. Decided by the user 2026-11-09: snippet PRs
+auto-merge after a second model's review finds no serious issue, and judges flag serious issues only, never
+edge cases the data does not contain (§4, §4.3, §12.1). v0.2 takes the architecture review in
 `notes/2026-11-09-autonomous-gates-review.md` (local, untracked): three invariants of the current code are fixed
 first (§3); an approval is a **versioned assessment** that a deterministic policy turns into an authorization
 (§5); rejection is **revocation**, not a new round (§6); budgets cover the whole request from its root (§8);
@@ -157,6 +159,19 @@ not in the evidence**: it does not fill voxel sizes or channel meanings (v0.1 §
 an author). Metadata inference stays an author-side step (prep spec §4.3, a later plan) whose claims get their own
 check.
 
+**Serious issues only (the user, 2026-11-09).** A judge rejects for a **serious** finding and nothing else: the
+data would be read wrong (axes, channel, label layer, scale, plane), a spec or safety rule is broken (a read
+outside `io`, a forbidden import, an undeclared param, a write outside the workspace), or the code would fail on
+the files of **this** binding. It does not reject for generality the data does not need (a format variant not
+present in these files, a configurable parameter nobody asked for), for style, naming, documentation depth, or
+for edge cases the dataset does not contain: *we process the data as it is*. Such notes are findings of severity
+`ok` with a note, visible in the comment, never a reject. Mechanically: a `reject` verdict is accepted by policy
+only when at least one finding has severity `bad`; a `reject` without one is recorded and treated as `approve`
+with notes. Each prompt says so in its first lines, and the evaluation set (§9) holds "good enough, with nits"
+items whose expected verdict is `approve`, so a judge that nitpicks is measured as a false rejection. The
+`max_auto_rejects` cap (default **2**) is the backstop against a loop between an author and a judge that keep
+finding one more thing.
+
 ### 4.1 autodev: the review judge
 
 **Today.** A round opens or updates a PR; `decide()` waits for a human's approval of the exact head, revises on
@@ -238,11 +253,16 @@ The registry row carries the assessment id (§5); a buffer spec may demand `sele
 
 ### 4.3 mia-snippets: the code judge
 
-A snippet or tensorizer PR head is merged today when a human approves the crops its head made. Two judges look,
-both separate from autodev's author: the **crop judge** on the head's set (§4.2: "does this code read this data
-right"), and the **code judge** (§4.1 run by `snippets`: "is this written to `SPEC.md`": every read through
-`io`, no axis override without a stated source, declared params only, README says what it reads and its limits,
-the static rules not merely evaded by aliasing or `getattr`).
+A snippet or tensorizer PR head is merged today when a human approves the crops its head made. **Decided
+(the user, 2026-11-09): snippet PRs auto-merge once a second model has reviewed them and found no serious
+issue.** Two judges look, both separate from autodev's author: the **crop judge** on the head's set (§4.2: "does
+this code read this data right"), and the **code judge** (§4.1 run by `snippets`, a different model from the
+author's): "does this snippet read the files of this binding correctly and within `SPEC.md`": every read through
+`io`, no axis override without a stated source, declared params only, the static rules not merely evaded by
+aliasing or `getattr`, nothing that would crash on these files. It is **not** asked whether the snippet handles
+the format in general, other containers, other datasets, or hypothetical inputs; a snippet is one reader for one
+layout, immutable, superseded when the next dataset needs more (crops spec §5). The serious-only rule of §4
+applies: nits are notes, not rejects, and two auto-rejects end at a human.
 
 **Who merges.** mia-data owns the trigger; two statuses carry the verdicts:
 
@@ -472,7 +492,9 @@ first.
 
 ## 12. Open questions (defaults in bold)
 
-1. **Auto-merge where.** **`snippets`: yes (after shadow); `autodev` on this repo: no.**
+1. **Auto-merge where.** Decided 2026-11-09: **`snippets`: yes**, after the shadow period, when a second model
+   has reviewed the PR and found no serious issue (§4.3); **`autodev` on this repo: no** (default kept, the user
+   has not said otherwise).
 2. **Judge model.** **`opus`** (Claude Opus 5.5 under the team seat), different from the `sonnet` authors.
 3. **Thresholds and caps.** Every number in §4, §8, §9, §10 is a starting point; the per-gate ones are set from
    shadow data before `active`. The root caps (§8) are the ones that need the user's sense of scale.
@@ -481,8 +503,8 @@ first.
 5. **Audit sample.** **10%, non-blocking, completed by removing the label.**
 6. **`data:go` on everything.** **No.** Preparation on demand through prep requests and buffer plans; a daily
    scheduled prep request of `max_records` is the way to "everything eventually" within budget.
-7. **Rulesets.** **Status checks only where `auto_merge` is on**, `check` enforcing protected paths. The question
-   left: is "no human review required on `mia-snippets`" acceptable given the remaining guards.
+7. **Rulesets.** **Status checks only where `auto_merge` is on**, `check` enforcing protected paths. Resolved
+   with §12.1: `mia-snippets` requires no human review; the runbook gains the ruleset steps.
 8. **Unprepared records.** **The buffer files the prep request and gets `buffer:go` back at `prep:done` if the
    spec is unchanged.**
 9. **Research-validity flags the pipeline does not verify** (from the review; outside this spec, stated so an
