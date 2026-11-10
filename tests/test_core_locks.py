@@ -135,3 +135,22 @@ def test_a_late_release_leaves_the_new_owners_lock(tmp_path, monkeypatch):
     monkeypatch.setattr("mia_core.locks.os.replace", replace_after_takeover)
     outcome["released"] = old.release("raw", "rec", "old")
     assert outcome == {"new": True, "released": False} and old.holder("raw", "rec").owner == "new"
+
+
+def test_heartbeat_through_raises_when_the_lock_is_lost(tmp_path):
+    """A stale lease is not evidence that its writer stopped: the wait must fail, not log (spec autonomous-gates §3)."""
+    from mia_core.locks import LockLost, heartbeat_through
+
+    now, tick = clock()
+    locks = LockDir(tmp_path, now)
+    assert locks.take("raw", "rec", "round A", 900)
+    seen = []
+    beat = heartbeat_through(locks, ["raw", "rec", "round A"], seen.append)
+    beat("RUN")
+    assert seen == ["RUN"]
+    tick(1000)
+    assert locks.take("raw", "rec", "round B", 900)  # lapsed: another owner takes it
+    with pytest.raises(LockLost) as info:
+        beat("RUN")
+    assert seen == ["RUN", "RUN"] and (info.value.kind, info.value.key, info.value.owner) == ("raw", "rec", "round A")
+    assert "round A lost the lock raw/rec" in str(info.value)

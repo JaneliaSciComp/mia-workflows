@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mia_core.locks import LockLost
 from mia_core.untrusted import read_untrusted as read_untrusted
 
 from .models import JobOutcome
@@ -124,12 +125,17 @@ class CsubJobs:
         """Poll until the job is finished (or forgotten by LSF), calling `heartbeat` with each state seen.
 
         The script writes its exit code to `exit_code` in the workspace; that file settles the outcome when
-        LSF has already forgotten the job."""
+        LSF has already forgotten the job. A heartbeat that raises `LockLost` kills the job before the error
+        propagates: the lock it ran under is gone, so nothing it writes from here on is ours."""
         # ponytail: one csub status call per job per poll; batch across jobs if many run at once.
         while True:
             status = next(iter(await asyncio.to_thread(self.client.status, [job_id])), None)
             state = status.state if status else "UNKNOWN"
-            heartbeat(state)
+            try:
+                heartbeat(state)
+            except LockLost:
+                await asyncio.to_thread(self.client.kill, [job_id])
+                raise
             if status is None or status.terminal:
                 break
             await self._sleep(self._poll_s)

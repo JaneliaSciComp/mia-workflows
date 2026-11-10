@@ -80,6 +80,7 @@ def test_log_tail_reads_claude_and_job_stderr(tmp_path):
 class FakeCsub:
     def __init__(self, states=("DONE",), existing=(), error=None):
         self.submitted, self.states, self.existing, self.error = [], list(states), list(existing), error
+        self.killed = []
 
     def submit(self, spec):
         if self.error:
@@ -87,6 +88,10 @@ class FakeCsub:
         JobSpec.from_dict(spec)
         self.submitted.append(spec)
         return SimpleNamespace(job_id="777", walltime_min=spec["walltime_min"])
+
+    def kill(self, job_ids=None):
+        self.killed.extend(job_ids or [])
+        return SimpleNamespace(killed=list(job_ids or []))
 
     def status(self, ids=None):
         if ids is None:

@@ -534,7 +534,7 @@ async def test_take_lock_names_the_holder(tmp_path):
     assert (await t.a.take_lock("raw", "rec-1", "mia-data i1-e98 crop", 900)).ok
 
 
-async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path, caplog):
+async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path):
     t = _setup(tmp_path)
     locks = lock_dir(t.cfg)
     assert locks.take("raw", "rec-1", "me", 900)
@@ -552,9 +552,9 @@ async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path, caplog):
     assert beats == [("PEND",), ("RUN",)] and locks.holder("raw", "rec-1").heartbeat_at > before
     assert await env.run(t.a.await_job, "j2", "/w") == JobDone("j2", "DONE", 0)  # no lock: two arguments still work
     locks.release("raw", "rec-1", "me")
-    with caplog.at_level(logging.WARNING):
-        await env.run(t.a.await_job, "j3", "/w", ["raw", "rec-1", "me"])  # the lock is gone: logged, not raised
-    assert caplog.text.count("lost the lock raw/rec-1") == 1
+    with pytest.raises(ApplicationError) as info:  # the lock is gone: the wait fails, never retried
+        await env.run(t.a.await_job, "j3", "/w", ["raw", "rec-1", "me"])
+    assert info.value.non_retryable and info.value.type == "LockLost" and "lost the lock raw/rec-1" in str(info.value)
 
 
 def _cache_with_files_json(t):

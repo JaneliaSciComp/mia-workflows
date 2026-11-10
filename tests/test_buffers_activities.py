@@ -7,11 +7,13 @@ import os
 import shutil
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 from mia_helpers import FakeGH
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 from test_buffers_config import make_cfg
 from test_buffers_plan import BCSS, CATALOG, ONE_CH, U937, spec_with
 from test_buffers_register import token_server, write_stage_json  # noqa: F401  (fixture)
@@ -40,6 +42,7 @@ from mia_buffers.status import render_plan_comment, render_ready, render_staged
 from mia_core.registry import Registry, RegistryError
 from mia_core.untrusted import texts
 from mia_data.catalog import dataset_folder
+from mia_data.jobspec import lock_dir
 from mia_data.models import LockTaken
 from mia_data.publish import reindex
 
@@ -1093,7 +1096,6 @@ async def test_keep_posts_once_when_held_set_is_over_quota(acts, keeper_server):
 
 async def test_keep_resets_stale_builds_and_removes_old_building_dirs(acts, keeper_server):
     import time
-    from types import SimpleNamespace
 
     registry = keeper_server
     catalog_not_due(acts)
@@ -1622,3 +1624,22 @@ async def test_set_prep_stage_swaps_label_and_comments_once(acts):
     assert "`prep:done`" in comment["body"] and "every record is prepared" in comment["body"]
     with pytest.raises(ApplicationError):
         await acts.set_prep_stage(8, "new", state, "")
+
+
+async def test_await_job_lock_loss_is_permanent(acts, tmp_path):
+    """A heartbeat that finds the raw lock gone fails the wait for good (spec autonomous-gates §3); the runner has
+    killed the job by then."""
+    locks = lock_dir(acts.cfg)
+    assert locks.take("raw", "rec-1", "me", 900)
+
+    async def wait(job_id, workspace, heartbeat):
+        heartbeat("RUN")
+        return SimpleNamespace(job_id=job_id, state="DONE", exit_code=0)
+
+    acts.jobs = SimpleNamespace(wait=wait)
+    env = ActivityEnvironment()
+    assert (await env.run(acts.await_job, "j1", "/w", ["raw", "rec-1", "me"])).state == "DONE"
+    locks.release("raw", "rec-1", "me")
+    with pytest.raises(ApplicationError) as info:
+        await env.run(acts.await_job, "j2", "/w", ["raw", "rec-1", "me"])
+    assert info.value.non_retryable and info.value.type == "LockLost" and "lost the lock raw/rec-1" in str(info.value)

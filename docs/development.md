@@ -87,6 +87,12 @@ approved`; `needs-human` is `409 buffer needs a human`; no event at all is `409 
 serves because no one said no, so a new event kind is unservable until it is added to `SERVING` on purpose;
 `mia-buffers register` writes `approved` and `ready` itself (spec autonomous-gates §3).
 
+**A lost lock kills the job.** `heartbeat_through` raises `LockLost` when the raw lock lapsed or changed hands;
+`CsubJobs.wait` kills the job (`csub kill`) before the error propagates, and both `await_job` activities turn it into
+a non-retryable `ApplicationError` of type `LockLost`, which the workflows already route to `needs-human` or a failed
+dataset. The job is killed even when the loss shows on the terminal poll: a workspace whose lock was lost is never
+read from (spec autonomous-gates §3).
+
 **Shared helpers take a `Deployment`, not a `Config`.** autodev's auth, Temporal connection, logging and ops
 helpers are annotated with the `Deployment` protocol in `autodev/config.py`, which both packages' configs satisfy.
 If a helper needs a new config field, add it to the protocol and to both configs.
@@ -202,7 +208,8 @@ python -c 'import json,sys; print(json.dumps({"spec": open(sys.argv[1]).read()})
 
 **The raw lock.** No job writes a record's raw cache unless its worker holds `<local_root>/locks/raw/<record>`, a file
 with `{owner, taken_at, heartbeat_at, ttl_s}` (TTL 900 s). Every `await_job` poll heartbeats it; a stale file is
-renamed aside as `<key>.stale-<time>`. mia-data takes it around smoke and trusted crop jobs (owner
+renamed aside as `<key>.stale-<time>`. A wait whose heartbeat finds the lock gone (`mia_core.locks.LockLost`) kills
+its job (`csub kill`) and fails the round; a stale lease is never evidence that its writer stopped. mia-data takes it around smoke and trusted crop jobs (owner
 `mia-data <round> smoke|crop`); mia-buffers from before the fetch through the stage (owner
 `mia-buffers <round> <record>`), released while the dataset is blocked on quota and re-taken after; the keeper
 takes it (owner `keeper`) before evicting a record's assets and skips a held record. Snapshot extraction uses

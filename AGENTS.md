@@ -39,8 +39,9 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **Worker routes of buffer-api take the bearer token.** Every PUT/POST/DELETE other than the consumer routes needs
   `Authorization: Bearer <service.token_file>`; use `mia_core.registry.Registry`, never a bare httpx call.
 - **One writer per raw cache.** No job writes a record's raw cache unless its worker holds
-  `<local_root>/locks/raw/<record>` (`mia_core.locks`; TTL 900 s, heartbeat with every `await_job` poll). Hand-run
-  harness commands bypass it.
+  `<local_root>/locks/raw/<record>` (`mia_core.locks`; TTL 900 s, heartbeat with every `await_job` poll). A wait
+  whose heartbeat finds the lock gone kills its job (`csub kill`) and fails the round; a stale lease is never
+  evidence that its writer stopped. Hand-run harness commands bypass it.
 - **Only the keeper deletes.** The buffers worker's `MiaCacheKeeper` is the only code that removes anything under
   `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.
 - **A staged artifact is published by the worker's rename and never written again.** Stage jobs write

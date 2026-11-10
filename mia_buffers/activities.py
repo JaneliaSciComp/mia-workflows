@@ -31,7 +31,7 @@ from autodev.activities import PERMANENT_CSUB
 from autodev.jobs import JobSpec
 from mia_core.assets import cache_missing, raw_asset, read_files_json
 from mia_core.fs import dir_bytes
-from mia_core.locks import heartbeat_through, release_or_log, take_or_holder
+from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
@@ -823,11 +823,15 @@ class Activities:
 
     @activity.defn(name="await_job")
     async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
-        """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock."""
+        """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock.
+        A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3)."""
         if self.jobs is None:
             raise RuntimeError("no job runner: await_job runs only inside the worker")
         heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
-        outcome = await self.jobs.wait(job_id, workspace, heartbeat)
+        try:
+            outcome = await self.jobs.wait(job_id, workspace, heartbeat)
+        except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
+            raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
         return JobDone(outcome.job_id, outcome.state, outcome.exit_code)
 
     @activity.defn(name="read_stage")
