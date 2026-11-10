@@ -46,6 +46,10 @@ HUMAN_LABELS = {  # set by humans
         "d93f0b",
         "Reject the crops under review: your comments since the review go to the agent fixing the snippet",
     ),
+    "revoke": (
+        "b60205",
+        "Revoke this dataset's published crops: buffers that drew from it are degraded, nothing is deleted",
+    ),
 }
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),

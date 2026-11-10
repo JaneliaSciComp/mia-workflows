@@ -74,6 +74,7 @@ from .models import (
     QuotaCheck,
     RawStatus,
     RegisterResult,
+    RevokedSignal,
     SourcingLimits,
     StagedSummary,
     StageJobArgs,
@@ -1427,9 +1428,15 @@ class Activities:
         if kind == "staged":  # unapproved past retire_after_days: retire; a missing pyramid is not yet its problem
             if now - float(latest["at"]) > config.retire_after_days * 86400:
                 signals.append(("retire", [None, buffer_id], ""))
-            missing = []
+            status: dict = {}
         else:
-            missing = (await asyncio.to_thread(self.registry.status, buffer_id))["missing"]  # stats the pyramids
+            status = await asyncio.to_thread(self.registry.status, buffer_id)  # stats the pyramids
+        missing, quarantined = status.get("missing") or [], status.get("quarantined") or []
+        if quarantined:  # a revocation (spec autonomous-gates §6): the buffer unregisters these volumes
+            records = sorted({str(volume).split("/", 1)[0] for volume in quarantined})
+            reason = "quarantined: " + ", ".join(quarantined)
+            signal = RevokedSignal(records, [str(volume) for volume in quarantined], text(reason, 500), buffer_id)
+            signals.append(("revoked", [signal], ",".join(records)))
         if missing:
             records = sorted({volume.split("/", 1)[0] for volume in missing})
             reason = "pyramid missing: " + ", ".join(missing)
@@ -1531,7 +1538,14 @@ class Activities:
         in_progress: set[str] = set()
         if kind == "raw":  # a prep job may be reading the raw cache of a record mia-data is working on
             in_progress = {row["id"] for row in await asyncio.to_thread(registry.datasets, "in-progress")}
-        rules: dict[str, Any] = {"hold_s": hold_s, "now": now, "in_progress": in_progress, "kind": kind}
+        quarantine_s = self.cfg.autonomy.quarantine_days * 86400  # a revoked artifact is evidence for this long
+        rules: dict[str, Any] = {
+            "hold_s": hold_s,
+            "now": now,
+            "in_progress": in_progress,
+            "kind": kind,
+            "quarantine_s": quarantine_s,
+        }
         locks = lock_dir(self.cfg)
 
         def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its fetch and stage of the record

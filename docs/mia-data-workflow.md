@@ -157,6 +157,12 @@ until an approve. Either label counts only while the issue is in review and only
 round's crops. The gate is one event; when the evaluation step exists, a VLM's `ok` verdict can stand in for
 the label.
 
+**Revocation.** `data:revoke` on the issue, at any stage after a publication, withdraws it (spec autonomous-gates
+§6): a `reject` assessment supersedes the approve, every staged artifact of the record is quarantined and rejected,
+the registry row becomes `revoked` and `revoked.json` is written beside the manifest, so no buffer plans or reuses
+the dataset and the buffers that drew from it unregister its volumes (the keeper tells them). Nothing is deleted; the
+issue ends in `data:needs-human` listing the artifacts and buffers, and a new `data:go` that publishes repairs it.
+
 **Publication.** The approve publishes the very crops that were reviewed: the worker reads the round's verify
 report back from its workspaces and copies every crop that passed into `paths.storage_root/<dataset>/<crop_id>/`
 by an idempotent publication activity (a retry never duplicates or overwrites), beside `binding.yaml`, and
@@ -172,8 +178,8 @@ the cache read-only, writes a private one and takes no lock.
 ## How the issue reads
 
 Every stage change posts a new comment, never an edit: the stage, what it produced, and the folders to look at.
-Labels show the current stage, exactly one `data:*` at a time, set only by the worker; `data:go`, `data:approve`
-and `data:reject` are yours, and the poller removes them once delivered. Anything the system
+Labels show the current stage, exactly one `data:*` at a time, set only by the worker; `data:go`, `data:approve`,
+`data:reject` and `data:revoke` are yours, and the poller removes them once delivered. Anything the system
 cannot handle ends in `data:needs-human` with a comment saying why and what to change; a `data:go` afterwards
 retries from the start with a new seed, or, when the round was following a snippet PR that is still open, picks
 that PR up again.

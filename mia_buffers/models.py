@@ -54,6 +54,17 @@ class PlanResult:
 
 
 @dataclass
+class RevokedSignal:
+    """The keeper's `revoked` signal: records of `buffer` whose staged volumes are quarantined (a revocation,
+    spec autonomous-gates §6), the volume ids, and why."""
+
+    records: list[str]
+    volumes: list[str]
+    reason: str
+    buffer: str = ""
+
+
+@dataclass
 class DegradedSignal:
     """The keeper's `degraded` signal: the records whose staged pyramids went missing from disk, and why."""
 

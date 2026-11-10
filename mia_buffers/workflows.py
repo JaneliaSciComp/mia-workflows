@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         QuotaCheck,
         RawStatus,
         RegisterResult,
+        RevokedSignal,
         SourcingLimits,
         StagedSummary,
         StageJobArgs,
@@ -186,6 +187,11 @@ class MiaBuffer:
     def degraded(self, signal: DegradedSignal) -> None:
         """The keeper found staged pyramids of these records of `signal.buffer` gone from disk."""
         self.lifecycle.append(("degraded", signal, signal.buffer))
+
+    @workflow.signal
+    def revoked(self, signal: RevokedSignal) -> None:
+        """The keeper found staged volumes of these records of `signal.buffer` quarantined (a revocation)."""
+        self.lifecycle.append(("revoked", signal, signal.buffer))
 
     @workflow.signal
     def idle(self, event: LabelEvent | None = None, buffer: str = "") -> None:
@@ -795,7 +801,34 @@ class MiaBuffer:
             return False
         elif kind == "degraded":
             return await self._degraded(payload)
+        elif kind == "revoked" and workflow.patched("l-revoke"):
+            return await self._revoked(payload)
         return True  # an idle while idle: the keeper says it again each pass
+
+    async def _revoked(self, signal: RevokedSignal) -> bool:
+        """A revocation reached this buffer (spec autonomous-gates §6): the named servable datasets leave the
+        registration and fail with the reason; the buffer serves on at its floor, or ends in needs-human below it.
+        The keeper re-sends while the volumes stay quarantined: a record already failed is left alone."""
+        state = self.state
+        assert state.round_id and state.buffer_id
+        named = set(signal.records)
+        hit = [dataset for dataset in state.datasets if dataset.record in named and dataset.status == "servable"]
+        if not hit:
+            return True
+        for dataset in hit:
+            await self._act("unregister_volumes", state.buffer_id, dataset.record, seconds=300, result_type=list[str])
+            await self._fail(dataset, f"revoked: {signal.reason}")
+        records = ", ".join(f"`{dataset.record}`" for dataset in hit)
+        if not self._ready_now():
+            below = ", ".join(self._below())
+            await self._finish(
+                "needs-human",
+                f"revoked ({signal.reason}): {records}; these weighting groups are now below their floor: {below}",
+            )
+            return False
+        marker = f"revoked {state.round_id} {' '.join(dataset.record for dataset in hit)}"
+        await self._comment(f"serving without {records}: revoked ({signal.reason})", marker)
+        return True
 
     async def _degraded(self, signal: DegradedSignal) -> bool:
         """Start staging again, from the raw cache, the named servable datasets whose volumes buffer-api finds

@@ -33,6 +33,7 @@ from mia_buffers.models import (
     PrepState,
     QuotaCheck,
     RawStatus,
+    RevokedSignal,
     StagedSummary,
     job_key,
 )
@@ -1404,17 +1405,21 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
 
     def buffer(buffer_id, kinds, volumes=(), **config):
         registry.request("PUT", f"/buffers/{buffer_id}", json={**CFG, **config})
-        for volume_id, present in volumes:
+        for volume_id, present, *artifact in volumes:
             path = staged_root / buffer_id / volume_id
             if present:
                 path.mkdir(parents=True)
             volume = {**body(), "path": str(path), "record": volume_id.split("/")[0]}
+            if artifact:
+                volume["artifact"] = artifact[0]
             registry.request("PUT", f"/buffers/{buffer_id}/volumes/{volume_id.replace('/', '%2F')}", json=volume)
         for kind in kinds:
             registry.event(buffer_id, kind)
 
     buffer("i2-e3", ["created", "ready"], [("rec-a/v0.zarr", False), ("rec-b/v0.zarr", False), ("rec-c/v0", True)])
     buffer("i4-e5", ["ready"], [("rec-d/v0", True)], idle_hours=1)  # no consumer for over an hour
+    buffer("i16-e17", ["ready"], [("rec-h/v0", True, "art-h"), ("rec-i/v0", True, "art-i")])  # art-h is revoked
+    registry.put_asset("staged", "art-h", {"quarantined": True, "quarantined_at": 1.0})
     buffer("i6-e7", ["ready", "idle"], retire_after_days=0.01)  # idle for over 864 s
     buffer("i8-e9", ["ready", "idle"], retire_after_days=0.01)  # its workflow is gone
     buffer("i10-e11", ["approved"], [("rec-e/v0", False)])  # still sourcing: not the keeper's to judge
@@ -1430,6 +1435,7 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
     await acts._keeper_buffers(report, now, dry_run=True)
     expected = [
         "retire i12-e13",
+        "revoked i16-e17 rec-h",
         "degraded i2-e3 rec-a,rec-b",
         "idle i4-e5",
         "retire i6-e7",
@@ -1439,9 +1445,14 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
 
     report = KeeperReport()
     await acts._keeper_buffers(report, now, dry_run=False)
-    assert report.signalled == expected[:4] and report.errors == []  # the gone workflow is logged, not reported
+    assert report.signalled == expected[:5] and report.errors == []  # the gone workflow is logged, not reported
     assert acts.client.sent == [
         (acts.cfg.workflow_id(12), "retire", [None, "i12-e13"]),
+        (
+            acts.cfg.workflow_id(16),
+            "revoked",
+            [RevokedSignal(["rec-h"], ["rec-h/v0"], "quarantined: rec-h/v0", "i16-e17")],
+        ),
         (
             acts.cfg.workflow_id(2),
             "degraded",
@@ -1752,3 +1763,23 @@ async def test_read_binding_reports_a_refused_artifact(acts, server):
     )
     binding = await acts.read_binding(ROUND, U937)
     assert binding.staged and binding.refused.startswith("human:bob at ") and binding.refused.endswith(": revoked")
+
+
+async def test_keep_holds_a_quarantined_asset_for_the_quarantine(acts, keeper_server, monkeypatch):
+    import time
+
+    from mia_buffers import cli
+    from mia_core.fs import dir_bytes
+
+    registry = keeper_server
+    monkeypatch.setattr(cli, "catalog_snapshot", lambda cfg_, ref, tokens: CATALOG)
+    acts.gh_catalog.refs["main"] = REF
+    young, old_one = staged_artifact(acts, "young", 1000), staged_artifact(acts, "old", 1000)
+    now = time.time()
+    registry.put_asset("staged", "young", {"last_used": now - 49 * 3600, "quarantined": True, "quarantined_at": now})
+    old_at = now - acts.cfg.autonomy.quarantine_days * 86400 - 60
+    registry.put_asset("staged", "old", {"last_used": now - 49 * 3600, "quarantined": True, "quarantined_at": old_at})
+    acts.cfg.quota.staged_bytes, acts.cfg.quota.headroom_bytes = dir_bytes(young) // 2, 0
+    report = await acts.keep(dry_run=True)
+    assert report.evicted == ["staged old"] and report.errors == []  # the young one is held, over quota or not
+    assert young.is_dir() and old_one.is_dir()

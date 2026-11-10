@@ -31,6 +31,7 @@ from mia_data.models import (
     Pins,
     PrUpdate,
     Reservation,
+    Revocation,
     RoundLimits,
     SmokeResult,
     VerifyResult,
@@ -260,6 +261,11 @@ class Mocks:
             refused = "rejected by human:bob at t: wrong channel"
             return AssessmentWritten("as-1", self.assess_authorized, "" if self.assess_authorized else refused)
 
+        @activity.defn(name="revoke_dataset")
+        async def revoke_dataset(issue: int, round_id: str, actor: str, event_id: str) -> Revocation:
+            rec("revoke_dataset", round_id, actor, event_id)
+            return Revocation("as-r", ["art1"], ["i3-e4"])
+
         @activity.defn(name="adopt_pr_binding")
         async def adopt_pr_binding(round_id: str, pr: int, sha: str) -> dict:
             rec("adopt_pr_binding", pr, sha)
@@ -291,6 +297,7 @@ class Mocks:
             reserve,
             settle,
             assess,
+            revoke_dataset,
         ]
 
     def await_act(self):
@@ -1226,3 +1233,45 @@ async def test_pr_head_verdicts_are_assessed_on_the_head_sha(env):
         await happy(h, m)
     assert m.of("assess")[-1][:5] == ("crops", "pr_head", H1, "approve", "human:alice")
     assert m.names().index("assess") < m.names().index("comment", m.names().index("assess"))  # before `/approve`
+
+
+# --- milestone L: data:revoke ---------------------------------------------------------------------
+
+REVOKE_AT = "2030-01-01T00:00:00Z"
+
+
+async def test_revoke_after_done_ends_in_needs_human_and_lists_the_blast_radius(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
+        await idle(h, m, "needs-human")
+    assert m.of("revoke_dataset") == [("i7-e11", "alice", "77")]
+    detail, extra = m.of("set_stage")[-1][1:3]
+    assert (
+        detail == "revoked by alice: the dataset row is `revoked`, 1 artifact quarantined; a new `data:go` repairs it"
+    )
+    assert "art1" in extra and "i3-e4" in extra
+
+
+async def test_revoke_during_a_later_review_is_taken_and_ends_the_round(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
+        await idle(h, m, "needs-human")
+    assert m.of("revoke_dataset") == [("i7-e13", "alice", "77")] and len(m.of("publish_crops")) == 1
+
+
+async def test_revoke_with_nothing_published_is_refused(env):
+    m = Mocks(outcome="blocked")
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+        await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
+        await until(lambda: m.of("refuse_label"))
+    assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this issue has published no crops")
+    assert "revoke_dataset" not in m.names()

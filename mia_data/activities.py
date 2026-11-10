@@ -18,6 +18,7 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -71,12 +72,13 @@ from .models import (
     Pins,
     PrUpdate,
     Reservation,
+    Revocation,
     RoundLimits,
     SmokeResult,
     VerifyResult,
 )
 from .poll import run_poll
-from .publish import CROP_ID_RE, Conflict
+from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
 from .seed import ID_RE, MARKER_RE, ROOT_RE
 from .status import render_binding, render_crops_table, render_links, render_stage
 
@@ -239,6 +241,7 @@ class Activities:
             self.reserve,
             self.settle,
             self.assess,
+            self.revoke_dataset,
         ]
 
     # --- helpers -----------------------------------------------------------------------------
@@ -312,7 +315,10 @@ class Activities:
         """The registry row for the dataset at `stage`: prepared (with the manifest's facts) when its folder holds a
         binding and a manifest that matches it, else in-progress, or needs-human at that stage."""
         try:
-            row = crop_publish.prepared_row(self._dataset_dir(round_id, self._pins(round_id)))
+            dataset_dir = self._dataset_dir(round_id, self._pins(round_id))
+            if (dataset_dir / REVOKED_FILE).is_file():  # revoked stays revoked until a new publication
+                return {"state": "revoked", "data_stage": stage, "issue": issue}
+            row = crop_publish.prepared_row(dataset_dir)
         except (ValueError, OSError) as err:  # no derivable folder (unclear record) or unreadable: a state row only
             log.warning("round %s: no prepared lookup: %s", round_id, err)
             row = None
@@ -869,9 +875,10 @@ class Activities:
             raise ValueError(f"binding {binding} is not one of round {round_id}'s")
         withdrawn = withdrawn_snippets(await self._snapshot(sha))
         timeout = activity.info().start_to_close_timeout if activity.in_activity() else None
-        return await asyncio.to_thread(
+        dataset_dir = self._dataset_dir(round_id, self._pins(round_id))
+        published = await asyncio.to_thread(
             crop_publish.publish,
-            self._dataset_dir(round_id, self._pins(round_id)),
+            dataset_dir,
             crops_dir,
             verified,
             withdrawn,
@@ -879,6 +886,68 @@ class Activities:
             binding=Path(binding) if binding else None,
             previews=previews,
         )
+        (dataset_dir / REVOKED_FILE).unlink(missing_ok=True)  # a new publication repairs a revocation (§6 step 5)
+        return published
+
+    @activity.defn(name="revoke_dataset")
+    @mia_permanent_errors
+    async def revoke_dataset(self, issue: int, round_id: str, actor: str, event_id: str) -> Revocation:
+        """`data:revoke` (spec autonomous-gates §6): a reject assessment superseding the dataset's approve, a reject
+        and a quarantine mark on every staged artifact of the record, the dataset row flipped to `revoked`, and
+        `revoked.json` written last beside the manifest (the folder is no longer prepared; nothing is deleted).
+        A retry reads the marker and returns what the first run recorded."""
+        registry = self.registry
+        if registry is None:
+            raise ValueError("data:revoke needs buffer-api's registry (`service` in mia.yaml)")
+        pins = self._pins(round_id)
+        record, folder = pins.record, self._dataset_dir(round_id, pins)
+        marker = folder / REVOKED_FILE
+        if marker.is_file():
+            return Revocation(**json.loads(marker.read_text())["revocation"])
+        by, at = f"human:{actor}", time.time()
+        summary = f"data:revoke by {actor} (event {event_id})"
+        row = await asyncio.to_thread(registry.dataset, record) or {}
+        approve_id = row.get("assessment")
+        approve = await asyncio.to_thread(registry.assessment, approve_id) if approve_id else None
+        subject = approve["subject"] if approve else {"kind": "crop_set", "ref": f"{round_id}:revoked"}
+        reject = new_assessment(
+            gate="crops",
+            subject_kind=subject["kind"],
+            subject_ref=subject["ref"],
+            verdict="reject",
+            by=by,
+            at=at,
+            summary=summary,
+            supersedes=approve_id,
+        )
+        await asyncio.to_thread(registry.put_assessment, reject)
+        assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
+        artifacts: list[str] = []
+        for asset in assets:
+            if not asset.get("data"):
+                continue
+            key = str(asset["key"])
+            artifact_reject = new_assessment(
+                gate="staged", subject_kind="artifact", subject_ref=key, verdict="reject", by=by, at=at, summary=summary
+            )
+            await asyncio.to_thread(registry.put_assessment, artifact_reject)
+            quarantine = {"quarantined": True, "quarantined_at": at, "quarantined_by": by}
+            await asyncio.to_thread(registry.put_asset, "staged", key, quarantine)
+            artifacts.append(key)
+        buffers = sorted({str(ref) for asset in assets for ref in asset.get("refs") or []})
+        await asyncio.to_thread(
+            registry.put_dataset,
+            record,
+            state="revoked",
+            revoked_at=datetime.fromtimestamp(at, UTC).isoformat(),
+            revoked_by=by,
+            assessment=reject["id"],
+        )
+        revocation = Revocation(reject["id"], sorted(artifacts), buffers)
+        folder.mkdir(parents=True, exist_ok=True)
+        record_of = {"record": record, "by": by, "at": at, "issue": issue, "event_id": event_id}
+        write_atomic(marker, json.dumps({**record_of, "revocation": dataclasses.asdict(revocation)}, indent=1))
+        return revocation
 
     # --- snippet development -----------------------------------------------------------------
 

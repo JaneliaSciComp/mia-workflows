@@ -123,6 +123,19 @@ If a helper needs a new config field, add it to the protocol and to both configs
   unregistered and its dataset fails, the buffer serves at its floor or goes needs-human), and a staged pyramid is
   never reused (`_reuse`) while its newest assessment is a reject. `plan.auto_approve` writes no assessment until
   milestone P removes it. Both sit behind `workflow.patched("l-assess")`.
+- **Revocation deletes nothing and stops everything.** `data:revoke` on a dataset issue counts at any stage once
+  the issue has published crops (`DatasetState.published`; a history from before milestone L has it unset even
+  when it did publish: the label is refused once, run `data:go` and revoke again). The `revoke_dataset` activity
+  writes a `reject` assessment superseding the dataset's approve and one per staged artifact of the record, marks
+  those artifact rows `quarantined` (`quarantined_at`, `quarantined_by`), flips the dataset row to `revoked`
+  (`sync_datasets` never merges over it) and writes `revoked.json` beside the manifest last, so the folder is not
+  prepared whatever else is on disk; the issue ends in needs-human naming the artifacts and the buffers that drew
+  from the record. The keeper holds a quarantined asset for `autonomy.quarantine_days` after its references are
+  gone and, for a ready or idle buffer whose status lists quarantined volumes, sends the `revoked` signal: the
+  buffer unregisters those volumes, fails the dataset with the reason and serves on at its floor, or ends in
+  needs-human below it (`buffer:retire` stops it altogether, spec §12.10). A new `data:go` whose publication
+  succeeds removes `revoked.json` and the next stage write makes the row prepared again. All of it sits behind
+  `workflow.patched("l-revoke")`.
 
 ## Style
 

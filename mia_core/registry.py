@@ -183,6 +183,9 @@ class Registry:
         params = {name: value for name, value in given if value is not None}
         return self.request("GET", "/assessments", params=params or None)["assessments"]
 
+    def assessment(self, assessment_id: str) -> dict | None:
+        return self._lookup(f"/assessments/{quote(assessment_id, safe='')}")
+
     def reserve(self, root: str, reservation_id: str, kind: str, usd: float, caps: dict[str, float]) -> dict:
         """Charge a job to its root: {ok, reason, usage}."""
         body = {"reservation_id": reservation_id, "kind": kind, "usd": usd, "caps": caps}

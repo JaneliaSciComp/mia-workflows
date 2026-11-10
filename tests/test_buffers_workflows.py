@@ -40,6 +40,7 @@ from mia_buffers.models import (
     QuotaCheck,
     RawStatus,
     RegisterResult,
+    RevokedSignal,
     SourcingLimits,
     StagedSummary,
     StageJobArgs,
@@ -2427,3 +2428,31 @@ async def test_a_refused_staged_artifact_is_not_reused(env):
     assert dataset(state, "u937").status == "failed"
     assert dataset(state, "u937").reason == "staged artifact art-u is refused: human:bob at t: revoked"
     assert "read_stage" not in m.names() and "submit" not in m.names()
+
+
+# --- milestone L: the keeper's revoked signal ---------------------------------------------------
+
+
+async def test_a_revoked_signal_unregisters_the_record_and_serves_on_at_the_floor(env):
+    m = Mocks(plan=TWO)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        signal = RevokedSignal(["a"], ["a/v0.zarr"], "quarantined: a/v0.zarr", "i7-e11")
+        await h.signal(MiaBuffer.revoked, signal)
+        await until(lambda: any("serving without" in c[0] for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert m.of("unregister_volumes") == [("i7-e11", "a")]
+    assert dataset(state, "a").status == "failed" and dataset(state, "a").reason == "revoked: quarantined: a/v0.zarr"
+    assert state.stage == "ready" and any("serving without `a`" in c[0] for c in m.of("comment"))
+
+
+async def test_a_revoked_signal_below_the_floor_is_needs_human(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        signal = RevokedSignal(["u937"], ["u937/v0.zarr"], "quarantined: u937/v0.zarr", "i7-e11")
+        await h.signal(MiaBuffer.revoked, signal)
+        await idle(h, m, "needs-human")
+    assert "revoked" in m.of("set_stage")[-1][1] and m.of("unregister_volumes") == [("i7-e11", "u937")]

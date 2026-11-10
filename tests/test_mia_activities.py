@@ -656,3 +656,36 @@ async def test_assess_writes_the_human_verdict_and_asks_the_policy(tmp_path, tok
     t.a.registry = None
     written = await t.a.assess(1, "i1-e11", "crops", "crop_set", "x", "approve", "human:a")
     assert written == AssessmentWritten("", True, "no registry")
+
+
+async def test_revoke_dataset_rejects_quarantines_and_finds_the_buffers(tmp_path, token_server):  # noqa: F811
+    from test_buffers_api import CFG, body
+    from test_buffers_sync import write_prepared
+
+    t = _setup(tmp_path)
+    registry = t.a.registry = Registry(token_server, "t")
+    await t.a.admit(1, "11")
+    folder = t.a._dataset_dir("i1-e11", t.a._pins("i1-e11"))
+    write_prepared(folder, "rec-1")
+    approve = await t.a.assess(1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "approve", "human:alice")
+    registry.put_asset("staged", "art1", {"record": "rec-1", "state": "ready", "path": "/x", "bytes": 1})
+    registry.put_asset("staged", "art2", {"record": "rec-1", "state": "ready", "path": "/y", "bytes": 1})
+    registry.put_asset("staged", "other", {"record": "rec-2", "state": "ready"})
+    registry.request("PUT", "/buffers/i3-e4", json=CFG)
+    volume = {**body("rec-1/v0.zarr"), "artifact": "art1"}
+    registry.request("PUT", "/buffers/i3-e4/volumes/rec-1%2Fv0.zarr", json=volume)
+    out = await t.a.revoke_dataset(1, "i1-e11", "alice", "77")
+    assert out.artifacts == ["art1", "art2"] and out.buffers == ["i3-e4"]
+    row = registry.dataset("rec-1")
+    assert (row["state"], row["revoked_by"], row["assessment"]) == ("revoked", "human:alice", out.assessment)
+    crop_set = registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
+    assert crop_set[0]["verdict"] == "reject" and crop_set[0]["supersedes"] == approve.id
+    assert crop_set[0]["id"] == out.assessment
+    assert registry.assessments(subject_kind="artifact", subject_ref="art1")[0]["verdict"] == "reject"
+    art1 = registry.asset("staged", "art1")
+    assert art1["quarantined"] is True and art1["quarantined_by"] == "human:alice"
+    assert "quarantined" not in registry.asset("staged", "other")
+    assert json.loads((folder / "revoked.json").read_text())["by"] == "human:alice"
+    assert t.a.dataset_fields(1, "i1-e11", "done")["state"] == "revoked"  # the row stays revoked whatever the stage
+    assert await t.a.revoke_dataset(1, "i1-e11", "alice", "77") == out  # a retry: the same assessment, nothing doubled
+    assert len(registry.assessments(subject_kind="artifact", subject_ref="art1")) == 1

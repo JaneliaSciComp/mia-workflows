@@ -177,9 +177,16 @@ def reindex(dataset_dir: Path, withdrawn: dict[str, str]) -> int:
     return len(crops)
 
 
+REVOKED_FILE = "revoked.json"  # written by data:revoke beside manifest.json; the folder is not prepared while it exists
+
+
 def prepared_row(dataset_dir: Path) -> dict | None:
     """The registry row of a prepared dataset folder, or None: prepared means a binding.yaml naming its record and
     a manifest.json whose binding sha256 is that file's (a newer binding with crops not yet re-verified is not)."""
+    if (
+        dataset_dir / REVOKED_FILE
+    ).is_file():  # revoked (spec autonomous-gates §6): never prepared, whatever is on disk
+        return None
     binding_bytes = read_untrusted(dataset_dir, "binding.yaml", MAX_INDEX_FILE, binary=True)
     manifest = loads(read_untrusted(dataset_dir, "manifest.json", MAX_INDEX_FILE))
     if binding_bytes is None or not isinstance(manifest, dict):

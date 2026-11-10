@@ -90,6 +90,7 @@ class DatasetState:
     tests: list[Test] = field(default_factory=list)
     attempts: dict[str, int] = field(default_factory=dict)  # stage -> attempts used
     pending: list[PrUpdate] = field(default_factory=list)  # PR updates not yet acted on
+    published: bool = False  # some round of this issue published crops: there is something a data:revoke withdraws
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:
@@ -171,6 +172,16 @@ class AssessmentWritten:
     id: str
     authorized: bool
     reason: str = ""
+
+
+@dataclass
+class Revocation:
+    """What `data:revoke` recorded (spec autonomous-gates §6): the reject assessment superseding the approve, the
+    staged artifacts quarantined and the buffers that drew from the dataset."""
+
+    assessment: str
+    artifacts: list[str] = field(default_factory=list)
+    buffers: list[str] = field(default_factory=list)
 
 
 @dataclass

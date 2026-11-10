@@ -41,6 +41,7 @@ with workflow.unsafe.imports_passed_through():
         Pins,
         PrUpdate,
         Reservation,
+        Revocation,
         RoundLimits,
         SmokeResult,
         Test,
@@ -48,7 +49,11 @@ with workflow.unsafe.imports_passed_through():
         job_key,
     )
 
-GO, APPROVE, REJECT = "data:go", "data:approve", "data:reject"
+GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:revoke"
+NOTHING_TO_REVOKE = "nothing to revoke: this issue has published no crops"
+REVOKED = (
+    "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; a new `data:go` repairs it"
+)
 BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
 NOT_REVIEW = (
     "`data:approve` and `data:reject` count only while the issue is in `data:review`, for the round under review."
@@ -92,6 +97,7 @@ class MiaDataDataset:
         self.go_events: list[LabelEvent] = []  # signals not yet acted on
         self.approve_events: list[LabelEvent] = []
         self.reject_events: list[LabelEvent] = []
+        self.revoke_events: list[LabelEvent] = []
         self.limits: RoundLimits | None = None  # read from config at the start of a round
         self.stage_write: Any = None  # the handle of a stage write still running beside the round (see _stage)
 
@@ -106,6 +112,11 @@ class MiaDataDataset:
     @workflow.signal
     def reject(self, event: LabelEvent) -> None:
         self.reject_events.append(event)
+
+    @workflow.signal
+    def revoke(self, event: LabelEvent) -> None:
+        """`data:revoke`: withdraw what this issue published (spec autonomous-gates §6); taken at any stage."""
+        self.revoke_events.append(event)
 
     @workflow.signal
     def pr_update(self, update: PrUpdate) -> None:
@@ -128,6 +139,7 @@ class MiaDataDataset:
             await workflow.wait_condition(lambda: bool(self._labels()) or _rollover_due())
             if not self._labels():
                 await self._rollover()  # idle, nothing queued
+            await self._revokes()  # a revoke counts at any stage
             await self._refuse_queued(gos=False)  # idle: a verdict has no round under review to apply to
             if not self.go_events:
                 continue
@@ -173,7 +185,42 @@ class MiaDataDataset:
 
     def _labels(self) -> bool:
         """Whether any label signal is queued."""
-        return bool(self.go_events or self.approve_events or self.reject_events)
+        return bool(self.go_events or self.approve_events or self.reject_events or self.revoke_events)
+
+    async def _revokes(self) -> bool:
+        """Act on every queued `data:revoke`; True when one was taken (the round, if any, is over)."""
+        taken = False
+        while self.revoke_events:
+            event = self.revoke_events.pop(0)
+            if self._seen(event):
+                continue
+            await self._guard(self._revoke(event))
+            taken = True
+        return taken
+
+    async def _revoke(self, event: LabelEvent) -> None:
+        """Withdraw the dataset: the activity writes the reject assessments, quarantines the staged artifacts and
+        flips the row; the issue ends in needs-human naming the blast radius. Nothing published: refused."""
+        state = self.state
+        if not workflow.patched("l-revoke"):
+            return
+        if not state.published or not state.round_id:
+            return await self._refuse(REVOKE, NOTHING_TO_REVOKE, event)
+        out = await self._act(
+            "revoke_dataset",
+            state.issue,
+            state.round_id,
+            event.actor,
+            event.event_id,
+            seconds=900,
+            result_type=Revocation,
+        )
+        artifacts = ", ".join(f"`{artifact}`" for artifact in out.artifacts) or "none"
+        buffers = ", ".join(f"`{buffer}`" for buffer in out.buffers) or "none"
+        extra = f"**Quarantined artifacts:** {artifacts}\n**Buffers that drew from it:** {buffers}\n"
+        count = len(out.artifacts)
+        detail = REVOKED.format(actor=event.actor, count=count, plural="" if count == 1 else "s")
+        await self._finish("needs-human", detail, extra=extra)
 
     def _seen(self, event: LabelEvent) -> bool:
         """True if this label event was handled before; otherwise record it as handled now."""
@@ -624,6 +671,7 @@ class MiaDataDataset:
             seconds=300,
             result_type=dict,
         )
+        state.published = True
         extra = (
             f"**Totals:** {len(published['published'])} crops published this round ({verify.ok_count} verified); "
             f"{published['total']} in the dataset\n"
@@ -653,6 +701,7 @@ class MiaDataDataset:
             seconds=300,
             result_type=dict,
         )
+        state.published = True
         table = (
             (await self._gallery("production", crop_workspace, verify_workspace, verify)).table if verify.crops else ""
         )
@@ -711,6 +760,8 @@ class MiaDataDataset:
             await workflow.wait_condition(lambda: self._labels() or _rollover_due())
             if not self._labels():
                 await self._rollover()  # stage review: the next run resumes here
+            if await self._revokes():
+                return "revoked", None  # the round ended in needs-human; nothing under review any more
             if verdict := await self._verdict():
                 return verdict
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
@@ -769,6 +820,8 @@ class MiaDataDataset:
             await workflow.wait_condition(lambda: bool(state.pending) or self._labels() or _rollover_due())
             if not (state.pending or self._labels()):
                 await self._rollover()  # the develop state is all in `state`: the next run resumes here
+            if await self._revokes():
+                return  # the round ended in needs-human
             if loop and state.stage == "review" and state.pr and (verdict := await self._verdict()):
                 kind, event = verdict
                 await (self._approve_pr(event) if kind == "approve" else self._revise_pr(event))
