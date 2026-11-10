@@ -1783,3 +1783,35 @@ async def test_keep_holds_a_quarantined_asset_for_the_quarantine(acts, keeper_se
     report = await acts.keep(dry_run=True)
     assert report.evicted == ["staged old"] and report.errors == []  # the young one is held, over quota or not
     assert young.is_dir() and old_one.is_dir()
+
+
+async def test_revoke_targets_reads_the_actors_revoke_lines(acts):
+    acts.gh_issues.comments[7] = [
+        {
+            "user": {"login": "alice"},
+            "created_at": "2026-11-10T10:00:00Z",
+            "body": "/revoke rec-a\nlooks wrong\n/revoke rec-b\n/revoke rec-a",
+        },
+        {"user": {"login": "bob"}, "created_at": "2026-11-10T10:05:00Z", "body": "/revoke rec-c"},
+        {"user": {"login": "alice"}, "created_at": "2026-11-01T10:00:00Z", "body": "/revoke rec-old"},
+        {"user": {"login": "alice"}, "created_at": "2026-11-10T12:00:00Z", "body": "/revoke rec-later"},
+        {"user": {"login": "alice"}, "created_at": "2026-11-10T10:30:00Z", "body": "please /revoke rec-inline"},
+    ]
+    assert await acts.revoke_targets(7, "alice", "2026-11-10T11:00:00Z") == ["rec-a", "rec-b"]
+    assert await acts.revoke_targets(7, "carol", "2026-11-10T11:00:00Z") == []
+
+
+async def test_revoke_artifacts_rejects_and_quarantines_this_buffers_artifacts_only(acts, server):
+    from test_buffers_api import CFG, body
+
+    art_u, art_b = await two_registered(acts)
+    acts.registry.request("PUT", "/buffers/other", json=CFG)
+    other = {**body(f"{U937}/v0.zarr"), "record": U937, "artifact": "art-x"}
+    acts.registry.request("PUT", f"/buffers/other/volumes/{U937}%2Fv0.zarr", json=other)
+    acts.registry.put_asset("staged", "art-x", {"state": "ready", "record": U937})
+    out = await acts.revoke_artifacts(ROUND, ROUND, [U937, "not-here"], "human:alice", "buffer:revoke by alice")
+    assert out.records == [U937] and out.volumes == [f"{U937}/v0.zarr"] and len(out.assessments) == 1
+    assert acts.registry.asset("staged", art_u)["quarantined"] is True
+    assert "quarantined" not in acts.registry.asset("staged", "art-x")
+    assert "quarantined" not in (acts.registry.asset("staged", art_b) or {})  # the other record: untouched
+    assert acts.registry.assessments(subject_kind="artifact", subject_ref=art_u)[0]["verdict"] == "reject"

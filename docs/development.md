@@ -134,7 +134,10 @@ If a helper needs a new config field, add it to the protocol and to both configs
   gone and, for a ready or idle buffer whose status lists quarantined volumes, sends the `revoked` signal: the
   buffer unregisters those volumes, fails the dataset with the reason and serves on at its floor, or ends in
   needs-human below it (`buffer:retire` stops it altogether, spec §12.10). A new `data:go` whose publication
-  succeeds removes `revoked.json` and the next stage write makes the row prepared again. All of it sits behind
+  succeeds removes `revoked.json` and the next stage write makes the row prepared again. From the buffer side,
+  `buffer:revoke` on a ready or idle buffer reads the `/revoke <record>` lines the same person wrote in comments
+  within the week before the label (records not in the buffer are ignored; no line: the label is refused), rejects
+  and quarantines those records' artifacts and takes the keeper's `revoked` path at once. All of it sits behind
   `workflow.patched("l-revoke")`.
 
 ## Style

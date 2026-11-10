@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         QuotaCheck,
         RawStatus,
         RegisterResult,
+        RevokedArtifacts,
         RevokedSignal,
         SourcingLimits,
         StagedSummary,
@@ -85,6 +86,8 @@ RAW_GONE = "pyramid missing and raw cache gone"
 NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
 PREP_GO = "prep:go"
 REFUSED_ARTIFACT = "staged artifact {artifact} is refused: {why}"
+REVOKE_LABEL = "buffer:revoke"
+NO_REVOKE_LINES = "name the records first: `/revoke <record>` lines in a comment of yours, then the label"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the label again"
 PREP_SETTLED = ("prepared", "needs-human")  # registry states a preparation request stops following (spec §12)
 # nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
@@ -187,6 +190,11 @@ class MiaBuffer:
     def degraded(self, signal: DegradedSignal) -> None:
         """The keeper found staged pyramids of these records of `signal.buffer` gone from disk."""
         self.lifecycle.append(("degraded", signal, signal.buffer))
+
+    @workflow.signal
+    def revoke(self, event: LabelEvent) -> None:
+        """`buffer:revoke`: the records named as `/revoke <record>` lines by the same person leave this buffer."""
+        self.lifecycle.append(("revoke", event, ""))
 
     @workflow.signal
     def revoked(self, signal: RevokedSignal) -> None:
@@ -803,7 +811,35 @@ class MiaBuffer:
             return await self._degraded(payload)
         elif kind == "revoked" and workflow.patched("l-revoke"):
             return await self._revoked(payload)
+        elif kind == "revoke" and workflow.patched("l-revoke"):
+            return await self._revoke_label(payload)
         return True  # an idle while idle: the keeper says it again each pass
+
+    async def _revoke_label(self, event: LabelEvent) -> bool:
+        """`buffer:revoke`: the records the actor named in `/revoke` lines (within the pool) have their artifacts
+        rejected and quarantined, then the buffer is degraded as the keeper's `revoked` signal would do it."""
+        state = self.state
+        assert state.round_id and state.buffer_id
+        targets = await self._act(
+            "revoke_targets", state.issue, event.actor, event.at, seconds=300, result_type=list[str]
+        )
+        pool = {dataset.record for dataset in state.datasets}
+        records = [record for record in targets if record in pool]
+        if not records:
+            await self._refuse(REVOKE_LABEL, NO_REVOKE_LINES, event)
+            return True
+        by, why = f"human:{event.actor}", f"buffer:revoke by {event.actor}"
+        out = await self._act(
+            "revoke_artifacts",
+            state.round_id,
+            state.buffer_id,
+            records,
+            by,
+            why,
+            seconds=600,
+            result_type=RevokedArtifacts,
+        )
+        return await self._revoked(RevokedSignal(out.records, out.volumes, why, state.buffer_id))
 
     async def _revoked(self, signal: RevokedSignal) -> bool:
         """A revocation reached this buffer (spec autonomous-gates §6): the named servable datasets leave the

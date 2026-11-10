@@ -65,6 +65,15 @@ class RevokedSignal:
 
 
 @dataclass
+class RevokedArtifacts:
+    """What a `buffer:revoke` touched: the reject assessments written, the volumes and records they cover."""
+
+    assessments: list[str] = field(default_factory=list)
+    volumes: list[str] = field(default_factory=list)
+    records: list[str] = field(default_factory=list)
+
+
+@dataclass
 class DegradedSignal:
     """The keeper's `degraded` signal: the records whose staged pyramids went missing from disk, and why."""
 

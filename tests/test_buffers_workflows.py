@@ -40,6 +40,7 @@ from mia_buffers.models import (
     QuotaCheck,
     RawStatus,
     RegisterResult,
+    RevokedArtifacts,
     RevokedSignal,
     SourcingLimits,
     StagedSummary,
@@ -119,6 +120,7 @@ class Mocks:
         paused=False,
         reservations=None,
         assess_refused=None,
+        revoke_targets_answer=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -137,6 +139,7 @@ class Mocks:
         self.missing = missing  # missing_records' answers in turn (the last repeats); default: every pool record
         self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
         self.assess_refused = assess_refused or {}  # record -> the policy's reason at the gate approve
+        self.revoke_targets_answer = revoke_targets_answer or []  # the records a buffer:revoke names
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -241,6 +244,18 @@ class Mocks:
             rec("unregister_volumes", buffer_id, record)
             return [f"{record}/v0.zarr"]
 
+        @activity.defn(name="revoke_targets")
+        async def revoke_targets(issue: int, actor: str, until: str) -> list[str]:
+            rec("revoke_targets", actor, until)
+            return list(self.revoke_targets_answer)
+
+        @activity.defn(name="revoke_artifacts")
+        async def revoke_artifacts(
+            round_id: str, buffer_id: str, records: list[str], by: str, summary: str
+        ) -> RevokedArtifacts:
+            rec("revoke_artifacts", buffer_id, list(records), by)
+            return RevokedArtifacts(["as-r"], [f"{record}/v0.zarr" for record in records], list(records))
+
         return [
             admit,
             plan,
@@ -260,6 +275,8 @@ class Mocks:
             register_dataset,
             assess_board,
             unregister_volumes,
+            revoke_targets,
+            revoke_artifacts,
             *self.cache_acts(),
         ]
 
@@ -2456,3 +2473,40 @@ async def test_a_revoked_signal_below_the_floor_is_needs_human(env):
         await h.signal(MiaBuffer.revoked, signal)
         await idle(h, m, "needs-human")
     assert "revoked" in m.of("set_stage")[-1][1] and m.of("unregister_volumes") == [("i7-e11", "u937")]
+
+
+# --- milestone L: buffer:revoke with /revoke lines ----------------------------------------------
+
+
+async def test_buffer_revoke_label_quarantines_the_named_records_and_degrades_the_buffer(env):
+    m = Mocks(plan=TWO, revoke_targets_answer=["a", "zz"])
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.revoke, ev("revoke", "77", "2030-01-01T00:00:00Z"))
+        await until(lambda: any("serving without" in c[0] for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert m.of("revoke_targets") == [("alice", "2030-01-01T00:00:00Z")]
+    assert m.of("revoke_artifacts") == [("i7-e11", ["a"], "human:alice")]  # zz is not in the pool: dropped
+    assert m.of("unregister_volumes") == [("i7-e11", "a")] and dataset(state, "a").status == "failed"
+    assert dataset(state, "a").reason == "revoked: buffer:revoke by alice" and state.stage == "ready"
+
+
+async def test_buffer_revoke_without_revoke_lines_is_refused(env):
+    m = Mocks(plan=TWO)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.revoke, ev("revoke", "77", "2030-01-01T00:00:00Z"))
+        await until(lambda: m.of("refuse_label"), m=m)
+    assert m.of("refuse_label")[-1][:2] == ("buffer:revoke", workflows.NO_REVOKE_LINES)
+    assert "revoke_artifacts" not in m.names()
+
+
+async def test_buffer_revoke_outside_the_ready_loop_is_refused(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await idle(h, m, "plan-review")
+        await h.signal(MiaBuffer.revoke, ev("revoke", "77", "2030-01-01T00:00:00Z"))
+        await until(lambda: m.of("refuse_label"), m=m)
+    assert m.of("refuse_label")[-1][0] == "buffer:revoke" and "revoke_targets" not in m.names()

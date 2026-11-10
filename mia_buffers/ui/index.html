@@ -355,6 +355,7 @@ ready:
 <tr><td><code>buffer:approve</code></td><td>Continue from whichever gate the issue is at: the plan, or the staged board.</td></tr>
 <tr><td><code>buffer:keep</code></td><td>An idle buffer stays; back to ready.</td></tr>
 <tr><td><code>buffer:retire</code></td><td>Release the buffer's staged data now. Closing the issue does the same.</td></tr>
+<tr><td><code>buffer:revoke</code></td><td>Revoke records of a serving buffer: write <code>/revoke &lt;record&gt;</code> lines in a comment, then add the label. Their volumes leave the buffer and their artifacts are quarantined; the buffer serves on at its floor or asks for a human.</td></tr>
 </table></div>
 <div class="tw"><table>
 <tr><th>the system sets</th><th>the buffer is</th></tr>

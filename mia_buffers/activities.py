@@ -19,7 +19,7 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
@@ -74,6 +74,7 @@ from .models import (
     QuotaCheck,
     RawStatus,
     RegisterResult,
+    RevokedArtifacts,
     RevokedSignal,
     SourcingLimits,
     StagedSummary,
@@ -101,6 +102,8 @@ log = logging.getLogger(__name__)
 ROUND_RE = re.compile(r"[ip]\d+-e\d+")  # i<issue>-e<event>: a buffer round; p<issue>-e<event>: a preparation request
 BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
 SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
+REVOKE_RE = re.compile(r"^/revoke\s+([a-z0-9][a-z0-9._-]{0,120})\s*$", re.M)  # a `/revoke <record>` line
+REVOKE_WINDOW_DAYS = 7  # how far back a buffer:revoke reads its actor's `/revoke` lines
 MANIFEST_SOURCE_MANUAL = "manual"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
 FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
@@ -247,6 +250,8 @@ class Activities:
             self.settle,
             self.assess_board,
             self.unregister_volumes,
+            self.revoke_targets,
+            self.revoke_artifacts,
         ]
 
     # --- assessments at the staged gate (spec autonomous-gates §5) -----------------------------------
@@ -295,6 +300,56 @@ class Activities:
         for volume_id in removed:
             await asyncio.to_thread(registry.delete_volume, buffer_id, volume_id)
         return removed
+
+    # --- buffer:revoke: the records a human named, and their artifacts (spec autonomous-gates §6) -----
+
+    @activity.defn(name="revoke_targets")
+    @mia_permanent_errors
+    async def revoke_targets(self, issue: int, actor: str, until: str) -> list[str]:
+        """The records named as `/revoke <record>` lines in `actor`'s comments on the issue within the week before
+        `until` (the label's time), deduplicated in order of first mention. A line, never a mention mid-sentence."""
+        end = _parse_iso(until)
+        if end is None:
+            raise ValueError(f"buffer:revoke: the label's time {until!r} is not an ISO-8601 time")
+        start = end - timedelta(days=REVOKE_WINDOW_DAYS)
+        found: dict[str, None] = {}
+        for comment in await self.gh_issues.issue_comments(issue):
+            if ((comment.get("user") or {}).get("login")) != actor:
+                continue
+            created = _parse_iso(str(comment.get("created_at") or ""))
+            if created is None or not start <= created <= end:
+                continue
+            found.update(dict.fromkeys(REVOKE_RE.findall(str(comment.get("body") or ""))))
+        return list(found)
+
+    @activity.defn(name="revoke_artifacts")
+    @mia_permanent_errors
+    async def revoke_artifacts(
+        self, round_id: str, buffer_id: str, records: list[str], by: str, summary: str
+    ) -> RevokedArtifacts:
+        """For each distinct artifact among the buffer's volumes of `records`: a reject assessment (gate `staged`)
+        and the quarantine mark on its asset row. Records with no volume in this buffer are left out."""
+        registry, at = self.registry, time.time()
+        rows = await asyncio.to_thread(registry.volumes, buffer_id)
+        wanted = set(records)
+        hit = [row for row in rows if row.get("record") in wanted and row.get("artifact")]
+        out = RevokedArtifacts(volumes=[str(row["id"]) for row in hit])
+        out.records = list(dict.fromkeys(str(row["record"]) for row in hit))
+        for artifact in dict.fromkeys(str(row["artifact"]) for row in hit):
+            reject = policy.new_assessment(
+                gate="staged",
+                subject_kind="artifact",
+                subject_ref=artifact,
+                verdict="reject",
+                by=by,
+                at=at,
+                summary=summary,
+            )
+            await asyncio.to_thread(registry.put_assessment, reject)
+            quarantine = {"quarantined": True, "quarantined_at": at, "quarantined_by": by}
+            await asyncio.to_thread(registry.put_asset, "staged", artifact, quarantine)
+            out.assessments.append(reject["id"])
+        return out
 
     # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
 
@@ -1626,6 +1681,14 @@ class Activities:
         marker = self.cfg.marker(f"keeper over-quota {kind}")
         newest = max(issues, key=lambda issue: issue["number"])
         await self._comment_once(self.gh_issues, newest["number"], f"{message}\n\n{marker}", marker)
+
+
+def _parse_iso(text: str) -> datetime | None:
+    """A GitHub ISO-8601 time (`Z` or an offset) as an aware datetime; None when it is not one."""
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _issue_of(round_id: str) -> int:

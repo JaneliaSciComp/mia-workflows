@@ -55,7 +55,7 @@ def test_labels_ids_and_markers(tmp_path):
         "retired",
         "needs-human",
     }
-    assert set(HUMAN_LABELS) == {"go", "plan", "approve", "keep", "retire"}
+    assert set(HUMAN_LABELS) == {"go", "plan", "approve", "keep", "retire", "revoke"}
 
 
 def test_roots_accept_path_and_url_form(tmp_path):
