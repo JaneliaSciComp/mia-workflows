@@ -342,8 +342,10 @@ class MiaBuffer:
             return False
         if kind == "revoked" and isinstance(payload, RevokedSignal):
             for record in payload.records:
-                try:
+                try:  # the volumes leave, and the old buffer's board says why (the page still shows that board)
                     await self._act("unregister_volumes", buffer, record, seconds=300, result_type=list[str])
+                    reason = f"revoked: {payload.reason}"
+                    await self._act("mark_dataset", buffer, record, "failed", reason, budget=timedelta(minutes=10))
                 except ActivityError as error:  # the keeper says it again on its next pass
                     workflow.logger.warning(
                         "issue #%d: revoked on %s: %s", self.state.issue, buffer, error_message(error)

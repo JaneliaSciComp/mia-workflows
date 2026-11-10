@@ -2556,3 +2556,5 @@ async def test_a_superseded_buffer_still_unregisters_a_revoked_record(env):
         await h.signal(MiaBuffer.revoked, signal)
         await until(lambda: m.of("unregister_volumes"), m=m)
     assert m.of("unregister_volumes") == [("i7-e11", "u937")] and m.stages[-1] == "plan-review"
+    await until(lambda: any(a[:3] == ("i7-e11", "u937", "failed") for a in m.of("mark_dataset")), m=m)
+    assert any(a[3] == "revoked: quarantined: u937/v0.zarr" for a in m.of("mark_dataset"))  # the old board says why
