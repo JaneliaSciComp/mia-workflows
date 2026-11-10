@@ -160,6 +160,15 @@ class RoundLimits:
     walltime_min: int
     max_pr_revisions: int = 5  # PR heads tested per round (develop path)
     poll_minutes: int = 2  # how long a round waits between tries of a lock someone else holds
+    agent_max_budget_usd: float = 5.0  # what a match agent run may cost: reserved against the root before it runs
+
+
+@dataclass
+class Reservation:
+    """Whether a job may be charged to its root request (spec autonomous-gates §8); `reason` names the cap when not."""
+
+    ok: bool
+    reason: str = ""
 
 
 @dataclass

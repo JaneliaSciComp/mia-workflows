@@ -48,10 +48,10 @@ from mia_buffers.models import (
 )
 from mia_buffers.poll import run_poll
 from mia_buffers.workflows import MiaBuffer
-from mia_data.models import JobDone, LabelEvent, LockTaken
+from mia_data.models import JobDone, LabelEvent, LockTaken, Reservation
 from mia_data.publish import reindex
 
-PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64)
+PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64, root="o/buffers#7")
 PLAN = PlanResult(
     True,
     [],
@@ -114,6 +114,8 @@ class Mocks:
         raw_ready=None,
         quota_after=None,
         missing=None,
+        paused=False,
+        reservations=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -130,6 +132,7 @@ class Mocks:
         self.board: list[tuple[str, str]] = []  # (record, status) as mark_dataset received them
         self.quota_after = quota_after or {}  # record -> the record whose fetch must be submitted before its quota
         self.missing = missing  # missing_records' answers in turn (the last repeats); default: every pool record
+        self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -316,6 +319,20 @@ class Mocks:
                 return [d.record for d in self.plan.pool]
             return self.missing.pop(0) if len(self.missing) > 1 else self.missing[0]
 
+        @activity.defn(name="paused")
+        async def paused() -> bool:
+            rec("paused")
+            return self.paused
+
+        @activity.defn(name="reserve")
+        async def reserve(root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
+            rec("reserve", root, reservation_id, kind, usd)
+            return self.reservations.get(kind, Reservation(True))
+
+        @activity.defn(name="settle")
+        async def settle(root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
+            rec("settle", root, reservation_id, usd, fetched_bytes)
+
         @activity.defn(name="raw_ready")
         async def raw_ready(round_id: str, record: str) -> bool:
             rec("raw_ready", record)
@@ -336,6 +353,9 @@ class Mocks:
             retire_buffer,
             raw_ready,
             missing_records,
+            paused,
+            reserve,
+            settle,
         ]
 
     def await_act(self):
@@ -2105,7 +2125,11 @@ class PrepMocks:
         async def refuse_label(issue: int, label: str, reason: str, event_id: str) -> None:
             rec("refuse_label", label, reason, event_id)
 
-        return [prep_admit, limits, set_prep_stage, prep_nudge, comment_prep, prep_status, refuse_label]
+        @activity.defn(name="paused")
+        async def paused() -> bool:
+            return False
+
+        return [prep_admit, limits, set_prep_stage, prep_nudge, comment_prep, prep_status, refuse_label, paused]
 
     def of(self, name):
         return [c[1] for c in self.calls if c[0] == name]
@@ -2294,3 +2318,37 @@ async def test_replay_buffer_history_e(env):
             PREP_E_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-e-prep", PREP_E_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+# --- milestone L: budgets and the pause ---------------------------------------------------------
+
+
+async def test_stage_and_fetch_jobs_are_reserved_and_settled_with_their_bytes(env):
+    m = Mocks(
+        plan=ONLY_U937,
+        raw={"u937": RawStatus(False, ["https://zenodo.org/f"])},
+        fetches={"u937": FetchResult(True, bytes_fetched=4096)},
+    )
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+    assert [a[2] for a in m.of("reserve")] == ["fetch", "stage"]
+    assert all(a[0] == "o/buffers#7" for a in m.of("reserve"))
+    assert [a[1] for a in m.of("reserve")] == [m.of("submit_fetch")[0][0], m.of("submit")[0][0]]
+    assert [(a[1], a[3]) for a in m.of("settle")] == [(m.of("reserve")[0][1], 4096), (m.of("reserve")[1][1], 0)]
+
+
+async def test_a_refused_reservation_fails_the_dataset_with_the_reason(env):
+    refused = Reservation(False, "root o/buffers#7: 200 jobs launched, max_jobs 200")
+    m = Mocks(plan=ONLY_U937, reservations={"stage": refused})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed" and "max_jobs 200" in dataset(state, "u937").reason
+    assert "submit" not in m.names()
+
+
+async def test_paused_stops_a_buffer_round_and_a_prep_round(env):
+    m = Mocks(plan=ONLY_U937, paused=True)
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+    assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "plan" not in m.names()

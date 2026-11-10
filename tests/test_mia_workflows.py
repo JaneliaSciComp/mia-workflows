@@ -29,6 +29,7 @@ from mia_data.models import (
     MatchResult,
     Pins,
     PrUpdate,
+    Reservation,
     RoundLimits,
     SmokeResult,
     VerifyResult,
@@ -36,7 +37,7 @@ from mia_data.models import (
 from mia_data.workflows import MiaDataDataset
 
 SHA = "a" * 40
-PINS = Pins("rec-1", "c" * 40, SHA, "h" * 40, "sha256:x")
+PINS = Pins("rec-1", "c" * 40, SHA, "h" * 40, "sha256:x", root="o/data#7")
 
 
 @pytest.fixture
@@ -73,6 +74,8 @@ class Mocks:
         revisions=5,
         lock_busy=0,
         slow_stages=(),
+        paused=False,
+        reservations=None,
     ):
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
@@ -82,6 +85,7 @@ class Mocks:
         self.await_failures, self.gate, self.gate_on = await_failures, gate, gate_on
         self.test_ok_by, self.pr_now, self.trees, self.revisions = test_ok_by or {}, pr_now, trees or {}, revisions
         self.lock_busy = lock_busy  # how many take_lock calls find the raw cache held by someone else
+        self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -223,6 +227,20 @@ class Mocks:
             rec("tree_sha", sha, name)
             return self.trees.get(sha, "T1")
 
+        @activity.defn(name="paused")
+        async def paused() -> bool:
+            rec("paused")
+            return self.paused
+
+        @activity.defn(name="reserve")
+        async def reserve(root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
+            rec("reserve", root, reservation_id, kind, usd)
+            return self.reservations.get(kind, Reservation(True))
+
+        @activity.defn(name="settle")
+        async def settle(root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
+            rec("settle", root, reservation_id, usd, fetched_bytes)
+
         @activity.defn(name="adopt_pr_binding")
         async def adopt_pr_binding(round_id: str, pr: int, sha: str) -> dict:
             rec("adopt_pr_binding", pr, sha)
@@ -250,6 +268,9 @@ class Mocks:
             set_crop_status,
             tree_sha,
             adopt_pr_binding,
+            paused,
+            reserve,
+            settle,
         ]
 
     def await_act(self):
@@ -1113,3 +1134,34 @@ async def test_poll_accepts_go_only_from_listed_bot(tmp_path):
     assert (arg, kw["start_signal_args"]) == (DatasetState(1), [LabelEvent("go", "61", "mia-bot[bot]", at)])
     assert sorted(data.removed) == [(1, "data:go"), (2, "data:go")]
     assert 1 not in data.comments and "does not have write access" in data.comments[2][0]["body"]
+
+
+# --- milestone L: budgets and the pause ---------------------------------------------------------
+
+
+async def test_every_job_is_reserved_against_the_root_and_settled(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert [a[2] for a in m.of("reserve")] == ["match", "smoke", "crop", "verify"]
+    assert [a[1] for a in m.of("reserve")] == [a[0] for a in m.of("submit")]  # the reservation id is the job key
+    assert [a[0] for a in m.of("reserve")] == [PINS.root] * 4 and m.of("reserve")[0][3] == 5.0  # the agent's cap
+    assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")]  # one settle per reservation
+    assert m.names().index("reserve") < m.names().index("submit")
+
+
+async def test_a_refused_reservation_ends_the_round_naming_the_root(env):
+    reason = "root o/data#7: usd 99.00 reserved or spent + 5.00 would exceed max_usd 100"
+    m = Mocks(reservations={"match": Reservation(False, reason)})
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert "submit" not in m.names()
+    assert m.of("set_stage")[-1][1] == f"root budget: {reason}"
+
+
+async def test_a_paused_operator_stops_the_round_before_its_first_job(env):
+    m = Mocks(paused=True)
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()

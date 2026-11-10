@@ -26,7 +26,7 @@ from temporalio.exceptions import ActivityError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
-    from mia_data.models import JobDone, LabelEvent, LockTaken
+    from mia_data.models import JobDone, LabelEvent, LockTaken, Reservation
 
     from .models import (
         MAX_POLL_MINUTES,
@@ -82,6 +82,7 @@ RETIRED = "Retired: refs released; draws archived to {path}"
 RAW_GONE = "pyramid missing and raw cache gone"
 NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
 PREP_GO = "prep:go"
+PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the label again"
 PREP_SETTLED = ("prepared", "needs-human")  # registry states a preparation request stops following (spec §12)
 # nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
 PREP_HUMAN = ("done-unpublished", "unknown")
@@ -89,6 +90,10 @@ PREP_HUMAN = ("done-unpublished", "unknown")
 
 class RoundFailed(Exception):
     """A step of the round that ends it in needs-human (raised by workflow code, never by an activity)."""
+
+
+class BudgetRefused(Exception):
+    """A job the pause or the root budget refused: this dataset fails with the reason, the round goes on."""
 
 
 class LockChanged(Exception):
@@ -359,6 +364,8 @@ class MiaBuffer:
         if failed and workflow.patched("retire-failed-round"):
             await self._retire_failed(failed)
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=600, result_type=BufferPins)
+        if workflow.patched("l-budget") and await self._act("paused", result_type=bool):
+            return await self._finish("needs-human", PAUSED)
         await self._stage("planning")
         plan = await self._act("plan", state.issue, state.round_id, state.pins, seconds=1800, result_type=PlanResult)
         await self._act("comment_plan", state.issue, state.round_id, seconds=300)
@@ -957,6 +964,8 @@ class MiaBuffer:
         gives up fails this dataset alone, never the round."""
         try:
             await self._source_steps(dataset, semaphore, fetch_slots)
+        except BudgetRefused as error:
+            await self._fail(dataset, str(error))
         except ActivityError as error:
             if dataset.status == "servable":  # only the "servable" comment failed; the volumes are registered
                 workflow.logger.warning("issue #%d: %s: %s", self.state.issue, dataset.record, error_message(error))
@@ -1252,10 +1261,20 @@ class MiaBuffer:
             )
             args = FetchJobArgs(workspace, round_id, state.pins, record, list(binding.hosts), attempt)
             key = fetch_job_key(state.issue, round_id, record, attempt)
+            budgeted = await self._charge(key, "fetch")
             job_id = await self._act("submit_fetch", key, args, seconds=600, result_type=str)
-            job = await self._await_job(job_id, workspace, limits.fetch_walltime_min, ["raw", record, owner])
+            try:
+                job = await self._await_job(job_id, workspace, limits.fetch_walltime_min, ["raw", record, owner])
+                fetched = await self._act(
+                    "read_fetch", round_id, record, workspace, seconds=300, result_type=FetchResult
+                )
+            except (ActivityError, asyncio.CancelledError):
+                if budgeted:
+                    await self._settle(key)
+                raise
+            if budgeted:
+                await self._settle(key, fetched.bytes_fetched)
             last = f"last job {job.job_id} {job.state} exit {job.exit_code}"
-            fetched = await self._act("read_fetch", round_id, record, workspace, seconds=300, result_type=FetchResult)
             if fetched.host_not_allowed or not fetched.ok:
                 why = "; ".join(fetched.errors + [f"{url} failed" for url in fetched.failed]) or "no errors reported"
                 if fetched.host_not_allowed:
@@ -1362,10 +1381,39 @@ class MiaBuffer:
             cache_writable=cache_writable,
             rebuild=rebuild,
         )
-        job_id = await self._act(
-            "submit", job_key(state.issue, state.round_id, record, rebuild), args, seconds=600, result_type=str
-        )
-        return await self._await_job(job_id, workspace, (await self._limits()).walltime_min, lock)
+        key = job_key(state.issue, state.round_id, record, rebuild)
+        budgeted = await self._charge(key, "stage")
+        job_id = await self._act("submit", key, args, seconds=600, result_type=str)
+        try:
+            done = await self._await_job(job_id, workspace, (await self._limits()).walltime_min, lock)
+        except (ActivityError, asyncio.CancelledError):
+            if budgeted:
+                await self._settle(key)
+            raise
+        if budgeted:
+            await self._settle(key)
+        return done
+
+    async def _charge(self, key: str, kind: str) -> bool:
+        """Before a job: the pause switch, then the root budget (spec autonomous-gates §8). BudgetRefused ends this
+        dataset with the reason. Returns whether the job was reserved (a pre-L history is not)."""
+        if not workflow.patched("l-budget"):
+            return False
+        if await self._act("paused", result_type=bool):
+            raise BudgetRefused(PAUSED)
+        assert self.state.pins
+        reservation = await self._act("reserve", self.state.pins.root, key, kind, 0.0, result_type=Reservation)
+        if not reservation.ok:
+            raise BudgetRefused(f"root budget: {reservation.reason}")
+        return True
+
+    async def _settle(self, key: str, fetched_bytes: int = 0) -> None:
+        """Close the job's reservation; an accounting write that fails is logged, never the dataset's end."""
+        assert self.state.pins
+        try:
+            await self._act("settle", self.state.pins.root, key, None, fetched_bytes, budget=timedelta(minutes=10))
+        except ActivityError as error:
+            workflow.logger.warning("issue #%d: settle %s failed: %s", self.state.issue, key, error_message(error))
 
     async def _await_job(
         self, job_id: str, workspace: str, walltime_min: int, lock: list[str] | None = None
@@ -1471,6 +1519,8 @@ class MiaPrep:
         started = workflow.now()
         # a pre-H registry had a third settled state; a round recorded then (and the fixture) still treats it as one
         legacy = () if workflow.patched("h-no-ineligible") else ("ineligible",)
+        if workflow.patched("l-budget") and await self._act("paused", result_type=bool):
+            return await self._stage("needs-human", PAUSED)
         pins = state.pins = await self._act(
             "prep_admit", state.issue, event.event_id, seconds=600, result_type=PrepPins
         )

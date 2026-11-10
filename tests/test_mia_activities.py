@@ -12,12 +12,13 @@ from mia_helpers import FakeGH, make_cfg
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from test_autodev_agent import FakeCsub
+from test_buffers_register import token_server  # noqa: F401  (fixture)
 
 from autodev.jobs import CsubJobs
 from mia_core.registry import Registry
 from mia_data.activities import Activities
 from mia_data.jobspec import lock_dir
-from mia_data.models import DatasetState, JobArgs, JobDone, LockTaken, job_key
+from mia_data.models import DatasetState, JobArgs, JobDone, LockTaken, Reservation, job_key
 
 REC_SHA, SNIP_SHA = "c" * 40, "a" * 40
 RECORD = {
@@ -613,3 +614,29 @@ async def test_read_verify_puts_the_raw_asset_and_survives_a_down_registry(tmp_p
     with caplog.at_level(logging.WARNING):
         assert (await t.a.read_verify(str(vw), str(cw), "rec-1")).errors == ["verify checked no crops"]
     assert "raw asset rec-1: registry write skipped" in caplog.text
+
+
+async def test_reserve_and_settle_charge_the_root(tmp_path, token_server):  # noqa: F811
+    t = _setup(tmp_path)
+    t.a.registry = Registry(token_server, "t")
+    t.cfg.autonomy.root.max_usd = 7
+    assert await t.a.reserve("o/data#7", "mia-7-i7-e11-match-1", "match", 5.0) == Reservation(True, "")
+    refused = await t.a.reserve("o/data#7", "mia-7-i7-e11-match-2", "match", 5.0)
+    assert not refused.ok and "would exceed max_usd 7" in refused.reason
+    await t.a.settle("o/data#7", "mia-7-i7-e11-match-1", usd=1.0)
+    assert t.a.registry.budget("o/data#7")["spent_usd"] == 1.0
+    assert (await t.a.reserve("", "k", "match", 5.0)) == Reservation(True, "no budget")
+    t.a.registry = None
+    assert (await t.a.reserve("o/data#7", "k", "match", 5.0)) == Reservation(True, "no budget")
+
+
+async def test_paused_reads_the_manifest_fresh(tmp_path, monkeypatch):
+    from mia_core.autonomy import set_pause
+
+    t = _setup(tmp_path)
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("services: {}\n")
+    monkeypatch.setenv("MIA_CONFIG", str(manifest))
+    assert await t.a.paused() is False
+    set_pause(manifest, True)
+    assert await t.a.paused() is True

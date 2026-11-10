@@ -108,6 +108,13 @@ If a helper needs a new config field, add it to the protocol and to both configs
   every continue-as-new wait for it. The GitHub client's own write budget (400 creating writes an hour per process,
   under GitHub's secondary limit) once held three rounds 25 minutes before their first job; the registry row is the
   state machines read, the label is for people.
+- **Budgets attach to the root request.** Every round is charged to one root: the issue that caused it
+  (`<repo>#<issue>`, pinned at admission; a dataset issue a buffer or prep opened carries its requester's root as
+  the `<!-- mia-data:root=... -->` marker on its second line). Before every job the workflow asks `paused`, then
+  `reserve` (the job key is the reservation id, so a retry charges once) against the caps in `autonomy.root`;
+  after the job, `settle` records what it cost and fetched. A refusal names the root, the cap and the usage and
+  ends the round (mia-data) or fails that dataset alone (mia-buffers); `mia pause` stops every round at its next
+  job with "paused by the operator". Both checks sit behind `workflow.patched("l-budget")`.
 
 ## Style
 

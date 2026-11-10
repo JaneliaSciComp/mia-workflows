@@ -29,7 +29,9 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB
 from autodev.jobs import JobSpec
+from mia_core import autonomy
 from mia_core.assets import cache_missing, raw_asset, read_files_json
+from mia_core.config import manifest_path
 from mia_core.fs import dir_bytes
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
@@ -39,7 +41,7 @@ from mia_data.binding import hosts as job_hosts
 from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
-from mia_data.models import JobDone, LockTaken
+from mia_data.models import JobDone, LockTaken, Reservation
 from mia_data.publish import prepared_row
 from mia_data.seed import ID_RE, MARKER, render_issue
 from mia_data.status import render_links, render_stage
@@ -236,7 +238,40 @@ class Activities:
             self.comment_prep,
             self.poll,
             self.keep,
+            self.paused,
+            self.reserve,
+            self.settle,
         ]
+
+    # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
+
+    @activity.defn(name="paused")
+    async def paused(self) -> bool:
+        """Whether `autonomy.pause` is set in mia.yaml now (re-read: `mia pause` edits the file in place)."""
+        return await asyncio.to_thread(autonomy.paused, manifest_path())
+
+    @activity.defn(name="reserve")
+    async def reserve(self, root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
+        """Charge a job to its root before it launches; a refusal names the cap. A round from before the root
+        pins (empty root) has no budget to check."""
+        if not root:
+            return Reservation(True, "no budget")
+        caps = self.cfg.autonomy.caps()
+        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
+        return Reservation(bool(out.get("ok")), "" if out.get("ok") else str(out.get("reason", "")))
+
+    @activity.defn(name="settle")
+    async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
+        """Close the job's reservation with what it cost and moved; an accounting write never fails a round."""
+        if not root:
+            return
+        registry = self.registry
+        await asyncio.to_thread(
+            best_effort,
+            lambda: registry.settle(root, reservation_id, usd=usd, fetched_bytes=fetched_bytes),
+            f"settle {reservation_id}",
+            log,
+        )
 
     # --- helpers -----------------------------------------------------------------------------
 

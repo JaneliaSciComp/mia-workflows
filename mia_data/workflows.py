@@ -13,6 +13,7 @@ Workflow code does no I/O: every GitHub, filesystem and cluster interaction is a
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import math
@@ -38,6 +39,7 @@ with workflow.unsafe.imports_passed_through():
         MatchResult,
         Pins,
         PrUpdate,
+        Reservation,
         RoundLimits,
         SmokeResult,
         Test,
@@ -52,6 +54,7 @@ NOT_REVIEW = (
 )
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
+PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the label again"
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
 
@@ -273,25 +276,51 @@ class MiaDataDataset:
         `lock` ([kind, key, owner], from _hold_raw) is heartbeated by the wait while the job runs."""
         state = self.state
         assert state.round_id and state.pins  # a round is admitted before any job runs
+        key = job_key(state.issue, state.round_id, workspace_kind or kind, 1)
+        limits = await self._limits()
+        budgeted = workflow.patched("l-budget")
+        if budgeted:  # the operator's switches first: the pause, then the root budget (spec autonomous-gates §8)
+            if await self._act("paused", result_type=bool):
+                raise RoundFailed(PAUSED)
+            usd = limits.agent_max_budget_usd if kind == "match" else 0.0
+            reservation = await self._act("reserve", state.pins.root, key, kind, usd, result_type=Reservation)
+            if not reservation.ok:
+                raise RoundFailed(f"root budget: {reservation.reason}")
         job_id = await self._act(
             "submit",
-            job_key(state.issue, state.round_id, workspace_kind or kind, 1),
+            key,
             kind,
             JobArgs(workspace, state.round_id, state.pins, **job_args),
             seconds=600,
             result_type=str,
         )
-        walltime = timedelta(minutes=(await self._limits()).walltime_min)
-        return await workflow.execute_activity(
-            "await_job",
-            args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
-            result_type=JobDone,
-            task_queue=workflow.info().task_queue + "-await",
-            start_to_close_timeout=walltime + QUEUE_SLACK,
-            schedule_to_close_timeout=walltime + timedelta(hours=24),
-            heartbeat_timeout=timedelta(minutes=3),
-            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
-        )
+        walltime = timedelta(minutes=limits.walltime_min)
+        try:
+            done = await workflow.execute_activity(
+                "await_job",
+                args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
+                result_type=JobDone,
+                task_queue=workflow.info().task_queue + "-await",
+                start_to_close_timeout=walltime + QUEUE_SLACK,
+                schedule_to_close_timeout=walltime + timedelta(hours=24),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            )
+        except (ActivityError, asyncio.CancelledError):
+            if budgeted:
+                await self._settle(key)
+            raise
+        if budgeted:
+            await self._settle(key)
+        return done
+
+    async def _settle(self, key: str) -> None:
+        """Close the job's reservation; an accounting write that fails is logged, never the round's end."""
+        assert self.state.pins
+        try:
+            await self._act("settle", self.state.pins.root, key, None, 0, budget=timedelta(minutes=10))
+        except ActivityError as error:
+            workflow.logger.warning("issue #%d: settle %s failed: %s", self.state.issue, key, error_message(error))
 
     async def _hold_raw(self, kind: str) -> list[str]:
         """Take the lock on the round record's raw cache for a `kind` (smoke, crop) job that writes it, waiting while
@@ -452,6 +481,8 @@ class MiaDataDataset:
         state.tests, state.attempts, state.pending = [], {}, []
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=300, result_type=Pins)
         self.limits = await self._act("limits", result_type=RoundLimits)
+        if workflow.patched("l-budget") and await self._act("paused", result_type=bool):
+            raise RoundFailed(PAUSED)
         if snippet_issue and snippet_pr and await self._resume_pr(snippet_issue, snippet_pr):
             return
         await self._stage("matching")

@@ -43,7 +43,7 @@ from mia_core.registry import Registry, RegistryError
 from mia_core.untrusted import texts
 from mia_data.catalog import dataset_folder
 from mia_data.jobspec import lock_dir
-from mia_data.models import LockTaken
+from mia_data.models import LockTaken, Reservation
 from mia_data.publish import reindex
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
@@ -1659,3 +1659,24 @@ async def test_await_job_lock_loss_is_permanent(acts, tmp_path):
     with pytest.raises(ApplicationError) as info:
         await env.run(acts.await_job, "j2", "/w", ["raw", "rec-1", "me"])
     assert info.value.non_retryable and info.value.type == "LockLost" and "lost the lock raw/rec-1" in str(info.value)
+
+
+async def test_reserve_and_settle_charge_the_root(acts):
+    acts.cfg.autonomy.root.max_usd = 7
+    assert await acts.reserve("o/buffers#7", "mia-7-i7-e11-u937-0", "stage", 5.0) == Reservation(True, "")
+    refused = await acts.reserve("o/buffers#7", "mia-7-i7-e11-u937-1", "stage", 5.0)
+    assert not refused.ok and "would exceed max_usd 7" in refused.reason
+    await acts.settle("o/buffers#7", "mia-7-i7-e11-u937-0", fetched_bytes=4096)
+    assert acts.registry.budget("o/buffers#7")["fetched_bytes"] == 4096
+    assert (await acts.reserve("", "k", "stage", 0.0)) == Reservation(True, "no budget")
+
+
+async def test_paused_reads_the_manifest_fresh(acts, tmp_path, monkeypatch):
+    from mia_core.autonomy import set_pause
+
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("services: {}\n")
+    monkeypatch.setenv("MIA_CONFIG", str(manifest))
+    assert await acts.paused() is False
+    set_pause(manifest, True)
+    assert await acts.paused() is True

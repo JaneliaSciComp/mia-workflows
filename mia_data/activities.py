@@ -28,7 +28,9 @@ from temporalio.exceptions import ApplicationError
 from autodev.activities import PERMANENT_CSUB, permanent_errors
 from autodev.jobs import JobSpec
 from autodev.review import WRITE_PERMISSIONS
+from mia_core import autonomy
 from mia_core.assets import raw_asset
+from mia_core.config import manifest_path
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import loads as _loads
@@ -66,6 +68,7 @@ from .models import (
     MatchResult,
     Pins,
     PrUpdate,
+    Reservation,
     RoundLimits,
     SmokeResult,
     VerifyResult,
@@ -230,6 +233,9 @@ class Activities:
             self.set_crop_status,
             self.tree_sha,
             self.adopt_pr_binding,
+            self.paused,
+            self.reserve,
+            self.settle,
         ]
 
     # --- helpers -----------------------------------------------------------------------------
@@ -383,6 +389,37 @@ class Activities:
             cfg.limits.job_walltime_min,
             cfg.limits.max_pr_revisions,
             cfg.temporal.poll_minutes,
+            cfg.limits.agent_max_budget_usd,
+        )
+
+    # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
+
+    @activity.defn(name="paused")
+    async def paused(self) -> bool:
+        """Whether `autonomy.pause` is set in mia.yaml now (re-read: `mia pause` edits the file in place)."""
+        return await asyncio.to_thread(autonomy.paused, manifest_path())
+
+    @activity.defn(name="reserve")
+    async def reserve(self, root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
+        """Charge a job to its root before it launches; a refusal names the cap. Without a registry or a root (a
+        round from before the root pins) there is no budget to check."""
+        if self.registry is None or not root:
+            return Reservation(True, "no budget")
+        caps = self.cfg.autonomy.caps()
+        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
+        return Reservation(bool(out.get("ok")), "" if out.get("ok") else str(out.get("reason", "")))
+
+    @activity.defn(name="settle")
+    async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
+        """Close the job's reservation with what it cost and moved; an accounting write never fails a round."""
+        if self.registry is None or not root:
+            return
+        registry = self.registry
+        await asyncio.to_thread(
+            best_effort,
+            lambda: registry.settle(root, reservation_id, usd=usd, fetched_bytes=fetched_bytes),
+            f"settle {reservation_id}",
+            log,
         )
 
     @activity.defn(name="set_stage")

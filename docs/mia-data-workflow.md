@@ -201,5 +201,7 @@ pixi run mia ps | logs mia-data -f | attach mia-data | down mia-data | restart m
 pixi run mia exec mia-data seed --dry-run
 ```
 
-Config is the `mia-data` block of `mia.yaml` (see `mia.yaml.example`). `paths.work_root` and `paths.storage_root` take a
+`mia pause` stops every round at its next job (and `mia resume` lets it go on when the label is added again); every
+job is first reserved against its root request's caps in `autonomy.root`, and a refusal ends the round naming the
+cap. Config is the `mia-data` block of `mia.yaml` (see `mia.yaml.example`). `paths.work_root` and `paths.storage_root` take a
 path or `{path, url}`; with a Fileglancer URL the comments link the folders they mention.
