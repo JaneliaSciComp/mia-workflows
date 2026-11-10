@@ -536,6 +536,17 @@ git commit -m "mia-data: the match agent's tools are restricted by availability,
 Not code; the acceptance row of spec §14 K. Run after Tasks 1–4 are committed and the workers restarted
 (`pixi run mia restart buffer-api mia-buffers mia-data autodev`, with no round in `sourcing`).
 
+- [ ] **Step 0: Before the restart, list the buffers the allowlist will stop serving, and check the sandbox's CLI**
+
+Run: `curl -s <service.url>/buffers | python3 -c 'import json,sys; print([b["id"] for b in json.load(sys.stdin)["buffers"] if not b.get("latest_event")])'`
+Expected: the ids of buffers with no events (hand registrations). Each will answer `409 buffer has no approved event`
+after the restart; re-run `mia-buffers register` with the same arguments for the ones still in use.
+
+Run a one-off csub `--claude` job (or `csub run --claude -- claude --help`) with the same agent the match job uses and
+check that its output lists `--restricted`, `--tools` and `--strict-mcp-config`.
+Expected: all three present. If one is missing, the sandbox's Claude Code predates them and every match job would
+fail with an unknown-option error; upgrade it before restarting mia-data.
+
 - [ ] **Step 1: A `needs-human` buffer refuses a consumer**
 
 Pick a buffer whose latest event is `needs-human` on the page (or write one on a scratch buffer with the worker
@@ -548,9 +559,16 @@ Expected: `409`.
 Run the same `POST .../consumers` against a buffer at `ready`.
 Expected: `201`.
 
-- [ ] **Step 3: Note the result**
+- [ ] **Step 3: One live match job**
 
-Append one line to `notes/` (untracked) with the date, the buffer ids and the two status codes. Nothing to commit.
+Trigger a match on a scratch dataset issue (`data:go` on a record whose binding is already known) and check its
+`claude.err` is empty of option errors and the round reaches `matched` or `needs_snippet`.
+Expected: the agent ran under the restricted tool set and produced a verdict.
+
+- [ ] **Step 4: Note the result**
+
+Append one line to `notes/` (untracked) with the date, the buffer ids, the two status codes and the match job's
+outcome. Nothing to commit.
 
 ---
 

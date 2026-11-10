@@ -35,7 +35,10 @@ TENSORIZERS_ENV = "MIA_BUFFERS_TENSORIZERS"
 
 
 class BufferNotApproved(RuntimeError):
-    """buffer-api answered 409: the round is staged but no human has approved it yet (spec §15)."""
+    """buffer-api answered 409: the buffer refuses consumers, and the message says why. `buffer not approved`: the
+    round is staged but not approved yet (spec §15); `buffer needs a human`: its latest event is `needs-human`, read
+    the issue; `buffer has no approved event`: a registration that never authorized it, re-run `mia-buffers register`
+    (spec autonomous-gates §3)."""
 
 
 class BufferEmpty(RuntimeError):
@@ -62,7 +65,11 @@ class BufferClient:
 
     def _approved(self, response: httpx.Response) -> None:
         if response.status_code == 409:
-            raise BufferNotApproved(f"buffer {self.buffer} is not approved yet (409 {response.text[:200]})")
+            try:
+                reason = str(response.json().get("error") or response.text[:200])
+            except ValueError:  # not JSON: a proxy page
+                reason = response.text[:200]
+            raise BufferNotApproved(f"buffer {self.buffer} refused consumers (409 {reason})")
 
     def status(self) -> dict:
         return self._get("status", "").json()

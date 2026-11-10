@@ -85,7 +85,10 @@ posting it to GitHub.
 buffer's latest event is `approved`, `ready` or `idle`. `retired` is 410; a round before its approve is `409 buffer not
 approved`; `needs-human` is `409 buffer needs a human`; no event at all is `409 buffer has no approved event`. Nothing
 serves because no one said no, so a new event kind is unservable until it is added to `SERVING` on purpose;
-`mia-buffers register` writes `approved` and `ready` itself (spec autonomous-gates §3).
+`mia-buffers register` writes `approved` and `ready` itself (spec autonomous-gates §3). A buffer registered before
+this rule answers `409 buffer has no approved event` (`GET /buffers` lists it with a null `latest_event`): re-run
+`mia-buffers register` with the same arguments, which re-puts the config and volumes (frozen lists survive under the
+same artifact) and writes the two events. The client's `BufferNotApproved` message repeats the service's reason.
 
 **A lost lock kills the job.** `heartbeat_through` raises `LockLost` when the raw lock lapsed or changed hands;
 `CsubJobs.wait` kills the job (`csub kill`) before the error propagates, and both `await_job` activities turn it into
@@ -531,7 +534,7 @@ for loopback names, and inside it they point at the sandbox's own empty loopback
    serves the buffer as it is: each group's servable fraction becomes its floor (`accepted` in the state, what a
    later degraded rebuild is judged against), the `approved` and `ready` events are written, the issue moves to
    `buffer:ready` with the `BufferDataset` cell, and a short group is named there. No job runs between the approve
-   and `ready`. buffer-api answers consumers `409 buffer not approved` until the `ready` event. A waiting dataset
+   and `ready`. buffer-api answers consumers `409 buffer not approved` until the `approved` event. A waiting dataset
    keeps its place and joins when it lands (a fresh board comment follows); the day limit
    (`sourcing.dataset_timeout_days`, default 14) drops waiters only until the approve. `plan.auto_approve` skips
    the gate when every group meets the fraction, and the plan gate of a `buffer:go` round; a `buffer:plan` round

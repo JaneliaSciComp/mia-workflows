@@ -393,7 +393,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
   <li><b>The service serves descriptors, not pixels.</b> A descriptor names the pyramid, the window, the channels and the normalisation bounds. The training process reads the OME-Zarr pyramid from shared storage and tensorises it, so the load of a DataLoader with many workers falls on the training node. Each worker registers itself as a consumer, listed on the <a href="#buffers">Buffers</a> tab.</li>
   <li><b>What a sample holds.</b> The image at each level in <code>sampling.levels</code>, the label layers the dataset has, and <code>meta</code> with the record, the voxel size and the crop's position in physical units. A buffer mixes datasets whose label layers differ, which is why the custom collate is needed: a batch keeps the keys every sample has.</li>
   <li><b>What is pinned.</b> The buffer records the catalog commit, the spec hash, the plan hash and the commit of the conversion code. A checkout at a different commit raises on construction; <code>allow_recipe_mismatch=True</code> turns that into a warning.</li>
-  <li><b>Before the approve</b> the service answers 409 and the client raises <code>BufferNotApproved</code>. <b>After a retire</b> it answers 410. A split with nothing servable yet raises <code>BufferEmpty</code>.</li>
+  <li><b>Before the approve</b>, while the buffer <b>needs a human</b>, or when it has <b>no approved event</b>, the service answers 409 with the reason and the client raises <code>BufferNotApproved</code>. <b>After a retire</b> it answers 410. A split with nothing servable yet raises <code>BufferEmpty</code>.</li>
 </ul>
 
 <h2>Step 5. During training, and afterwards</h2>
@@ -412,7 +412,9 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>approve refused: jobs still running</td><td>the round is between gates</td><td>wait for <code>buffer:staged</code></td></tr>
 <tr><td>no weighting group reached <code>ready.min_fraction</code></td><td>every dataset of every group failed or is still waiting</td><td>the board names the failures; edit the spec or request preparation, then <code>buffer:go</code></td></tr>
 <tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td><b>Request preparation</b> on the Datasets tab, then a new round later</td></tr>
-<tr><td><code>BufferNotApproved</code> (409)</td><td>the round is staged but not approved</td><td>add <code>buffer:approve</code> on the issue</td></tr>
+<tr><td><code>BufferNotApproved</code> (409 buffer not approved)</td><td>the round is staged but not approved</td><td>add <code>buffer:approve</code> on the issue</td></tr>
+<tr><td><code>BufferNotApproved</code> (409 buffer needs a human)</td><td>the buffer's latest event is <code>needs-human</code>: a degraded rebuild or a round that stopped</td><td>read the issue's last comment; the buffer serves again once the round writes <code>approved</code> or <code>ready</code></td></tr>
+<tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorized to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
 <tr><td>410 buffer retired</td><td>the buffer was retired: by a label, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
 <tr><td>the issue seems stuck for hours with no comment</td><td>the run may be frozen</td><td>close the issue, wait for its "issue closed" comment, reopen, <code>buffer:go</code></td></tr>
