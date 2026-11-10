@@ -40,15 +40,23 @@ def demand(assets: list[dict], *, hold_s: float, now: float) -> float:
     return max(wanted)
 
 
-def free_assets(assets: list[dict], *, hold_s: float, now: float, in_progress: set[str], kind: str) -> list[dict]:
-    """The rows nothing needs: no buffer references them, they are `ready`, unused for `hold_s`, and (raw) no
-    dataset of their record is being prepared. Least recently used first."""
+def _quarantined(data: dict, quarantine_s: float, now: float) -> bool:
+    """A quarantined row is held for `quarantine_s` after it was quarantined: evidence outlives the revocation."""
+    return bool(data.get("quarantined")) and _bytes(data, "quarantined_at") + quarantine_s > now
+
+
+def free_assets(
+    assets: list[dict], *, hold_s: float, now: float, in_progress: set[str], kind: str, quarantine_s: float = 0
+) -> list[dict]:
+    """The rows nothing needs: no buffer references them, they are `ready`, unused for `hold_s`, not under
+    quarantine, and (raw) no dataset of their record is being prepared. Least recently used first."""
     free = [
         row
         for row in assets
         if not row.get("refs")
         and (data := row.get("data") or {}).get("state") == "ready"
         and _last_used(data) + hold_s < now
+        and not _quarantined(data, quarantine_s, now)
         and not (kind == "raw" and row.get("key") in in_progress)
     ]
     return sorted(free, key=lambda row: _last_used(row["data"]))
@@ -64,13 +72,15 @@ def plan_evictions(
     in_progress: set[str],
     kind: str,
     demand_bytes: float = 0,
+    quarantine_s: float = 0,
 ) -> list[dict]:
     """The free rows to evict, oldest first, until the kind is under its quota minus the headroom, or minus
     `demand_bytes` (what a blocked fetch wants) when that is larger; none when the quota is 0 (unlimited)."""
     if quota_bytes <= 0:
         return []
     remaining, target, picked = live_bytes(assets), quota_bytes - max(headroom_bytes, demand_bytes), []
-    for row in free_assets(assets, hold_s=hold_s, now=now, in_progress=in_progress, kind=kind):
+    free = free_assets(assets, hold_s=hold_s, now=now, in_progress=in_progress, kind=kind, quarantine_s=quarantine_s)
+    for row in free:
         if remaining <= target:
             break
         picked.append(row)

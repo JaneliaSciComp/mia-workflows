@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .sampler import Level, Volume, servable
 
@@ -71,10 +71,19 @@ CREATE TABLE IF NOT EXISTS buffer_events (buffer TEXT, seq INTEGER, kind TEXT, a
 CREATE TABLE IF NOT EXISTS usage (buffer TEXT, day TEXT, draws INTEGER, consumers INTEGER, empty INTEGER,
                                   PRIMARY KEY (buffer, day));
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS assessments (id TEXT PRIMARY KEY, gate TEXT, subject_kind TEXT, subject_ref TEXT,
+                                        verdict TEXT, author TEXT, at TEXT, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS assessments_subject ON assessments (subject_kind, subject_ref);
+CREATE TABLE IF NOT EXISTS budgets (root TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL);
 """
 
 BOARD_COLUMNS = ("record", "status", "reason", "job", "updated_at")
 EVENT_COLUMNS = ("seq", "kind", "at", "issue", "event_id", "detail")
+
+
+def _num(value: float) -> str:
+    """A cap for a message: 14 not 14.0, 500000000000 not 5e+11."""
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
 
 
 def _volume_from(data: dict) -> Volume:
@@ -427,11 +436,18 @@ class Ledger:
         return {row["id"] for row in self.datasets("in-progress")}
 
     def sync_datasets(self, prepared: dict[str, dict], *, older_than: float | None = None) -> dict:
-        """Mark each given record prepared and drop prepared rows no longer given; other states are untouched.
-        With `older_than`, only rows last written before it are dropped: one written during the scan stays."""
+        """Mark each given record prepared and drop prepared rows no longer given; other states are untouched,
+        and a `revoked` row is never merged over (the folder may still look prepared: a revocation deletes
+        nothing). With `older_than`, only rows last written before it are dropped: one written during the scan
+        stays."""
         now = time.time()
+        kept = 0
         with self._transaction() as db:
             for record, fields in prepared.items():
+                state = db.execute("SELECT json_extract(data, '$.state') FROM datasets WHERE id = ?", (record,))
+                if (state.fetchone() or (None,))[0] == "revoked":
+                    kept += 1
+                    continue
                 self._merge_dataset(db, record, {**fields, "state": "prepared"}, now)
             rows = db.execute("SELECT id, updated_at FROM datasets WHERE json_extract(data, '$.state') = 'prepared'")
             stale = [
@@ -440,7 +456,200 @@ class Ledger:
                 if record not in prepared and (older_than is None or updated_at < older_than)
             ]
             db.executemany("DELETE FROM datasets WHERE id = ?", [(record,) for record in stale])
-        return {"prepared": len(prepared), "demoted": len(stale)}
+        return {"prepared": len(prepared) - kept, "demoted": len(stale), "revoked_kept": kept}
+
+    # --- assessments: the append-only record every gate decision leaves (spec autonomous-gates §5) ----
+
+    def put_assessment(self, assessment: dict) -> dict:
+        """Store the assessment unless its id is known already (a retry); returns the stored row either way."""
+        subject = assessment.get("subject") or {}
+        with self._transaction() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO assessments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    assessment["id"],
+                    assessment.get("gate"),
+                    subject.get("kind"),
+                    subject.get("ref"),
+                    assessment.get("verdict"),
+                    assessment.get("by"),
+                    assessment.get("at"),
+                    json.dumps(assessment),
+                ),
+            )
+            (data,) = db.execute("SELECT data FROM assessments WHERE id = ?", (assessment["id"],)).fetchone()
+        return json.loads(data)
+
+    def assessment(self, assessment_id: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT data FROM assessments WHERE id = ?", (assessment_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def assessments(
+        self,
+        *,
+        subject_kind: str | None = None,
+        subject_ref: str | None = None,
+        gate: str | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """The assessments matching every given filter, newest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT data FROM assessments WHERE (? IS NULL OR subject_kind = ?) AND (? IS NULL OR subject_ref = ?) "
+                "AND (? IS NULL OR gate = ?) ORDER BY at DESC, id DESC LIMIT ?",
+                (subject_kind, subject_kind, subject_ref, subject_ref, gate, gate, limit),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    # --- budgets: what each root request has reserved and spent (spec autonomous-gates §8) ----------
+
+    @staticmethod
+    def _fresh_budget(root: str, now: float) -> dict:
+        return {
+            "root": root,
+            "since": now,
+            "reserved_usd": 0.0,
+            "spent_usd": 0.0,
+            "fetched_bytes": 0,
+            "staged_bytes": 0,
+            "jobs": 0,
+            "running": 0,
+            "open": {},
+            "closed": [],
+        }
+
+    @staticmethod
+    def _over_caps(row: dict, usd: float, caps: dict[str, float], now: float) -> str:
+        """The first cap the reservation would break, as the reason; '' when none. A cap missing from `caps` is
+        not checked."""
+        root = row["root"]
+        if "max_days" in caps and (days := (now - row["since"]) / 86400) > caps["max_days"]:
+            return f"root {root} is {days:.1f} days old, over max_days {_num(caps['max_days'])}"
+        committed = row["reserved_usd"] + row["spent_usd"]
+        if "max_usd" in caps and committed + usd > caps["max_usd"]:
+            return (
+                f"root {root}: usd {committed:.2f} reserved or spent + {usd:.2f} would exceed "
+                f"max_usd {_num(caps['max_usd'])}"
+            )
+        if "max_fetch_bytes" in caps and row["fetched_bytes"] > caps["max_fetch_bytes"]:
+            return f"root {root}: {row['fetched_bytes']} bytes fetched, over max_fetch_bytes {_num(caps['max_fetch_bytes'])}"
+        if "max_concurrent_jobs" in caps and row["running"] + 1 > caps["max_concurrent_jobs"]:
+            return (
+                f"root {root}: {row['running']} jobs running, max_concurrent_jobs {_num(caps['max_concurrent_jobs'])}"
+            )
+        if "max_jobs" in caps and row["jobs"] + 1 > caps["max_jobs"]:
+            return f"root {root}: {row['jobs']} jobs launched, max_jobs {_num(caps['max_jobs'])}"
+        return ""
+
+    def reserve(
+        self, root: str, reservation_id: str, kind: str, usd: float, caps: dict[str, float], now: float | None = None
+    ) -> dict:
+        """Charge a job to its root before it launches: {ok, reason, usage}. The check and the add are one
+        transaction; a known reservation id (a retry) answers ok without charging again."""
+        now = time.time() if now is None else now
+        with self._transaction() as db:
+            stored = db.execute("SELECT data FROM budgets WHERE root = ?", (root,)).fetchone()
+            row = json.loads(stored[0]) if stored else self._fresh_budget(root, now)
+            if reservation_id in row["open"] or reservation_id in row["closed"]:
+                return {"ok": True, "reason": "", "usage": row}
+            reason = self._over_caps(row, usd, caps, now)
+            if not reason:
+                row["open"][reservation_id] = {"kind": kind, "usd": usd, "at": now}
+                row["reserved_usd"] += usd
+                row["jobs"] += 1
+                row["running"] += 1
+            db.execute("INSERT OR REPLACE INTO budgets VALUES (?, ?, ?)", (root, json.dumps(row), now))
+        return {"ok": not reason, "reason": reason, "usage": row}
+
+    def settle(
+        self,
+        root: str,
+        reservation_id: str,
+        *,
+        usd: float | None = None,
+        fetched_bytes: int = 0,
+        staged_bytes: int = 0,
+    ) -> dict:
+        """Close an open reservation with what the job cost (`usd` None: unknown, adds nothing to spent) and moved;
+        returns the budget row. A closed or unknown reservation changes nothing."""
+        now = time.time()
+        with self._transaction() as db:
+            stored = db.execute("SELECT data FROM budgets WHERE root = ?", (root,)).fetchone()
+            row = json.loads(stored[0]) if stored else self._fresh_budget(root, now)
+            opened = row["open"].pop(reservation_id, None)
+            if opened is None:
+                return row
+            row["reserved_usd"] = max(0.0, row["reserved_usd"] - opened["usd"])
+            row["spent_usd"] += usd if usd is not None else 0.0
+            row["running"] -= 1
+            row["fetched_bytes"] += fetched_bytes
+            row["staged_bytes"] += staged_bytes
+            row["closed"].append(reservation_id)
+            db.execute("INSERT OR REPLACE INTO budgets VALUES (?, ?, ?)", (root, json.dumps(row), now))
+        return row
+
+    def budget(self, root: str) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT data FROM budgets WHERE root = ?", (root,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def budgets(self) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute("SELECT data FROM budgets ORDER BY root").fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    # --- unregistering and inspecting volumes (a revocation leaves the buffer; spec autonomous-gates §6) --
+
+    def delete_volume(self, buffer: str, volume_id: str) -> bool:
+        """Drop the volume, its frozen rows and the staged reference no other volume of the buffer still needs;
+        False when the buffer has no such volume. The raw reference stays (a retire drops it)."""
+        with self._transaction() as db:
+            found = db.execute(
+                "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes "
+                "WHERE buffer = ? AND id = ?",
+                (buffer, volume_id),
+            ).fetchone()
+            if found is None:
+                return False
+            artifact, path = found
+            db.execute("DELETE FROM volumes WHERE buffer = ? AND id = ?", (buffer, volume_id))
+            db.execute(
+                "DELETE FROM frozen WHERE buffer = ? AND json_extract(descriptor, '$.volume') = ?", (buffer, volume_id)
+            )
+            staged = artifact or str(PurePosixPath(path).parent)
+            still = {
+                known_artifact or str(PurePosixPath(known_path).parent)
+                for known_artifact, known_path in db.execute(
+                    "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes WHERE buffer = ?",
+                    (buffer,),
+                )
+            }
+            if staged not in still:
+                db.execute("DELETE FROM refs WHERE buffer = ? AND kind = 'staged' AND key = ?", (buffer, staged))
+            self._volumes.pop(buffer, None)
+        return True
+
+    def volume_rows(self, buffer: str) -> list[dict]:
+        """One small row per volume: {id, artifact, record, missing}; the record is the id up to its first '/'."""
+        return [
+            {
+                "id": volume.id,
+                "artifact": volume.artifact,
+                "record": volume.id.split("/", 1)[0],
+                "missing": volume.missing,
+            }
+            for volume in self.volumes(buffer)
+        ]
+
+    def quarantined_volumes(self, buffer: str) -> list[str]:
+        """The ids of the buffer's volumes whose staged artifact is quarantined."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key FROM assets WHERE kind = 'staged' AND json_extract(data, '$.quarantined') = 1"
+            ).fetchall()
+        quarantined = {row[0] for row in rows}
+        return [volume.id for volume in self.volumes(buffer) if volume.artifact in quarantined]
 
     # --- the registry ------------------------------------------------------------------------
 

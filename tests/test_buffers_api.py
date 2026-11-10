@@ -424,7 +424,7 @@ def test_sync_datasets_route(tmp_path):
     write_prepared(root / "tem-mouse-stale", "stale", match=False)
     s = BufferService(Ledger(tmp_path / "l.sqlite"), storage_root=root)
     s.ledger.put_dataset("busy", {"state": "in-progress"})
-    assert call(s, "POST", "/sync/datasets")[1] == {"prepared": 1, "demoted": 0}
+    assert call(s, "POST", "/sync/datasets")[1] == {"prepared": 1, "demoted": 0, "revoked_kept": 0}
     assert call(s, "GET", "/datasets/stale")[0] == 404 and call(s, "GET", "/datasets/busy")[1]["state"] == "in-progress"
     assert call(s, "GET", f"/datasets/{U937}")[1]["folder"] == "confocal-human-u937"
     assert call(s, "POST", "/sync/datasets")[0] == 200
@@ -460,7 +460,7 @@ def test_sync_keeps_a_row_prepared_during_the_scan(tmp_path, monkeypatch):
         return {}
 
     monkeypatch.setattr("mia_buffers.api.scan_storage", scan_while_set_stage_runs)
-    assert call(s, "POST", "/sync/datasets")[1] == {"prepared": 0, "demoted": 1}
+    assert call(s, "POST", "/sync/datasets")[1] == {"prepared": 0, "demoted": 1, "revoked_kept": 0}
     assert s.ledger.dataset("late")["state"] == "prepared" and s.ledger.dataset("old") is None
 
 
@@ -937,3 +937,65 @@ def test_keeper_kv_routes(tmp_path):
     assert status == 200 and stored["evicted"] == ["staged a"] and isinstance(stored["at"], float)
     assert call(s, "GET", "/keeper")[1] == stored
     assert worker(s, "PUT", "/keeper", {"at": 5.0})[1] == {"at": 5.0}  # replaced whole; a given `at` kept
+
+
+# --- milestone L: assessments, budgets, volumes routes, revoked datasets -------------------------
+
+
+def test_assessment_routes(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    row = new_assessment(
+        gate="crops", subject_kind="crop_set", subject_ref="i7-e11:s", verdict="approve", by="human:a", at=10.0
+    )
+    assert call(s, "PUT", f"/assessments/{row['id']}", payload=row)[0] == 401
+    assert worker(s, "PUT", f"/assessments/{row['id']}", row)[:2] == (200, row)
+    assert worker(s, "PUT", f"/assessments/{row['id']}", {**row, "gate": "vibes"})[0] == 422
+    assert worker(s, "PUT", "/assessments/other-id", row)[0] == 422  # the path and the body must agree
+    assert call(s, "GET", f"/assessments/{row['id']}")[:2] == (200, row) and call(s, "GET", "/assessments/x")[0] == 404
+    listed = call(s, "GET", "/assessments", {"subject_kind": "crop_set", "subject_ref": "i7-e11:s"})[1]
+    assert listed == {"assessments": [row]}
+    assert call(s, "GET", "/assessments", {"gate": "staged"})[1] == {"assessments": []}
+
+
+def test_budget_routes(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    root = quote("o/buffers#7", safe="")
+    body = {"reservation_id": "job-1", "kind": "match", "usd": 6.0, "caps": {"max_usd": 10}}
+    assert call(s, "POST", f"/budgets/{root}/reserve", payload=body)[0] == 401
+    status, out, _ = worker(s, "POST", f"/budgets/{root}/reserve", body)
+    assert status == 200 and out["ok"] and out["usage"]["root"] == "o/buffers#7"
+    refused = worker(s, "POST", f"/budgets/{root}/reserve", {**body, "reservation_id": "job-2"})[1]
+    assert not refused["ok"] and "would exceed max_usd 10" in refused["reason"]
+    settled = worker(s, "POST", f"/budgets/{root}/settle", {"reservation_id": "job-1", "usd": 1.5})[1]
+    assert settled["spent_usd"] == 1.5
+    assert call(s, "GET", f"/budgets/{root}")[1]["spent_usd"] == 1.5 and call(s, "GET", "/budgets/nobody")[0] == 404
+    assert [row["root"] for row in call(s, "GET", "/budgets")[1]["budgets"]] == ["o/buffers#7"]
+    assert worker(s, "POST", f"/budgets/{root}/reserve", {"kind": "x"})[0] == 422
+
+
+def test_volumes_routes_and_quarantined_status(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    worker(s, "PUT", "/buffers/b", CFG)
+    worker(s, "PUT", "/buffers/b/volumes/rec%2Fv0.zarr", {**body("rec/v0.zarr"), "artifact": "art1"})
+    worker(s, "PUT", "/buffers/b/volumes/other%2Fv0.zarr", {**body("other/v0.zarr"), "artifact": "art2"})
+    worker(s, "PUT", "/assets/staged/art1", {"quarantined": True, "quarantined_at": 1.0, "quarantined_by": "human:a"})
+    assert call(s, "GET", "/buffers/b/status")[1]["quarantined"] == ["rec/v0.zarr"]
+    rows = call(s, "GET", "/buffers/b/volumes")[1]["volumes"]
+    assert [(row["id"], row["artifact"], row["record"]) for row in rows] == [
+        ("other/v0.zarr", "art2", "other"),
+        ("rec/v0.zarr", "art1", "rec"),
+    ]
+    assert call(s, "DELETE", "/buffers/b/volumes/rec%2Fv0.zarr")[0] == 401
+    assert worker(s, "DELETE", "/buffers/b/volumes/rec%2Fv0.zarr")[:2] == (200, {"deleted": "rec/v0.zarr"})
+    assert worker(s, "DELETE", "/buffers/b/volumes/rec%2Fv0.zarr")[0] == 404
+    assert call(s, "GET", "/buffers/b/status")[1]["quarantined"] == []
+    assert call(s, "GET", "/assets/staged/art1")[1]["refs"] == []
+    assert call(s, "GET", "/buffers/zz/volumes")[0] == 404
+
+
+def test_datasets_accept_the_revoked_state(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"))
+    assert call(s, "PUT", "/datasets/rec", payload={"state": "revoked"})[1]["state"] == "revoked"
+    assert call(s, "GET", "/datasets", {"state": "revoked"})[1]["datasets"][0]["id"] == "rec"

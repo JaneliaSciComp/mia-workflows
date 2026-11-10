@@ -170,6 +170,45 @@ class Registry:
         """Store the keeper's last pass for the page (`at` added when absent); returns it as stored."""
         return self.request("PUT", "/keeper", json=report)
 
+    # --- assessments, budgets and volumes (spec autonomous-gates §5, §6, §8) ---------------------
+
+    def put_assessment(self, assessment: dict) -> dict:
+        return self.request("PUT", f"/assessments/{quote(assessment['id'], safe='')}", json=assessment)
+
+    def assessments(
+        self, *, subject_kind: str | None = None, subject_ref: str | None = None, gate: str | None = None
+    ) -> list[dict]:
+        """The matching assessments, newest first."""
+        given = (("subject_kind", subject_kind), ("subject_ref", subject_ref), ("gate", gate))
+        params = {name: value for name, value in given if value is not None}
+        return self.request("GET", "/assessments", params=params or None)["assessments"]
+
+    def reserve(self, root: str, reservation_id: str, kind: str, usd: float, caps: dict[str, float]) -> dict:
+        """Charge a job to its root: {ok, reason, usage}."""
+        body = {"reservation_id": reservation_id, "kind": kind, "usd": usd, "caps": caps}
+        return self.request("POST", f"/budgets/{quote(root, safe='')}/reserve", json=body)
+
+    def settle(
+        self, root: str, reservation_id: str, *, usd: float | None = None, fetched_bytes: int = 0, staged_bytes: int = 0
+    ) -> dict:
+        body = {
+            "reservation_id": reservation_id,
+            "usd": usd,
+            "fetched_bytes": fetched_bytes,
+            "staged_bytes": staged_bytes,
+        }
+        return self.request("POST", f"/budgets/{quote(root, safe='')}/settle", json=body)
+
+    def budget(self, root: str) -> dict | None:
+        return self._lookup(f"/budgets/{quote(root, safe='')}")
+
+    def delete_volume(self, buffer: str, volume_id: str) -> None:
+        self.request("DELETE", f"/buffers/{quote(buffer, safe='')}/volumes/{quote(volume_id, safe='')}")
+
+    def volumes(self, buffer: str) -> list[dict]:
+        """The buffer's volumes as small rows: {id, artifact, record, missing}."""
+        return self.request("GET", f"/buffers/{quote(buffer, safe='')}/volumes")["volumes"]
+
     def status(self, buffer: str) -> dict:
         """The buffer's status (stats its pyramids, flags the missing); a consumer route, the token is harmless."""
         return self.request("GET", f"/buffers/{quote(buffer, safe='')}/status")

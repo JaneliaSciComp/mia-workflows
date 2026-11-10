@@ -120,7 +120,7 @@ def test_sync_datasets_keeps_in_progress_rows(tmp_path):
     led.put_dataset("stuck", {"state": "needs-human", "issue": 2})
     led.put_dataset("old", {"state": "prepared", "folder": "f-old"})
     out = led.sync_datasets({"new": {"folder": "f-new", "crops": 3}})
-    assert out == {"prepared": 1, "demoted": 1}
+    assert out == {"prepared": 1, "demoted": 1, "revoked_kept": 0}
     assert led.dataset("old") is None and led.dataset("busy")["state"] == "in-progress"
     assert led.dataset("stuck")["state"] == "needs-human" and led.dataset("new")["crops"] == 3
 
@@ -372,3 +372,88 @@ def test_sync_assets_drops_a_raw_row_with_nothing_cached_that_the_scan_skipped(t
     assert "phantom" not in by_key
     assert by_key["wiped"]["state"] == "missing" and by_key["fetching"]["state"] == "fetching"
     assert counts == {"scanned": 0, "new": 0, "missing": 1, "dropped": 1}
+
+
+# --- milestone L: assessments, budgets, revoked rows, quarantined volumes ------------------------
+
+
+def test_assessments_are_append_only_and_filterable(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    led = Ledger(tmp_path / "l.sqlite")
+    first = new_assessment(
+        gate="crops", subject_kind="crop_set", subject_ref="i7-e11:s", verdict="approve", by="human:a", at=10.0
+    )
+    second = new_assessment(
+        gate="staged", subject_kind="artifact", subject_ref="art1", verdict="reject", by="human:b", at=20.0
+    )
+    assert led.put_assessment(first) == first and led.put_assessment({**first, "verdict": "reject"}) == first
+    led.put_assessment(second)
+    assert [row["id"] for row in led.assessments()] == [second["id"], first["id"]]  # newest first
+    assert led.assessments(subject_kind="artifact", subject_ref="art1") == [second]
+    assert led.assessments(gate="crops") == [first] and led.assessment("nope") is None
+    assert led.assessments(limit=1) == [second]
+
+
+def test_reserve_enforces_the_caps_atomically_and_settles_once(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    caps = {"max_usd": 10, "max_fetch_bytes": 100, "max_jobs": 3, "max_concurrent_jobs": 2, "max_days": 14}
+    root = "o/buffers#7"
+    first = led.reserve(root, "job-1", "match", 6.0, caps, now=1000.0)
+    assert first["ok"] and first["usage"]["reserved_usd"] == 6.0 and first["usage"]["running"] == 1
+    assert led.reserve(root, "job-1", "match", 6.0, caps, now=1001.0)["usage"]["reserved_usd"] == 6.0  # a retry
+    over = led.reserve(root, "job-2", "match", 5.0, caps, now=1002.0)
+    assert not over["ok"]
+    assert over["reason"] == "root o/buffers#7: usd 6.00 reserved or spent + 5.00 would exceed max_usd 10"
+    assert led.reserve(root, "job-2", "stage", 0.0, caps, now=1002.0)["ok"]  # jobs: 2 running of 2
+    busy = led.reserve(root, "job-3", "stage", 0.0, caps, now=1003.0)
+    assert busy["reason"] == "root o/buffers#7: 2 jobs running, max_concurrent_jobs 2"
+    settled = led.settle(root, "job-1", usd=2.5)
+    assert (settled["reserved_usd"], settled["spent_usd"], settled["running"], settled["jobs"]) == (0.0, 2.5, 1, 2)
+    assert led.settle(root, "job-1", usd=2.5) == settled  # settling twice changes nothing
+    assert led.settle(root, "never", fetched_bytes=5) == settled  # an unknown reservation: a no-op
+    assert led.reserve(root, "job-3", "stage", 0.0, caps, now=1004.0)["ok"]
+    assert led.settle(root, "job-2", fetched_bytes=60)["fetched_bytes"] == 60
+    launched = led.reserve(root, "job-4", "fetch", 0.0, caps, now=1005.0)
+    assert launched["reason"] == "root o/buffers#7: 3 jobs launched, max_jobs 3"
+    assert led.settle(root, "job-3", usd=None)["spent_usd"] == 2.5  # a job without a cost adds nothing to spent
+    assert led.settle(root, "job-3", fetched_bytes=50) == led.budget(root)  # closed already: a no-op
+    roomy = {**caps, "max_jobs": 99}
+    assert led.reserve(root, "job-5", "fetch", 0.0, roomy, now=1006.0)["ok"]
+    assert led.settle(root, "job-5", fetched_bytes=50)["fetched_bytes"] == 110
+    bytes_over = led.reserve(root, "job-6", "fetch", 0.0, roomy, now=1007.0)
+    assert bytes_over["reason"] == "root o/buffers#7: 110 bytes fetched, over max_fetch_bytes 100"
+    old = led.reserve(root, "job-9", "stage", 0.0, {**roomy, "max_fetch_bytes": 1e9}, now=1000.0 + 15 * 86400)
+    assert old["reason"] == "root o/buffers#7 is 15.0 days old, over max_days 14"
+    assert led.budget("nobody") is None and [row["root"] for row in led.budgets()] == [root]
+
+
+def test_sync_datasets_never_touches_a_revoked_row(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_dataset("bad", {"state": "revoked", "revoked_by": "human:a"})
+    out = led.sync_datasets({"bad": {"folder": "f-bad"}, "good": {"folder": "f-good"}})
+    assert out == {"prepared": 1, "demoted": 0, "revoked_kept": 1}
+    assert led.dataset("bad")["state"] == "revoked" and "folder" not in led.dataset("bad")
+    assert led.dataset("good")["state"] == "prepared"
+
+
+def test_delete_volume_drops_its_frozen_rows_and_an_orphaned_ref(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {})
+    led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art1"), refs=[("staged", "art1"), ("raw", "rec")])
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art1"), refs=[("staged", "art1")])
+    led.extend_frozen("b", "val", [{"volume": "rec/a", "i": 0}, {"volume": "rec/b", "i": 1}])
+    assert led.delete_volume("b", "rec/a") and not led.delete_volume("b", "rec/a")
+    assert [v.id for v in led.volumes("b")] == ["rec/b"] and led.frozen("b", "val") == [{"volume": "rec/b", "i": 1}]
+    assert led.refs("staged", "art1") == ["b"]  # rec/b still lives in art1
+    assert led.delete_volume("b", "rec/b") and led.refs("staged", "art1") == []
+    assert led.volume_rows("b") == []
+
+
+def test_quarantined_volumes_are_those_whose_artifact_is_quarantined(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art1"))
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art2"))
+    led.put_asset("staged", "art1", {"quarantined": True, "quarantined_at": 1.0})
+    assert led.quarantined_volumes("b") == ["rec/a"]
+    assert led.volume_rows("b")[0] == {"id": "rec/a", "artifact": "art1", "record": "rec", "missing": False}

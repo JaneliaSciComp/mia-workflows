@@ -148,3 +148,23 @@ def test_put_keeper():
     assert reg.put_keeper({"evicted": []}) == {"evicted": [], "at": 1.0}
     assert seen[0].method == "PUT" and seen[0].url.path == "/keeper" and json.loads(seen[0].read()) == {"evicted": []}
     assert seen[0].headers["authorization"] == "Bearer t"
+
+
+def test_assessment_budget_and_volume_paths():
+    seen = []
+    reg = Registry("http://svc", "t", transport=transport(seen, body={"ok": True, "assessments": [], "volumes": []}))
+    reg.put_assessment({"id": "a1", "gate": "crops"})
+    reg.assessments(subject_kind="artifact", subject_ref="art1")
+    reg.reserve("o/r#7", "job-1", "match", 5.0, {"max_usd": 10})
+    reg.settle("o/r#7", "job-1", usd=1.0, fetched_bytes=3)
+    reg.delete_volume("b", "rec/v0.zarr")
+    reg.volumes("b")
+    assert [(r.method, r.url.raw_path.decode()) for r in seen] == [
+        ("PUT", "/assessments/a1"),
+        ("GET", "/assessments?subject_kind=artifact&subject_ref=art1"),
+        ("POST", "/budgets/o%2Fr%237/reserve"),
+        ("POST", "/budgets/o%2Fr%237/settle"),
+        ("DELETE", "/buffers/b/volumes/rec%2Fv0.zarr"),
+        ("GET", "/buffers/b/volumes"),
+    ]
+    assert json.loads(seen[3].content) == {"reservation_id": "job-1", "usd": 1.0, "fetched_bytes": 3, "staged_bytes": 0}

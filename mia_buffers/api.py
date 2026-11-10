@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
+from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import read_untrusted
@@ -41,7 +42,8 @@ from .sync import scan_assets, scan_storage
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
-DATASET_STATES = ("in-progress", "prepared", "needs-human")  # no row = unprepared; `ineligible` ended with spec §12
+# no row = unprepared; `ineligible` ended with spec §12; `revoked` since autonomous-gates §6
+DATASET_STATES = ("in-progress", "prepared", "needs-human", "revoked")
 CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
 CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
 log = logging.getLogger(__name__)
@@ -152,6 +154,49 @@ class EventBody(_Strict):
     detail: str = ""
 
 
+class SubjectBody(_Strict):
+    kind: str
+    ref: str
+    source_digest: str = ""
+
+
+class AssessmentBody(_Strict):
+    """One assessment as `mia_core.judge.policy.new_assessment` shapes it (spec autonomous-gates §5)."""
+
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())  # `model` is a field, not a namespace
+
+    id: str
+    gate: str
+    subject: SubjectBody
+    verdict: str
+    by: str
+    at: str
+    policy_version: int
+    confidence: float | None = None
+    findings: list[dict] = []
+    summary: str = ""
+    supersedes: str | None = None
+    evidence_digest: str = ""
+    checks: dict | None = None
+    model: str = ""
+    prompt_version: str = ""
+    coverage: dict | None = None
+
+
+class ReserveBody(_Strict):
+    reservation_id: str
+    kind: str
+    usd: float = 0.0
+    caps: dict[str, float] = {}
+
+
+class SettleBody(_Strict):
+    reservation_id: str
+    usd: float | None = None
+    fetched_bytes: int = 0
+    staged_bytes: int = 0
+
+
 class HttpError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
@@ -206,6 +251,15 @@ ROUTES = [
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
     ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
     ("GET", re.compile(r"^/locks$"), "locks", "read"),
+    ("PUT", re.compile(r"^/assessments/([^/]+)$"), "put_assessment", "worker"),
+    ("GET", re.compile(r"^/assessments/([^/]+)$"), "get_assessment", "read"),
+    ("GET", re.compile(r"^/assessments$"), "list_assessments", "read"),
+    ("POST", re.compile(r"^/budgets/([^/]+)/reserve$"), "reserve", "worker"),
+    ("POST", re.compile(r"^/budgets/([^/]+)/settle$"), "settle", "worker"),
+    ("GET", re.compile(r"^/budgets/([^/]+)$"), "get_budget", "read"),
+    ("GET", re.compile(r"^/budgets$"), "list_budgets", "read"),
+    ("DELETE", re.compile(r"^/buffers/([^/]+)/volumes/([^/]+)$"), "delete_volume", "worker"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/volumes$"), "volumes", "read"),
     ("GET", re.compile(r"^/$"), "page", "read"),
     ("GET", re.compile(r"^/ui/([^/]+)$"), "ui", "read"),
     ("GET", re.compile(r"^/meta$"), "meta", "read"),
@@ -422,6 +476,70 @@ class BufferService:
         if row is None:
             raise HttpError(404, f"no dataset row for {record}")
         return 200, row, {}
+
+    # --- assessments and budgets: what the gates decided and what each root request has spent ------
+
+    def _put_assessment(self, assessment_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(AssessmentBody, body)
+        if parsed.id != assessment_id:
+            raise HttpError(422, f"the body's id {parsed.id!r} is not the path's {assessment_id!r}")
+        for value, allowed, what in (
+            (parsed.gate, GATES, "gate"),
+            (parsed.subject.kind, SUBJECT_KINDS, "subject kind"),
+            (parsed.verdict, VERDICTS, "verdict"),
+        ):
+            if value not in allowed:
+                raise HttpError(422, f"{what} must be one of {list(allowed)}, got {value!r}")
+        return 200, self.ledger.put_assessment(parsed.model_dump()), {}
+
+    def _get_assessment(self, assessment_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        row = self.ledger.assessment(assessment_id)
+        if row is None:
+            raise HttpError(404, f"no assessment {assessment_id}")
+        return 200, row, {}
+
+    def _list_assessments(self, *, query: dict[str, str], body: bytes) -> Response:
+        rows = self.ledger.assessments(
+            subject_kind=query.get("subject_kind"),
+            subject_ref=query.get("subject_ref"),
+            gate=query.get("gate"),
+            limit=_int(query, "limit", 200, low=1, high=1000),
+        )
+        return 200, {"assessments": rows}, {}
+
+    def _reserve(self, root: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(ReserveBody, body)
+        return 200, self.ledger.reserve(root, parsed.reservation_id, parsed.kind, parsed.usd, parsed.caps), {}
+
+    def _settle(self, root: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(SettleBody, body)
+        row = self.ledger.settle(
+            root,
+            parsed.reservation_id,
+            usd=parsed.usd,
+            fetched_bytes=parsed.fetched_bytes,
+            staged_bytes=parsed.staged_bytes,
+        )
+        return 200, row, {}
+
+    def _get_budget(self, root: str, *, query: dict[str, str], body: bytes) -> Response:
+        row = self.ledger.budget(root)
+        if row is None:
+            raise HttpError(404, f"no budget for {root}")
+        return 200, row, {}
+
+    def _list_budgets(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"budgets": self.ledger.budgets()}, {}
+
+    def _delete_volume(self, buffer: str, volume_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        if not self.ledger.delete_volume(buffer, volume_id):
+            raise HttpError(404, f"no volume {volume_id} in {buffer}")
+        return 200, {"deleted": volume_id}, {}
+
+    def _volumes(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        return 200, {"volumes": self.ledger.volume_rows(buffer)}, {}
 
     def _crop_png(self, folder: str, crop_id: str, name: str, *, query: dict[str, str], body: bytes) -> Response:
         """A published crop's raw.png or overlay.png from storage_root: the page's previews."""
@@ -663,6 +781,7 @@ class BufferService:
                 "volumes": len(volumes),
                 "servable": {split: len(servable(volumes, split)) for split in splits},
                 "missing": [volume.id for volume in volumes if volume.missing],
+                "quarantined": self.ledger.quarantined_volumes(buffer),
                 "draws": self.ledger.draws_per_volume(buffer),
                 "consumers": self.ledger.consumers(buffer, self.stale_s),
             },

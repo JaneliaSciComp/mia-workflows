@@ -177,8 +177,9 @@ Everything here is hand-driven; the `MiaBuffer` workflow (next section) runs the
 
 ## The registry (milestone B)
 
-The ledger now also holds one row per dataset (state `in-progress`, `needs-human` or `prepared`, with the
-folder, binding hash and crop count of a prepared one) and the catalog records of each synced commit. It lives in
+The ledger now also holds one row per dataset (state `in-progress`, `needs-human`, `prepared` or `revoked`, with
+the folder, binding hash and crop count of a prepared one; `datasets sync` never merges over a `revoked` row and
+reports it as `revoked_kept`) and the catalog records of each synced commit. It lives in
 `<local_root>/service/buffers.sqlite` with backups under `<state_dir>/backups/`. mia-data writes the dataset rows as
 its stages change (`mia_core.registry.Registry`, best effort).
 
@@ -187,6 +188,20 @@ routes (every other `GET`, and `POST /plan`) are open; worker routes (every othe
 `Authorization: Bearer <contents of service.token_file>`, else `401 {"error": "unauthorized"}`. Consumer routes answer
 `409` unless the buffer's latest event is `approved`, `ready` or `idle` (an allowlist: a `needs-human` or a missing event
 never serves; spec autonomous-gates §3).
+
+**Assessments and budgets** (spec autonomous-gates §5, §8). Every gate decision is an append-only assessment,
+shaped by `mia_core.judge.policy.new_assessment`: `PUT /assessments/<id>` (worker; the body's `id` must be the
+path's, and `gate`, `subject.kind` and `verdict` must be in the policy's tuples; a repeated id is ignored, so a retry
+is harmless), `GET /assessments/<id>` and `GET /assessments?subject_kind=&subject_ref=&gate=&limit=` (read, newest
+first). Jobs are charged to their root request: `POST /budgets/<root>/reserve` (worker; `{reservation_id, kind, usd,
+caps}` → `{ok, reason, usage}`, atomic against the caps `max_days`, `max_usd`, `max_fetch_bytes`,
+`max_concurrent_jobs`, `max_jobs`; a known reservation id answers `ok` without charging again),
+`POST /budgets/<root>/settle` (worker; `{reservation_id, usd, fetched_bytes, staged_bytes}`; a closed or unknown
+reservation is a no-op), `GET /budgets/<root>` and `GET /budgets` (read). A budget row is `{root, since, reserved_usd,
+spent_usd, fetched_bytes, staged_bytes, jobs, running, open: {id: {kind, usd, at}}, closed: [id]}`. A volume leaves a
+buffer with `DELETE /buffers/<b>/volumes/<vid>` (worker; drops its frozen rows and a staged reference no other
+volume needs); `GET /buffers/<b>/volumes` (read) lists `{id, artifact, record, missing}` rows, and
+`GET /buffers/<b>/status` names the `quarantined` volumes (those whose artifact row is quarantined).
 
 Sync commands, for a fresh service or one that missed writes:
 
@@ -242,7 +257,9 @@ and `blocked_at` on the raw row; the next fetch clears them. A fetch still parti
 job's id, state and exit code; `mia-buffers check` verifies the harness checkout has `harness fetch`.
 
 **Asset rows.** `state` is one of `fetching`, `staging`, `waiting-drop`, `ready`, `partial`, `missing`, `evicted`;
-rows also carry `bytes`, `job`, `last_used` and `scanned_at`, and raw rows `stream` (URLs that stream) and `files`.
+rows also carry `bytes`, `job`, `last_used` and `scanned_at`, and raw rows `stream` (URLs that stream) and `files`;
+a revoked staged row carries `quarantined`, `quarantined_at` and `quarantined_by` (the keeper holds a quarantined
+row for `autonomy.quarantine_days` after its references are gone).
 `PUT /assets/<kind>/<key>` merges fields into the row. `GET /assets/<kind>?state=&record=` filters and adds a `bytes`
 total. `POST /sync/assets` (worker token) scans the roots, skips a missing or empty root, lists `.building-*`
 directories (staged builds and eviction asides in both roots) and sets staged `last_used` from the draws; a row
