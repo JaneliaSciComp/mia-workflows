@@ -118,6 +118,9 @@ class CropsCfg(BaseModel):
 
 
 class LimitsCfg(BaseModel):
+    """Per job: what one csub job may read, write and run for (plus one agent run's cost and one round's PR
+    revisions). Per disk root is `QuotaCfg`; per request is `AutonomyCfg` (mia_core.config)."""
+
     job_bytes: float = 5e9
     stage_bytes: float | None = None  # cap on one staged artifact's uncompressed planned bytes; None = job_bytes
     job_walltime_min: int = 120

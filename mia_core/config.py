@@ -48,6 +48,9 @@ class KeeperCfg(BaseModel):
 
 
 class QuotaCfg(BaseModel):
+    """Per disk root: how much the shared raw and staged caches may hold; the keeper evicts free assets to stay
+    under. Per job is `LimitsCfg` (mia_data.config); per request is `AutonomyCfg`."""
+
     raw_bytes: float = Field(default=0, ge=0)  # 0 = unlimited
     staged_bytes: float = Field(default=0, ge=0)
     headroom_bytes: float = Field(default=200e9, ge=0)
@@ -65,7 +68,8 @@ class RootBudgetCfg(BaseModel):
 
 
 class AutonomyCfg(BaseModel):
-    """The operator's switches over the autonomous gates: the pause, the quarantine hold and the root caps."""
+    """Per request, and the operator's switches over the autonomous gates: the pause, the quarantine hold and the
+    `root` caps that add up every job one issue causes. Per job is `LimitsCfg`; per disk root is `QuotaCfg`."""
 
     pause: bool = False  # `mia pause` flips it; every workflow stops at its next job while it is set
     quarantine_days: float = Field(default=30, ge=0)  # a revoked artifact is held this long before eviction

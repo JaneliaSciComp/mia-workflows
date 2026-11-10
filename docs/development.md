@@ -20,7 +20,10 @@ without. `paths.local_root` must be host-local disk, not NFS (`mia up` refuses o
 `<local_root>/service/buffers.sqlite` is buffer-api's SQLite ledger (the first `serve` moves an old
 `<state_dir>/buffers.sqlite` there once; the old file keeps a `.moved` suffix), with timed backups under
 `<state_dir>/backups/`. `service.token_file` (mode 600; `mia init-token` creates it) holds the buffer-api worker token
-and is mounted read-only into the workers. The shared `autonomy` block holds the operator's switches: `pause`
+and is mounted read-only into the workers. Three blocks bound three scopes: `limits` is per job (one csub job's bytes, walltime and attempts, one agent run's
+cost, one round's PR revisions), `quota` is per disk root (the shared caches' size, kept by the keeper's evictions),
+and `autonomy` is per request (what every job of one issue adds up to) plus the operator's switches. The shared
+`autonomy` block holds those switches: `pause`
 (`mia pause` and `mia resume` edit it in place, comments kept; every worker re-reads the file before each job),
 `quarantine_days` and the `root` caps a request may spend in all (`max_usd`, `max_fetch_bytes`, `max_jobs`,
 `max_concurrent_jobs`, `max_days`).

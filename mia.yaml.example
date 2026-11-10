@@ -43,7 +43,11 @@ paths:
     url: https://fileglancer.example.org/browse/TBD/mia/staged
 harness:
   dir: /path/to/mia-snippets-checkout     # pinned per round by commit + pixi.lock digest
-limits:
+# Three blocks bound three scopes. `limits`: one job (what a single csub job may read, write and run for, plus one
+# agent run's cost and one round's PR revisions). `quota`: one disk root (how much the shared caches may hold; the
+# keeper evicts to stay under). `autonomy`: one request (what all the jobs of one issue may add up to) and the
+# operator's switches. A number that is "per job" goes in limits, "per root" in quota, "per request" in autonomy.
+limits:                                   # per job: one csub job's bytes, walltime and attempts
   job_bytes: 5e9
   # stage_bytes: 2e9   # cap on one staged artifact's uncompressed planned bytes; defaults to job_bytes
   job_walltime_min: 120
@@ -56,7 +60,7 @@ network:
 service:                                  # the buffer-api (`mia-buffers serve`) and its clients
   url: http://host.example.org:8765       # the port is required
   token_file: ~/.config/mia/service-token # chmod 600
-quota:                                    # the buffers worker's keeper evicts free assets per root; 0 = unlimited
+quota:                                    # per disk root: the shared caches' size; the keeper evicts free assets to stay under; 0 = unlimited
   raw_bytes: 0                            # bytes under paths.raw_root; 0 = unlimited
   staged_bytes: 0                         # bytes under paths.staged_root; 0 = unlimited
   headroom_bytes: 200e9                   # a pass over quota evicts until usage is under quota minus this
@@ -64,7 +68,8 @@ quota:                                    # the buffers worker's keeper evicts f
 keeper:
   minutes: 30                             # SQLite backup cadence and the MiaCacheKeeper schedule (mia-buffers schedule)
   catalog_sync_hours: 24                  # the keeper syncs the catalog's main head when older than this
-autonomy:                                 # the operator's switches over the autonomous gates (autonomous-gates spec)
+autonomy:                                 # per request, and the operator's switches (autonomous-gates spec): the caps under `root`
+                                          # add up every job one issue causes (its own and the dataset issues it opens)
   pause: false                            # mia pause / mia resume; every worker re-reads it at each job
   quarantine_days: 30                     # a revoked artifact is held this long before the keeper may evict it
   root:                                   # what one root request (a buffer, prep or dataset issue) may spend in all
