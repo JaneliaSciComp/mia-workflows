@@ -517,50 +517,53 @@ class Ledger:
             "running": 0,
             "open": {},
             "closed": [],
+            "epochs": 1,
         }
 
     @staticmethod
-    def _over_caps(row: dict, usd: float, caps: dict[str, float], now: float) -> str:
-        """The first cap the reservation would break, as the reason; '' when none. A cap missing from `caps` is
-        not checked."""
+    def _over_caps(row: dict, usd: float, caps: dict[str, float], now: float) -> tuple[str, bool]:
+        """The first cap the reservation would break, as (reason, wait); ('', False) when none. `wait` is True for
+        the concurrency cap alone: that one paces work, the others end it. A cap missing from `caps` is not checked."""
         root = row["root"]
         if "max_days" in caps and (days := (now - row["since"]) / 86400) > caps["max_days"]:
-            return f"root {root} is {days:.1f} days old, over max_days {_num(caps['max_days'])}"
+            return f"root {root} is {days:.1f} days old, over max_days {_num(caps['max_days'])}", False
         committed = row["reserved_usd"] + row["spent_usd"]
         if "max_usd" in caps and committed + usd > caps["max_usd"]:
-            return (
-                f"root {root}: usd {committed:.2f} reserved or spent + {usd:.2f} would exceed "
-                f"max_usd {_num(caps['max_usd'])}"
-            )
+            reason = f"root {root}: usd {committed:.2f} reserved or spent + {usd:.2f} would exceed max_usd "
+            return reason + _num(caps["max_usd"]), False
         if "max_fetch_bytes" in caps and row["fetched_bytes"] > caps["max_fetch_bytes"]:
-            return f"root {root}: {row['fetched_bytes']} bytes fetched, over max_fetch_bytes {_num(caps['max_fetch_bytes'])}"
+            cap = _num(caps["max_fetch_bytes"])
+            return f"root {root}: {row['fetched_bytes']} bytes fetched, over max_fetch_bytes {cap}", False
         if "max_concurrent_jobs" in caps and row["running"] + 1 > caps["max_concurrent_jobs"]:
-            return (
-                f"root {root}: {row['running']} jobs running, max_concurrent_jobs {_num(caps['max_concurrent_jobs'])}"
-            )
+            cap = _num(caps["max_concurrent_jobs"])
+            return f"root {root}: {row['running']} jobs running, max_concurrent_jobs {cap}", True
         if "max_jobs" in caps and row["jobs"] + 1 > caps["max_jobs"]:
-            return f"root {root}: {row['jobs']} jobs launched, max_jobs {_num(caps['max_jobs'])}"
-        return ""
+            return f"root {root}: {row['jobs']} jobs launched, max_jobs {_num(caps['max_jobs'])}", False
+        return "", False
 
     def reserve(
         self, root: str, reservation_id: str, kind: str, usd: float, caps: dict[str, float], now: float | None = None
     ) -> dict:
-        """Charge a job to its root before it launches: {ok, reason, usage}. The check and the add are one
-        transaction; a known reservation id (a retry) answers ok without charging again."""
+        """Charge a job to its root before it launches: {ok, reason, wait, usage}. The check and the add are one
+        transaction; a known reservation id (a retry) answers ok without charging again. A root with nothing running
+        whose epoch is older than `max_days` starts a fresh one (counters reset): the caps bound an episode of work,
+        and a request busy for `max_days` straight is the runaway they stop."""
         now = time.time() if now is None else now
         with self._transaction() as db:
             stored = db.execute("SELECT data FROM budgets WHERE root = ?", (root,)).fetchone()
             row = json.loads(stored[0]) if stored else self._fresh_budget(root, now)
             if reservation_id in row["open"] or reservation_id in row["closed"]:
-                return {"ok": True, "reason": "", "usage": row}
-            reason = self._over_caps(row, usd, caps, now)
+                return {"ok": True, "reason": "", "wait": False, "usage": row}
+            if "max_days" in caps and not row["open"] and (now - row["since"]) / 86400 > caps["max_days"]:
+                row = {**self._fresh_budget(root, now), "epochs": int(row.get("epochs", 1)) + 1}
+            reason, wait = self._over_caps(row, usd, caps, now)
             if not reason:
                 row["open"][reservation_id] = {"kind": kind, "usd": usd, "at": now}
                 row["reserved_usd"] += usd
                 row["jobs"] += 1
                 row["running"] += 1
             db.execute("INSERT OR REPLACE INTO budgets VALUES (?, ?, ?)", (root, json.dumps(row), now))
-        return {"ok": not reason, "reason": reason, "usage": row}
+        return {"ok": not reason, "reason": reason, "wait": wait, "usage": row}
 
     def settle(
         self,
@@ -571,8 +574,8 @@ class Ledger:
         fetched_bytes: int = 0,
         staged_bytes: int = 0,
     ) -> dict:
-        """Close an open reservation with what the job cost (`usd` None: unknown, adds nothing to spent) and moved;
-        returns the budget row. A closed or unknown reservation changes nothing."""
+        """Close an open reservation with what the job cost (`usd` None: unknown, the reservation stands as the
+        cost) and moved; returns the budget row. A closed or unknown reservation changes nothing."""
         now = time.time()
         with self._transaction() as db:
             stored = db.execute("SELECT data FROM budgets WHERE root = ?", (root,)).fetchone()
@@ -581,7 +584,7 @@ class Ledger:
             if opened is None:
                 return row
             row["reserved_usd"] = max(0.0, row["reserved_usd"] - opened["usd"])
-            row["spent_usd"] += usd if usd is not None else 0.0
+            row["spent_usd"] += usd if usd is not None else opened["usd"]
             row["running"] -= 1
             row["fetched_bytes"] += fetched_bytes
             row["staged_bytes"] += staged_bytes

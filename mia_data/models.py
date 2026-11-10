@@ -190,6 +190,7 @@ class Reservation:
 
     ok: bool
     reason: str = ""
+    wait: bool = False  # the refusal is the concurrency cap: wait and ask again rather than fail
 
 
 @dataclass

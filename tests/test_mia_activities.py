@@ -18,7 +18,16 @@ from autodev.jobs import CsubJobs
 from mia_core.registry import Registry
 from mia_data.activities import Activities
 from mia_data.jobspec import lock_dir
-from mia_data.models import AssessmentWritten, DatasetState, JobArgs, JobDone, LockTaken, Reservation, job_key
+from mia_data.models import (
+    AssessmentWritten,
+    DatasetState,
+    JobArgs,
+    JobDone,
+    LockTaken,
+    Reservation,
+    Revocation,
+    job_key,
+)
 
 REC_SHA, SNIP_SHA = "c" * 40, "a" * 40
 RECORD = {
@@ -689,3 +698,35 @@ async def test_revoke_dataset_rejects_quarantines_and_finds_the_buffers(tmp_path
     assert t.a.dataset_fields(1, "i1-e11", "done")["state"] == "revoked"  # the row stays revoked whatever the stage
     assert await t.a.revoke_dataset(1, "i1-e11", "alice", "77") == out  # a retry: the same assessment, nothing doubled
     assert len(registry.assessments(subject_kind="artifact", subject_ref="art1")) == 1
+
+
+async def test_revoke_dataset_with_nothing_published_records_nothing(tmp_path, token_server):  # noqa: F811
+    t = _setup(tmp_path)
+    registry = t.a.registry = Registry(token_server, "t")
+    await t.a.admit(1, "11")
+    assert await t.a.revoke_dataset(1, "i1-e11", "alice", "77") == Revocation("")
+    folder = t.a._dataset_dir("i1-e11", t.a._pins("i1-e11"))
+    assert not (folder / "revoked.json").exists() and registry.assessments() == [] and registry.dataset("rec-1") is None
+
+
+async def test_a_publication_after_a_revoke_releases_the_artifacts(tmp_path, token_server):  # noqa: F811
+    from test_buffers_sync import write_prepared
+
+    t = _setup(tmp_path)
+    registry = t.a.registry = Registry(token_server, "t")
+    await t.a.admit(1, "11")
+    folder = t.a._dataset_dir("i1-e11", t.a._pins("i1-e11"))
+    write_prepared(folder, "rec-1")
+    registry.put_asset("staged", "art1", {"record": "rec-1", "state": "ready", "path": "/x", "bytes": 1})
+    await t.a.revoke_dataset(1, "i1-e11", "alice", "77")
+    assert registry.asset("staged", "art1")["quarantined"] is True
+    binding = t.cfg.paths.state_dir / "rounds" / "i1-e11" / "binding-1.yaml"
+    binding.write_text("record: rec-1\n")
+    cw = Path(await t.a.prepare_job(1, "i1-e11", "crop", 1, None))
+    await t.a.publish_crops(1, "i1-e11", str(cw), [_crop(cw, "c1", 0)], SNIP_SHA, str(binding))
+    assert not (folder / "revoked.json").exists()
+    art1 = registry.asset("staged", "art1")
+    assert art1["quarantined"] is False and art1["repaired_by"] == "i1-e11"
+    newest = registry.assessments(subject_kind="artifact", subject_ref="art1")[0]
+    assert newest["verdict"] == "approve" and newest["by"] == "policy:repair"
+    assert t.a.dataset_fields(1, "i1-e11", "done")["state"] == "prepared"

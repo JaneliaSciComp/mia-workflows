@@ -188,24 +188,30 @@ class MiaDataDataset:
         return bool(self.go_events or self.approve_events or self.reject_events or self.revoke_events)
 
     async def _revokes(self) -> bool:
-        """Act on every queued `data:revoke`; True when one was taken (the round, if any, is over)."""
-        taken = False
+        """Act on every queued `data:revoke`; True when one ended the round (a refused label leaves it alone)."""
+        ended = False
         while self.revoke_events:
             event = self.revoke_events.pop(0)
             if self._seen(event):
                 continue
-            await self._guard(self._revoke(event))
-            taken = True
-        return taken
+            try:
+                ended = await self._revoke(event) or ended
+            except (ActivityError, RoundFailed) as error:
+                await self._finish("needs-human", error_message(error))
+                ended = True
+            await self._settle_stage_write(cancel=False)
+        return ended
 
-    async def _revoke(self, event: LabelEvent) -> None:
+    async def _revoke(self, event: LabelEvent) -> bool:
         """Withdraw the dataset: the activity writes the reject assessments, quarantines the staged artifacts and
-        flips the row; the issue ends in needs-human naming the blast radius. Nothing published: refused."""
+        flips the row; the issue ends in needs-human naming the blast radius. Returns whether the round ended: an
+        issue that never published anything (no round, or no manifest on disk) only has the label refused."""
         state = self.state
         if not workflow.patched("l-revoke"):
-            return
-        if not state.published or not state.round_id:
-            return await self._refuse(REVOKE, NOTHING_TO_REVOKE, event)
+            return False
+        if not state.round_id:
+            await self._refuse(REVOKE, NOTHING_TO_REVOKE, event)
+            return False
         out = await self._act(
             "revoke_dataset",
             state.issue,
@@ -215,12 +221,16 @@ class MiaDataDataset:
             seconds=900,
             result_type=Revocation,
         )
+        if not out.assessment:
+            await self._refuse(REVOKE, NOTHING_TO_REVOKE, event)
+            return False
         artifacts = ", ".join(f"`{artifact}`" for artifact in out.artifacts) or "none"
         buffers = ", ".join(f"`{buffer}`" for buffer in out.buffers) or "none"
         extra = f"**Quarantined artifacts:** {artifacts}\n**Buffers that drew from it:** {buffers}\n"
         count = len(out.artifacts)
         detail = REVOKED.format(actor=event.actor, count=count, plural="" if count == 1 else "s")
         await self._finish("needs-human", detail, extra=extra)
+        return True
 
     def _seen(self, event: LabelEvent) -> bool:
         """True if this label event was handled before; otherwise record it as handled now."""
@@ -329,22 +339,17 @@ class MiaDataDataset:
         limits = await self._limits()
         budgeted = workflow.patched("l-budget")
         if budgeted:  # the operator's switches first: the pause, then the root budget (spec autonomous-gates §8)
-            if await self._act("paused", result_type=bool):
-                raise RoundFailed(PAUSED)
-            usd = limits.agent_max_budget_usd if kind == "match" else 0.0
-            reservation = await self._act("reserve", state.pins.root, key, kind, usd, result_type=Reservation)
-            if not reservation.ok:
-                raise RoundFailed(f"root budget: {reservation.reason}")
-        job_id = await self._act(
-            "submit",
-            key,
-            kind,
-            JobArgs(workspace, state.round_id, state.pins, **job_args),
-            seconds=600,
-            result_type=str,
-        )
+            await self._reserve(key, kind, limits.agent_max_budget_usd if kind == "match" else 0.0)
         walltime = timedelta(minutes=limits.walltime_min)
         try:
+            job_id = await self._act(
+                "submit",
+                key,
+                kind,
+                JobArgs(workspace, state.round_id, state.pins, **job_args),
+                seconds=600,
+                result_type=str,
+            )
             done = await workflow.execute_activity(
                 "await_job",
                 args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
@@ -362,6 +367,23 @@ class MiaDataDataset:
         if budgeted:
             await self._settle(key)
         return done
+
+    async def _reserve(self, key: str, kind: str, usd: float) -> None:
+        """The pause, then the root budget (spec autonomous-gates §8). A cap refusal ends the round; the concurrency
+        cap alone is a wait: poll_minutes, doubling up to 30 minutes, then ask again."""
+        state, tries = self.state, 0
+        assert state.pins
+        while True:
+            if await self._act("paused", result_type=bool):
+                raise RoundFailed(PAUSED)
+            reservation = await self._act("reserve", state.pins.root, key, kind, usd, result_type=Reservation)
+            if reservation.ok:
+                return
+            if not reservation.wait:
+                raise RoundFailed(f"root budget: {reservation.reason}")
+            poll_minutes = (await self._limits()).poll_minutes
+            await workflow.sleep(timedelta(minutes=min(poll_minutes * 2**tries, 30)))
+            tries += 1
 
     async def _settle(self, key: str) -> None:
         """Close the job's reservation; an accounting write that fails is logged, never the round's end."""

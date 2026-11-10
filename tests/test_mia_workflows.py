@@ -54,6 +54,14 @@ def ev(kind, eid, at="2026-01-01T00:00:00Z"):
     return LabelEvent(kind, eid, "alice", at)
 
 
+def turn(answers, key, default):
+    """The next of a key's queued answers (a list; its last one repeats), the one answer, or `default`."""
+    queued = answers.get(key, default)
+    if not isinstance(queued, list):
+        return queued
+    return queued.pop(0) if len(queued) > 1 else queued[0]
+
+
 def shift(iso, seconds):
     return (datetime.fromisoformat(iso) + timedelta(seconds=seconds)).isoformat()
 
@@ -79,6 +87,8 @@ class Mocks:
         paused=False,
         reservations=None,
         assess_authorized=True,
+        submit_error=None,
+        revocation=None,
     ):
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
@@ -90,6 +100,8 @@ class Mocks:
         self.lock_busy = lock_busy  # how many take_lock calls find the raw cache held by someone else
         self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
         self.assess_authorized = assess_authorized  # what the policy answers to an approve
+        self.submit_error = submit_error  # a message: every submit raises it, non-retryable
+        self.revocation = revocation or Revocation("as-r", ["art1"], ["i3-e4"])  # what revoke_dataset answers
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -142,6 +154,8 @@ class Mocks:
         @activity.defn(name="submit")
         async def submit(key: str, kind: str, a: JobArgs) -> str:
             rec("submit", key, kind, a)
+            if self.submit_error:
+                raise ApplicationError(self.submit_error, non_retryable=True)
             if kind == "crop":
                 self.crop_jobs[a.workspace] = a
             return f"job-{key}"
@@ -234,12 +248,12 @@ class Mocks:
         @activity.defn(name="paused")
         async def paused() -> bool:
             rec("paused")
-            return self.paused
+            return turn({"p": self.paused}, "p", False)  # a list: answers in turn, the last repeats
 
         @activity.defn(name="reserve")
         async def reserve(root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
             rec("reserve", root, reservation_id, kind, usd)
-            return self.reservations.get(kind, Reservation(True))
+            return turn(self.reservations, kind, Reservation(True))
 
         @activity.defn(name="settle")
         async def settle(root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
@@ -264,7 +278,7 @@ class Mocks:
         @activity.defn(name="revoke_dataset")
         async def revoke_dataset(issue: int, round_id: str, actor: str, event_id: str) -> Revocation:
             rec("revoke_dataset", round_id, actor, event_id)
-            return Revocation("as-r", ["art1"], ["i3-e4"])
+            return self.revocation
 
         @activity.defn(name="adopt_pr_binding")
         async def adopt_pr_binding(round_id: str, pr: int, sha: str) -> dict:
@@ -1268,10 +1282,46 @@ async def test_revoke_during_a_later_review_is_taken_and_ends_the_round(env):
 
 
 async def test_revoke_with_nothing_published_is_refused(env):
-    m = Mocks(outcome="blocked")
+    m = Mocks(outcome="blocked", revocation=Revocation(""))  # the activity finds no manifest
     async with started(env, m) as h:
         await idle(h, m, "needs-human")
         await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
         await until(lambda: m.of("refuse_label"))
     assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this issue has published no crops")
-    assert "revoke_dataset" not in m.names()
+    assert len(m.of("revoke_dataset")) == 1
+
+
+async def test_a_refused_revoke_during_review_leaves_the_round_under_review(env):
+    m = Mocks(revocation=Revocation(""))
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
+        await until(lambda: m.of("refuse_label"))
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert m.of("refuse_label")[-1][0] == "data:revoke" and len(m.of("publish_crops")) == 1
+
+
+async def test_a_failed_submit_settles_its_reservation(env):
+    m = Mocks(submit_error="csub refused the job")
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")] == [m.of("submit")[0][0]]
+
+
+async def test_a_pause_mid_round_stops_at_the_next_job(env):
+    m = Mocks(paused=[False, True])
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
+    assert m.of("prepare_match")  # the round got past admission and stopped at its first job
+
+
+async def test_a_concurrency_refusal_waits_and_tries_again(env):
+    busy = Reservation(False, "root o/data#7: 20 jobs running, max_concurrent_jobs 20", wait=True)
+    m = Mocks(reservations={"match": [busy, Reservation(True)]})
+    async with started(env, m) as h:
+        await until(lambda: m.of("reserve"))
+        await env.sleep(timedelta(minutes=3))  # past the first wait (poll_minutes)
+        await idle(h, m, "review")
+    assert [a[2] for a in m.of("reserve")][:2] == ["match", "match"] and len(m.of("submit")) == 4

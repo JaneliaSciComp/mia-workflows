@@ -1718,12 +1718,13 @@ async def test_assess_board_writes_one_assessment_per_artifact_and_names_the_ref
         subject_ref=art_b,
         verdict="reject",
         by="human:bob",
-        at=time.time() + 60,
+        at=time.time() - 60,
         summary="revoked",
     )
     acts.registry.put_assessment(reject)
     out = await acts.assess_board(7, ROUND, ROUND, "approve", "human:alice")
-    assert len(out.assessments) == 2 and list(out.refused) == [BCSS]
+    assert len(out.assessments) == 1 and list(out.refused) == [BCSS]  # no approve is written over a standing reject
+    assert [r["verdict"] for r in acts.registry.assessments(subject_kind="artifact", subject_ref=art_b)] == ["reject"]
     assert out.refused[BCSS].startswith("rejected by human:bob at ") and out.refused[BCSS].endswith(": revoked")
     rows = acts.registry.assessments(subject_kind="artifact", subject_ref=art_u)
     assert (

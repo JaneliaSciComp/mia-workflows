@@ -166,6 +166,7 @@ class MiaBuffer:
         self.rebuild_slots: tuple[asyncio.Semaphore, asyncio.Semaphore] | None = None  # their stage and fetch slots
         self.degraded_records: set[str] = set()  # records of the degraded signals the running rebuild answers
         self.degraded_reason = ""
+        self.paused_round = False  # a job of this round met autonomy.pause: the round stops once nothing runs
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
@@ -330,15 +331,24 @@ class MiaBuffer:
             if isinstance(payload, LabelEvent):
                 if not self._seen(payload):
                     await self._refuse(f"buffer:{kind}", why, payload)
-            elif not await self._superseded(kind, buffer):
+            elif not await self._superseded(kind, buffer, payload):
                 workflow.logger.info("issue #%d: %s ignored: %s", self.state.issue, kind, why)
 
-    async def _superseded(self, kind: str, buffer: str) -> bool:
+    async def _superseded(self, kind: str, buffer: str, payload: Any = None) -> bool:
         """A keeper signal about a buffer a go left serving (`state.superseded`): its idle writes the `idle` event on
-        that buffer (so the keeper's retire rule runs from it), its retire releases it; anything else is logged.
-        False: not a superseded buffer."""
+        that buffer (so the keeper's retire rule runs from it), its retire releases it, its `revoked` unregisters the
+        named records (it still serves); anything else is logged. False: not a superseded buffer."""
         if not buffer or buffer not in self.state.superseded:
             return False
+        if kind == "revoked" and isinstance(payload, RevokedSignal):
+            for record in payload.records:
+                try:
+                    await self._act("unregister_volumes", buffer, record, seconds=300, result_type=list[str])
+                except ActivityError as error:  # the keeper says it again on its next pass
+                    workflow.logger.warning(
+                        "issue #%d: revoked on %s: %s", self.state.issue, buffer, error_message(error)
+                    )
+            return True
         if kind == "idle":  # best effort: the keeper says it again on its next pass until the event is there
             try:
                 await self._act("buffer_event", buffer, "idle", "superseded", budget=timedelta(minutes=10))
@@ -378,6 +388,7 @@ class MiaBuffer:
         state.idle_since, state.retired = None, False
         state.accepted, state.staged_at = {}, None
         state.approved_by = ""
+        self.paused_round = False
         if failed and workflow.patched("retire-failed-round"):
             await self._retire_failed(failed)
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=600, result_type=BufferPins)
@@ -612,6 +623,9 @@ class MiaBuffer:
                     break
                 await self._refuse_queued()  # while jobs run: an approve has no gate, a go is busy
                 await self._refuse_lifecycle(SOURCING, sum(not task.done() for task in tasks))
+            if self.paused_round:  # the operator's pause: the round stops here, nothing is marked failed
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise RoundFailed(PAUSED)
             if not any(dataset.status == "servable" for dataset in datasets):
                 await asyncio.gather(*tasks, return_exceptions=True)
                 reasons = "; ".join(f"{d.record}: {d.reason or d.status}" for d in datasets if d.status != "servable")
@@ -778,7 +792,7 @@ class MiaBuffer:
                 if isinstance(payload, LabelEvent) and self._seen(payload):
                     continue
                 if buffer and buffer != self.state.buffer_id:  # about a buffer an earlier round left registered
-                    if not await self._superseded(kind, buffer):
+                    if not await self._superseded(kind, buffer, payload):
                         workflow.logger.info("issue #%d: %s of buffer %s ignored", self.state.issue, kind, buffer)
                     continue
                 if not await self._on_lifecycle(kind, payload):
@@ -1057,6 +1071,9 @@ class MiaBuffer:
         try:
             await self._source_steps(dataset, semaphore, fetch_slots)
         except BudgetRefused as error:
+            if str(error) == PAUSED:  # the round stops once nothing runs; the dataset is not at fault
+                self._set(dataset, "pending", PAUSED)
+                return
             await self._fail(dataset, str(error))
         except ActivityError as error:
             if dataset.status == "servable":  # only the "servable" comment failed; the volumes are registered
@@ -1360,8 +1377,8 @@ class MiaBuffer:
             args = FetchJobArgs(workspace, round_id, state.pins, record, list(binding.hosts), attempt)
             key = fetch_job_key(state.issue, round_id, record, attempt)
             budgeted = await self._charge(key, "fetch")
-            job_id = await self._act("submit_fetch", key, args, seconds=600, result_type=str)
             try:
+                job_id = await self._act("submit_fetch", key, args, seconds=600, result_type=str)
                 job = await self._await_job(job_id, workspace, limits.fetch_walltime_min, ["raw", record, owner])
                 fetched = await self._act(
                     "read_fetch", round_id, record, workspace, seconds=300, result_type=FetchResult
@@ -1481,8 +1498,8 @@ class MiaBuffer:
         )
         key = job_key(state.issue, state.round_id, record, rebuild)
         budgeted = await self._charge(key, "stage")
-        job_id = await self._act("submit", key, args, seconds=600, result_type=str)
         try:
+            job_id = await self._act("submit", key, args, seconds=600, result_type=str)
             done = await self._await_job(job_id, workspace, (await self._limits()).walltime_min, lock)
         except (ActivityError, asyncio.CancelledError):
             if budgeted:
@@ -1497,13 +1514,19 @@ class MiaBuffer:
         dataset with the reason. Returns whether the job was reserved (a pre-L history is not)."""
         if not workflow.patched("l-budget"):
             return False
-        if await self._act("paused", result_type=bool):
-            raise BudgetRefused(PAUSED)
         assert self.state.pins
-        reservation = await self._act("reserve", self.state.pins.root, key, kind, 0.0, result_type=Reservation)
-        if not reservation.ok:
-            raise BudgetRefused(f"root budget: {reservation.reason}")
-        return True
+        tries = 0
+        while True:
+            if await self._act("paused", result_type=bool):
+                self.paused_round = True
+                raise BudgetRefused(PAUSED)
+            reservation = await self._act("reserve", self.state.pins.root, key, kind, 0.0, result_type=Reservation)
+            if reservation.ok:
+                return True
+            if not reservation.wait:
+                raise BudgetRefused(f"root budget: {reservation.reason}")
+            await workflow.sleep(_backoff((await self._limits()).poll_minutes, tries))  # the concurrency cap paces
+            tries += 1
 
     async def _settle(self, key: str, fetched_bytes: int = 0) -> None:
         """Close the job's reservation; an accounting write that fails is logged, never the dataset's end."""

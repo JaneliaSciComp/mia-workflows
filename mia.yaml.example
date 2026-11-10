@@ -72,7 +72,7 @@ autonomy:                                 # the operator's switches over the aut
     max_fetch_bytes: 500e9
     max_jobs: 200
     max_concurrent_jobs: 20
-    max_days: 14
+    max_days: 14                          # a request busy this long straight is stopped; one idle this long starts a fresh budget
 services:                                 # per service: app + the sections that differ, in the app's own shape
   autodev:
     app: autodev

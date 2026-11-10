@@ -121,6 +121,7 @@ class Mocks:
         reservations=None,
         assess_refused=None,
         revoke_targets_answer=None,
+        submit_error=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -140,6 +141,7 @@ class Mocks:
         self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
         self.assess_refused = assess_refused or {}  # record -> the policy's reason at the gate approve
         self.revoke_targets_answer = revoke_targets_answer or []  # the records a buffer:revoke names
+        self.submit_error = submit_error  # a message: every stage submit raises it, non-retryable
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -208,6 +210,8 @@ class Mocks:
         @activity.defn(name="submit")
         async def submit(key: str, args: StageJobArgs) -> str:
             rec("submit", key, args)
+            if self.submit_error:
+                raise ApplicationError(self.submit_error, non_retryable=True)
             return f"job-{key}"
 
         @activity.defn(name="read_stage")
@@ -355,12 +359,12 @@ class Mocks:
         @activity.defn(name="paused")
         async def paused() -> bool:
             rec("paused")
-            return self.paused
+            return turn({"p": self.paused}, "p", False)  # a list: answers in turn, the last repeats
 
         @activity.defn(name="reserve")
         async def reserve(root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
             rec("reserve", root, reservation_id, kind, usd)
-            return self.reservations.get(kind, Reservation(True))
+            return turn(self.reservations, kind, Reservation(True))
 
         @activity.defn(name="settle")
         async def settle(root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
@@ -2510,3 +2514,45 @@ async def test_buffer_revoke_outside_the_ready_loop_is_refused(env):
         await h.signal(MiaBuffer.revoke, ev("revoke", "77", "2030-01-01T00:00:00Z"))
         await until(lambda: m.of("refuse_label"), m=m)
     assert m.of("refuse_label")[-1][0] == "buffer:revoke" and "revoke_targets" not in m.names()
+
+
+# --- final fix pass (milestone L review) ---------------------------------------------------------
+
+
+async def test_a_pause_mid_round_stops_the_round_without_failing_its_datasets(env):
+    m = Mocks(plan=TWO, paused=[False, True])
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
+    assert {d.status for d in state.datasets} == {"pending"}  # mia resume, then buffer:go: nothing is marked failed
+
+
+async def test_a_failed_stage_submit_settles_its_reservation(env):
+    m = Mocks(plan=ONLY_U937, submit_error="csub refused the job")
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+    assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")] == [m.of("submit")[0][0]]
+
+
+async def test_a_concurrency_refusal_waits_and_tries_again(env):
+    busy = Reservation(False, "root o/buffers#7: 20 jobs running, max_concurrent_jobs 20", wait=True)
+    m = Mocks(plan=ONLY_U937, reservations={"stage": [busy, Reservation(True)]})
+    async with started(env, m, signal="go") as h:
+        await until(lambda: m.of("reserve"), m=m)
+        await env.sleep(timedelta(minutes=3))  # past the first wait (poll_minutes)
+        await idle(h, m, "staged")
+    assert [a[2] for a in m.of("reserve")] == ["stage", "stage"] and len(m.of("submit")) == 1
+
+
+async def test_a_superseded_buffer_still_unregisters_a_revoked_record(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.plan, ev("plan", "15"))
+        await idle(h, m, "plan-review")
+        signal = RevokedSignal(["u937"], ["u937/v0.zarr"], "quarantined: u937/v0.zarr", "i7-e11")
+        await h.signal(MiaBuffer.revoked, signal)
+        await until(lambda: m.of("unregister_volumes"), m=m)
+    assert m.of("unregister_volumes") == [("i7-e11", "u937")] and m.stages[-1] == "plan-review"

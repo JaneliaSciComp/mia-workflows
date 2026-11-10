@@ -416,7 +416,7 @@ def test_reserve_enforces_the_caps_atomically_and_settles_once(tmp_path):
     assert led.settle(root, "job-2", fetched_bytes=60)["fetched_bytes"] == 60
     launched = led.reserve(root, "job-4", "fetch", 0.0, caps, now=1005.0)
     assert launched["reason"] == "root o/buffers#7: 3 jobs launched, max_jobs 3"
-    assert led.settle(root, "job-3", usd=None)["spent_usd"] == 2.5  # a job without a cost adds nothing to spent
+    assert led.settle(root, "job-3", usd=None)["spent_usd"] == 2.5  # a job reserved at 0 without a cost: nothing added
     assert led.settle(root, "job-3", fetched_bytes=50) == led.budget(root)  # closed already: a no-op
     roomy = {**caps, "max_jobs": 99}
     assert led.reserve(root, "job-5", "fetch", 0.0, roomy, now=1006.0)["ok"]
@@ -424,7 +424,7 @@ def test_reserve_enforces_the_caps_atomically_and_settles_once(tmp_path):
     bytes_over = led.reserve(root, "job-6", "fetch", 0.0, roomy, now=1007.0)
     assert bytes_over["reason"] == "root o/buffers#7: 110 bytes fetched, over max_fetch_bytes 100"
     old = led.reserve(root, "job-9", "stage", 0.0, {**roomy, "max_fetch_bytes": 1e9}, now=1000.0 + 15 * 86400)
-    assert old["reason"] == "root o/buffers#7 is 15.0 days old, over max_days 14"
+    assert old["ok"] and old["usage"]["epochs"] == 2 and old["usage"]["jobs"] == 1  # idle past max_days: a fresh epoch
     assert led.budget("nobody") is None and [row["root"] for row in led.budgets()] == [root]
 
 
@@ -457,3 +457,39 @@ def test_quarantined_volumes_are_those_whose_artifact_is_quarantined(tmp_path):
     led.put_asset("staged", "art1", {"quarantined": True, "quarantined_at": 1.0})
     assert led.quarantined_volumes("b") == ["rec/a"]
     assert led.volume_rows("b")[0] == {"id": "rec/a", "artifact": "art1", "record": "rec", "missing": False}
+
+
+def test_an_unknown_cost_keeps_the_reservation_as_spent(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    caps = {"max_usd": 10}
+    assert led.reserve("r", "job-1", "match", 5.0, caps, now=1.0)["ok"]
+    settled = led.settle("r", "job-1", usd=None)  # the report was unreadable: the reservation is what it cost
+    assert (settled["reserved_usd"], settled["spent_usd"]) == (0.0, 5.0)
+    assert led.reserve("r", "job-2", "match", 5.0, caps, now=2.0)["ok"]
+    assert not led.reserve("r", "job-3", "match", 1.0, caps, now=3.0)["ok"]  # 5 spent + 5 reserved: full
+
+
+def test_a_concurrency_refusal_asks_the_caller_to_wait(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    caps = {"max_concurrent_jobs": 1, "max_jobs": 1}
+    assert led.reserve("r", "job-1", "stage", 0.0, caps, now=1.0)["ok"]
+    busy = led.reserve("r", "job-2", "stage", 0.0, caps, now=2.0)
+    assert not busy["ok"] and busy["wait"] is True and "max_concurrent_jobs" in busy["reason"]
+    led.settle("r", "job-1")
+    full = led.reserve("r", "job-2", "stage", 0.0, caps, now=3.0)
+    assert not full["ok"] and full["wait"] is False and "max_jobs" in full["reason"]
+
+
+def test_an_idle_root_past_max_days_starts_a_new_epoch(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    caps = {"max_days": 14, "max_jobs": 2}
+    assert led.reserve("r", "job-1", "match", 1.0, caps, now=0.0)["ok"]
+    assert led.reserve("r", "job-2", "match", 1.0, caps, now=1.0)["ok"]
+    assert "max_jobs" in led.reserve("r", "job-3", "match", 1.0, caps, now=2.0)["reason"]
+    led.settle("r", "job-1", usd=1.0)
+    late = led.reserve("r", "job-3", "match", 1.0, caps, now=15 * 86400.0)
+    assert "15.0 days old" in late["reason"]  # job-2 still runs: the request is a runaway, not an old one
+    led.settle("r", "job-2", usd=1.0)
+    fresh = led.reserve("r", "job-3", "match", 1.0, caps, now=15 * 86400.0)
+    assert fresh["ok"] and fresh["usage"]["since"] == 15 * 86400.0 and fresh["usage"]["jobs"] == 1
+    assert fresh["usage"]["epochs"] == 2 and fresh["usage"]["spent_usd"] == 0.0

@@ -9,9 +9,10 @@ from pathlib import Path
 
 import yaml
 
+from mia_core.untrusted import write_atomic
+
 log = logging.getLogger(__name__)
-BLOCK_RE = re.compile(r"^autonomy:[^\n]*\n((?:[ \t]+[^\n]*\n?)*)", re.M)  # the top-level block and its children
-PAUSE_RE = re.compile(r"^([ \t]+pause:[ \t]*)(\S+)", re.M)
+PAUSE_LINE_RE = re.compile(r"^(\s*pause:\s*)\S+")
 
 
 def paused(manifest: Path) -> bool:
@@ -25,19 +26,43 @@ def paused(manifest: Path) -> bool:
     return isinstance(autonomy, dict) and autonomy.get("pause") is True
 
 
+def _block_end(lines: list[str], start: int) -> int:
+    """The index after the last line of the top-level block opened at `start`: blank lines, comments and indented
+    lines belong to it; the next column-0 key ends it."""
+    end = start + 1
+    while end < len(lines) and (
+        not lines[end].strip() or lines[end].lstrip().startswith("#") or lines[end][0].isspace()
+    ):
+        end += 1
+    return end
+
+
 def set_pause(manifest: Path, value: bool) -> None:
-    """Write `autonomy.pause: <value>` into the manifest, editing the existing line in place (its trailing comment
-    stays), else adding the key as the block's first child, else appending the block."""
+    """Write `autonomy.pause: <value>` into the manifest: the block's own `pause` line is edited in place (its trailing
+    comment stays), else the key is added as the block's first child, else the block is appended. The result is read
+    back; a file the edit did not flip raises instead of reporting a pause that is not there."""
     text = manifest.read_text()
     flag = "true" if value else "false"
-    block = BLOCK_RE.search(text)
-    if block is None:
+    lines = text.split("\n")
+    start = next((index for index, line in enumerate(lines) if re.match(r"^autonomy:", line)), None)
+    if start is None:
         joint = "" if text.endswith("\n") or not text else "\n"
-        manifest.write_text(f"{text}{joint}autonomy:\n  pause: {flag}\n")
-        return
-    body = block.group(1)
-    if PAUSE_RE.search(body):
-        edited = PAUSE_RE.sub(lambda match: f"{match.group(1)}{flag}", body, count=1)
+        out = f"{text}{joint}autonomy:\n  pause: {flag}\n"
     else:
-        edited = f"  pause: {flag}\n{body}"
-    manifest.write_text(text[: block.start(1)] + edited + text[block.end(1) :])
+        end = _block_end(lines, start)
+        children = [
+            index
+            for index in range(start + 1, end)
+            if lines[index].strip() and not lines[index].lstrip().startswith("#")
+        ]
+        indent = len(lines[children[0]]) - len(lines[children[0]].lstrip()) if children else 2
+        own = [index for index in children if len(lines[index]) - len(lines[index].lstrip()) == indent]
+        hit = next((index for index in own if PAUSE_LINE_RE.match(lines[index])), None)
+        if hit is not None:
+            lines[hit] = PAUSE_LINE_RE.sub(lambda match: f"{match.group(1)}{flag}", lines[hit], count=1)
+        else:
+            lines.insert(start + 1, f"{' ' * indent}pause: {flag}")
+        out = "\n".join(lines)
+    write_atomic(manifest, out)
+    if paused(manifest) is not value:
+        raise RuntimeError(f"{manifest}: autonomy.pause did not become {flag}; edit the file by hand")

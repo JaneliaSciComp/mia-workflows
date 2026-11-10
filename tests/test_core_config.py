@@ -153,3 +153,23 @@ def test_pause_is_a_text_edit_that_keeps_comments(tmp_path):
     assert paused(manifest) is True and "# the switches" in text and "# mia pause flips this" in text
     assert "quarantine_days: 30" in text and text.count("pause:") == 1
     assert paused(tmp_path / "missing.yaml") is False
+
+
+def test_set_pause_survives_blank_lines_comments_and_a_nested_pause(tmp_path):
+    from mia_core.autonomy import paused, set_pause
+
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("autonomy:\n  quarantine_days: 30\n\n  pause: false\nservices: {}\n")
+    set_pause(manifest, True)
+    assert paused(manifest) is True and manifest.read_text().count("pause:") == 1
+    manifest.write_text("autonomy:\n  root:\n    max_usd: 100\n# operator switch\n  pause: false\nservices: {}\n")
+    set_pause(manifest, True)
+    assert (
+        paused(manifest) is True
+        and manifest.read_text().count("pause:") == 1
+        and "# operator switch" in manifest.read_text()
+    )
+    manifest.write_text("autonomy:\n  root:\n    pause: false\nservices: {}\n")  # a nested key is not the switch
+    set_pause(manifest, True)
+    text = manifest.read_text()
+    assert paused(manifest) is True and "    pause: false" in text and "  pause: true" in text

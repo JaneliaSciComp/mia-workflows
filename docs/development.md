@@ -113,9 +113,13 @@ If a helper needs a new config field, add it to the protocol and to both configs
   (`<repo>#<issue>`, pinned at admission; a dataset issue a buffer or prep opened carries its requester's root as
   the `<!-- mia-data:root=... -->` marker on its second line). Before every job the workflow asks `paused`, then
   `reserve` (the job key is the reservation id, so a retry charges once) against the caps in `autonomy.root`;
-  after the job, `settle` records what it cost and fetched. A refusal names the root, the cap and the usage and
-  ends the round (mia-data) or fails that dataset alone (mia-buffers); `mia pause` stops every round at its next
-  job with "paused by the operator". Both checks sit behind `workflow.patched("l-budget")`.
+  after the job, `settle` records what it cost and fetched (a job whose cost is unknown is charged its
+  reservation). A refusal names the root, the cap and the usage and ends the round (mia-data) or fails that
+  dataset alone (mia-buffers); the concurrency cap alone makes the job wait (`poll_minutes`, doubling to 30) and
+  ask again. The caps bound an episode of work: a root with nothing running whose budget is older than `max_days`
+  starts a fresh epoch at its next job, while one busy for `max_days` straight is stopped. `mia pause` stops every
+  round at its next job with "paused by the operator"; a buffer round met mid-sourcing leaves its datasets
+  `pending`, not failed. Both checks sit behind `workflow.patched("l-budget")`.
 - **Approvals are assessments, authorization is a function.** Every human verdict is written to buffer-api's
   `assessments` table (`by: human:<login>`, gate `crops` for a crop set or PR head, `staged` for an artifact) before
   anything acts on it, and the action is allowed only when `mia_core.judge.policy.authorized()` says so over
@@ -125,8 +129,8 @@ If a helper needs a new config field, add it to the protocol and to both configs
   never reused (`_reuse`) while its newest assessment is a reject. `plan.auto_approve` writes no assessment until
   milestone P removes it. Both sit behind `workflow.patched("l-assess")`.
 - **Revocation deletes nothing and stops everything.** `data:revoke` on a dataset issue counts at any stage once
-  the issue has published crops (`DatasetState.published`; a history from before milestone L has it unset even
-  when it did publish: the label is refused once, run `data:go` and revoke again). The `revoke_dataset` activity
+  the issue has published crops (the activity looks for `manifest.json` in the dataset folder; an issue that never
+  published has the label refused and its round, if any, goes on). The `revoke_dataset` activity
   writes a `reject` assessment superseding the dataset's approve and one per staged artifact of the record, marks
   those artifact rows `quarantined` (`quarantined_at`, `quarantined_by`), flips the dataset row to `revoked`
   (`sync_datasets` never merges over it) and writes `revoked.json` beside the manifest last, so the folder is not
@@ -134,8 +138,10 @@ If a helper needs a new config field, add it to the protocol and to both configs
   from the record. The keeper holds a quarantined asset for `autonomy.quarantine_days` after its references are
   gone and, for a ready or idle buffer whose status lists quarantined volumes, sends the `revoked` signal: the
   buffer unregisters those volumes, fails the dataset with the reason and serves on at its floor, or ends in
-  needs-human below it (`buffer:retire` stops it altogether, spec §12.10). A new `data:go` whose publication
-  succeeds removes `revoked.json` and the next stage write makes the row prepared again. From the buffer side,
+  needs-human below it (`buffer:retire` stops it altogether, spec §12.10). A board approve never writes over an
+  artifact whose newest assessment is a reject: only a repair supersedes a revocation. A new `data:go` whose
+  publication succeeds removes `revoked.json`, writes a `policy:repair` approve on each quarantined artifact of the
+  record and clears their quarantine marks, and the next stage write makes the row prepared again. From the buffer side,
   `buffer:revoke` on a ready or idle buffer reads the `/revoke <record>` lines the same person wrote in comments
   within the week before the label (records not in the buffer are ignored; no line: the label is refused), rejects
   and quarantines those records' artifacts and takes the keeper's `revoked` path at once. All of it sits behind

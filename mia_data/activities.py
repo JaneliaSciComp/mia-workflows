@@ -34,7 +34,7 @@ from mia_core.assets import raw_asset
 from mia_core.config import manifest_path
 from mia_core.judge.policy import authorized, new_assessment
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
-from mia_core.registry import Registry, best_effort
+from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_core.untrusted import text as _text
@@ -457,7 +457,8 @@ class Activities:
             return Reservation(True, "no budget")
         caps = self.cfg.autonomy.caps()
         out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
-        return Reservation(bool(out.get("ok")), "" if out.get("ok") else str(out.get("reason", "")))
+        ok = bool(out.get("ok"))
+        return Reservation(ok, "" if ok else str(out.get("reason", "")), wait=bool(out.get("wait")) and not ok)
 
     @activity.defn(name="settle")
     async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
@@ -875,7 +876,9 @@ class Activities:
             raise ValueError(f"binding {binding} is not one of round {round_id}'s")
         withdrawn = withdrawn_snippets(await self._snapshot(sha))
         timeout = activity.info().start_to_close_timeout if activity.in_activity() else None
-        dataset_dir = self._dataset_dir(round_id, self._pins(round_id))
+        pins = self._pins(round_id)
+        dataset_dir = self._dataset_dir(round_id, pins)
+        revoked = (dataset_dir / REVOKED_FILE).is_file()
         published = await asyncio.to_thread(
             crop_publish.publish,
             dataset_dir,
@@ -886,8 +889,38 @@ class Activities:
             binding=Path(binding) if binding else None,
             previews=previews,
         )
-        (dataset_dir / REVOKED_FILE).unlink(missing_ok=True)  # a new publication repairs a revocation (§6 step 5)
+        if revoked:  # a new publication repairs a revocation (spec autonomous-gates §6.5)
+            (dataset_dir / REVOKED_FILE).unlink(missing_ok=True)
+            await self._release_revoked(round_id, pins.record)
         return published
+
+    async def _release_revoked(self, round_id: str, record: str) -> None:
+        """After a repair: every quarantined staged artifact of the record gets a `policy:repair` approve (the newest
+        assessment, so buffers may reuse it) and its quarantine mark cleared. Best effort: the publication stands."""
+        registry = self.registry
+        if registry is None:
+            return
+        try:
+            assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
+            for asset in assets:
+                data = asset.get("data") or {}
+                if not data.get("quarantined"):
+                    continue
+                key, now = str(asset["key"]), time.time()
+                approve = new_assessment(
+                    gate="staged",
+                    subject_kind="artifact",
+                    subject_ref=key,
+                    verdict="approve",
+                    by="policy:repair",
+                    at=now,
+                    summary=f"repaired by {round_id}: {record} was published again",
+                )
+                await asyncio.to_thread(registry.put_assessment, approve)
+                release = {"quarantined": False, "repaired_at": now, "repaired_by": round_id}
+                await asyncio.to_thread(registry.put_asset, "staged", key, release)
+        except RegistryError as error:
+            log.warning("round %s: the revoked artifacts of %s were not released: %s", round_id, record, error)
 
     @activity.defn(name="revoke_dataset")
     @mia_permanent_errors
@@ -904,6 +937,8 @@ class Activities:
         marker = folder / REVOKED_FILE
         if marker.is_file():
             return Revocation(**json.loads(marker.read_text())["revocation"])
+        if not (folder / "manifest.json").is_file():  # nothing was ever published here: nothing to withdraw
+            return Revocation("")
         by, at = f"human:{actor}", time.time()
         summary = f"data:revoke by {actor} (event {event_id})"
         row = await asyncio.to_thread(registry.dataset, record) or {}

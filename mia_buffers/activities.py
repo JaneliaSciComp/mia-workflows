@@ -260,7 +260,9 @@ class Activities:
     @mia_permanent_errors
     async def assess_board(self, issue: int, round_id: str, buffer_id: str, verdict: str, by: str) -> BoardAssessed:
         """Write the gate verdict as one assessment per staged artifact among the buffer's volumes, then ask the
-        policy per artifact; the records of an artifact it does not authorize come back in `refused`."""
+        policy per artifact; the records of an artifact it does not authorize come back in `refused`. An artifact
+        whose newest assessment is a reject (a revocation) gets no approve: only a deliberate re-judgment or a repair
+        publication supersedes that."""
         registry = self.registry
         rows = await asyncio.to_thread(registry.volumes, buffer_id)
         records: dict[str, list[str]] = {}
@@ -269,6 +271,12 @@ class Activities:
                 records.setdefault(str(row["artifact"]), []).append(str(row["record"]))
         out = BoardAssessed()
         for artifact in sorted(records):
+            prior = await asyncio.to_thread(
+                functools.partial(registry.assessments, subject_kind="artifact", subject_ref=artifact)
+            )
+            if standing := policy.refused(prior):  # a revocation stands: a board approve never writes over it
+                out.refused.update(dict.fromkeys(records[artifact], f"rejected by {standing}"))
+                continue
             asset = await asyncio.to_thread(registry.asset, "staged", artifact) or {}
             assessment = policy.new_assessment(
                 gate="staged",
@@ -366,7 +374,8 @@ class Activities:
             return Reservation(True, "no budget")
         caps = self.cfg.autonomy.caps()
         out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
-        return Reservation(bool(out.get("ok")), "" if out.get("ok") else str(out.get("reason", "")))
+        ok = bool(out.get("ok"))
+        return Reservation(ok, "" if ok else str(out.get("reason", "")), wait=bool(out.get("wait")) and not ok)
 
     @activity.defn(name="settle")
     async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
