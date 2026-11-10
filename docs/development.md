@@ -115,6 +115,14 @@ If a helper needs a new config field, add it to the protocol and to both configs
   after the job, `settle` records what it cost and fetched. A refusal names the root, the cap and the usage and
   ends the round (mia-data) or fails that dataset alone (mia-buffers); `mia pause` stops every round at its next
   job with "paused by the operator". Both checks sit behind `workflow.patched("l-budget")`.
+- **Approvals are assessments, authorization is a function.** Every human verdict is written to buffer-api's
+  `assessments` table (`by: human:<login>`, gate `crops` for a crop set or PR head, `staged` for an artifact) before
+  anything acts on it, and the action is allowed only when `mia_core.judge.policy.authorized()` says so over
+  everything written about that subject: `publish_crops` and the `/approve <head>` comment in mia-data, the
+  `approved` event in mia-buffers (one assessment per staged artifact; a refused artifact's volumes are
+  unregistered and its dataset fails, the buffer serves at its floor or goes needs-human), and a staged pyramid is
+  never reused (`_reuse`) while its newest assessment is a reject. `plan.auto_approve` writes no assessment until
+  milestone P removes it. Both sit behind `workflow.patched("l-assess")`.
 
 ## Style
 

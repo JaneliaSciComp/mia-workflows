@@ -146,7 +146,9 @@ published. The passing crops' `raw.png` and `overlay.png` are committed to the `
 mia-workflow-data, and a comment on the issue shows them inline with the binding and the agent's reasons. The
 issue moves to `data:review`.
 
-**Validation.** A human approves the set with `data:approve` on the data issue, or rejects it with `data:reject`
+**Validation.** The label is recorded as an assessment in buffer-api's registry (`by: human:<login>`), and the
+publication is authorized from the assessments on record, never from the label alone (spec autonomous-gates §5).
+A human approves the set with `data:approve` on the data issue, or rejects it with `data:reject`
 after saying what is wrong in plain comments. On a reject the worker collects the comments by people with write
 access posted after the set's report and before the reject, and sends them to the agent: as `/revise` on the
 snippet PR when the round is following one, else in a new mia-snippets issue asking autodev to supersede the

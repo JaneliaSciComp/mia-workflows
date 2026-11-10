@@ -20,6 +20,7 @@ from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 from mia_data import workflows
 from mia_data.activities import Activities
 from mia_data.models import (
+    AssessmentWritten,
     DatasetState,
     GalleryResult,
     JobArgs,
@@ -76,6 +77,7 @@ class Mocks:
         slow_stages=(),
         paused=False,
         reservations=None,
+        assess_authorized=True,
     ):
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
@@ -86,6 +88,7 @@ class Mocks:
         self.test_ok_by, self.pr_now, self.trees, self.revisions = test_ok_by or {}, pr_now, trees or {}, revisions
         self.lock_busy = lock_busy  # how many take_lock calls find the raw cache held by someone else
         self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
+        self.assess_authorized = assess_authorized  # what the policy answers to an approve
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -241,6 +244,22 @@ class Mocks:
         async def settle(root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
             rec("settle", root, reservation_id, usd, fetched_bytes)
 
+        @activity.defn(name="assess")
+        async def assess(
+            issue: int,
+            round_id: str,
+            gate: str,
+            subject_kind: str,
+            subject_ref: str,
+            verdict: str,
+            by: str,
+            summary: str = "",
+            supersedes: str | None = None,
+        ) -> AssessmentWritten:
+            rec("assess", gate, subject_kind, subject_ref, verdict, by, summary)
+            refused = "rejected by human:bob at t: wrong channel"
+            return AssessmentWritten("as-1", self.assess_authorized, "" if self.assess_authorized else refused)
+
         @activity.defn(name="adopt_pr_binding")
         async def adopt_pr_binding(round_id: str, pr: int, sha: str) -> dict:
             rec("adopt_pr_binding", pr, sha)
@@ -271,6 +290,7 @@ class Mocks:
             paused,
             reserve,
             settle,
+            assess,
         ]
 
     def await_act(self):
@@ -1165,3 +1185,44 @@ async def test_a_paused_operator_stops_the_round_before_its_first_job(env):
     async with started(env, m) as h:
         await idle(h, m, "needs-human")
     assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
+
+
+# --- milestone L: human verdicts are assessments -------------------------------------------------
+
+
+async def test_an_approve_is_written_as_an_assessment_before_the_crops_are_published(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m, eid="12")
+        await idle(h, m, "done")
+    (assessed,) = m.of("assess")  # the subject is <round id>:<test id>
+    assert assessed[:2] == ("crops", "crop_set") and assessed[2].startswith("i7-e11:")
+    assert assessed[3:5] == ("approve", "human:alice")
+    assert m.names().index("assess") < m.names().index("publish_crops")
+
+
+async def test_an_approve_the_policy_refuses_publishes_nothing(env):
+    m = Mocks(assess_authorized=False)
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "needs-human")
+    assert "publish_crops" not in m.names()
+    assert m.of("set_stage")[-1][1] == (
+        "approve recorded as as-1, but publication is not authorized: rejected by human:bob at t: wrong channel"
+    )
+
+
+async def test_a_reject_is_written_as_an_assessment(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await reject_review(h, m)
+        await until(lambda: m.of("open_snippet_issue"))
+    assert [a[3:5] for a in m.of("assess")] == [("reject", "human:alice")]
+
+
+async def test_pr_head_verdicts_are_assessed_on_the_head_sha(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await happy(h, m)
+    assert m.of("assess")[-1][:5] == ("crops", "pr_head", H1, "approve", "human:alice")
+    assert m.names().index("assess") < m.names().index("comment", m.names().index("assess"))  # before `/approve`

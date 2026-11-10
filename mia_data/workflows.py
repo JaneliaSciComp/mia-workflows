@@ -30,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
 
     from .crop_test import describe_failure, job_succeeded, judge
     from .models import (
+        AssessmentWritten,
         DatasetState,
         GalleryResult,
         JobArgs,
@@ -54,6 +55,7 @@ NOT_REVIEW = (
 )
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
+NOT_AUTHORIZED = "approve recorded as {id}, but publication is not authorized: {why}"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the label again"
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
@@ -560,12 +562,38 @@ class MiaDataDataset:
         superseding the binding's, with the reviewer's comments, and the round goes on as a develop round
         (spec §14); a new go ends the round and starts the next from matching."""
         kind, event = await self._review()
+        state = self.state
+        subject = ("crop_set", f"{state.round_id}:{state.tests[-1].test_id}")
         if kind == "approve" and event:
-            self.state.tests[-1].approved_at = event.at
+            written = await self._assess("approve", event, subject)
+            if not written.authorized:
+                return await self._finish("needs-human", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
+            state.tests[-1].approved_at = event.at
             await self._publish_set()
         elif kind == "reject" and event:
+            await self._assess("reject", event, subject)
             feedback = await self._feedback(event)
-            await self._develop({"what_fails": feedback}, self.state.snippet_issue, binding=self.state.binding)
+            await self._develop({"what_fails": feedback}, state.snippet_issue, binding=state.binding)
+
+    async def _assess(self, verdict: str, event: LabelEvent, subject: tuple[str, str]) -> AssessmentWritten:
+        """Record a human verdict as an assessment (spec autonomous-gates §5) and ask whether the subject is
+        authorized; a run from before `l-assess` takes the label alone as the authorization."""
+        if not workflow.patched("l-assess"):
+            return AssessmentWritten("", True)
+        state, (kind, ref) = self.state, subject
+        return await self._act(
+            "assess",
+            state.issue,
+            state.round_id,
+            "crops",
+            kind,
+            ref,
+            verdict,
+            f"human:{event.actor}",
+            f"data:{verdict} by {event.actor}",
+            seconds=300,
+            result_type=AssessmentWritten,
+        )
 
     async def _feedback(self, event: LabelEvent) -> str:
         """The reviewer's comments on the issue since the set's report and up to this reject (spec §14)."""
@@ -753,6 +781,9 @@ class MiaDataDataset:
         """The reviewer approved the PR head's set: `/approve <head>` tells autodev to merge it. The merge wakes
         the round (_merged), which publishes these very crops when the merged snippet is the reviewed one."""
         state, test = self.state, self.state.tests[-1]
+        written = await self._assess("approve", event, ("pr_head", test.sha))
+        if not written.authorized:
+            return await self._finish("needs-human", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
         test.approved_at = event.at
         await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
         await self._stage(
@@ -763,6 +794,7 @@ class MiaDataDataset:
         """The reviewer rejected the PR head's set: their comments go to the PR as `/revise`; autodev's next head
         brings its crops back to review."""
         state = self.state
+        await self._assess("reject", event, ("pr_head", state.tests[-1].sha))
         feedback = await self._feedback(event)
         await self._act(
             "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} {event.event_id}", "snippets"

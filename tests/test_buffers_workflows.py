@@ -24,6 +24,7 @@ from mia_buffers import workflows
 from mia_buffers.activities import Activities
 from mia_buffers.models import (
     BindingInfo,
+    BoardAssessed,
     BufferPins,
     BufferState,
     DatasetIssue,
@@ -116,6 +117,7 @@ class Mocks:
         missing=None,
         paused=False,
         reservations=None,
+        assess_refused=None,
     ):
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
@@ -133,6 +135,7 @@ class Mocks:
         self.quota_after = quota_after or {}  # record -> the record whose fetch must be submitted before its quota
         self.missing = missing  # missing_records' answers in turn (the last repeats); default: every pool record
         self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
+        self.assess_refused = assess_refused or {}  # record -> the policy's reason at the gate approve
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -227,6 +230,16 @@ class Mocks:
                 return RegisterResult(refused={f"{record}/v0.zarr": self.refuse[record]})
             return RegisterResult([f"{record}/v0.zarr"])
 
+        @activity.defn(name="assess_board")
+        async def assess_board(issue: int, round_id: str, buffer_id: str, verdict: str, by: str) -> BoardAssessed:
+            rec("assess_board", buffer_id, verdict, by)
+            return BoardAssessed(["as-1"], dict(self.assess_refused))
+
+        @activity.defn(name="unregister_volumes")
+        async def unregister_volumes(buffer_id: str, record: str) -> list[str]:
+            rec("unregister_volumes", buffer_id, record)
+            return [f"{record}/v0.zarr"]
+
         return [
             admit,
             plan,
@@ -244,6 +257,8 @@ class Mocks:
             verify_drop,
             create_buffer,
             register_dataset,
+            assess_board,
+            unregister_volumes,
             *self.cache_acts(),
         ]
 
@@ -2352,3 +2367,63 @@ async def test_paused_stops_a_buffer_round_and_a_prep_round(env):
     async with started(env, m, signal="go") as h:
         await idle(h, m, "needs-human")
     assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "plan" not in m.names()
+
+
+# --- milestone L: the gate approve is assessed per artifact ------------------------------------
+
+
+async def test_the_gate_approve_is_assessed_per_artifact_before_the_approved_event(env):
+    m = Mocks()
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await until(lambda: any("`bcss` | servable" in c[0] for c in staged_comments(m)), m=m)
+        await idle(h, m, "staged")
+        await approve_staged(h, m)
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("assess_board") == [("i7-e11", "approve", "human:alice")] and state.approved_by == "human:alice"
+    assert m.names().index("assess_board") < m.names().index("buffer_event")
+
+
+async def test_a_refused_artifact_is_unregistered_and_its_dataset_fails_at_the_approve(env):
+    m = Mocks(plan=TWO, assess_refused={"a": "rejected by human:bob at t: revoked"})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await approve_staged(h, m)
+        await idle(h, m, "ready")  # TWO's min_fraction is 0.5: b alone keeps the group at its floor
+        state = await h.query(MiaBuffer.status)
+    assert m.of("unregister_volumes") == [("i7-e11", "a")]
+    assert dataset(state, "a").status == "failed"
+    assert dataset(state, "a").reason == "refused: rejected by human:bob at t: revoked"
+    assert state.accepted == {"TEM": 0.5}
+
+
+async def test_every_artifact_refused_is_needs_human_not_ready(env):
+    m = Mocks(plan=ONLY_U937, assess_refused={"u937": "rejected by human:bob at t: revoked"})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await approve_staged(h, m)
+        await idle(h, m, "needs-human")
+    assert "buffer_event" not in m.names() and "refused" in m.of("set_stage")[-1][1]
+
+
+async def test_auto_approve_writes_no_assessment(env):
+    m = Mocks(plan=replace(ONLY_U937, auto_approve=True))
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert "assess_board" not in m.names() and state.approved_by == ""
+
+
+async def test_a_refused_staged_artifact_is_not_reused(env):
+    staged = BindingInfo(
+        True, "/s/u937.yaml", "bh", ["zenodo.org"], staged=True, artifact="art-u", refused="human:bob at t: revoked"
+    )
+    m = Mocks(plan=ONLY_U937, bindings={"u937": staged})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed"
+    assert dataset(state, "u937").reason == "staged artifact art-u is refused: human:bob at t: revoked"
+    assert "read_stage" not in m.names() and "submit" not in m.names()

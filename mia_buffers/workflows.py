@@ -31,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from .models import (
         MAX_POLL_MINUTES,
         BindingInfo,
+        BoardAssessed,
         BufferPins,
         BufferState,
         DatasetStatus,
@@ -82,6 +83,7 @@ RETIRED = "Retired: refs released; draws archived to {path}"
 RAW_GONE = "pyramid missing and raw cache gone"
 NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
 PREP_GO = "prep:go"
+REFUSED_ARTIFACT = "staged artifact {artifact} is refused: {why}"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the label again"
 PREP_SETTLED = ("prepared", "needs-human")  # registry states a preparation request stops following (spec §12)
 # nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
@@ -361,6 +363,7 @@ class MiaBuffer:
         state.datasets, state.ready = [], False
         state.idle_since, state.retired = None, False
         state.accepted, state.staged_at = {}, None
+        state.approved_by = ""
         if failed and workflow.patched("retire-failed-round"):
             await self._retire_failed(failed)
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=600, result_type=BufferPins)
@@ -660,6 +663,7 @@ class MiaBuffer:
                 if self._seen(event):
                     continue
                 if (approved_at := _parse_time(event.at)) and approved_at > staged_at:
+                    state.approved_by = f"human:{event.actor}"
                     await self._approve_at_gate(limits)
                     return True
                 await self._refuse(APPROVE, STALE_STAGED, event)
@@ -697,7 +701,26 @@ class MiaBuffer:
         """The human (or auto_approve) says serve this: each group's fraction becomes its floor, the `approved`
         event is written, the buffer is ready. No job runs from here to `ready`."""
         state = self.state
-        assert state.buffer_id
+        assert state.round_id and state.buffer_id
+        if workflow.patched("l-assess") and state.approved_by:  # the human's approve, per artifact, on record
+            board = await self._act(
+                "assess_board",
+                state.issue,
+                state.round_id,
+                state.buffer_id,
+                "approve",
+                state.approved_by,
+                seconds=600,
+                result_type=BoardAssessed,
+            )
+            for record, reason in sorted(board.refused.items()):
+                await self._act("unregister_volumes", state.buffer_id, record, seconds=300, result_type=list[str])
+                dataset = next((item for item in state.datasets if item.record == record), None)
+                if dataset is not None:
+                    await self._fail(dataset, f"refused: {reason}")
+            if board.refused and not self._ready_now():
+                refused = "; ".join(f"`{record}`: {reason}" for record, reason in sorted(board.refused.items()))
+                raise RoundFailed(f"every artifact refused at the approve: {refused}")
         groups = self._groups()
         state.accepted = {group: servable / total for group, (servable, total) in groups.items()}
         short = [f"{g} {s}/{t}" for g, (s, t) in sorted(groups.items()) if s / t < state.min_fraction]
@@ -986,6 +1009,9 @@ class MiaBuffer:
         if not binding.found:
             workflow.deprecate_patch("e-prep")  # a `prep:go` issue prepares it; the buffer never waits on mia-data
             return await self._fail(dataset, NOT_PREPARED)
+        dataset.artifact = binding.artifact
+        if binding.refused and workflow.patched("l-assess"):
+            return await self._fail(dataset, REFUSED_ARTIFACT.format(artifact=binding.artifact, why=binding.refused))
         if binding.manual:
             await self._await_drop(dataset)
         async with semaphore:
@@ -1032,6 +1058,9 @@ class MiaBuffer:
         if not binding.found:
             workflow.deprecate_patch("e-prep")  # a `prep:go` issue prepares it; the buffer never waits on mia-data
             return await self._fail(dataset, NOT_PREPARED)
+        dataset.artifact = binding.artifact
+        if binding.refused and workflow.patched("l-assess"):  # revoked: never reused, never served again
+            return await self._fail(dataset, REFUSED_ARTIFACT.format(artifact=binding.artifact, why=binding.refused))
         if binding.manual and not dataset.rebuilds:  # a rebuild found the dropped files in the raw cache
             await self._await_drop(dataset, mark=True)
             self._set(dataset, "pending")  # no longer waiting on a human: not dropped at the timeout, nor abandoned

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -33,6 +34,7 @@ from mia_core import autonomy
 from mia_core.assets import cache_missing, raw_asset, read_files_json
 from mia_core.config import manifest_path
 from mia_core.fs import dir_bytes
+from mia_core.judge import policy
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
@@ -55,6 +57,7 @@ from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions,
 from .models import (
     MAX_POLL_MINUTES,
     BindingInfo,
+    BoardAssessed,
     BufferPins,
     BufferState,
     DatasetIssue,
@@ -241,7 +244,56 @@ class Activities:
             self.paused,
             self.reserve,
             self.settle,
+            self.assess_board,
+            self.unregister_volumes,
         ]
+
+    # --- assessments at the staged gate (spec autonomous-gates §5) -----------------------------------
+
+    @activity.defn(name="assess_board")
+    @mia_permanent_errors
+    async def assess_board(self, issue: int, round_id: str, buffer_id: str, verdict: str, by: str) -> BoardAssessed:
+        """Write the gate verdict as one assessment per staged artifact among the buffer's volumes, then ask the
+        policy per artifact; the records of an artifact it does not authorize come back in `refused`."""
+        registry = self.registry
+        rows = await asyncio.to_thread(registry.volumes, buffer_id)
+        records: dict[str, list[str]] = {}
+        for row in rows:
+            if row.get("artifact"):
+                records.setdefault(str(row["artifact"]), []).append(str(row["record"]))
+        out = BoardAssessed()
+        for artifact in sorted(records):
+            asset = await asyncio.to_thread(registry.asset, "staged", artifact) or {}
+            assessment = policy.new_assessment(
+                gate="staged",
+                subject_kind="artifact",
+                subject_ref=artifact,
+                verdict=verdict,
+                by=by,
+                at=time.time(),
+                source_digest=str(asset.get("source_digest") or ""),
+                summary=f"buffer:{verdict} on {buffer_id} by {by.removeprefix('human:')}",
+            )
+            await asyncio.to_thread(registry.put_assessment, assessment)
+            out.assessments.append(assessment["id"])
+            written = await asyncio.to_thread(
+                functools.partial(registry.assessments, subject_kind="artifact", subject_ref=artifact)
+            )
+            auth = policy.authorized(written)
+            if not auth.ok:
+                out.refused.update(dict.fromkeys(records[artifact], auth.reason))
+        return out
+
+    @activity.defn(name="unregister_volumes")
+    @mia_permanent_errors
+    async def unregister_volumes(self, buffer_id: str, record: str) -> list[str]:
+        """Delete every volume of the record from the buffer's registration; returns the ids removed."""
+        registry = self.registry
+        rows = await asyncio.to_thread(registry.volumes, buffer_id)
+        removed = [str(row["id"]) for row in rows if str(row["id"]).startswith(f"{record}/")]
+        for volume_id in removed:
+            await asyncio.to_thread(registry.delete_volume, buffer_id, volume_id)
+        return removed
 
     # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
 
@@ -762,28 +814,35 @@ class Activities:
         manual = any(url.startswith("manual://") for url in urls) or bool(
             missing_hosts(url_hosts, await asyncio.to_thread(self.probe))
         )
-        staged, artifact = await self._staged_before(round_id, record)
+        staged, artifact, refused = await self._staged_before(round_id, record)
         if manual:
-            return BindingInfo(
-                True, str(dest), digest, [], [list(pair) for pair in drop_names(urls)], staged=staged, artifact=artifact
-            )
-        return BindingInfo(True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged, artifact=artifact)
+            drops = [list(pair) for pair in drop_names(urls)]
+            return BindingInfo(True, str(dest), digest, [], drops, staged=staged, artifact=artifact, refused=refused)
+        return BindingInfo(
+            True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged, artifact=artifact, refused=refused
+        )
 
-    async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str]:
-        """(found, artifact id): found when buffer-api's registry holds an `ok` pyramid under this artifact id
-        and its stage.json is still on disk (its `last_used` is then touched). Buffer-api unreachable or refusing:
-        not found (stage again)."""
+    async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str, str]:
+        """(found, artifact id, refused): found when buffer-api's registry holds an `ok` pyramid under this artifact
+        id and its stage.json is still on disk (its `last_used` is then touched); `refused` names the newest
+        assessment of a found artifact when it is a reject (a revocation: never reuse it). Buffer-api unreachable
+        or refusing: not found (stage again)."""
         artifact = self._artifact(round_id, record)
+        registry = self.registry
         try:
-            data = await asyncio.to_thread(self.registry.asset, "staged", artifact)
+            data = await asyncio.to_thread(registry.asset, "staged", artifact)
         except RegistryError as error:
             activity.logger.warning("%s: registry unavailable, staging again: %s", record, error)
-            return False, artifact
+            return False, artifact, ""
         found = isinstance(data, dict) and data.get("ok") is True
         found = found and (self._staged_dir(round_id, record) / "stage.json").is_file()
-        if found:  # a buffer is about to reuse it: the keeper's hold rule spares it
+        if not found:
+            return False, artifact, ""
+        written = await asyncio.to_thread(lambda: registry.assessments(subject_kind="artifact", subject_ref=artifact))
+        refused = policy.refused(written) or ""
+        if not refused:  # a buffer is about to reuse it: the keeper's hold rule spares it
             await self.mark_asset("staged", artifact, {"last_used": time.time()})
-        return found, artifact
+        return True, artifact, refused
 
     @activity.defn(name="prepare_stage")
     @mia_permanent_errors

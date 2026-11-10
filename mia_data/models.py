@@ -164,6 +164,16 @@ class RoundLimits:
 
 
 @dataclass
+class AssessmentWritten:
+    """A human verdict recorded as an assessment (spec autonomous-gates §5), and whether the subject is now
+    authorized under the policy; `reason` is the policy's answer either way."""
+
+    id: str
+    authorized: bool
+    reason: str = ""
+
+
+@dataclass
 class Reservation:
     """Whether a job may be charged to its root request (spec autonomous-gates §8); `reason` names the cap when not."""
 

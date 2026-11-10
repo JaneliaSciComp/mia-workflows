@@ -31,6 +31,7 @@ from autodev.review import WRITE_PERMISSIONS
 from mia_core import autonomy
 from mia_core.assets import raw_asset
 from mia_core.config import manifest_path
+from mia_core.judge.policy import authorized, new_assessment
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import loads as _loads
@@ -60,6 +61,7 @@ from .jobspec import (
     verify_job,
 )
 from .models import (
+    AssessmentWritten,
     DatasetState,
     GalleryResult,
     JobArgs,
@@ -236,6 +238,7 @@ class Activities:
             self.paused,
             self.reserve,
             self.settle,
+            self.assess,
         ]
 
     # --- helpers -----------------------------------------------------------------------------
@@ -391,6 +394,47 @@ class Activities:
             cfg.temporal.poll_minutes,
             cfg.limits.agent_max_budget_usd,
         )
+
+    # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
+
+    @activity.defn(name="assess")
+    async def assess(
+        self,
+        issue: int,
+        round_id: str,
+        gate: str,
+        subject_kind: str,
+        subject_ref: str,
+        verdict: str,
+        by: str,
+        summary: str = "",
+        supersedes: str | None = None,
+    ) -> AssessmentWritten:
+        """Write the verdict as an assessment in the registry, then ask `authorized()` over everything written about
+        the subject; an approve also names its assessment on the dataset row. No registry: nothing to record, the
+        label alone authorizes as before."""
+        registry = self.registry
+        if registry is None:
+            return AssessmentWritten("", True, "no registry")
+        row = new_assessment(
+            gate=gate,
+            subject_kind=subject_kind,
+            subject_ref=subject_ref,
+            verdict=verdict,
+            by=by,
+            at=time.time(),
+            summary=summary,
+            supersedes=supersedes,
+        )
+        await asyncio.to_thread(registry.put_assessment, row)
+        rows = await asyncio.to_thread(lambda: registry.assessments(subject_kind=subject_kind, subject_ref=subject_ref))
+        auth = authorized(rows)
+        if verdict == "approve":
+            record = self._pins(round_id).record
+            await asyncio.to_thread(
+                best_effort, lambda: registry.put_dataset(record, assessment=row["id"]), f"{record}: assessment", log
+            )
+        return AssessmentWritten(row["id"], auth.ok, auth.reason)
 
     # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
 

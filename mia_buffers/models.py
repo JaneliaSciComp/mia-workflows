@@ -75,6 +75,7 @@ class BindingInfo:
     errors: list[str] = field(default_factory=list)
     staged: bool = False  # buffer-api's registry knows a pyramid staged from this very binding, still on disk
     artifact: str = ""  # the staged pyramid's artifact id (jobspec.artifact_id), set whenever the binding is found
+    refused: str = ""  # the newest assessment of a staged artifact is a reject: "<by> at <time>: <summary>"
 
 
 @dataclass
@@ -235,6 +236,7 @@ class DatasetStatus:
     voxel_size_nm: dict[str, float] | None = None  # from the plan, handed to the stage job
     weight: float = 0.0  # the plan's weight, so the heaviest datasets are fetched first
     rebuilds: int = 0  # times a degraded (missing) pyramid was staged again from the raw cache
+    artifact: str = ""  # the staged artifact the dataset's volumes live in, from the binding
 
 
 @dataclass
@@ -265,6 +267,16 @@ class BufferState:
     auto_approve: bool = False
     staged_at: str | None = None
     accepted: dict[str, float] = field(default_factory=dict)
+    approved_by: str = ""  # `human:<login>` of the accepted gate approve; "" for plan.auto_approve
+
+
+@dataclass
+class BoardAssessed:
+    """The gate approve written as one assessment per staged artifact (spec autonomous-gates §5); `refused` names
+    each record whose artifact the policy does not authorize, with the reason."""
+
+    assessments: list[str] = field(default_factory=list)
+    refused: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

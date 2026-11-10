@@ -18,7 +18,7 @@ from autodev.jobs import CsubJobs
 from mia_core.registry import Registry
 from mia_data.activities import Activities
 from mia_data.jobspec import lock_dir
-from mia_data.models import DatasetState, JobArgs, JobDone, LockTaken, Reservation, job_key
+from mia_data.models import AssessmentWritten, DatasetState, JobArgs, JobDone, LockTaken, Reservation, job_key
 
 REC_SHA, SNIP_SHA = "c" * 40, "a" * 40
 RECORD = {
@@ -640,3 +640,19 @@ async def test_paused_reads_the_manifest_fresh(tmp_path, monkeypatch):
     assert await t.a.paused() is False
     set_pause(manifest, True)
     assert await t.a.paused() is True
+
+
+async def test_assess_writes_the_human_verdict_and_asks_the_policy(tmp_path, token_server):  # noqa: F811
+    t = _setup(tmp_path)
+    t.a.registry = Registry(token_server, "t")
+    await t.a.admit(1, "11")  # pins rec-1
+    first = await t.a.assess(1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "approve", "human:alice", "data:approve")
+    assert first.authorized and first.id and "human:alice" in first.reason
+    rows = t.a.registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
+    assert [r["verdict"] for r in rows] == ["approve"] and rows[0]["by"] == "human:alice" and rows[0]["gate"] == "crops"
+    assert t.a.registry.dataset("rec-1")["assessment"] == first.id
+    second = await t.a.assess(1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "reject", "human:bob", "data:reject")
+    assert not second.authorized and second.reason.startswith("rejected by human:bob")
+    t.a.registry = None
+    written = await t.a.assess(1, "i1-e11", "crops", "crop_set", "x", "approve", "human:a")
+    assert written == AssessmentWritten("", True, "no registry")

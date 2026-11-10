@@ -1680,3 +1680,75 @@ async def test_paused_reads_the_manifest_fresh(acts, tmp_path, monkeypatch):
     assert await acts.paused() is False
     set_pause(manifest, True)
     assert await acts.paused() is True
+
+
+async def two_registered(acts) -> tuple[str, str]:
+    """U937 and BCSS staged and registered with buffer i7-e11; returns their artifact ids."""
+    await planned_and_bound(acts)
+    write_binding(acts, BCSS, ["https://zenodo.org/b.tif"])
+    await acts.read_binding(ROUND, BCSS)
+    write_stage_json(staged_dir(acts, U937))
+    write_stage_json(staged_dir(acts, BCSS))
+    await acts.create_buffer(ROUND, ROUND)
+    assert (await acts.register_dataset(ROUND, U937, ROUND)).refused == {}
+    assert (await acts.register_dataset(ROUND, BCSS, ROUND)).refused == {}
+    return staged_dir(acts, U937).name, staged_dir(acts, BCSS).name
+
+
+async def test_assess_board_writes_one_assessment_per_artifact_and_names_the_refused(acts, server):
+    import time
+
+    from mia_core.judge.policy import new_assessment
+
+    art_u, art_b = await two_registered(acts)
+    reject = new_assessment(
+        gate="staged",
+        subject_kind="artifact",
+        subject_ref=art_b,
+        verdict="reject",
+        by="human:bob",
+        at=time.time() + 60,
+        summary="revoked",
+    )
+    acts.registry.put_assessment(reject)
+    out = await acts.assess_board(7, ROUND, ROUND, "approve", "human:alice")
+    assert len(out.assessments) == 2 and list(out.refused) == [BCSS]
+    assert out.refused[BCSS].startswith("rejected by human:bob at ") and out.refused[BCSS].endswith(": revoked")
+    rows = acts.registry.assessments(subject_kind="artifact", subject_ref=art_u)
+    assert (
+        [r["verdict"] for r in rows] == ["approve"] and rows[0]["gate"] == "staged" and rows[0]["by"] == "human:alice"
+    )
+
+
+async def test_unregister_volumes_deletes_a_records_volumes_only(acts, server):
+    await two_registered(acts)
+    assert await acts.unregister_volumes(ROUND, U937) == [f"{U937}/v0.zarr"]
+    assert [row["id"] for row in acts.registry.volumes(ROUND)] == [f"{BCSS}/v0.zarr"]
+    assert await acts.unregister_volumes(ROUND, U937) == []
+
+
+async def test_read_binding_reports_a_refused_artifact(acts, server):
+    import time
+
+    from mia_core.judge.policy import new_assessment
+
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/a.tif/content"])
+    await acts.read_binding(ROUND, U937)
+    artifact = staged_dir(acts, U937).name
+    write_stage_json(staged_dir(acts, U937))
+    await acts.read_stage(ROUND, U937)
+    assert (await acts.read_binding(ROUND, U937)).refused == ""
+    acts.registry.put_assessment(
+        new_assessment(
+            gate="staged",
+            subject_kind="artifact",
+            subject_ref=artifact,
+            verdict="reject",
+            by="human:bob",
+            at=time.time(),
+            summary="revoked",
+        )
+    )
+    binding = await acts.read_binding(ROUND, U937)
+    assert binding.staged and binding.refused.startswith("human:bob at ") and binding.refused.endswith(": revoked")
