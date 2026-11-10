@@ -43,6 +43,7 @@ class Pins:
     snippets_commit: str
     harness_commit: str
     env_digest: str
+    root: str = ""  # the root request charged for this round (`<repo>#<issue>`); "" from before milestone L
 
 
 @dataclass

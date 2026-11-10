@@ -11,6 +11,9 @@ import stat
 import subprocess
 import sys
 
+from mia_core.autonomy import set_pause
+from mia_core.config import manifest_path
+
 from . import services
 from .manifest import load_manifest
 from .services import Stack, Temporal, attach, is_running, kill, service_up, windows
@@ -107,6 +110,19 @@ def cmd_init_token(stack: Stack, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pause(stack: Stack, args: argparse.Namespace) -> int:
+    """Set `autonomy.pause: true` in the manifest; every worker re-reads it before its next job."""
+    set_pause(manifest_path(args.manifest), True)
+    print("paused: every workflow stops at its next job; mia resume lifts it")
+    return 0
+
+
+def cmd_resume(stack: Stack, args: argparse.Namespace) -> int:
+    set_pause(manifest_path(args.manifest), False)
+    print("resumed")
+    return 0
+
+
 COMMANDS = {
     "up": cmd_up,
     "down": cmd_down,
@@ -116,6 +132,8 @@ COMMANDS = {
     "attach": cmd_attach,
     "exec": cmd_exec,
     "init-token": cmd_init_token,
+    "pause": cmd_pause,
+    "resume": cmd_resume,
 }
 
 
@@ -142,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
     ex.add_argument("service")
     ex.add_argument("args", nargs=argparse.REMAINDER)
     sub.add_parser("init-token", help="create the worker token file named by service.token_file")
+    sub.add_parser("pause", help="stop every workflow at its next job (sets autonomy.pause in mia.yaml)")
+    sub.add_parser("resume", help="lift the pause")
     args = parser.parse_args(argv)
     stack = Stack(load_manifest(args.manifest))
     return COMMANDS[args.cmd](stack, args)

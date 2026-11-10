@@ -86,6 +86,14 @@ async def test_admit_is_idempotent(tmp_path):
     assert [g for g in t.cat.gets if g[0].startswith("datasets/")] == [("datasets/rec-1.yaml", REC_SHA)]
 
 
+async def test_admit_pins_the_root_from_the_issue_marker_or_the_issue_itself(tmp_path):
+    t = _setup(tmp_path)
+    t.data.issues[1]["body"] = "<!-- mia-data:record=rec-1 -->\n<!-- mia-data:root=o/buffers#9 -->\n- Record: x"
+    assert (await t.a.admit(1, "98")).root == "o/buffers#9"
+    t.data.issues[2] = {**t.data.issues[1], "number": 2, "body": "<!-- mia-data:record=rec-1 -->\n- Record: x"}
+    assert (await t.a.admit(2, "12")).root == f"{t.cfg.github.data_repo}#2"
+
+
 async def _match_ws(t, outcome, binding=None):
     pins = await t.a.admit(1, "99")
     ws = Path(await t.a.prepare_match(1, ROUND, pins, 1))

@@ -72,7 +72,7 @@ from .models import (
 )
 from .poll import run_poll
 from .publish import CROP_ID_RE, Conflict
-from .seed import ID_RE, MARKER_RE
+from .seed import ID_RE, MARKER_RE, ROOT_RE
 from .status import render_binding, render_crops_table, render_links, render_stage
 
 if TYPE_CHECKING:
@@ -344,10 +344,13 @@ class Activities:
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
         if (round_dir / "pins.json").is_file():
             return Pins(**json.loads((round_dir / "pins.json").read_text()))
-        match = MARKER_RE.match((await self.gh_data.get_issue(issue)).get("body") or "")
+        body = (await self.gh_data.get_issue(issue)).get("body") or ""
+        match = MARKER_RE.match(body)
         if not (match and ID_RE.fullmatch(match.group(1))):
             raise ValueError(f"issue #{issue} has no valid record marker on its first line")
         record_id = match.group(1)
+        root_marker = ROOT_RE.search(body)  # a buffer or prep opened the issue: its request is the root
+        root = root_marker.group(1) if root_marker else self.cfg.root_of(issue)
         entry = (await catalog.downloaded(self.gh_catalog)).get(record_id)
         if entry is None:
             entry = {"record_commit": await self.gh_catalog.get_ref_sha("main"), "downloaders": []}
@@ -362,6 +365,7 @@ class Activities:
             entry["record_commit"],
             await self.gh_snippets.get_ref_sha("main"),
             *await asyncio.to_thread(harness_pin, self.cfg),
+            root=root,
         )
         await asyncio.to_thread(harness_snapshot, self.cfg, pins.harness_commit)  # freeze the source now
         write_atomic(round_dir / "record.yaml", yaml.safe_dump(record, sort_keys=False))

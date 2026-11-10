@@ -54,6 +54,28 @@ class QuotaCfg(BaseModel):
     hold_hours: float = Field(default=48, ge=0)  # an asset unused this long is evictable
 
 
+class RootBudgetCfg(BaseModel):
+    """What one root request (a buffer, prep or dataset issue) may spend in all (spec autonomous-gates §8)."""
+
+    max_usd: float = Field(default=100, ge=0)
+    max_fetch_bytes: float = Field(default=500e9, ge=0)
+    max_jobs: int = Field(default=200, ge=1)
+    max_concurrent_jobs: int = Field(default=20, ge=1)
+    max_days: float = Field(default=14, gt=0)
+
+
+class AutonomyCfg(BaseModel):
+    """The operator's switches over the autonomous gates: the pause, the quarantine hold and the root caps."""
+
+    pause: bool = False  # `mia pause` flips it; every workflow stops at its next job while it is set
+    quarantine_days: float = Field(default=30, ge=0)  # a revoked artifact is held this long before eviction
+    root: RootBudgetCfg = RootBudgetCfg()
+
+    def caps(self) -> dict[str, float]:
+        """The root caps as the `caps` dict buffer-api's reserve route takes."""
+        return dict(self.root.model_dump())
+
+
 def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:
     """Minimal .env loader: KEY=VALUE lines; variables already in the environment win."""
     if not path.is_file():

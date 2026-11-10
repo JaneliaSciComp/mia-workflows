@@ -151,6 +151,22 @@ async def test_admit_writes_spec_and_pins(acts):
     assert await acts.admit(7, "11") == pins
 
 
+async def test_admit_and_prep_admit_pin_their_own_issue_as_root(acts):
+    pins = await admitted(acts)
+    assert pins.root == f"{acts.cfg.github.buffers_repo}#7"
+    assert acts._pins(ROUND).root == pins.root  # written to pins.json
+    prep_issue(acts, records=[U937])
+    prep = await acts.prep_admit(8, "21")
+    assert prep.root == f"{acts.cfg.github.buffers_repo}#8" and acts._pins(PREP_ROUND).root == prep.root
+
+
+async def test_nudge_opens_the_dataset_issue_with_the_requests_root(acts):
+    await acts.plan(7, ROUND, await admitted(acts))
+    gh = with_datasets(acts)
+    await acts.nudge_dataset(ROUND, U937)
+    assert f"<!-- mia-data:root={acts.cfg.github.buffers_repo}#7 -->" in gh.created[0][1]
+
+
 @pytest.mark.parametrize("fences", [0, 2])
 async def test_admit_refuses_issue_without_one_yaml_fence(acts, fences):
     acts.gh.issues[7]["body"] = issue_body(fences=fences)
@@ -1540,7 +1556,7 @@ def prep_issue(acts, number: int = 8, **fields) -> None:
 async def test_prep_admit_and_nudge_report_prepared_records(acts):
     prep_issue(acts, records=[U937, BCSS, U937])
     pins = await acts.prep_admit(8, "21")
-    assert pins == PrepPins(PREP_ROUND, REF, [U937, BCSS], 14, issue=8)
+    assert pins == PrepPins(PREP_ROUND, REF, [U937, BCSS], 14, issue=8, root=f"{acts.cfg.github.buffers_repo}#8")
     assert await acts.prep_admit(8, "21") == pins  # a retry: the same pins
     round_dir = acts.cfg.paths.state_dir / "rounds" / PREP_ROUND
     assert {row["id"] for row in json.loads((round_dir / "plan.json").read_text())["rows"]} == {U937, BCSS}

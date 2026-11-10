@@ -117,3 +117,39 @@ def test_service_url_needs_an_explicit_port():
     assert ServiceCfg(url="http://svc.example.org:8765").url == "http://svc.example.org:8765"
     with pytest.raises(ValidationError, match="service.url needs an explicit port"):
         ServiceCfg(url="http://svc.example.org")
+
+
+def test_autonomy_defaults_and_caps():
+    from mia_core.config import AutonomyCfg
+
+    cfg = AutonomyCfg()
+    assert (cfg.pause, cfg.quarantine_days) == (False, 30)
+    assert cfg.caps() == {
+        "max_usd": 100,
+        "max_fetch_bytes": 500e9,
+        "max_jobs": 200,
+        "max_concurrent_jobs": 20,
+        "max_days": 14,
+    }
+
+
+def test_pause_is_a_text_edit_that_keeps_comments(tmp_path):
+    from mia_core.autonomy import paused, set_pause
+
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("temporal:\n  address: localhost:7233   # keep me\nservices: {}\n")
+    assert paused(manifest) is False
+    set_pause(manifest, True)
+    assert paused(manifest) is True and "# keep me" in manifest.read_text()
+    assert manifest.read_text().endswith("autonomy:\n  pause: true\n")
+    set_pause(manifest, False)
+    assert paused(manifest) is False and manifest.read_text().count("autonomy:") == 1
+    manifest.write_text(
+        "autonomy:                 # the switches\n  quarantine_days: 30\n  pause: false  # mia pause flips this\n"
+        "services: {}\n"
+    )
+    set_pause(manifest, True)
+    text = manifest.read_text()
+    assert paused(manifest) is True and "# the switches" in text and "# mia pause flips this" in text
+    assert "quarantine_days: 30" in text and text.count("pause:") == 1
+    assert paused(tmp_path / "missing.yaml") is False

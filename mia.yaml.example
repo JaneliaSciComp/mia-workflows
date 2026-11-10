@@ -64,6 +64,15 @@ quota:                                    # the buffers worker's keeper evicts f
 keeper:
   minutes: 30                             # SQLite backup cadence and the MiaCacheKeeper schedule (mia-buffers schedule)
   catalog_sync_hours: 24                  # the keeper syncs the catalog's main head when older than this
+autonomy:                                 # the operator's switches over the autonomous gates (autonomous-gates spec)
+  pause: false                            # mia pause / mia resume; every worker re-reads it at each job
+  quarantine_days: 30                     # a revoked artifact is held this long before the keeper may evict it
+  root:                                   # what one root request (a buffer, prep or dataset issue) may spend in all
+    max_usd: 100
+    max_fetch_bytes: 500e9
+    max_jobs: 200
+    max_concurrent_jobs: 20
+    max_days: 14
 services:                                 # per service: app + the sections that differ, in the app's own shape
   autodev:
     app: autodev

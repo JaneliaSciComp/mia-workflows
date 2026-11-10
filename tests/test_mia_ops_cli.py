@@ -24,7 +24,7 @@ def test_help_lists_commands(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("up", "down", "restart", "ps", "logs", "attach", "exec", "init-token"):
+    for cmd in ("up", "down", "restart", "ps", "logs", "attach", "exec", "init-token", "pause", "resume"):
         assert cmd in out
 
 
@@ -123,3 +123,11 @@ def test_init_token_writes_once_with_mode_600(tmp_path, fake, monkeypatch, capsy
     assert cli.main(["init-token"]) == 0
     assert oct((tmp_path / "token").stat().st_mode & 0o777) == "0o600" and len((tmp_path / "token").read_text()) == 64
     assert cli.main(["init-token"]) == 0 and "exists" in capsys.readouterr().err
+
+
+def test_pause_and_resume_edit_the_manifest(stack, tmp_path, monkeypatch):  # noqa: F811
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("services: {}\n")
+    monkeypatch.setenv("MIA_CONFIG", str(manifest))
+    assert cli.main(["pause"]) == 0 and "pause: true" in manifest.read_text()
+    assert cli.main(["resume"]) == 0 and "pause: false" in manifest.read_text()

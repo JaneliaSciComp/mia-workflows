@@ -22,18 +22,21 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 MARKER = "<!-- mia-data:record={} -->"
 MARKER_RE = re.compile(r"<!-- mia-data:record=(\S+) -->")  # matched only at the start of a body
+ROOT_MARKER = "<!-- mia-data:root={} -->"  # the root request a buffer- or prep-opened issue is charged to
+ROOT_RE = re.compile(r"<!-- mia-data:root=(\S+) -->")
 
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")
 
 
 def render_issue(
-    record: dict, entry: dict, repo: str = "", path: str = "", record_id: str | None = None
+    record: dict, entry: dict, repo: str = "", path: str = "", record_id: str | None = None, root: str = ""
 ) -> tuple[str, str, list[str]]:
     """Build (title, body, labels) for a dataset issue.
 
     `record` is the catalog's YAML record, `entry` its downloads-state entry (dataset_dir, record_commit,
     bytes_on_disk, downloaders) or just `{"record_commit": sha}` for a record nobody downloaded (a buffer asks
-    for it; its jobs fetch on demand), `repo`/`path` locate the record on GitHub for links."""
+    for it; its jobs fetch on demand), `repo`/`path` locate the record on GitHub for links; `root`, when given, is
+    the request the issue's rounds are charged to, written as the body's second-line marker."""
     record_id = record_id or record["id"]
     imaging, spdx = record.get("imaging") or {}, (record.get("license") or {}).get("spdx")
     arrays = (record.get("technical") or {}).get("arrays") or []
@@ -48,6 +51,7 @@ def render_issue(
     urls = data.get("download_url") or []
     lines = [
         MARKER.format(record_id),
+        *([ROOT_MARKER.format(root)] if root else []),
         "",
         f"- Record: [main]({base_url}/main/{path}), "
         f"[at `{entry['record_commit'][:12]}`]({base_url}/{entry['record_commit']}/{path})",

@@ -204,3 +204,15 @@ def test_render_issue_with_record_commit_only():
     title, body, labels = render_issue(rec, {"record_commit": "a" * 40}, "o/catalog", "datasets/x.yaml")
     assert body.startswith("<!-- mia-data:record=bbbc034-hipsc-nuclei-3d -->")
     assert "Downloaded by: none" in body and "Dataset dir" not in body and "data:new" in labels
+
+
+def test_render_issue_carries_the_root_marker_on_its_second_line():
+    from mia_data.seed import ROOT_RE
+
+    record = {"id": "rec", "imaging": {"modality": ["EM"]}, "technical": {"arrays": []}}
+    _, body, _ = render_issue(record, {"record_commit": "c" * 40}, "o/catalog", "p.yaml", root="o/buffers#7")
+    lines = body.splitlines()
+    assert lines[0] == "<!-- mia-data:record=rec -->" and lines[1] == "<!-- mia-data:root=o/buffers#7 -->"
+    assert ROOT_RE.search(body).group(1) == "o/buffers#7"
+    _, plain, _ = render_issue(record, {"record_commit": "c" * 40}, "o/catalog", "p.yaml")
+    assert ROOT_RE.search(plain) is None

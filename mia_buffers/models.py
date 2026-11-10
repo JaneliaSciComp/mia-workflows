@@ -20,6 +20,7 @@ class BufferPins:
     catalog_ref: str
     harness_commit: str
     env_digest: str
+    root: str = ""  # the root request charged for this round (`<repo>#<issue>`); "" from before milestone L
 
 
 @dataclass
@@ -287,6 +288,7 @@ class PrepPins:
     records: list[str]
     timeout_days: float
     issue: int
+    root: str = ""  # the root request every dataset it opens is charged to
 
 
 @dataclass

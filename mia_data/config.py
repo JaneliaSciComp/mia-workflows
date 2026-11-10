@@ -21,7 +21,7 @@ import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR, AgentCfg, TemporalCfg, is_github_host, load_dotenv
-from mia_core.config import ServiceCfg, load_service_config, manifest_path
+from mia_core.config import AutonomyCfg, ServiceCfg, load_service_config, manifest_path
 
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
@@ -144,6 +144,7 @@ class Config(BaseModel):
     deployment: str = "mia-data"
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg(namespace="mia-data")
+    autonomy: AutonomyCfg = AutonomyCfg()
     paths: PathsCfg
     gallery: GalleryCfg = GalleryCfg()
     crops: CropsCfg = CropsCfg()
@@ -236,6 +237,11 @@ class Config(BaseModel):
 
     def workflow_id(self, issue: int) -> str:
         return f"mia-data/{self.github.data_repo}/issue-{issue}"
+
+    def root_of(self, issue: int) -> str:
+        """The root request id a round of this issue is charged to: `<issue repo>#<issue>` (mia-buffers inherits
+        it with its own issue repo in `data_repo`)."""
+        return f"{self.github.data_repo}#{issue}"
 
     def marker(self, text: str) -> str:
         """The HTML comment hidden in our own GitHub comments so we can find them again."""

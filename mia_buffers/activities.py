@@ -375,6 +375,7 @@ class Activities:
             hashlib.sha256(spec_path.read_bytes()).hexdigest(),
             spec.catalog.ref,
             *await asyncio.to_thread(harness_pin, self.cfg),
+            root=self.cfg.root_of(issue),
         )
         await asyncio.to_thread(harness_snapshot, self.cfg, pins.harness_commit)  # freeze the source now
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted
@@ -517,12 +518,14 @@ class Activities:
         issue = await gh.find_issue_by_marker(MARKER.format(record))
         created = issue is None
         if issue is None:
+            pins = self._pins(round_id)
             title, body, labels = render_issue(
                 record_yaml,
-                {"record_commit": self._pins(round_id).catalog_ref},
+                {"record_commit": pins.catalog_ref},
                 self.cfg.github.catalog_repo,
                 self._row(round_id, record)["path"],
                 record,
+                root=pins.root,
             )
             issue = await gh.create_issue(title, body, labels)
         number = int(issue["number"])
@@ -593,9 +596,10 @@ class Activities:
         write_atomic(
             round_dir / "plan.json", json.dumps({"rows": [{"id": id_, "path": paths[id_]} for id_ in records]})
         )
-        spec_hash = hashlib.sha256(fences[0].encode()).hexdigest()
-        write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(BufferPins(spec_hash, ref, "", ""))))
-        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue))
+        spec_hash, root = hashlib.sha256(fences[0].encode()).hexdigest(), self.cfg.root_of(issue)
+        buffer_pins = BufferPins(spec_hash, ref, "", "", root=root)
+        write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(buffer_pins)))
+        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root)
         write_atomic(round_dir / "prep.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the request admitted
         return pins
 
