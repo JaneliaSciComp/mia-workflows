@@ -1,7 +1,9 @@
 # MIA: the page acts, GitHub records — Spec
 
-**Status:** draft v0.3 · 2026-11-11 · not yet approved. v0.2 took a reviewer's pass against the code: the claim
-that workflows keep their commands holds, with one named exception (§6); ids survive a ledger restore (§4.1);
+**Status:** draft v0.4 · 2026-11-11 · not yet approved. v0.4: the service accepts only the actions a subject's
+stage allows, and a round in progress accepts only `cancel`, which is new (§5; the user's ruling). v0.2 took a
+reviewer's pass against the code: the claim that workflows keep their commands holds, with two named changes
+(§6); ids survive a ledger restore (§4.1);
 adoption runs with the first slice (§11). v0.3 takes a second review, on delivery and recovery: an action is
 `pending` until Temporal has it and a retry reuses its id (§5); a decision names the state the person saw (§5);
 the mirror catches up after a crash (§7); adoption carries the stage and slice E waits for label rounds to drain
@@ -35,7 +37,10 @@ After this spec:
   retrying for as long as GitHub is away. No round waits for it and nothing reads the issue back.
 - **The workflows barely change.** They already take signals and call activities by name. The signals now come
   from the service instead of a poller, and the activities read and write the registry instead of GitHub. The
-  commands a workflow issues stay the same, so recorded histories replay and running rounds carry on.
+  commands a workflow issues stay the same, so recorded histories replay and running rounds carry on. Two things
+  are added: stage writes are awaited, and a round can be cancelled (§6).
+- **Only valid actions.** Each stage has a declared set of actions it accepts. The page offers those and the
+  service refuses the rest; a round in progress accepts only *Cancel* (§5).
 
 What stays on GitHub is autodev: its issues, its PRs, and the snippet PR that a dataset round follows (§9).
 
@@ -166,7 +171,7 @@ action:
   id: <integer, §4.1>          # the workflow's event id: the <event> of i<number>-e<event>
   kind: dataset | buffer | prep
   number: <subject number>
-  action: go | plan | approve | reject | revoke | keep | retire | dropped | stop
+  action: go | plan | approve | reject | revoke | keep | retire | dropped | cancel | stop
   actor: page | prep:<number> | buffer:<number>     # §10
   at: <iso time>               # stored exactly as sent in the signal: two activities find their action by it (§6)
   key: <text | null>           # the sender's own name for this request; a repeat is the same action (§5)
@@ -181,9 +186,11 @@ action:
 
 | kind | actions |
 |---|---|
-| dataset | `go`, `approve`, `reject` (note), `revoke` |
-| buffer | `go` (spec), `plan` (spec), `approve`, `revoke` (records), `keep`, `retire`, `dropped` (record), `stop` |
-| prep | `go` (spec), `stop` |
+| dataset | `go`, `approve`, `reject` (note), `revoke`, `cancel` |
+| buffer | `go` (spec), `plan` (spec), `approve`, `revoke` (records), `keep`, `retire`, `dropped` (record), `cancel`, `stop` |
+| prep | `go` (spec), `cancel`, `stop` |
+
+Which of these a subject accepts depends on its stage (§5).
 
 The root travels with the action. Today it is fixed when a buffer or a request opens the dataset's issue, so a
 dataset that already had an issue is charged to itself whoever asks; from now on each round is charged to whoever
@@ -244,10 +251,18 @@ buffer-api gets a Temporal client for the `mia-data` and `mia-buffers` namespace
 task queues from the `services` block of the one `mia.yaml`, which the loader strips from a service's own view
 today. An action route:
 
-1. checks the request's shape only: the subject exists (or the action creates it), the action belongs to the kind,
-   a spec or request parses. **The workflow, not the registry's stage, decides whether an action applies**, as it
-   does for a label today: a stage write can be late (§6), and a route that refused on it could refuse an approve
-   for a round that is waiting for one. The "valid actions" the page is given are advice on which buttons to show;
+1. checks the request: the subject exists (or the action creates it), a spec or request parses, and **the
+   subject's stage allows the action** (decided by the user). Today no one place says which action is valid in
+   which stage: the stages are named in each package's `STAGES`, and the edges exist only as the workflows' own
+   branches and refusals. So each kind gets one table beside its `STAGES`, stage to the actions it accepts and
+   whether a round is in progress there, written from what its workflow accepts today. This check, the page's
+   buttons, *Needs you*, the status word and `DATA_IN_PROGRESS` all read it. The workflow stays the code that
+   carries a round out; a test holds that every stage has a row and that each refusal the workflow tests cover
+   agrees with the table. Anything else is answered `409` with the reason, and nothing is recorded or sent.
+   **While a round is in progress the table allows only `cancel`** (and `dropped`, which answers a wait the
+   round itself opened, and `stop`, below): a new `go`, a revoke or a retire waits until the round has ended or
+   been cancelled. The check
+   can trust the stage because every stage write is awaited (§6);
 2. for an approve or a reject, compares the `revision` the request carries with the subject's and answers `409`
    when they differ, recording nothing (*my call*). The workflow takes any verdict newer than the set under
    review, and a click is always newer, so a page that still showed the previous set could approve crops nobody
@@ -269,9 +284,20 @@ after it was made (the service died between steps 3 and 5, or the answer was los
 with a *Retry* button, which sends the same key. The workflows already drop an event id they have handled, so a
 retry of an action that did arrive starts nothing twice. The page makes one key per click.
 
-Two actions are not a start-with-signal:
+Three actions are not a start-with-signal:
 
-- **`stop`** is `retire_closed`, moved from the poller to the route and otherwise unchanged: it terminates the
+- **`cancel`** is new, for all three kinds (decided by the user: a round in progress is cancelled before anything
+  else is asked of its subject). It is a plain signal to the running workflow. The round ends now: its
+  outstanding tasks are cancelled, its cluster job is killed by id (the call the job runner already makes when a
+  lock is lost), its reservation is settled and its raw lock released as for any failed round, and the subject
+  goes to a new final stage `cancelled`, from which `go` is allowed again. *My calls:* the job is killed, since
+  "cancelled" over a job that keeps running would be a false state; whatever follows a dataset reads `cancelled`
+  as it reads a round that did not prepare it; a buffer round's unfinished buffer is retired as a failed round's
+  is; a round that was following a snippet PR stops following it, and the PR, which is autodev's, stays open;
+  cancelling a request also cancels the dataset rounds that request started and that have not settled, and no
+  others.
+- **`stop`** is the force stop, for a run that does not answer a `cancel` (one frozen by nondeterminism). It is
+  `retire_closed`, moved from the poller to the route and otherwise unchanged: it terminates the
   workflow (a terminate reaches a run that nondeterminism froze), retires the subject's buffers with their
   `retired` events, and sets the stage it sets today (`retired` for a buffer, `done` for a request). It is offered
   in the stages the poller handles today (the live buffer stages and a requested preparation). As today, it does
@@ -282,8 +308,9 @@ Two actions are not a start-with-signal:
   file and records its hash; a click during a copy would record a truncated file as good. The route therefore
   refuses while any file under `incoming/` was modified in the last minute, and says so (*my call*).
 
-A workflow refuses an action its state does not allow. The existing `refuse_label` activity marks the action
-`refused` and appends the reason to the timeline, where the page shows it against the click.
+The workflow's own refusal stays as the backstop for a click that crossed a stage change (two people, or a second
+`go` before the round's first stage is written). The existing `refuse_label` activity marks the action `refused`
+and appends the reason to the timeline, where the page shows it against the click.
 
 The Temporal client connects lazily: buffer-api starts and serves reads with Temporal down, and `/health` says so.
 
@@ -318,14 +345,19 @@ vocabulary of action names, and only `init-labels` stops creating them on GitHub
 The registry write becomes the required one. Today it is best effort and GitHub is required; the roles swap, so an
 activity that cannot reach buffer-api retries as it retries GitHub today.
 
-**The one place a workflow may have to change.** In mia-data a stage write inside a round runs beside the round,
-is cancelled by the next stage write, and its failure is only logged; only a final stage is awaited. That was
-built because GitHub's write budget once held rounds for 25 minutes. With GitHub out of the activity the write is
-a local call, but the workflow's shape remains: an in-round stage can be lost, or land after a newer one when the
-service was briefly away. That is acceptable for a stage the round passes through and not for one where it stops
-and waits for a person, since *Needs you* is built from it. The plan checks each waiting stage (`review` above
-all): where its write is not awaited, that write becomes awaited behind a `workflow.patched` guard with a
-re-recorded fixture. Everything else replays as recorded.
+**The two places a workflow changes.**
+
+- *Stage writes are awaited again* (*my call*). In mia-data a stage write inside a round runs beside the round,
+  is cancelled by the next stage write, and its failure is only logged; only a final stage is awaited. That was
+  built because GitHub's write budget once held rounds for 25 minutes. With GitHub out of the activity the write
+  is a local call, and a lost or late one would make the registry's stage wrong, which the action check (§5) and
+  *Needs you* both rely on. So every stage write is awaited, behind one `workflow.patched` guard with a
+  re-recorded fixture. The cost: a round waits at its next stage while buffer-api is away.
+- *The `cancel` signal* (§5) is a new handler and a new way for a round to end, in `MiaDataDataset`, `MiaBuffer`
+  and `MiaPrep`. No recorded history holds a cancel, so the fixtures replay as they are; each workflow gets a new
+  one for a cancelled round.
+
+Everything else replays as recorded.
 
 During the build (§14, slices B to D) labels keep working beside the page: an event id the registry does not know
 is a GitHub label event and the old source applies, and a label on an issue the registry has no subject for
@@ -382,7 +414,9 @@ Still one HTML file served by buffer-api, no build step, no token.
   (`#buffers/<id>`) stays as it is.
 - **Preparation view.** Requests with their records and where each stands; *Run again* and *Stop*.
 
-Only the actions valid for the subject's stage are offered; the server decides which (`GET /subjects/...`).
+Only the actions the subject's stage allows are offered, and the server refuses any other (§5). A subject with a
+round in progress offers *Cancel* and nothing else that changes its state; *Force stop* sits behind a
+confirmation on buffers and requests.
 
 ### 8.2 Needs you
 
@@ -489,7 +523,8 @@ the page starts.
 | `mia_buffers/poll.py` | deleted |
 | `mia_data/seed.py` | the issue renderer moves to the mirror; `seed`, the root marker and `trusted_bots` go |
 | new: the mirror workflow and activity | in `mia_data` (mia-buffers imports it, as it imports `deliver_label` today) |
-| `mia_data/config.py`, `mia_buffers/config.py` | `HUMAN_LABELS` and `PREP_HUMAN_LABELS` stay as the action vocabulary; `init-labels` creates stage labels only |
+| `mia_data/config.py`, `mia_buffers/config.py` | `HUMAN_LABELS` and `PREP_HUMAN_LABELS` stay as the action vocabulary; the table of actions each stage accepts (§5); the `cancelled` stage; `init-labels` creates stage labels only |
+| `mia_data/workflows.py`, `mia_buffers/workflows.py` | stage writes awaited behind a guard; the `cancel` signal (§6) |
 | `mia_core/config.py` | buffer-api's view of `mia.yaml` keeps the two pipelines' namespaces and task queues |
 | `mia_buffers/ui/index.html` | §8; the Docs tab's steps |
 | `tests/test_buffers_ui.py` | every route the page calls exists and is `read`, `consumer` or `action`; no token; no stray host |
@@ -514,11 +549,12 @@ changed.
    issues that share a name today (§11).
 4. **Crops under review are a link to the gallery on GitHub**, not shown on the page (§8.1).
 5. **Goal 5 is about issues.** A round still needs GitHub for the catalog, the snippets repo and the gallery (§2).
-6. **The workflow decides whether an action applies**; the route checks shape only (§5).
+6. **Every stage write is awaited again**, so the stage the action check reads is the workflow's (§6). (This
+   replaces an earlier call, "the workflow decides, the route checks shape only", which the user overruled.)
 7. **The service kicks the mirror**, one mirror workflow per subject (§7).
 8. **One dataset is a direct `go`; a selection is a preparation request** (§8.1).
-9. **`stop` is today's "close the issue"**, unchanged in what it does (§5). Datasets get no `stop`: they have none
-   today.
+9. **`stop` is today's "close the issue"**, unchanged in what it does, kept as the force stop (§5). Datasets get
+   no `stop`: they have none today.
 10. **`dropped` is refused while files are still being written** (§5).
 11. **A round is charged to whoever asked for it**, not to whoever first opened the dataset's issue (§4.2).
 12. **Liveness is checked on load**, not pushed (§8.3).
@@ -535,6 +571,11 @@ changed.
     and says so (§5).
 22. **A request still learns that its datasets finished by asking the registry on a timer** (every
     `poll_minutes`, doubling to 30). Each dataset shows live on the page; only the request's own `done` can lag.
+23. **What `cancel` does** (§5): it kills the round's cluster job; `cancelled` is a new final stage; cancelling a
+    request cancels the dataset rounds it started and no others.
+24. **What is refused mid-round that is taken today** (§5): a dataset `revoke` (queued until the next gate today)
+    and a buffer `retire` (cancels the rebuild today) now need the round cancelled first. `dropped` is still
+    taken mid-round.
 
 ## 14. Build order
 
@@ -544,7 +585,7 @@ not on the remote yet: it has to be pushed, or merged, before the first PR can b
 | # | slice | done when |
 |---|---|---|
 | A | **registry**: subjects, actions, timeline; read routes, `/lookup`, `/needs`, `/stream`; the `action` capability and guard; `adopt-issues` | tests pass; `adopt-issues` against the live repos adopts every issue once and reports duplicates; a restored backup issues no id twice; nothing behaves differently |
-| B | **timeline and mirror**: the stage and comment activities of §6 write entries; `MiaMirror` posts them; rounds stop calling GitHub for data and buffers issues | replay fixtures pass, with at most the one guarded change §6 names; a test round completes while every issue call of a GitHub fake fails, and the issue is complete once the fake recovers; a live round's issue reads as before |
-| C | **datasets from the page**: the Temporal client, dataset actions, `admit` and `read_feedback` from the registry, the dataset page, live updates, `/health` | live: *Prepare* on a dataset with no issue shows it working within two seconds, its issue appears with the link back, and a review is approved by click and publishes; in tests, a repeated key starts one round and an approve carrying an old revision is refused |
+| B | **timeline and mirror**: the stage and comment activities of §6 write entries; `MiaMirror` posts them; rounds stop calling GitHub for data and buffers issues | replay fixtures pass, with the one guarded change §6 names (stage writes awaited); a test round completes while every issue call of a GitHub fake fails, and the issue is complete once the fake recovers; a live round's issue reads as before |
+| C | **datasets from the page**: the Temporal client, dataset actions, `admit` and `read_feedback` from the registry, the dataset page, live updates, `/health` | live: *Prepare* on a dataset with no issue shows it working within two seconds, its issue appears with the link back, and a review is approved by click and publishes; in tests, a repeated key starts one round and an approve carrying an old revision is refused; live: *Prepare* on a dataset whose round is running is refused, *Cancel* ends the round and its cluster job is gone from the queue |
 | D | **buffers and requests from the page**: specs, buffer and prep actions, `stop`, `dropped`, `nudge` through the registry, *Prepare selected*, *Needs you* | live: a buffer created on the page reaches ready with no GitHub input; a request for several records starts them with no `data:go` label |
 | E | **GitHub input removed**: the buffers poller and schedule, label delivery, `trusted_bots`, markers, parsers, `seed`, human labels, the fallback of §6; docs and `AGENTS.md` | no read of a data or buffers issue remains outside the mirror and `adopt-issues`; labelling, commenting on or closing an issue changes nothing |
