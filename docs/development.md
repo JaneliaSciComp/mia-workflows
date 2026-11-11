@@ -46,7 +46,7 @@ Configuration for all four is in `pyproject.toml`. Keep them clean rather than s
 
 | path | |
 |---|---|
-| `mia_core/` | what every package shares: the `mia.yaml` loader and shared config models (`config.py`), the host-local-disk and secret-file checks (`fs.py`), the worker-side client of buffer-api's registry (`registry.py`), the untrusted-output helpers (`untrusted.py`). Imports no application package; every package may import it |
+| `mia_core/` | what every package shares: the `mia.yaml` loader and shared config models (`config.py`), the host-local-disk and secret-file checks (`fs.py`), the worker-side client of buffer-api's registry (`registry.py`), the untrusted-output helpers (`untrusted.py`), and the judge (`judge/`: the acceptance policy, the verdict schema, the evidence builder, the prompts, the comment, `mia judge eval`). Imports no application package; every package may import it |
 | `autodev/` | the issue → PR loop. Also home to the pieces mia-data reuses: the GitHub client (`github.py`), auth (`auth.py`), the csub job runner (`jobs.py`), git operations (`gitops.py`), and the Temporal connection and logging (`cli.py`) |
 | `mia_data/` | the dataset → crops loop. Imports from `autodev`, never the other way round |
 | `mia_buffers/` | training buffers: the `MiaBuffer` workflow (a buffer issue → plan → approval → sourcing → ready) and its poller, `mia-buffers plan` (spec + catalog checkout → data pool, fit, weights, channel recipes), `mia-buffers serve` (buffer-api, the one sampler and SQLite ledger), `mia-buffers register` (plan + staged volumes → a buffer) and `mia_buffers.client.BufferDataset` (MuViT dataset over a buffer). Imports from `mia_data` and `autodev`, never the other way round. Design: `docs/specs/2026-10-21-training-buffers.md`; walkthroughs below |
@@ -131,6 +131,24 @@ If a helper needs a new config field, add it to the protocol and to both configs
   unregistered and its dataset fails, the buffer serves at its floor or goes needs-human), and a staged pyramid is
   never reused (`_reuse`) while its newest assessment is a reject. `plan.auto_approve` writes no assessment until
   milestone P removes it. Both sit behind `workflow.patched("l-assess")`.
+- **A judge sees evidence, never the author's reasoning.** A judge job (`mia_core/judge`, spec autonomous-gates
+  §4) is `claude -p` with `Read,Glob,Grep` only, no hosts of its own, over an evidence directory the worker builds
+  (`evidence.build`): the gate's question (`prompts/<gate>.md`, versioned by its hash), the artifacts under
+  judgement and the deterministic facts about them, listed with sha256 in `evidence.json`. Nothing from the author's
+  workspace enters unless the caller names that exact file (`IndependenceError` otherwise); the binding goes in
+  without its `reasons`, agent-written text is fenced and labelled as data. Its final message is one JSON verdict
+  (`schema.parse_verdict`); policy (`schema.effective_verdict`) turns a `reject` without a `bad` finding into an
+  approve with notes and a confidence under `judge.min_confidence` into an escalate, and the result is an assessment
+  `by: judge` with the evidence digest, model and prompt version. `judge.model` must differ from `agent.model`
+  while any gate is on.
+- **Shadow never blocks.** With `judge.<gate>.mode: shadow` the judge runs on every live round (the crop judge after
+  a passing set, the review judge after a pushed head), its assessment and comment are written, and the round goes
+  on to the human gate exactly as before: `authorized()` ignores a judge's approve for a gate that is not `active`,
+  and a judge job that fails or writes garbage is an `escalate` on record plus a comment, never the round's end. Only
+  the operator's switches (the pause, the root budget) outrank it. The Decisions tab pairs each judge verdict with
+  the newest human verdict on the same subject (`Ledger.agreement`); `mia judge eval <gate> <dir>` scores a judge
+  over an evaluation set (`mia exec mia-data collect-judge-set <dir>` builds the crops set from human-labelled
+  rounds still on disk). Both judges sit behind `workflow.patched("m-crop-judge")` / `("m-review-judge")`.
 - **Revocation deletes nothing and stops everything.** `data:revoke` on a dataset issue counts at any stage once
   the issue has published crops (the activity looks for `manifest.json` in the dataset folder; an issue that never
   published has the label refused and its round, if any, goes on). The `revoke_dataset` activity
@@ -525,6 +543,9 @@ exist or is a worker route, uses an `Authorization` header, or calls a host othe
   (the last pass the worker stored with `PUT /keeper`, or "has not reported a pass yet").
 - **Preparation** reads `/datasets`: in-progress and needs-human rows with issue links, plus a GitHub search for
   `prep:` labels (the service cannot list issues).
+- **Decisions** reads `/decisions` (every assessment newest first, a `before=<id>` cursor to load older, and the
+  judge/human agreement per gate): the audit trail of spec autonomous-gates §10, with a human approve that a later
+  reject overrules marked.
 - **Docs** is static: the user guide (`#docs`, the loop from spec to training as the person training a model sees
   it) and the architecture overview (`#docs/architecture`). Both live in `index.html` under `data-view="docs"`;
   the overview is the same text as the published explainer, and the page is the copy to edit first.

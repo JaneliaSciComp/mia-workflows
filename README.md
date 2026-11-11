@@ -32,7 +32,10 @@ and writes a binding; plain harness jobs check it, cut the round's crops, verify
 A human approves with `data:approve`, and those crops are published to shared storage and a `galleries` branch; or
 rejects with `data:reject` and comments, which go to the agent fixing the snippet (a new snippet's PR, which autodev
 writes, is merged only when its crops are approved). Every verdict is recorded as an assessment, and `data:revoke`
-withdraws a published dataset later: nothing is deleted, the buffers that drew from it are degraded. Every stage is a label
+withdraws a published dataset later: nothing is deleted, the buffers that drew from it are degraded. A **judge**
+(a second model, read-only, over the same gallery) can look at every set before the human does: in shadow mode its
+verdict is recorded beside the human's and decides nothing, and the buffers page's Decisions tab shows how often
+they agree; a gate goes active only on those numbers. Every stage is a label
 and a new comment with links to the folders involved. The whole flow, with a diagram and the component for each
 step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/mia-crops-spec.md`](docs/mia-crops-spec.md).
 

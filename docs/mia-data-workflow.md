@@ -146,6 +146,16 @@ published. The passing crops' `raw.png` and `overlay.png` are committed to the `
 mia-workflow-data, and a comment on the issue shows them inline with the binding and the agent's reasons. The
 issue moves to `data:review`.
 
+**The crop judge (shadow).** With `judge.crops.mode: shadow`, a second model looks at the same set before the
+human does (spec autonomous-gates §4.2, §9): the worker builds an evidence directory under the round's workspace
+(`judge-crops-1/evidence/`: the question, every verified crop's raw and overlay PNG, `verify.json`, the binding
+without the agent's reasons, the record) and runs a read-only Claude Code job over it, budgeted against the root
+like the match agent. Its verdict is written as an assessment `by: judge` on the same subject the human label will
+use, and posted as a second comment under the crop table (verdict, findings per crop, confidence, model, prompt
+version, spend, and the line that it decides nothing). A judge job that fails leaves a one-line comment instead.
+The issue still moves to `data:review` and waits for the human; the Decisions tab on the buffers page shows the
+agreement. `mode: off` skips all of it; `mode: active` is milestone N.
+
 **Validation.** The label is recorded as an assessment in buffer-api's registry (`by: human:<login>`), and the
 publication is authorized from the assessments on record, never from the label alone (spec autonomous-gates §5).
 A human approves the set with `data:approve` on the data issue, or rejects it with `data:reject`

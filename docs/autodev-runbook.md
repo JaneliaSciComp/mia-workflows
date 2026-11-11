@@ -109,6 +109,29 @@ systemd on a cluster-attached host) is [`docs/deployment.md`](../docs/deployment
 6. As the service account: `pixi run mia exec autodev init-labels`, `pixi run mia up`, then
    `pixi run mia exec autodev check`.
 
+## The judges: from shadow to active
+
+Every former human gate gets a judge (spec `docs/specs/2026-11-09-autonomous-gates.md`): a second model, read-only,
+over the gate's evidence. It earns authority in three steps, per gate, and nothing turns on by itself.
+
+1. **Off** (`judge.<gate>.mode: off`, the default): today's behaviour.
+2. **Shadow** (`mode: shadow`): set it in `mia.yaml` (`judge.model` must differ from the deployment's
+   `agent.model`), `pixi run mia restart`. The judge runs on every live round: autodev's review judge after each
+   pushed head (a PR comment headed "Review judge", no `/approve` line), mia-data's crop judge after each passing set
+   (a comment under the crop table). Both write an assessment `by: judge`; the human label still decides. Watch the
+   **Decisions** tab of the buffers page: per gate, how many subjects were judged and whether the newest human label
+   agrees. Build an evaluation set from the human-labelled rounds still on disk and score the judge offline:
+
+   ```
+   pixi run mia exec mia-data collect-judge-set /path/to/eval-crops
+   pixi run mia judge eval crops /path/to/eval-crops            # per category: agree, false approve, false reject, abstain
+   ```
+
+   Twenty live rounds without a false approval, and none on the evaluation set, is the bar the spec sets
+   (`autonomy.min_shadow_rounds`, milestone M).
+3. **Active** (`mode: active`, milestone N): the judge's approve authorizes within policy; `data:revoke` and
+   `buffer:revoke` withdraw it at any time, `mia pause` stops every workflow at its next job.
+
 ## Known gaps (deliberate, for later)
 
 - No cancel command: `temporal workflow terminate -w <id>` stops a workflow but leaves its job; `csub kill <job>`.
