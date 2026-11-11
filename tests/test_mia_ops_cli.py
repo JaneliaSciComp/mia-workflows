@@ -131,3 +131,27 @@ def test_pause_and_resume_edit_the_manifest(stack, tmp_path, monkeypatch):  # no
     monkeypatch.setenv("MIA_CONFIG", str(manifest))
     assert cli.main(["pause"]) == 0 and "pause: true" in manifest.read_text()
     assert cli.main(["resume"]) == 0 and "pause: false" in manifest.read_text()
+
+
+def test_judge_eval_cli(stack, tmp_path, monkeypatch, capsys):  # noqa: F811
+    from mia_core.judge.eval import EvalRow
+    from mia_ops import cli as ops_cli
+
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("judge: {model: opus, min_confidence: 0.5}\nservices: {}\n")
+    monkeypatch.setenv("MIA_CONFIG", str(manifest))
+    seen = {}
+
+    def evaluate(eval_dir, cfg, *, limit=None, run=None):
+        seen.update(dir=eval_dir, model=cfg.model, min_confidence=cfg.min_confidence, limit=limit)
+        return [
+            EvalRow("a", "confocal/none", "approve", "approve", 0.9, 0.2),
+            EvalRow("b", "confocal/none", "reject", "approve", 0.8, None),
+        ]
+
+    monkeypatch.setattr(ops_cli.judge_eval, "evaluate", evaluate)
+    assert ops_cli.main(["judge", "eval", "crops", str(tmp_path / "set"), "--limit", "2", "--model", "haiku"]) == 0
+    assert seen == {"dir": tmp_path / "set", "model": "haiku", "min_confidence": 0.5, "limit": 2}
+    out = capsys.readouterr().out
+    assert "a\tconfocal/none\texpected approve\tgot approve\t0.9\t$0.20" in out and "\tgot approve\t0.8\t-" in out
+    assert "| confocal/none | 2 | 1 | 1 | 0 | 0 |" in out and "| all | 2 | 1 | 1 | 0 | 0 |" in out

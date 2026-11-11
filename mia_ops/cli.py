@@ -10,9 +10,11 @@ import secrets
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 from mia_core.autonomy import set_pause
-from mia_core.config import manifest_path
+from mia_core.config import JudgeCfg, manifest_path, read_manifest
+from mia_core.judge import eval as judge_eval
 
 from . import services
 from .manifest import load_manifest
@@ -123,6 +125,22 @@ def cmd_resume(stack: Stack, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_judge(stack: Stack, args: argparse.Namespace) -> int:
+    """`mia judge eval <gate> <dir>`: run the judge over an evaluation set with the manifest's `judge` block
+    (spec autonomous-gates §9) and print the per-category table."""
+    data = read_manifest(manifest_path(args.manifest))
+    cfg = JudgeCfg(**(data.get("judge") or {}))
+    if args.model:
+        cfg = cfg.model_copy(update={"model": args.model})
+    rows = judge_eval.evaluate(Path(args.dir), cfg, limit=args.limit)
+    for row in rows:
+        cost = f"${row.cost_usd:.2f}" if row.cost_usd is not None else "-"
+        print(f"{row.item}\t{row.category}\texpected {row.expected}\tgot {row.got}\t{row.confidence:g}\t{cost}")
+    print()
+    print(judge_eval.render(judge_eval.summarize(rows)), end="")
+    return 0
+
+
 COMMANDS = {
     "up": cmd_up,
     "down": cmd_down,
@@ -134,6 +152,7 @@ COMMANDS = {
     "init-token": cmd_init_token,
     "pause": cmd_pause,
     "resume": cmd_resume,
+    "judge": cmd_judge,
 }
 
 
@@ -162,6 +181,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init-token", help="create the worker token file named by service.token_file")
     sub.add_parser("pause", help="stop every workflow at its next job (sets autonomy.pause in mia.yaml)")
     sub.add_parser("resume", help="lift the pause")
+    judge = sub.add_parser("judge", help="the judges: `mia judge eval <gate> <dir>` scores one over an evaluation set")
+    judge_sub = judge.add_subparsers(dest="judge_cmd", required=True)
+    ev = judge_sub.add_parser("eval", help="run the judge over <dir>/<item>/evidence and compare with expected.json")
+    ev.add_argument("gate", choices=["crops", "review"])
+    ev.add_argument("dir")
+    ev.add_argument("--limit", type=int, help="only the first N items")
+    ev.add_argument("--model", help="override judge.model for this run")
     args = parser.parse_args(argv)
     stack = Stack(load_manifest(args.manifest))
     return COMMANDS[args.cmd](stack, args)

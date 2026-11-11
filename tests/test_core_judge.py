@@ -178,3 +178,57 @@ def test_read_claude_json(tmp_path):
     assert read_claude_json(tmp_path) == ("", None, "")
     (tmp_path / "claude.json").write_text(json.dumps({"result": 5, "total_cost_usd": "x", "modelUsage": []}))
     assert read_claude_json(tmp_path) == ("", None, "")
+
+
+# --- the evaluation runner ---------------------------------------------------------------------------
+
+
+def _item(root, name, expected, category="confocal/instance"):
+    item = root / name
+    (item / "evidence").mkdir(parents=True)
+    (item / "evidence" / "question.md").write_text("q")
+    (item / "expected.json").write_text(json.dumps({"verdict": expected, "category": category}))
+    return item
+
+
+def _fake_run(answers):
+    """A subprocess.run stand-in: writes claude.json in the item's cwd from `answers[item name]` (None: no file)."""
+
+    def run(cmd, cwd, **kwargs):
+        assert cmd[:2] == ["bash", "-c"] and "--allowedTools" in cmd[2] and kwargs["timeout"] == 30 * 60
+        answer = answers.get(cwd.name)
+        if answer is not None:
+            (cwd / "claude.json").write_text(json.dumps({"result": json.dumps(answer), "total_cost_usd": 0.2}))
+        return None
+
+    return run
+
+
+def test_evaluate_and_summarize(tmp_path):
+    from mia_core.config import JudgeCfg
+    from mia_core.judge.eval import EvalRow, evaluate, render, summarize
+
+    _item(tmp_path, "a", "approve")
+    _item(tmp_path, "b", "reject")
+    _item(tmp_path, "c", "approve", "em/semantic")
+    _item(tmp_path, "d", "reject", "em/semantic")
+    (tmp_path / "not-an-item").mkdir()
+    answers = {
+        "a": {"verdict": "approve", "confidence": 0.9, "findings": [], "summary": "ok"},
+        "b": {"verdict": "approve", "confidence": 0.8, "findings": [], "summary": "looked fine"},  # false approve
+        "c": None,  # the run wrote nothing: abstain
+        "d": {"verdict": "reject", "confidence": 0.9, "findings": [{"item": "x", "severity": "bad"}], "summary": ""},
+    }
+    rows = evaluate(tmp_path, JudgeCfg(), run=_fake_run(answers))
+    assert rows[0] == EvalRow("a", "confocal/instance", "approve", "approve", 0.9, 0.2)
+    assert [(r.item, r.got) for r in rows] == [("a", "approve"), ("b", "approve"), ("c", "escalate"), ("d", "reject")]
+    assert rows[2].cost_usd is None
+    summary = summarize(rows)
+    assert summary["confocal/instance"] == {"n": 2, "agree": 1, "false_approve": 1, "false_reject": 0, "abstain": 0}
+    assert summary["em/semantic"] == {"n": 2, "agree": 1, "false_approve": 0, "false_reject": 0, "abstain": 1}
+    assert summary["all"]["n"] == 4 and summary["all"]["agree"] == 2
+    text = render(summary)
+    assert text.splitlines()[0].startswith("| category | n | agree |") and text.splitlines()[-1].startswith(
+        "| all | 4 | 2 |"
+    )
+    assert [r.item for r in evaluate(tmp_path, JudgeCfg(), limit=1, run=_fake_run(answers))] == ["a"]
