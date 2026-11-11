@@ -25,6 +25,7 @@ from mia_data.models import (
     GalleryResult,
     JobArgs,
     JobDone,
+    JudgeResult,
     LabelEvent,
     LockTaken,
     MatchResult,
@@ -89,6 +90,8 @@ class Mocks:
         assess_authorized=True,
         submit_error=None,
         revocation=None,
+        crop_judge="off",
+        judge_result=None,
     ):
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
@@ -102,6 +105,10 @@ class Mocks:
         self.assess_authorized = assess_authorized  # what the policy answers to an approve
         self.submit_error = submit_error  # a message: every submit raises it, non-retryable
         self.revocation = revocation or Revocation("as-r", ["art1"], ["i3-e4"])  # what revoke_dataset answers
+        self.crop_judge = crop_judge  # judge.crops.mode the limits activity reports
+        self.judge_result = judge_result or JudgeResult(
+            "approve", "approve", 0.9, "fine", "as-j", 0.5, "Crop judge: approve"
+        )
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -114,7 +121,7 @@ class Mocks:
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
             rec("limits")
-            return RoundLimits(4, 16, 120, self.revisions)
+            return RoundLimits(4, 16, 120, self.revisions, crop_judge=self.crop_judge)
 
         @activity.defn(name="set_stage")
         async def set_stage(
@@ -280,6 +287,26 @@ class Mocks:
             rec("revoke_dataset", round_id, actor, event_id)
             return self.revocation
 
+        @activity.defn(name="prepare_judge")
+        async def prepare_judge(
+            issue: int,
+            round_id: str,
+            gate: str,
+            crop_ws: str,
+            verify_ws: str,
+            verified: list[dict],
+            attempt: int = 1,
+        ) -> str:
+            rec("prepare_judge", gate, crop_ws, verify_ws, len(verified))
+            return f"/w/{round_id}/judge-{gate}-{attempt}"
+
+        @activity.defn(name="read_judge")
+        async def read_judge(
+            issue: int, round_id: str, ws: str, gate: str, subject_kind: str, subject_ref: str, mode: str
+        ) -> JudgeResult:
+            rec("read_judge", ws, gate, subject_kind, subject_ref, mode)
+            return self.judge_result
+
         @activity.defn(name="adopt_pr_binding")
         async def adopt_pr_binding(round_id: str, pr: int, sha: str) -> dict:
             rec("adopt_pr_binding", pr, sha)
@@ -312,6 +339,8 @@ class Mocks:
             settle,
             assess,
             revoke_dataset,
+            prepare_judge,
+            read_judge,
         ]
 
     def await_act(self):
@@ -1325,3 +1354,62 @@ async def test_a_concurrency_refusal_waits_and_tries_again(env):
         await env.sleep(timedelta(minutes=3))  # past the first wait (poll_minutes)
         await idle(h, m, "review")
     assert [a[2] for a in m.of("reserve")][:2] == ["match", "match"] and len(m.of("submit")) == 4
+
+
+# --- the crop judge in shadow (spec autonomous-gates §9) -------------------------------------------------
+
+
+async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env):
+    m = Mocks(crop_judge="shadow")
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        names = m.names()
+        assert names.index("comment") < names.index("prepare_judge") < names.index("read_judge")
+        (prepared,) = m.of("prepare_judge")
+        assert prepared[0] == "crops" and prepared[3] == 16  # every verified crop is evidence
+        judged = [a for a in m.of("submit") if a[1] == "judge"]
+        assert len(judged) == 1 and judged[0][2].workspace == "/w/i7-e11/judge-crops-1"
+        (read,) = m.of("read_judge")
+        assert read[1:4] == ("crops", "crop_set", f"i7-e11:i7-e11-{SHA[:12]}") and read[4] == "shadow"
+        judge_comments = [a for a in m.of("comment") if a[1].startswith("judge crops i7-e11")]
+        assert judge_comments == [("Crop judge: approve", f"judge crops i7-e11 {SHA}", "data", None)]
+        assert "publish_crops" not in names  # shadow: the verdict decided nothing
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert "publish_crops" in m.names()
+
+
+async def test_shadow_judge_failure_is_a_comment_not_a_stop(env):
+    m = Mocks(crop_judge="shadow", states={"judge-crops": ("FAILED", 1)})
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+    assert "read_judge" not in m.names()
+    (failed,) = [a for a in m.of("comment") if a[1].startswith("judge crops")]
+    assert failed[0].startswith("The crop judge did not run to the end: judge job job-mia-7-i7-e11-judge-")
+    assert failed[0].endswith("ended FAILED (exit 1). The human label decides.")
+    assert m.stages == ["matching", "testing", "review"]
+
+
+async def test_judge_off_runs_nothing(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+    assert "prepare_judge" not in m.names() and all(a[1] != "judge" for a in m.of("submit"))
+
+
+async def test_judge_is_budgeted_and_settled(env):
+    m = Mocks(crop_judge="shadow")
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+    (reserved,) = [a for a in m.of("reserve") if a[2] == "judge"]
+    assert reserved[3] == 2.0 and reserved[1].startswith("mia-7-i7-e11-judge-")
+    assert any(a[1] == reserved[1] for a in m.of("settle"))
+
+
+async def test_a_pr_heads_set_is_judged_too(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"}, crop_judge="shadow")
+    async with started(env, m) as h:
+        await to_review(h, m)
+    (read,) = m.of("read_judge")
+    assert read[3] == f"i7-e11:i7-e11-{H1[:12]}"
+    assert m.of("set_crop_status")[-1][1] == "success"  # the status still follows the test, not the judge

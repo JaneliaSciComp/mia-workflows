@@ -32,7 +32,10 @@ from autodev.review import WRITE_PERMISSIONS
 from mia_core import autonomy
 from mia_core.assets import raw_asset
 from mia_core.config import manifest_path
-from mia_core.judge.policy import authorized, new_assessment
+from mia_core.judge.evidence import build as build_evidence
+from mia_core.judge.evidence import evidence_digest, read_claude_json
+from mia_core.judge.policy import POLICY_VERSION, authorized, new_assessment
+from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads as _loads
@@ -54,6 +57,7 @@ from .jobspec import (
     crop_job,
     harness_pin,
     harness_snapshot,
+    judge_job,
     lock_dir,
     match_job,
     match_prompt,
@@ -67,6 +71,7 @@ from .models import (
     GalleryResult,
     JobArgs,
     JobDone,
+    JudgeResult,
     LockTaken,
     MatchResult,
     Pins,
@@ -80,7 +85,7 @@ from .models import (
 from .poll import run_poll
 from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
 from .seed import ID_RE, MARKER_RE, ROOT_RE
-from .status import render_binding, render_crops_table, render_links, render_stage
+from .status import render_binding, render_crops_table, render_judge_comment, render_links, render_stage
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -242,6 +247,8 @@ class Activities:
             self.settle,
             self.assess,
             self.revoke_dataset,
+            self.prepare_judge,
+            self.read_judge,
         ]
 
     # --- helpers -----------------------------------------------------------------------------
@@ -399,6 +406,8 @@ class Activities:
             cfg.limits.max_pr_revisions,
             cfg.temporal.poll_minutes,
             cfg.limits.agent_max_budget_usd,
+            cfg.judge.crops.mode,
+            cfg.judge.max_budget_usd,
         )
 
     # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
@@ -441,6 +450,103 @@ class Activities:
                 best_effort, lambda: registry.put_dataset(record, assessment=row["id"]), f"{record}: assessment", log
             )
         return AssessmentWritten(row["id"], auth.ok, auth.reason)
+
+    # --- the judge: evidence in, an assessment out (spec autonomous-gates §4, §9) -------------------
+
+    @activity.defn(name="prepare_judge")
+    @mia_permanent_errors
+    async def prepare_judge(
+        self,
+        issue: int,
+        round_id: str,
+        gate: str,
+        crop_workspace: str,
+        verify_workspace: str,
+        verified: list[dict],
+        attempt: int = 1,
+    ) -> str:
+        """Make the crop judge's workspace, `<round workspace>/judge-crops-<attempt>`, with its evidence directory:
+        the question, raw.png and overlay.png of every verified crop, verify.json, the binding without the author's
+        `reasons`, and the record. Nothing from the match agent's workspace. Returns the workspace path."""
+        if gate != "crops":
+            raise ValueError(f"prepare_judge knows the crops gate, not {gate!r}")
+        workspace = self._make_workspace(issue, round_id, f"judge-{gate}", attempt)
+        crop_dir = self._job_workspace(issue, round_id, crop_workspace)
+        verify_dir = self._job_workspace(issue, round_id, verify_workspace)
+        files = await asyncio.to_thread(gallery_files, crop_dir, verify_dir, verified)
+        binding = yaml.safe_load(files.pop("binding.yaml")) or {}
+        if isinstance(binding, dict):
+            binding.pop("reasons", None)  # the author arguing its case is not evidence (spec §4)
+        items: dict[str, bytes | Path] = {
+            **files,
+            "binding.yaml": yaml.safe_dump(binding, sort_keys=False).encode(),
+            "record.yaml": self._round_dir(round_id) / "record.yaml",
+        }
+        crops = "\n".join(f"- `{crop['crop_id']}`" for crop in verified) or "(no verified crop)"
+        question = f"{prompt_text(gate)}\n# The crops in this set\n\n{crops}\n"
+        author = self._round_workspace(issue, round_id) / "match-1"
+        await asyncio.to_thread(build_evidence, workspace, question, items, author_workspace=author)
+        return str(workspace)
+
+    @activity.defn(name="read_judge")
+    @mia_permanent_errors
+    async def read_judge(
+        self, issue: int, round_id: str, workspace: str, gate: str, subject_kind: str, subject_ref: str, mode: str
+    ) -> JudgeResult:
+        """Read the judge's claude.json, apply policy (serious issues only, the confidence floor), write the
+        assessment `by: judge` to the registry and `verdict.json` beside the evidence, and render the comment.
+        A missing or unreadable verdict is an `escalate` on record, never an error: shadow must not block."""
+        path = self._job_workspace(issue, round_id, workspace)
+        text, cost, model = read_claude_json(path)
+        try:
+            verdict = parse_verdict(text)
+        except ValueError as error:
+            verdict = Verdict("escalate", 0.0, (), f"unreadable verdict: {_text(str(error), 400)}")
+        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence)
+        findings = [
+            {"item": self._clean(f.item), "severity": f.severity, "note": self._clean(f.note)} for f in verdict.findings
+        ]
+        summary = self._clean(verdict.summary)
+        row = new_assessment(
+            gate=gate,
+            subject_kind=subject_kind,
+            subject_ref=subject_ref,
+            verdict=effective,
+            by="judge",
+            at=time.time(),
+            summary=summary,
+            findings=findings,
+            confidence=verdict.confidence,
+            evidence_digest=evidence_digest(path),
+            checks={"verify": self._pins(round_id).harness_commit, "why": why},
+            model=model or self.cfg.judge.model,
+            prompt_version=prompt_version(gate),
+        )
+        write_atomic(
+            path / "verdict.json",
+            json.dumps({"assessment": row, "judge": dataclasses.asdict(verdict), "cost_usd": cost}, indent=1),
+        )
+        assessment_id = ""
+        if self.registry is not None:
+            await asyncio.to_thread(self.registry.put_assessment, row)
+            assessment_id = row["id"]
+        comment = render_judge_comment(
+            gate,
+            verdict.verdict,
+            effective,
+            why,
+            summary,
+            findings,
+            verdict.confidence,
+            row["model"],
+            row["prompt_version"],
+            POLICY_VERSION,
+            cost,
+            mode,
+        )
+        return JudgeResult(
+            verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings
+        )
 
     # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
 
@@ -584,6 +690,8 @@ class Activities:
         cfg = self.cfg
         if kind == "match":
             return match_job(cfg, args)
+        if kind == "judge":
+            return judge_job(cfg, args)
         existing = self._dataset_dir(args.round_id, args.pins) / "manifest.json" if args.existing else None
         existing = existing if existing and existing.is_file() else None
         if kind in ("smoke", "crop"):

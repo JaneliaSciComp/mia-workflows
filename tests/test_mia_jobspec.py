@@ -20,6 +20,7 @@ from mia_data.jobspec import (
     crop_job,
     harness_pin,
     harness_snapshot,
+    judge_job,
     match_job,
     match_prompt,
     smoke_job,
@@ -309,3 +310,15 @@ def test_match_prompt_names_pins_and_outcomes(tmp_path):
     for o in ("matched", "needs_snippet", "blocked", "host_not_allowed", "outcome.json"):
         assert o in p
     assert "ineligible" not in p and "256" not in p  # size is the buffer plan's call (spec §12)
+
+
+def test_judge_job_is_read_only_and_short(tmp_path):
+    cfg, ws = _cfg(tmp_path), _ws(tmp_path)
+    s = judge_job(cfg, _args(ws, _pins(cfg)))
+    assert s.agent == "claude" and s.allow_hosts == [] and s.rw_mounts == []
+    assert s.walltime_min == cfg.judge.walltime_min == 30 and s.cpus == 1
+    assert '--allowedTools "Read,Glob,Grep"' in s.command and '--tools "Read,Glob,Grep"' in s.command
+    assert "--restricted" in s.command and "--strict-mcp-config" in s.command and "--add-dir evidence" in s.command
+    assert f"--model {cfg.judge.model}" in s.command and f"--max-budget-usd {cfg.judge.max_budget_usd}" in s.command
+    assert "harness smoke" not in s.command and "Bash" not in s.command.split("claude -p", 1)[1]
+    assert s.env["MIA_HARNESS_CACHE_DIR"] == "" and "_snapshots" not in s.command

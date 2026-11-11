@@ -162,6 +162,8 @@ class RoundLimits:
     max_pr_revisions: int = 5  # PR heads tested per round (develop path)
     poll_minutes: int = 2  # how long a round waits between tries of a lock someone else holds
     agent_max_budget_usd: float = 5.0  # what a match agent run may cost: reserved against the root before it runs
+    crop_judge: str = "off"  # judge.crops.mode: off | shadow | active (spec autonomous-gates §9); off before M
+    judge_max_budget_usd: float = 2.0  # what one judge run may cost: reserved like the match agent's
 
 
 @dataclass
@@ -206,3 +208,19 @@ class GalleryResult:
     prefix: str
     urls: dict[str, str]  # rel -> ?raw=true URL
     table: str  # the markdown table from render_crops_table
+
+
+@dataclass
+class JudgeResult:
+    """What the judge said about a subject, after policy read it (spec autonomous-gates §4): `verdict` is the
+    judge's own, `effective` what the assessment records (a reject without a `bad` finding is an approve, low
+    confidence is an escalate). `comment` is rendered for the issue; `assessment` is "" without a registry."""
+
+    verdict: str
+    effective: str
+    confidence: float
+    summary: str
+    assessment: str = ""
+    cost_usd: float | None = None
+    comment: str = ""
+    findings: list[dict] = field(default_factory=list)  # <= 64 of {"item", "severity", "note"}

@@ -730,3 +730,114 @@ async def test_a_publication_after_a_revoke_releases_the_artifacts(tmp_path, tok
     newest = registry.assessments(subject_kind="artifact", subject_ref="art1")[0]
     assert newest["verdict"] == "approve" and newest["by"] == "policy:repair"
     assert t.a.dataset_fields(1, "i1-e11", "done")["state"] == "prepared"
+
+
+# --- the judge: evidence in, an assessment out ----------------------------------------------------------
+
+
+def _judged_round(t, verified_n=2):
+    """A round with a crop and a verify workspace holding `verified_n` verified crops; returns their paths."""
+    cw = Path(t.a._make_workspace(1, ROUND, "crop-" + SNIP_SHA, 1))
+    vw = Path(t.a._make_workspace(1, ROUND, "verify-" + SNIP_SHA, 1))
+    verified = [_crop(cw, f"c{i}", i) for i in range(verified_n)]
+    for crop in verified:
+        (vw / "preview" / crop["crop_id"]).mkdir(parents=True)
+        (vw / "preview" / crop["crop_id"] / "overlay.png").write_bytes(b"ov")
+    (vw / "binding.yaml").write_text("record: rec-1\nraw: [{snippet: s, urls: [u]}]\nreasons: [guessed the axes]\n")
+    (vw / "verify.json").write_text('{"n": 2}')
+    return cw, vw, verified
+
+
+async def test_prepare_judge_builds_evidence_without_reasons(tmp_path):
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    cw, vw, verified = _judged_round(t)
+    (t.a._round_workspace(1, ROUND) / "match-1").mkdir(parents=True)
+    ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified))
+    assert ws == t.a._round_workspace(1, ROUND) / "judge-crops-1"
+    ev = ws / "evidence"
+    assert (ev / "c0" / "raw.png").read_bytes() == b"rawc0" and (ev / "c1" / "overlay.png").read_bytes() == b"ov"
+    binding = yaml.safe_load((ev / "binding.yaml").read_text())
+    assert "reasons" not in binding and binding["record"] == "rec-1"
+    assert yaml.safe_load((ev / "record.yaml").read_text())["imaging"]["modality"] == ["confocal"]
+    question = (ev / "question.md").read_text()
+    assert "serious issues" in question.lower() and "- `c0`" in question and "- `c1`" in question
+    listed = json.loads((ev / "evidence.json").read_text())["files"]
+    assert {"question.md", "record.yaml", "binding.yaml", "verify.json", "c0/raw.png", "c1/overlay.png"} <= set(listed)
+    with pytest.raises(ApplicationError, match="crops gate"):
+        await t.a.prepare_judge(1, ROUND, "review", str(cw), str(vw), verified)
+
+
+def _claude_json(ws: Path, verdict: dict, cost=0.31):
+    (ws / "claude.json").write_text(
+        json.dumps({"result": json.dumps(verdict), "total_cost_usd": cost, "modelUsage": {"claude-opus-5-5": {}}})
+    )
+
+
+async def test_read_judge_records_assessment_and_comment(tmp_path, token_server):  # noqa: F811
+    t = _setup(tmp_path)
+    t.a.registry = Registry(token_server, "t")
+    await t.a.admit(1, "99")
+    cw, vw, verified = _judged_round(t)
+    ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified))
+    _claude_json(
+        ws,
+        {
+            "verdict": "approve",
+            "confidence": 0.9,
+            "findings": [{"item": "c0", "severity": "ok", "note": "cells | nuclei <!-- x -->"}],
+            "summary": "One dataset, read right.",
+            "schema_version": 1,
+        },
+    )
+    out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
+    assert (out.verdict, out.effective, out.confidence, out.cost_usd) == ("approve", "approve", 0.9, 0.31)
+    assert out.assessment and out.findings[0]["note"] == "cells | nuclei &lt;!-- x -->"
+    (row,) = t.a.registry.assessments(subject_kind="crop_set", subject_ref=f"{ROUND}:t1")
+    assert row["id"] == out.assessment and row["by"] == "judge" and row["verdict"] == "approve"
+    assert row["model"] == "claude-opus-5-5" and len(row["prompt_version"]) == 12 and len(row["evidence_digest"]) == 64
+    assert row["checks"]["verify"] == t.a._pins(ROUND).harness_commit and row["confidence"] == 0.9
+    verdict = json.loads((ws / "verdict.json").read_text())
+    assert verdict["assessment"]["id"] == out.assessment and verdict["cost_usd"] == 0.31
+    assert "**Crop judge:** `approve`" in out.comment and "Shadow mode" in out.comment
+    assert "| c0 | ok | cells \\| nuclei &lt;!-- x --> |" in out.comment and "$0.31" in out.comment
+    assert "model `claude-opus-5-5`" in out.comment
+
+
+async def test_read_judge_garbage_is_escalate(tmp_path, token_server):  # noqa: F811
+    t = _setup(tmp_path)
+    t.a.registry = Registry(token_server, "t")
+    await t.a.admit(1, "99")
+    cw, vw, verified = _judged_round(t)
+    ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified))
+    out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
+    assert out.effective == "escalate" and out.summary.startswith("unreadable verdict") and out.cost_usd is None
+    (row,) = t.a.registry.assessments(subject_kind="crop_set", subject_ref=f"{ROUND}:t1")
+    assert row["verdict"] == "escalate" and row["model"] == "opus"
+    (ws / "claude.json").write_text(
+        json.dumps({"result": "I looked at the crops and they seem fine.", "total_cost_usd": 1})
+    )
+    out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
+    assert out.effective == "escalate" and "`escalate`" in out.comment
+
+
+async def test_read_judge_reject_without_bad_is_approve(tmp_path):
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    cw, vw, verified = _judged_round(t)
+    ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified))
+    _claude_json(
+        ws,
+        {
+            "verdict": "reject",
+            "confidence": 0.8,
+            "findings": [{"item": "c1", "severity": "suspect", "note": "dim"}],
+            "summary": "nits",
+        },
+    )
+    out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
+    assert (out.verdict, out.effective, out.assessment) == ("reject", "approve", "")  # no registry: no id
+    assert "`approve` (the judge said `reject`: reject without a bad finding" in out.comment
+    _claude_json(ws, {"verdict": "approve", "confidence": 0.3, "findings": [], "summary": "unsure"})
+    out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
+    assert out.effective == "escalate" and "under the 0.6 floor" in out.comment

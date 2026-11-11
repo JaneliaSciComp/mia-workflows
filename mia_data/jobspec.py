@@ -33,6 +33,7 @@ import yaml
 
 from autodev.gitops import GitError, Mirror, git
 from autodev.jobs import JobSpec
+from mia_core.judge.evidence import command as judge_command
 from mia_core.locks import LockDir
 
 from .binding import hosts, missing_hosts, record_urls
@@ -296,12 +297,13 @@ def _spec(
     ro_inputs: list[Path | None],
     record: str | None = None,
     writable: bool = False,
+    walltime_min: int | None = None,
     **kwargs: Any,
 ) -> JobSpec:
     """The JobSpec shared by every kind: harness env vars, mounts, and the wrapper that records the exit code.
 
     `record` enables the per-dataset download cache (read-write when `writable`); `ro_inputs` are extra
-    read-only mounts (None entries are skipped)."""
+    read-only mounts (None entries are skipped); `walltime_min` overrides limits.job_walltime_min."""
     assert_pin(cfg, pins)  # the admitted environment, or no job
     harness_src = harness_snapshot(cfg, pins.harness_commit)  # the admitted source (made at admission; idempotent)
     env = {
@@ -332,7 +334,7 @@ def _spec(
         name=f"{cfg.deployment}-{kind}",
         command=f'set -u\n{prelude}{body}\nrc=$?\necho "$rc" > exit_code\nexit "$rc"\n',
         workspace=str(workspace),
-        walltime_min=cfg.limits.job_walltime_min,
+        walltime_min=walltime_min or cfg.limits.job_walltime_min,
         allow_hosts=allow_hosts,
         ro_mounts=ro_mounts,
         rw_mounts=rw_mounts,
@@ -415,3 +417,22 @@ def verify_job(cfg: Config, args: JobArgs, crops_dir: Path, existing: Path | Non
         + f" --out verify.json; v=$?\nharness preview {crops} --out preview && (exit $v)"
     )  # overlays even if a crop fails
     return _spec(cfg, "verify", Path(args.workspace), args.pins, body, [], [crops_dir, _parent(existing)])
+
+
+def judge_job(cfg: Config, args: JobArgs) -> JobSpec:
+    """The judge (spec autonomous-gates §4): Claude Code with read-only tools over `<workspace>/evidence/`, which
+    prepare_judge wrote. No hosts of its own (Anthropic's come from the csub policy's [agents] table), no dataset
+    cache, no snippet snapshot: it looks at evidence and writes one JSON verdict."""
+    return _spec(
+        cfg,
+        "judge",
+        Path(args.workspace),
+        args.pins,
+        judge_command(cfg.judge.model, cfg.judge.max_budget_usd),
+        [],
+        [],
+        walltime_min=cfg.judge.walltime_min,
+        agent="claude",
+        cpus=1,
+        mem_mb=cfg.agent.mem_mb,
+    )

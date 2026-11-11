@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         GalleryResult,
         JobArgs,
         JobDone,
+        JudgeResult,
         LabelEvent,
         LockTaken,
         MatchResult,
@@ -63,6 +64,10 @@ DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent f
 NOT_AUTHORIZED = "approve recorded as {id}, but publication is not authorized: {why}"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the label again"
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
+
+
+class JudgeFailed(Exception):
+    """The judge job did not end well; in shadow this is a comment, never the round's end."""
 
 
 class RoundFailed(Exception):
@@ -339,7 +344,8 @@ class MiaDataDataset:
         limits = await self._limits()
         budgeted = workflow.patched("l-budget")
         if budgeted:  # the operator's switches first: the pause, then the root budget (spec autonomous-gates §8)
-            await self._reserve(key, kind, limits.agent_max_budget_usd if kind == "match" else 0.0)
+            usd = {"match": limits.agent_max_budget_usd, "judge": limits.judge_max_budget_usd}.get(kind, 0.0)
+            await self._reserve(key, kind, usd)
         walltime = timedelta(minutes=limits.walltime_min)
         try:
             job_id = await self._act(
@@ -622,6 +628,7 @@ class MiaDataDataset:
             return await self._finish(
                 "needs-human", "; ".join(["the crops failed; nothing is published", *failed_jobs])
             )
+        await self._judge_crops(test)
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
         await self._from_review()
@@ -643,6 +650,61 @@ class MiaDataDataset:
             await self._assess("reject", event, subject)
             feedback = await self._feedback(event)
             await self._develop({"what_fails": feedback}, state.snippet_issue, binding=state.binding)
+
+    async def _judge_crops(self, test: Test) -> JudgeResult | None:
+        """The crop judge over a passing set (spec autonomous-gates §4.2, §9): evidence, the job, the assessment,
+        one comment. Off, or a run from before `m-crop-judge`: nothing. In shadow nothing here changes the round's
+        course: a failed job or an unreadable verdict is a comment and the human label decides; only the operator's
+        switches (the pause, the root budget) outrank it."""
+        if not workflow.patched("m-crop-judge"):
+            return None
+        limits = await self._limits()
+        if limits.crop_judge == "off" or not (test.crop_workspace and test.verify_workspace):
+            return None
+        state = self.state
+        assert state.round_id
+        marker = f"judge crops {state.round_id} {test.sha}"
+        try:
+            verify = await self._act(
+                "read_verify", test.verify_workspace, test.crop_workspace, result_type=VerifyResult
+            )
+            workspace = await self._act(
+                "prepare_judge",
+                state.issue,
+                state.round_id,
+                "crops",
+                test.crop_workspace,
+                test.verify_workspace,
+                verify.crops,
+                1,
+                seconds=600,
+                result_type=str,
+            )
+            job = await self._job("judge", workspace, workspace_kind=f"judge-{test.sha[:12]}")
+            if not job_succeeded(job):
+                raise JudgeFailed(describe_failure("judge", job))
+            result = await self._act(
+                "read_judge",
+                state.issue,
+                state.round_id,
+                workspace,
+                "crops",
+                "crop_set",
+                f"{state.round_id}:{test.test_id}",
+                limits.crop_judge,
+                seconds=300,
+                result_type=JudgeResult,
+            )
+        except (ActivityError, JudgeFailed) as error:
+            await self._act(
+                "comment",
+                state.issue,
+                f"The crop judge did not run to the end: {error_message(error)}. The human label decides.",
+                marker,
+            )
+            return None
+        await self._act("comment", state.issue, result.comment, marker)
+        return result
 
     async def _assess(self, verdict: str, event: LabelEvent, subject: tuple[str, str]) -> AssessmentWritten:
         """Record a human verdict as an assessment (spec autonomous-gates §5) and ask whether the subject is
@@ -946,6 +1008,8 @@ class MiaDataDataset:
         )
         pr_url = await self._act("comment", pr.pr, pr_report, marker, "snippets", state.binding, state.binding_hash)
         issue_url = await self._act("comment", state.issue, report, marker, "data", state.binding, state.binding_hash)
+        if test.ok:
+            await self._judge_crops(test)
         url = pr_url or issue_url  # the commit status links the PR comment
         current = await self._act("pr_state", pr.pr, result_type=PrUpdate)
         await self._act(
