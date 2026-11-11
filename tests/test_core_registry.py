@@ -155,6 +155,8 @@ def test_assessment_budget_and_volume_paths():
     reg = Registry("http://svc", "t", transport=transport(seen, body={"ok": True, "assessments": [], "volumes": []}))
     reg.put_assessment({"id": "a1", "gate": "crops"})
     reg.assessments(subject_kind="artifact", subject_ref="art1")
+    reg.assessments(by="judge", before="a0", limit=5)
+    reg.decisions("crops", before="a0")
     reg.reserve("o/r#7", "job-1", "match", 5.0, {"max_usd": 10})
     reg.settle("o/r#7", "job-1", usd=1.0, fetched_bytes=3)
     reg.delete_volume("b", "rec/v0.zarr")
@@ -162,9 +164,11 @@ def test_assessment_budget_and_volume_paths():
     assert [(r.method, r.url.raw_path.decode()) for r in seen] == [
         ("PUT", "/assessments/a1"),
         ("GET", "/assessments?subject_kind=artifact&subject_ref=art1"),
+        ("GET", "/assessments?by=judge&before=a0&limit=5"),
+        ("GET", "/decisions?gate=crops&before=a0"),
         ("POST", "/budgets/o%2Fr%237/reserve"),
         ("POST", "/budgets/o%2Fr%237/settle"),
         ("DELETE", "/buffers/b/volumes/rec%2Fv0.zarr"),
         ("GET", "/buffers/b/volumes"),
     ]
-    assert json.loads(seen[3].content) == {"reservation_id": "job-1", "usd": 1.0, "fetched_bytes": 3, "staged_bytes": 0}
+    assert json.loads(seen[5].content) == {"reservation_id": "job-1", "usd": 1.0, "fetched_bytes": 3, "staged_bytes": 0}

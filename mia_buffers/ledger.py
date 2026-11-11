@@ -493,16 +493,54 @@ class Ledger:
         subject_kind: str | None = None,
         subject_ref: str | None = None,
         gate: str | None = None,
+        by: str | None = None,
+        before: str | None = None,
         limit: int = 200,
     ) -> list[dict]:
-        """The assessments matching every given filter, newest first."""
+        """The assessments matching every given filter, newest first. `before` is an assessment id (ids sort by
+        time): only older rows, the page's cursor for loading further back."""
         with self._lock:
             rows = self._db.execute(
                 "SELECT data FROM assessments WHERE (? IS NULL OR subject_kind = ?) AND (? IS NULL OR subject_ref = ?) "
-                "AND (? IS NULL OR gate = ?) ORDER BY at DESC, id DESC LIMIT ?",
-                (subject_kind, subject_kind, subject_ref, subject_ref, gate, gate, limit),
+                "AND (? IS NULL OR gate = ?) AND (? IS NULL OR author = ?) AND (? IS NULL OR id < ?) "
+                "ORDER BY id DESC LIMIT ?",
+                (subject_kind, subject_kind, subject_ref, subject_ref, gate, gate, by, by, before, before, limit),
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def agreement(self, gate: str, limit: int = 5000) -> dict:
+        """How the judge and the humans agree at a gate (spec autonomous-gates §9): per subject with a judge
+        assessment, its newest judge verdict against the newest human verdict; no human verdict yet is `pending`.
+        Returns {"judged", "agree", "disagree", "pending", "pairs": [{subject, judge, human, agree}]}."""
+        newest_judge: dict[str, dict] = {}
+        newest_human: dict[str, dict] = {}
+        for row in self.assessments(gate=gate, limit=limit):  # newest first: the first seen per subject wins
+            subject = row.get("subject") or {}
+            key = f"{subject.get('kind')}:{subject.get('ref')}"
+            by = str(row.get("by", ""))
+            if by == "judge":
+                newest_judge.setdefault(key, row)
+            elif by.startswith("human:"):
+                newest_human.setdefault(key, row)
+        pairs = []
+        for key, judge in newest_judge.items():
+            human = newest_human.get(key)
+            pairs.append(
+                {
+                    "subject": key,
+                    "judge": judge.get("verdict"),
+                    "human": human.get("verdict") if human else None,
+                    "agree": None if human is None else judge.get("verdict") == human.get("verdict"),
+                    "at": judge.get("at"),
+                }
+            )
+        return {
+            "judged": len(pairs),
+            "agree": sum(1 for pair in pairs if pair["agree"] is True),
+            "disagree": sum(1 for pair in pairs if pair["agree"] is False),
+            "pending": sum(1 for pair in pairs if pair["agree"] is None),
+            "pairs": pairs[:200],
+        }
 
     # --- budgets: what each root request has reserved and spent (spec autonomous-gates §8) ----------
 

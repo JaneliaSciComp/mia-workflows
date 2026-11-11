@@ -957,6 +957,34 @@ def test_assessment_routes(tmp_path):
     listed = call(s, "GET", "/assessments", {"subject_kind": "crop_set", "subject_ref": "i7-e11:s"})[1]
     assert listed == {"assessments": [row]}
     assert call(s, "GET", "/assessments", {"gate": "staged"})[1] == {"assessments": []}
+    judged = new_assessment(
+        gate="crops", subject_kind="crop_set", subject_ref="i7-e11:s", verdict="approve", by="judge", at=11.0
+    )
+    worker(s, "PUT", f"/assessments/{judged['id']}", judged)
+    assert call(s, "GET", "/assessments", {"by": "judge"})[1] == {"assessments": [judged]}
+    assert call(s, "GET", "/assessments", {"before": judged["id"]})[1] == {"assessments": [row]}
+    assert call(s, "GET", "/assessments", {"limit": "0"})[0] == 422
+
+
+def test_decisions_route_is_open_and_returns_agreement(tmp_path):
+    from mia_core.judge.policy import GATES, new_assessment
+
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    human = new_assessment(
+        gate="crops", subject_kind="crop_set", subject_ref="i7-e11:s", verdict="approve", by="human:a", at=10.0
+    )
+    judge = new_assessment(
+        gate="crops", subject_kind="crop_set", subject_ref="i7-e11:s", verdict="approve", by="judge", at=11.0
+    )
+    for row in (human, judge):
+        worker(s, "PUT", f"/assessments/{row['id']}", row)
+    status, out, _ = call(s, "GET", "/decisions")
+    assert status == 200 and out["assessments"] == [judge, human] and set(out["agreement"]) == set(GATES)
+    assert out["agreement"]["crops"]["agree"] == 1 and out["agreement"]["review"]["judged"] == 0
+    only = call(s, "GET", "/decisions", {"gate": "crops", "limit": "1"})[1]
+    assert only["assessments"] == [judge] and list(only["agreement"]) == ["crops"]
+    assert call(s, "GET", "/decisions", {"before": judge["id"]})[1]["assessments"] == [human]
+    assert call(s, "GET", "/decisions", {"gate": "vibes"})[0] == 422
 
 
 def test_budget_routes(tmp_path):

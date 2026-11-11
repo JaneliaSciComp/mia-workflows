@@ -210,6 +210,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
     <a href="#buffers" data-tab="buffers">Buffers</a>
     <a href="#cache" data-tab="cache">Cache</a>
     <a href="#preparation" data-tab="preparation">Preparation</a>
+    <a href="#decisions" data-tab="decisions">Decisions</a>
     <a href="#docs" data-tab="docs">Docs</a>
   </nav>
   <span class="catref" id="catref">no catalog synced</span>
@@ -281,6 +282,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 <section data-view="buffers" hidden><div id="buffersBody"></div></section>
 <section data-view="cache" hidden><div id="cacheBody"></div></section>
 <section data-view="preparation" hidden><div id="prepBody"></div></section>
+<section data-view="decisions" hidden><div id="decBody"></div></section>
 <section data-view="docs" class="docs" hidden>
   <nav class="tabs subtabs" aria-label="Documents">
     <a href="#docs" data-doc-tab="guide">Guide</a>
@@ -1759,13 +1761,53 @@ async function viewPreparation() {
     ], by("needs-human"), "Nothing needs a human.")));
 }
 
+// ---- decisions: every assessment (spec autonomous-gates §5, §10) and how the judge agrees with the humans
+const VERDICT_KIND = { approve: "pool", reject: "warn", escalate: "" };
+const subjectLink = subject => {  // a crop set's ref starts with the round id, i<issue>-e<event>: link the dataset issue
+  const issue = subject?.kind === "crop_set" ? issueOf(subject.ref || "") : null;
+  return issue ? ghIssue(S.meta.datasets_repo, issue) : "";
+};
+function agreementLine(gate, a) {
+  if (!a || !a.judged) return el("div", { class: "small" }, `${gate}: no judge verdict yet`);
+  return el("div", { class: "small" }, `${gate}: ${num(a.judged)} judged · ${num(a.agree)} agree · ${num(a.disagree)} disagree · ${num(a.pending)} awaiting a human`);
+}
+async function viewDecisions(arg) {
+  const root = $("decBody");
+  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  const gate = ["crops", "review", "code", "staged"].includes(arg) ? arg : "";
+  const out = await load("/decisions" + (gate ? `?gate=${gate}` : ""));
+  if (!out) { root.replaceChildren(el("div", { class: "empty" }, "GET /decisions failed; the service log says why.")); return; }
+  const rows = out.assessments || [];
+  // a verdict is overruled when a later reject exists for the same subject (a revocation, or a human disagreeing)
+  const laterReject = r => rows.some(o => o.verdict === "reject" && o.id > r.id && o.subject?.kind === r.subject?.kind && o.subject?.ref === r.subject?.ref);
+  const cols = [
+    { label: "when", cell: r => when(r.at) },
+    { label: "gate", cell: r => r.gate },
+    { label: "subject", wrap: true, cell: r => el("span", {}, `${r.subject?.kind || ""} `, code(r.subject?.ref, 24), " ", subjectLink(r.subject)) },
+    { label: "verdict", cell: r => el("span", {}, pill(r.verdict, VERDICT_KIND[r.verdict] ?? ""), r.verdict === "approve" && laterReject(r) ? el("span", { class: "small" }, " overruled") : null) },
+    { label: "by", cell: r => r.by },
+    { label: "confidence", num: true, cell: r => r.confidence == null ? "" : Number(r.confidence).toFixed(2) },
+    { label: "model", cell: r => r.model ? code(r.model, 24) : "" },
+    { label: "summary", wrap: true, cell: r => r.summary || "" },
+  ];
+  const gates = el("div", { class: "links" }, ...["", "crops", "review", "code", "staged"].map(g => el("a", { href: "#decisions" + (g ? "/" + g : ""), "aria-current": g === gate ? "page" : null }, g || "all gates")));
+  const older = rows.length ? el("p", {}, el("a", { href: "#", onclick: async e => { e.preventDefault(); const more = await load(`/decisions?${gate ? `gate=${gate}&` : ""}before=${encodeURIComponent(rows[rows.length - 1].id)}`); if (more?.assessments?.length) { rows.push(...more.assessments); render(); } else e.target.replaceWith(el("span", { class: "small" }, "nothing older")); } }, "load older")) : null;
+  const render = () => root.replaceChildren(
+    gates,
+    card("Judge agreement", "Per gate: subjects with a judge verdict, and whether the newest human label agrees. Shadow mode records the judge's verdict and lets the human decide; a gate goes active on these numbers.",
+      ...Object.entries(out.agreement || {}).map(([g, a]) => agreementLine(g, a))),
+    card("Assessments", "Every decision on record, newest first: human labels, judge verdicts, policy events (repairs). A human approve that a later reject overrules is marked.",
+      table(cols, rows, "No assessment yet."), older));
+  render();
+}
+
 // ---- shell: top bar, theme, hash routing
 function viewDocs(arg) {  // static: show one of the two documents and mark its sub-tab
   const doc = arg === "architecture" ? "architecture" : "guide";
   document.querySelectorAll("[data-doc]").forEach(a => { a.hidden = a.dataset.doc !== doc; });
   document.querySelectorAll("[data-doc-tab]").forEach(a => { if (a.dataset.docTab === doc) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
 }
-const VIEWS = { datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation, docs: viewDocs };
+const VIEWS = { datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation, decisions: viewDecisions, docs: viewDocs };
 const REFRESH_MS = 30000;  // the buffer views poll; the others reload when their tab is clicked
 let refreshTimer = 0;
 function route() {

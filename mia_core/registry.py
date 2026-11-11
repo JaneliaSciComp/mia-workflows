@@ -176,12 +176,32 @@ class Registry:
         return self.request("PUT", f"/assessments/{quote(assessment['id'], safe='')}", json=assessment)
 
     def assessments(
-        self, *, subject_kind: str | None = None, subject_ref: str | None = None, gate: str | None = None
+        self,
+        *,
+        subject_kind: str | None = None,
+        subject_ref: str | None = None,
+        gate: str | None = None,
+        by: str | None = None,
+        before: str | None = None,
+        limit: int | None = None,
     ) -> list[dict]:
-        """The matching assessments, newest first."""
-        given = (("subject_kind", subject_kind), ("subject_ref", subject_ref), ("gate", gate))
+        """The matching assessments, newest first; `before` (an assessment id) pages further back."""
+        given = (
+            ("subject_kind", subject_kind),
+            ("subject_ref", subject_ref),
+            ("gate", gate),
+            ("by", by),
+            ("before", before),
+            ("limit", limit),
+        )
         params = {name: value for name, value in given if value is not None}
         return self.request("GET", "/assessments", params=params or None)["assessments"]
+
+    def decisions(self, gate: str | None = None, *, before: str | None = None, limit: int | None = None) -> dict:
+        """{assessments, agreement}: the Decisions view's data (spec autonomous-gates §10)."""
+        given = (("gate", gate), ("before", before), ("limit", limit))
+        params = {name: value for name, value in given if value is not None}
+        return self.request("GET", "/decisions", params=params or None)
 
     def assessment(self, assessment_id: str) -> dict | None:
         return self._lookup(f"/assessments/{quote(assessment_id, safe='')}")

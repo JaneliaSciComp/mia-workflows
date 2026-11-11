@@ -493,3 +493,63 @@ def test_an_idle_root_past_max_days_starts_a_new_epoch(tmp_path):
     fresh = led.reserve("r", "job-3", "match", 1.0, caps, now=15 * 86400.0)
     assert fresh["ok"] and fresh["usage"]["since"] == 15 * 86400.0 and fresh["usage"]["jobs"] == 1
     assert fresh["usage"]["epochs"] == 2 and fresh["usage"]["spent_usd"] == 0.0
+
+
+def test_assessments_before_cursor_and_by_filter(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    led = Ledger(tmp_path / "l.sqlite")
+    rows = [
+        new_assessment(gate="crops", subject_kind="crop_set", subject_ref=f"s{i}", verdict="approve", by=by, at=at)
+        for i, (by, at) in enumerate([("human:a", 10.0), ("judge", 20.0), ("human:b", 30.0)])
+    ]
+    for row in rows:
+        led.put_assessment(row)
+    assert [r["by"] for r in led.assessments()] == ["human:b", "judge", "human:a"]
+    assert [r["by"] for r in led.assessments(before=rows[2]["id"])] == ["judge", "human:a"]
+    assert led.assessments(before=rows[2]["id"], limit=1) == [rows[1]]
+    assert led.assessments(by="judge") == [rows[1]] and led.assessments(before=rows[0]["id"]) == []
+
+
+def test_agreement_pairs_judge_with_newest_human(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    led = Ledger(tmp_path / "l.sqlite")
+
+    def put(ref, verdict, by, at):
+        led.put_assessment(
+            new_assessment(gate="crops", subject_kind="crop_set", subject_ref=ref, verdict=verdict, by=by, at=at)
+        )
+
+    put("s1", "reject", "human:a", 10.0)  # relabelled later: the newest human verdict counts
+    put("s1", "approve", "judge", 11.0)
+    put("s1", "approve", "human:a", 12.0)
+    put("s2", "approve", "judge", 20.0)  # no human yet
+    put("s3", "reject", "judge", 30.0)
+    put("s3", "approve", "human:b", 31.0)
+    put("s4", "approve", "human:c", 40.0)  # never judged: not a pair
+    put("art", "approve", "judge", 50.0)  # another gate's row must not count here
+    led.put_assessment(
+        new_assessment(
+            gate="staged", subject_kind="artifact", subject_ref="art", verdict="approve", by="judge", at=51.0
+        )
+    )
+    out = led.agreement("crops")
+    assert (out["judged"], out["agree"], out["disagree"], out["pending"]) == (4, 1, 1, 2)
+    by_subject = {pair["subject"]: pair for pair in out["pairs"]}
+    assert by_subject["crop_set:s1"]["agree"] is True and by_subject["crop_set:s1"]["human"] == "approve"
+    assert by_subject["crop_set:s3"] == {
+        "subject": "crop_set:s3",
+        "judge": "reject",
+        "human": "approve",
+        "agree": False,
+        "at": by_subject["crop_set:s3"]["at"],
+    }
+    assert by_subject["crop_set:s2"]["agree"] is None and "crop_set:s4" not in by_subject
+    assert led.agreement("staged")["judged"] == 1 and led.agreement("review") == {
+        "judged": 0,
+        "agree": 0,
+        "disagree": 0,
+        "pending": 0,
+        "pairs": [],
+    }

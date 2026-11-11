@@ -254,6 +254,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/assessments/([^/]+)$"), "put_assessment", "worker"),
     ("GET", re.compile(r"^/assessments/([^/]+)$"), "get_assessment", "read"),
     ("GET", re.compile(r"^/assessments$"), "list_assessments", "read"),
+    ("GET", re.compile(r"^/decisions$"), "decisions", "read"),
     ("POST", re.compile(r"^/budgets/([^/]+)/reserve$"), "reserve", "worker"),
     ("POST", re.compile(r"^/budgets/([^/]+)/settle$"), "settle", "worker"),
     ("GET", re.compile(r"^/budgets/([^/]+)$"), "get_budget", "read"),
@@ -503,9 +504,23 @@ class BufferService:
             subject_kind=query.get("subject_kind"),
             subject_ref=query.get("subject_ref"),
             gate=query.get("gate"),
+            by=query.get("by"),
+            before=query.get("before"),
             limit=_int(query, "limit", 200, low=1, high=1000),
         )
         return 200, {"assessments": rows}, {}
+
+    def _decisions(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The page's Decisions view (spec autonomous-gates §10): the newest assessments and, per gate, how the
+        judge and the humans agree."""
+        gate = query.get("gate")
+        if gate is not None and gate not in GATES:
+            raise HttpError(422, f"gate must be one of {list(GATES)}, got {gate!r}")
+        rows = self.ledger.assessments(
+            gate=gate, before=query.get("before"), limit=_int(query, "limit", 200, low=1, high=1000)
+        )
+        gates = [gate] if gate else list(GATES)
+        return 200, {"assessments": rows, "agreement": {name: self.ledger.agreement(name) for name in gates}}, {}
 
     def _reserve(self, root: str, *, query: dict[str, str], body: bytes) -> Response:
         parsed = _parse(ReserveBody, body)
