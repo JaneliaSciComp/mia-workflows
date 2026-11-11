@@ -104,3 +104,11 @@ def test_shared_agent_hosts_still_refused_by_mia_data(tmp_path):
 
 def test_evaluate_is_off_by_default(tmp_path):
     assert make_cfg(tmp_path).evaluate.enabled is False
+
+
+def test_judge_section_loads_and_checks_model(tmp_path):
+    cfg = make_cfg(tmp_path, judge={"crops": {"mode": "shadow"}})
+    assert cfg.judge.crops.mode == "shadow" and cfg.judge.model == "opus"
+    with pytest.raises(ValidationError, match="judge.model"):
+        make_cfg(tmp_path, judge={"crops": {"mode": "shadow"}, "model": "sonnet"})
+    make_cfg(tmp_path, judge={"model": "sonnet"})  # off: the same model is allowed

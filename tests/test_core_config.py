@@ -173,3 +173,30 @@ def test_set_pause_survives_blank_lines_comments_and_a_nested_pause(tmp_path):
     set_pause(manifest, True)
     text = manifest.read_text()
     assert paused(manifest) is True and "    pause: false" in text and "  pause: true" in text
+
+
+def test_judge_cfg_defaults_and_enabled_gates():
+    from mia_core.config import JudgeCfg
+
+    cfg = JudgeCfg()
+    assert cfg.model == "opus" and cfg.max_budget_usd == 2.0 and cfg.min_confidence == 0.6
+    assert cfg.crops.mode == "off" and cfg.review.mode == "off" and cfg.crops.max_suspect == 2
+    assert cfg.enabled_gates() == frozenset()
+    assert JudgeCfg(crops={"mode": "active"}, review={"mode": "shadow"}).enabled_gates() == frozenset({"crops"})
+    assert JudgeCfg(crops={"mode": "shadow"}).on_gates() == frozenset({"crops"})
+
+
+def test_judge_cfg_refuses_same_model_when_a_gate_is_on():
+    from mia_core.config import JudgeCfg
+
+    JudgeCfg().check_model("opus")  # every gate off: nothing to check
+    JudgeCfg(crops={"mode": "shadow"}).check_model("sonnet")
+    JudgeCfg(crops={"mode": "shadow"}, allow_same_model=True).check_model("opus")
+    with pytest.raises(ValueError, match="judge.model.*agent.model"):
+        JudgeCfg(crops={"mode": "shadow"}).check_model("opus")
+
+
+def test_gate_mode_takes_yamls_bare_off():
+    from mia_core.config import GateCfg
+
+    assert GateCfg(mode=False).mode == "off"  # `mode: off` in YAML is False

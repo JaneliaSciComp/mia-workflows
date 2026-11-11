@@ -10,6 +10,7 @@ import copy
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -78,6 +79,53 @@ class AutonomyCfg(BaseModel):
     def caps(self) -> dict[str, float]:
         """The root caps as the `caps` dict buffer-api's reserve route takes."""
         return dict(self.root.model_dump())
+
+
+class GateCfg(BaseModel):
+    """One judged gate (spec autonomous-gates §9): `off` is today, `shadow` records the verdict beside the human's and
+    decides nothing, `active` lets the verdict authorize. `max_suspect` is how many `suspect` crops a set may carry
+    and still be approved (§4.2)."""
+
+    mode: Literal["off", "shadow", "active"] = "off"
+    max_suspect: int = Field(default=2, ge=0)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _bare_off(cls, value: object) -> object:
+        """YAML reads a bare `off` as false; take it as the mode it was meant to be."""
+        return "off" if value is False else value
+
+
+class JudgeCfg(BaseModel):
+    """The judge job (spec autonomous-gates §4): the model (a different one from the authors'), what one run may
+    cost and run for, the confidence under which it abstains, and the mode of each gate."""
+
+    model: str = "opus"
+    max_budget_usd: float = Field(default=2.0, gt=0)
+    walltime_min: int = Field(default=30, gt=0)
+    min_confidence: float = Field(default=0.6, ge=0, le=1)
+    allow_same_model: bool = False  # the independence precaution (§4) may be waived for a test deployment
+    crops: GateCfg = GateCfg()
+    review: GateCfg = GateCfg()
+
+    def _gates(self) -> dict[str, GateCfg]:
+        return {"crops": self.crops, "review": self.review}
+
+    def on_gates(self) -> frozenset[str]:
+        """The gates whose judge runs at all (shadow or active)."""
+        return frozenset(gate for gate, cfg in self._gates().items() if cfg.mode != "off")
+
+    def enabled_gates(self) -> frozenset[str]:
+        """The gates whose judge verdict authorizes (`authorized(enabled_gates=...)`)."""
+        return frozenset(gate for gate, cfg in self._gates().items() if cfg.mode == "active")
+
+    def check_model(self, author_model: str) -> None:
+        """A judge that runs must not be the model that authored the work, unless the operator says so."""
+        if self.on_gates() and not self.allow_same_model and self.model == author_model:
+            raise ValueError(
+                f"judge.model {self.model!r} is the author's agent.model; a judge must be a different model "
+                "(or set judge.allow_same_model: true)"
+            )
 
 
 def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:

@@ -21,7 +21,7 @@ import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR, AgentCfg, TemporalCfg, is_github_host, load_dotenv
-from mia_core.config import AutonomyCfg, ServiceCfg, load_service_config, manifest_path
+from mia_core.config import AutonomyCfg, JudgeCfg, ServiceCfg, load_service_config, manifest_path
 
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
@@ -152,6 +152,7 @@ class Config(BaseModel):
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg(namespace="mia-data")
     autonomy: AutonomyCfg = AutonomyCfg()
+    judge: JudgeCfg = JudgeCfg()
     paths: PathsCfg
     gallery: GalleryCfg = GalleryCfg()
     crops: CropsCfg = CropsCfg()
@@ -173,6 +174,7 @@ class Config(BaseModel):
         self._resolve_paths()
         self._check_limits()
         self._check_agent()
+        self.judge.check_model(self.agent.model)
         self._check_network()
         return self
 

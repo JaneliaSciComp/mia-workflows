@@ -17,9 +17,9 @@ import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
 from mia_core.config import PROJECT_DIR as PROJECT_DIR
+from mia_core.config import JudgeCfg, load_service_config, manifest_path
 from mia_core.config import TemporalCfg as TemporalCfg
 from mia_core.config import load_dotenv as load_dotenv
-from mia_core.config import load_service_config, manifest_path
 
 # environment variable -> the YAML key path it overrides
 _ENV_OVERRIDES = {
@@ -125,6 +125,7 @@ class Config(BaseModel):
     temporal: TemporalCfg = TemporalCfg()
     paths: PathsCfg
     agent: AgentCfg = AgentCfg()
+    judge: JudgeCfg = JudgeCfg()
 
     @model_validator(mode="after")
     def _finish(self) -> Config:
@@ -134,6 +135,7 @@ class Config(BaseModel):
         self._check_github()
         self._resolve_paths()
         self._check_agent()
+        self.judge.check_model(self.agent.model)
         self._check_mounts()
         return self
 

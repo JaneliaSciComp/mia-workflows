@@ -108,6 +108,19 @@ keeper:
   minutes: 30
   catalog_sync_hours: 24
 
+# The judge (autonomous-gates spec §4, §9): a read-only Claude Code job that looks at the evidence of a gate (crop
+# galleries, a PR diff) and answers approve / reject / escalate. `model` must differ from the authors' agent.model.
+# Each gate has a mode: `off` (today), `shadow` (the verdict is recorded beside the human label and decides
+# nothing; the Decisions tab shows the agreement), `active` (the verdict authorizes). A gate goes active only after
+# its shadow numbers say so. `min_confidence`: under it the judge abstains and a human decides.
+judge:
+  model: opus
+  max_budget_usd: 2
+  walltime_min: 30
+  min_confidence: 0.6
+  crops: {mode: "off"}
+  review: {mode: "off"}
+
 # Per request, and the operator's switches (autonomous-gates spec). `pause`: `mia pause` and `mia resume` flip it;
 # every worker re-reads it before each job and a paused round stops at its next job. `quarantine_days`: a revoked
 # artifact is held this long before the keeper may evict it. `root`: what one request (a buffer, prep or dataset
