@@ -65,6 +65,7 @@ class Mocks:
         observe_fatal=False,
         judge=False,
         judge_state="DONE",
+        judge_gate=None,
     ):
         self.observe_failures, self.report_failures, self.reported = observe_failures, report_failures, 0
         self.observe_fatal = observe_fatal
@@ -73,6 +74,7 @@ class Mocks:
         self.existing_pr, self.job_state, self.exit_code = existing_pr, job_state, exit_code
         self.publish_pr, self.await_failures, self.merge_ok = publish_pr, await_failures, merge_ok
         self.judge, self.judge_state = judge, judge_state  # judge.review.mode on, and how its job ends
+        self.judge_gate = judge_gate  # an asyncio.Event the judge's await waits on, to hold the judge back
 
     def acts(self):
         @activity.defn(name="set_stage")
@@ -169,6 +171,8 @@ class Mocks:
                 self.await_failures -= 1
                 raise ApplicationError("worker died mid-await")
             if a.job_id.startswith("judge-"):
+                if self.judge_gate is not None:
+                    await self.judge_gate.wait()
                 return JobOutcome(a.job_id, self.judge_state, 0 if self.judge_state == "DONE" else 1)
             return JobOutcome(a.job_id, self.job_state, self.exit_code)
 
@@ -359,17 +363,33 @@ async def test_bad_key_is_replaced_by_run_id(env, key):
 # --- the review judge in shadow (spec autonomous-gates §9) -----------------------------------------------------
 
 
-async def test_review_judge_in_shadow_runs_after_publish_and_pr_still_waits(env):
-    m = Mocks([snap(approved=True)], judge=True)
-    assert await run(env, m) == "merged"
+async def test_review_judge_in_shadow_runs_beside_the_watch_and_never_holds_a_merge(env):
+    import asyncio
+
+    gate = asyncio.Event()
+    m = Mocks([snap(approved=True)], judge=True, judge_gate=gate)
+    tq = f"tq-{uuid.uuid4()}"
+    async with (
+        Worker(env.client, task_queue=tq, workflows=[IssueWorkflow], activities=m.acts()),
+        Worker(env.client, task_queue=tq + "-await", activities=m.await_act()),
+    ):
+        h = await env.client.start_workflow(
+            IssueWorkflow.execute, IssueInput(7), id=f"wf-{uuid.uuid4()}", task_queue=tq
+        )
+        for _ in range(500):  # the PR is approved and merged while the judge's job is still running
+            if "merge" in m.names():
+                break
+            await asyncio.sleep(0.02)
+        assert "merge" in m.names() and "read_judge" not in m.names() and "submit_judge" in m.names()
+        gate.set()
+        assert await h.result() == "merged"
     names = m.names()
     assert (
         names.index("publish") < names.index("prepare_judge") < names.index("submit_judge") < names.index("read_judge")
     )
-    assert names.index("read_judge") < names.index("observe")  # the judge is done before the PR is watched
     (prepared,) = m.of("prepare_judge")
     assert (prepared.pr, prepared.head_sha, prepared.workspace.dir) == (5, "h1", "/w/round-1")
-    assert m.of("await")[1] == "judge-1" and not [c for c in m.of("comment") if "judge" in c.marker]
+    assert "judge-1" in m.of("await") and not [c for c in m.of("comment") if "judge" in c.marker]
 
 
 async def test_review_judge_off_runs_nothing_after_publish(env):
@@ -381,8 +401,6 @@ async def test_review_judge_off_runs_nothing_after_publish(env):
 async def test_review_judge_failure_is_a_comment_not_a_stop(env):
     m = Mocks([snap(approved=True)], judge=True, judge_state="EXIT")
     assert await run(env, m) == "merged"
-    assert "read_judge" not in m.names()
+    assert "read_judge" in m.names()  # the failure is an escalate on record
     (note,) = [c for c in m.of("comment") if c.marker == "judge-failed h1"]
-    assert note.number == 5 and note.body.startswith(
-        "The review judge did not run to the end: judge job judge-1 ended EXIT (exit 1)."
-    )
+    assert note.number == 5 and note.body.startswith("The review judge's job judge-1 ended EXIT (exit 1); its verdict")

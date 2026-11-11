@@ -59,6 +59,18 @@ def test_reject_without_bad_finding_is_approve_with_notes():
     assert effective_verdict(bad, 0.6) == ("reject", "a bad finding: c1")
 
 
+def test_a_bad_finding_rejects_whatever_the_judge_wrote():
+    approve_with_bad = Verdict("approve", 0.9, (Finding("c2", "bad", "colour bar"), Finding("c1", "ok")), "fine?")
+    assert effective_verdict(approve_with_bad, 0.6) == ("reject", "a bad finding: c2")
+
+
+def test_more_suspects_than_the_cap_reject():
+    suspects = Verdict("approve", 0.9, tuple(Finding(f"c{i}", "suspect") for i in range(3)), "meh")
+    assert effective_verdict(suspects, 0.6, max_suspect=2) == ("reject", "3 suspect findings, more than the cap of 2")
+    assert effective_verdict(suspects, 0.6, max_suspect=3) == ("approve", "approve")
+    assert effective_verdict(suspects, 0.6) == ("approve", "approve")  # no cap for this gate
+
+
 def test_low_confidence_escalates():
     verdict = Verdict("approve", 0.4, (), "unsure")
     assert effective_verdict(verdict, 0.6) == ("escalate", "confidence 0.4 is under the 0.6 floor")
@@ -127,6 +139,17 @@ def test_build_refuses_escaping_rel(tmp_path, rel):
         build(tmp_path / "judge", "q", {rel: b"x"})
 
 
+def test_build_refuses_a_symlinked_workspace(tmp_path):
+    from mia_core.judge.evidence import IndependenceError, build
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "judge").symlink_to(elsewhere)
+    with pytest.raises(IndependenceError, match="symlink"):
+        build(tmp_path / "judge", "q", {"a.txt": b"1"})
+    assert not list(elsewhere.iterdir())
+
+
 def test_build_refuses_a_huge_file(tmp_path, monkeypatch):
     import mia_core.judge.evidence as evidence
 
@@ -186,17 +209,24 @@ def test_read_claude_json(tmp_path):
 def _item(root, name, expected, category="confocal/instance"):
     item = root / name
     (item / "evidence").mkdir(parents=True)
-    (item / "evidence" / "question.md").write_text("q")
+    (item / "evidence" / "question.md").write_text(f"q {name}")
     (item / "expected.json").write_text(json.dumps({"verdict": expected, "category": category}))
     return item
 
 
-def _fake_run(answers):
-    """A subprocess.run stand-in: writes claude.json in the item's cwd from `answers[item name]` (None: no file)."""
+def _fake_run(answers, seen=None):
+    """A subprocess.run stand-in: writes claude.json in the run's cwd from `answers[item name]` (None: no file,
+    "hang": a timeout). The item is known from its question text."""
+    import subprocess
 
     def run(cmd, cwd, **kwargs):
         assert cmd[:2] == ["bash", "-c"] and "--allowedTools" in cmd[2] and kwargs["timeout"] == 30 * 60
-        answer = answers.get(cwd.name)
+        name = (cwd / "evidence" / "question.md").read_text().removeprefix("q ")
+        if seen is not None:
+            seen.append((name, cwd, sorted(path.name for path in cwd.iterdir())))
+        answer = answers.get(name)
+        if answer == "hang":
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
         if answer is not None:
             (cwd / "claude.json").write_text(json.dumps({"result": json.dumps(answer), "total_cost_usd": 0.2}))
         return None
@@ -219,8 +249,13 @@ def test_evaluate_and_summarize(tmp_path):
         "c": None,  # the run wrote nothing: abstain
         "d": {"verdict": "reject", "confidence": 0.9, "findings": [{"item": "x", "severity": "bad"}], "summary": ""},
     }
-    rows = evaluate(tmp_path, JudgeCfg(), run=_fake_run(answers))
+    seen = []
+    rows = evaluate(tmp_path, JudgeCfg(), run=_fake_run(answers, seen))
     assert rows[0] == EvalRow("a", "confocal/instance", "approve", "approve", 0.9, 0.2)
+    assert [name for name, _, _ in seen] == ["a", "b", "c", "d"]
+    for _, cwd, listing in seen:  # the judge ran in a copy: no answer key, no other item in reach
+        assert listing == ["evidence"] and not cwd.is_relative_to(tmp_path) and not cwd.exists()
+    assert not (tmp_path / "a" / "claude.json").exists()
     assert [(r.item, r.got) for r in rows] == [("a", "approve"), ("b", "approve"), ("c", "escalate"), ("d", "reject")]
     assert rows[2].cost_usd is None
     summary = summarize(rows)
@@ -232,3 +267,27 @@ def test_evaluate_and_summarize(tmp_path):
         "| all | 4 | 2 |"
     )
     assert [r.item for r in evaluate(tmp_path, JudgeCfg(), limit=1, run=_fake_run(answers))] == ["a"]
+
+
+def test_a_hung_run_is_an_escalate_not_a_crash(tmp_path):
+    from mia_core.config import JudgeCfg
+    from mia_core.judge.eval import evaluate
+
+    _item(tmp_path, "a", "approve")
+    _item(tmp_path, "b", "reject")
+    rows = evaluate(
+        tmp_path,
+        JudgeCfg(),
+        run=_fake_run(
+            {
+                "a": "hang",
+                "b": {
+                    "verdict": "reject",
+                    "confidence": 0.9,
+                    "findings": [{"item": "x", "severity": "bad"}],
+                    "summary": "",
+                },
+            }
+        ),
+    )
+    assert [(r.item, r.got, r.cost_usd) for r in rows] == [("a", "escalate", None), ("b", "reject", 0.2)]

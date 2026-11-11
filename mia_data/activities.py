@@ -464,13 +464,15 @@ class Activities:
         verify_workspace: str,
         verified: list[dict],
         attempt: int = 1,
+        tag: str = "",
     ) -> str:
-        """Make the crop judge's workspace, `<round workspace>/judge-crops-<attempt>`, with its evidence directory:
-        the question, raw.png and overlay.png of every verified crop, verify.json, the binding without the author's
-        `reasons`, and the record. Nothing from the match agent's workspace. Returns the workspace path."""
+        """Make the crop judge's workspace, `<round workspace>/judge-crops[-<tag>]-<attempt>` (`tag`: the tested
+        commit, so every head of a round keeps its own evidence), with its evidence directory: the question, raw.png
+        and overlay.png of every verified crop, verify.json, the binding without the author's `reasons`, and the
+        record. Nothing from the match agent's workspace. Returns the workspace path."""
         if gate != "crops":
             raise ValueError(f"prepare_judge knows the crops gate, not {gate!r}")
-        workspace = self._make_workspace(issue, round_id, f"judge-{gate}", attempt)
+        workspace = self._make_workspace(issue, round_id, f"judge-{gate}" + (f"-{tag}" if tag else ""), attempt)
         crop_dir = self._job_workspace(issue, round_id, crop_workspace)
         verify_dir = self._job_workspace(issue, round_id, verify_workspace)
         files = await asyncio.to_thread(gallery_files, crop_dir, verify_dir, verified)
@@ -502,7 +504,8 @@ class Activities:
             verdict = parse_verdict(text)
         except ValueError as error:
             verdict = Verdict("escalate", 0.0, (), f"unreadable verdict: {_text(str(error), 400)}")
-        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence)
+        max_suspect = self.cfg.judge.crops.max_suspect if gate == "crops" else None
+        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence, max_suspect)
         findings = [
             {"item": self._clean(f.item), "severity": f.severity, "note": self._clean(f.note)} for f in verdict.findings
         ]
@@ -527,9 +530,12 @@ class Activities:
             json.dumps({"assessment": row, "judge": dataclasses.asdict(verdict), "cost_usd": cost}, indent=1),
         )
         assessment_id = ""
-        if self.registry is not None:
-            await asyncio.to_thread(self.registry.put_assessment, row)
-            assessment_id = row["id"]
+        if self.registry is not None:  # shadow never blocks: a registry outage is logged, the round goes on
+            registry = self.registry
+            written = await asyncio.to_thread(
+                best_effort, lambda: registry.put_assessment(row), f"{round_id}: judge assessment", log
+            )
+            assessment_id = row["id"] if written else ""
         comment = render_judge_comment(
             gate,
             verdict.verdict,

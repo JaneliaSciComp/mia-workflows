@@ -182,8 +182,10 @@ def test_judge_cfg_defaults_and_enabled_gates():
     assert cfg.model == "opus" and cfg.max_budget_usd == 2.0 and cfg.min_confidence == 0.6
     assert cfg.crops.mode == "off" and cfg.review.mode == "off" and cfg.crops.max_suspect == 2
     assert cfg.enabled_gates() == frozenset()
-    assert JudgeCfg(crops={"mode": "active"}, review={"mode": "shadow"}).enabled_gates() == frozenset({"crops"})
     assert JudgeCfg(crops={"mode": "shadow"}).on_gates() == frozenset({"crops"})
+    assert JudgeCfg(crops={"mode": "shadow"}).enabled_gates() == frozenset()  # shadow authorizes nothing
+    with pytest.raises(ValueError, match="milestone N"):  # nothing grants on a judge yet: active would lie
+        JudgeCfg(crops={"mode": "active"})
 
 
 def test_judge_cfg_refuses_same_model_when_a_gate_is_on():

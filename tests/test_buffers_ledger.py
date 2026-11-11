@@ -528,6 +528,8 @@ def test_agreement_pairs_judge_with_newest_human(tmp_path):
     put("s3", "reject", "judge", 30.0)
     put("s3", "approve", "human:b", 31.0)
     put("s4", "approve", "human:c", 40.0)  # never judged: not a pair
+    put("s5", "escalate", "judge", 45.0)  # abstained: neither agreement nor disagreement
+    put("s5", "approve", "human:c", 46.0)
     put("art", "approve", "judge", 50.0)  # another gate's row must not count here
     led.put_assessment(
         new_assessment(
@@ -535,7 +537,8 @@ def test_agreement_pairs_judge_with_newest_human(tmp_path):
         )
     )
     out = led.agreement("crops")
-    assert (out["judged"], out["agree"], out["disagree"], out["pending"]) == (4, 1, 1, 2)
+    assert (out["judged"], out["agree"], out["disagree"], out["abstain"], out["pending"]) == (5, 1, 1, 1, 2)
+    assert {pair["subject"]: pair["agree"] for pair in out["pairs"]}["crop_set:s5"] is None
     by_subject = {pair["subject"]: pair for pair in out["pairs"]}
     assert by_subject["crop_set:s1"]["agree"] is True and by_subject["crop_set:s1"]["human"] == "approve"
     assert by_subject["crop_set:s3"] == {
@@ -550,6 +553,7 @@ def test_agreement_pairs_judge_with_newest_human(tmp_path):
         "judged": 0,
         "agree": 0,
         "disagree": 0,
+        "abstain": 0,
         "pending": 0,
         "pairs": [],
     }

@@ -525,12 +525,13 @@ class Ledger:
         pairs = []
         for key, judge in newest_judge.items():
             human = newest_human.get(key)
+            abstained = judge.get("verdict") == "escalate"  # the judge did not decide: neither agreement nor not
             pairs.append(
                 {
                     "subject": key,
                     "judge": judge.get("verdict"),
                     "human": human.get("verdict") if human else None,
-                    "agree": None if human is None else judge.get("verdict") == human.get("verdict"),
+                    "agree": None if human is None or abstained else judge.get("verdict") == human.get("verdict"),
                     "at": judge.get("at"),
                 }
             )
@@ -538,7 +539,8 @@ class Ledger:
             "judged": len(pairs),
             "agree": sum(1 for pair in pairs if pair["agree"] is True),
             "disagree": sum(1 for pair in pairs if pair["agree"] is False),
-            "pending": sum(1 for pair in pairs if pair["agree"] is None),
+            "abstain": sum(1 for pair in pairs if pair["judge"] == "escalate"),
+            "pending": sum(1 for pair in pairs if pair["agree"] is None and pair["judge"] != "escalate"),
             "pairs": pairs[:200],
         }
 

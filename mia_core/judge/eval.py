@@ -9,7 +9,9 @@ judge approve), false rejections and abstentions."""
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,22 +37,31 @@ class EvalRow:
     cost_usd: float | None
 
 
-def run_item(item: Path, cfg: JudgeCfg, run: Runner = subprocess.run) -> EvalRow:
-    """Run the judge in `item` (its cwd, like the job's) and read its answer; a run that fails or writes no readable
-    verdict is an `escalate`."""
+def run_item(item: Path, cfg: JudgeCfg, run: Runner = subprocess.run, max_suspect: int | None = None) -> EvalRow:
+    """Run the judge over a copy of the item's evidence in a fresh temporary directory (the answer key stays out
+    of its reach) and read its answer; a run that fails, hangs or writes no readable verdict is an `escalate`."""
+    # ponytail: on the operator's host the judge is not sandboxed, so Read works anywhere; the copy keeps the set's
+    # own expected.json files away from it, nothing more. Run the set through csub if that ceiling matters.
     expected = json.loads((item / EXPECTED_FILE).read_text())
-    (item / "claude.json").unlink(missing_ok=True)
-    run(
-        ["bash", "-c", command(cfg.model, cfg.max_budget_usd)],
-        cwd=item,
-        check=False,
-        capture_output=True,
-        timeout=cfg.walltime_min * 60,
-    )
-    text, cost, _ = read_claude_json(item)
+    with tempfile.TemporaryDirectory(prefix="judge-eval-") as scratch:
+        workspace = Path(scratch) / "run"
+        shutil.copytree(item / EVIDENCE_DIR, workspace / EVIDENCE_DIR)
+        try:
+            run(
+                ["bash", "-c", command(cfg.model, cfg.max_budget_usd)],
+                cwd=workspace,
+                check=False,
+                capture_output=True,
+                timeout=cfg.walltime_min * 60,
+            )
+        except subprocess.TimeoutExpired:
+            return EvalRow(
+                item.name, str(expected.get("category") or "unknown"), str(expected["verdict"]), "escalate", 0.0, None
+            )
+        text, cost, _ = read_claude_json(workspace)
     try:
         verdict = parse_verdict(text)
-        got, _ = effective_verdict(verdict, cfg.min_confidence)
+        got, _ = effective_verdict(verdict, cfg.min_confidence, max_suspect)
         confidence = verdict.confidence
     except ValueError:
         got, confidence = "escalate", 0.0
@@ -68,8 +79,15 @@ def items(eval_dir: Path) -> list[Path]:
     )
 
 
-def evaluate(eval_dir: Path, cfg: JudgeCfg, *, limit: int | None = None, run: Runner = subprocess.run) -> list[EvalRow]:
-    return [run_item(item, cfg, run) for item in items(eval_dir)[:limit]]
+def evaluate(
+    eval_dir: Path,
+    cfg: JudgeCfg,
+    *,
+    limit: int | None = None,
+    run: Runner = subprocess.run,
+    max_suspect: int | None = None,
+) -> list[EvalRow]:
+    return [run_item(item, cfg, run, max_suspect) for item in items(eval_dir)[:limit]]
 
 
 def summarize(rows: list[EvalRow]) -> dict[str, dict[str, int]]:

@@ -66,10 +66,6 @@ PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the la
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
 
-class JudgeFailed(Exception):
-    """The judge job did not end well; in shadow this is a comment, never the round's end."""
-
-
 class RoundFailed(Exception):
     """A job ended in a state the round cannot continue from."""
 
@@ -628,9 +624,9 @@ class MiaDataDataset:
             return await self._finish(
                 "needs-human", "; ".join(["the crops failed; nothing is published", *failed_jobs])
             )
-        await self._judge_crops(test)
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
+        await self._judge_crops(test)  # in shadow: after the gate opens, so a human verdict is only queued, never held
         await self._from_review()
 
     async def _from_review(self) -> None:
@@ -654,8 +650,8 @@ class MiaDataDataset:
     async def _judge_crops(self, test: Test) -> JudgeResult | None:
         """The crop judge over a passing set (spec autonomous-gates §4.2, §9): evidence, the job, the assessment,
         one comment. Off, or a run from before `m-crop-judge`: nothing. In shadow nothing here changes the round's
-        course: a failed job or an unreadable verdict is a comment and the human label decides; only the operator's
-        switches (the pause, the root budget) outrank it."""
+        course: a failed job or an unreadable verdict is an `escalate` on record and a comment, a refused reservation
+        (the pause, the root budget) skips the judge with a comment, and the human label decides."""
         if not workflow.patched("m-crop-judge"):
             return None
         limits = await self._limits()
@@ -663,7 +659,7 @@ class MiaDataDataset:
             return None
         state = self.state
         assert state.round_id
-        marker = f"judge crops {state.round_id} {test.sha}"
+        marker, failed = f"judge crops {state.round_id} {test.sha}", ""
         try:
             verify = await self._act(
                 "read_verify", test.verify_workspace, test.crop_workspace, result_type=VerifyResult
@@ -677,12 +673,21 @@ class MiaDataDataset:
                 test.verify_workspace,
                 verify.crops,
                 1,
+                test.sha[:12],
                 seconds=600,
                 result_type=str,
             )
-            job = await self._job("judge", workspace, workspace_kind=f"judge-{test.sha[:12]}")
+            try:
+                job = await self._job("judge", workspace, workspace_kind=f"judge-{test.sha[:12]}")
+            except RoundFailed as refused:  # the operator's switches: the judge is skipped, the round goes on
+                if limits.crop_judge != "shadow":
+                    raise
+                await self._act(
+                    "comment", state.issue, f"The crop judge was skipped: {refused}. The human label decides.", marker
+                )
+                return None
             if not job_succeeded(job):
-                raise JudgeFailed(describe_failure("judge", job))
+                failed = describe_failure("judge", job)  # read_judge still records the escalate
             result = await self._act(
                 "read_judge",
                 state.issue,
@@ -695,7 +700,7 @@ class MiaDataDataset:
                 seconds=300,
                 result_type=JudgeResult,
             )
-        except (ActivityError, JudgeFailed) as error:
+        except ActivityError as error:
             await self._act(
                 "comment",
                 state.issue,
@@ -703,7 +708,10 @@ class MiaDataDataset:
                 marker,
             )
             return None
-        await self._act("comment", state.issue, result.comment, marker)
+        body = (
+            f"The crop judge's {failed}; its verdict is recorded as an escalation.\n\n" if failed else ""
+        ) + result.comment
+        await self._act("comment", state.issue, body, marker)
         return result
 
     async def _assess(self, verdict: str, event: LabelEvent, subject: tuple[str, str]) -> AssessmentWritten:
@@ -1008,8 +1016,6 @@ class MiaDataDataset:
         )
         pr_url = await self._act("comment", pr.pr, pr_report, marker, "snippets", state.binding, state.binding_hash)
         issue_url = await self._act("comment", state.issue, report, marker, "data", state.binding, state.binding_hash)
-        if test.ok:
-            await self._judge_crops(test)
         url = pr_url or issue_url  # the commit status links the PR comment
         current = await self._act("pr_state", pr.pr, result_type=PrUpdate)
         await self._act(
@@ -1017,6 +1023,8 @@ class MiaDataDataset:
         )  # the head's own, current or not
         if test.ok and current.head_sha == head and current.state == "open":
             await self._stage("review" if loop else "pr-ready", extra=f"**Snippet PR:** {current.url or f'#{pr.pr}'}\n")
+        if test.ok:
+            await self._judge_crops(test)  # after the status and the stage: the required status never waits on it
         return current
 
     async def _merged(self, pr: PrUpdate) -> None:

@@ -465,6 +465,7 @@ async def cmd_collect_judge_set(cfg: Config, args: argparse.Namespace) -> int:
     from mia_core.judge.evidence import build as build_evidence
     from mia_core.judge.schema import prompt_text
     from mia_core.registry import Registry
+    from mia_core.untrusted import read_untrusted
 
     from .gallery import gallery_files
 
@@ -493,7 +494,7 @@ async def cmd_collect_judge_set(cfg: Config, args: argparse.Namespace) -> int:
             print(f"skipped {ref}: workspaces or record not on disk under {round_ws}")
             continue
         try:
-            verify = json.loads((verify_ws / "verify.json").read_text())
+            verify = json.loads(read_untrusted(verify_ws, "verify.json", 16 << 20) or "")  # a job wrote it
             verified = [
                 {"crop_id": crop["crop_id"], "files": crop["files"]}
                 for crop in verify.get("crops") or []

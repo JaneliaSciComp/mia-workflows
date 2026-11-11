@@ -142,8 +142,10 @@ def test_judge_eval_cli(stack, tmp_path, monkeypatch, capsys):  # noqa: F811
     monkeypatch.setenv("MIA_CONFIG", str(manifest))
     seen = {}
 
-    def evaluate(eval_dir, cfg, *, limit=None, run=None):
-        seen.update(dir=eval_dir, model=cfg.model, min_confidence=cfg.min_confidence, limit=limit)
+    def evaluate(eval_dir, cfg, *, limit=None, run=None, max_suspect=None):
+        seen.update(
+            dir=eval_dir, model=cfg.model, min_confidence=cfg.min_confidence, limit=limit, max_suspect=max_suspect
+        )
         return [
             EvalRow("a", "confocal/none", "approve", "approve", 0.9, 0.2),
             EvalRow("b", "confocal/none", "reject", "approve", 0.8, None),
@@ -151,7 +153,7 @@ def test_judge_eval_cli(stack, tmp_path, monkeypatch, capsys):  # noqa: F811
 
     monkeypatch.setattr(ops_cli.judge_eval, "evaluate", evaluate)
     assert ops_cli.main(["judge", "eval", "crops", str(tmp_path / "set"), "--limit", "2", "--model", "haiku"]) == 0
-    assert seen == {"dir": tmp_path / "set", "model": "haiku", "min_confidence": 0.5, "limit": 2}
+    assert seen == {"dir": tmp_path / "set", "model": "haiku", "min_confidence": 0.5, "limit": 2, "max_suspect": 2}
     out = capsys.readouterr().out
     assert "a\tconfocal/none\texpected approve\tgot approve\t0.9\t$0.20" in out and "\tgot approve\t0.8\t-" in out
     assert "| confocal/none | 2 | 1 | 1 | 0 | 0 |" in out and "| all | 2 | 1 | 1 | 0 | 0 |" in out

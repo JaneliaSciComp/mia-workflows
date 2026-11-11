@@ -1769,7 +1769,7 @@ const subjectLink = subject => {  // a crop set's ref starts with the round id, 
 };
 function agreementLine(gate, a) {
   if (!a || !a.judged) return el("div", { class: "small" }, `${gate}: no judge verdict yet`);
-  return el("div", { class: "small" }, `${gate}: ${num(a.judged)} judged · ${num(a.agree)} agree · ${num(a.disagree)} disagree · ${num(a.pending)} awaiting a human`);
+  return el("div", { class: "small" }, `${gate}: ${num(a.judged)} judged · ${num(a.agree)} agree · ${num(a.disagree)} disagree · ${num(a.abstain)} abstained · ${num(a.pending)} awaiting a human`);
 }
 async function viewDecisions(arg) {
   const root = $("decBody");

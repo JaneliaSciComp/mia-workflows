@@ -841,3 +841,28 @@ async def test_read_judge_reject_without_bad_is_approve(tmp_path):
     _claude_json(ws, {"verdict": "approve", "confidence": 0.3, "findings": [], "summary": "unsure"})
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
     assert out.effective == "escalate" and "under the 0.6 floor" in out.comment
+
+
+async def test_limits_carry_the_judge_config(tmp_path):
+    t = _setup(tmp_path)
+    t.a.cfg = t.cfg.model_copy(
+        update={
+            "judge": t.cfg.judge.model_copy(
+                update={"max_budget_usd": 3.5, "crops": t.cfg.judge.crops.model_copy(update={"mode": "shadow"})}
+            )
+        }
+    )
+    limits = await t.a.limits()
+    assert (limits.crop_judge, limits.judge_max_budget_usd) == ("shadow", 3.5)
+
+
+async def test_read_judge_applies_the_suspect_cap(tmp_path):
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    cw, vw, verified = _judged_round(t)
+    ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified, 1, "abc"))
+    assert ws.name == "judge-crops-abc-1"
+    findings = [{"item": f"c{i}", "severity": "suspect", "note": "dim"} for i in range(3)]
+    _claude_json(ws, {"verdict": "approve", "confidence": 0.9, "findings": findings, "summary": "meh"})
+    out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
+    assert out.effective == "reject" and "more than the cap of 2" in out.comment

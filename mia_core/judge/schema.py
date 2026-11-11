@@ -88,18 +88,22 @@ def parse_verdict(text: str) -> Verdict:
     raise ValueError(errors[-1] if errors else "empty message")
 
 
-def effective_verdict(verdict: Verdict, min_confidence: float) -> tuple[str, str]:
-    """What policy makes of the judge's answer: (approve | reject | escalate, why). Low confidence abstains; a
-    reject needs a `bad` finding (the user's rule: serious issues only), else it is an approve with notes."""
+def effective_verdict(verdict: Verdict, min_confidence: float, max_suspect: int | None = None) -> tuple[str, str]:
+    """What policy makes of the judge's answer: (approve | reject | escalate, why). Low confidence abstains; any
+    `bad` finding rejects whatever the judge wrote (spec §4.2); a reject with no `bad` finding is an approve with
+    notes (the user's rule: serious issues only); more `suspect` findings than `max_suspect` reject too."""
     if verdict.verdict == "escalate":
         return "escalate", "escalate"
     if verdict.confidence < min_confidence:
         return "escalate", f"confidence {verdict.confidence:g} is under the {min_confidence:g} floor"
-    if verdict.verdict == "reject":
-        bad = [finding.item for finding in verdict.findings if finding.severity == "bad"]
-        if not bad:
-            return "approve", "reject without a bad finding is treated as approve with notes"
+    bad = [finding.item for finding in verdict.findings if finding.severity == "bad"]
+    if bad:
         return "reject", f"a bad finding: {', '.join(bad[:5])}"
+    if verdict.verdict == "reject":
+        return "approve", "reject without a bad finding is treated as approve with notes"
+    suspects = sum(1 for finding in verdict.findings if finding.severity == "suspect")
+    if max_suspect is not None and suspects > max_suspect:
+        return "reject", f"{suspects} suspect findings, more than the cap of {max_suspect}"
     return "approve", "approve"
 
 

@@ -92,7 +92,10 @@ class GateCfg(BaseModel):
     @field_validator("mode", mode="before")
     @classmethod
     def _bare_off(cls, value: object) -> object:
-        """YAML reads a bare `off` as false; take it as the mode it was meant to be."""
+        """YAML reads a bare `off` as false; take it as the mode it was meant to be. `active` waits for milestone N:
+        nothing grants on a judge's verdict yet, so the mode would only post a false "approved automatically"."""
+        if value == "active":
+            raise ValueError("mode: active is not available yet (milestone N); use shadow")
         return "off" if value is False else value
 
 

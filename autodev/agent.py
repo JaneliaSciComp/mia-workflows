@@ -101,7 +101,11 @@ exit "$rc"
 """
 
 
-JUDGE_DIR = "judge-review"  # under the round dir, beside repo/: the judge's workspace, evidence/ inside it
+def judge_dir(round_dir: Path) -> Path:
+    """The review judge's workspace: a sibling of the round dir (`<key>/judge-r<n>`), outside the author job's
+    writable mount, so the author can plant nothing there (no CLAUDE.md, no settings, no exit_code)."""
+    round_dir = Path(round_dir)
+    return round_dir.parent / round_dir.name.replace("round-", "judge-r", 1)
 
 
 def judge_script(cfg: Config) -> str:

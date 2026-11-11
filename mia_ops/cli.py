@@ -132,7 +132,8 @@ def cmd_judge(stack: Stack, args: argparse.Namespace) -> int:
     cfg = JudgeCfg(**(data.get("judge") or {}))
     if args.model:
         cfg = cfg.model_copy(update={"model": args.model})
-    rows = judge_eval.evaluate(Path(args.dir), cfg, limit=args.limit)
+    max_suspect = cfg.crops.max_suspect if args.gate == "crops" else None  # the per-gate cap policy applies (§4.2)
+    rows = judge_eval.evaluate(Path(args.dir), cfg, limit=args.limit, max_suspect=max_suspect)
     for row in rows:
         cost = f"${row.cost_usd:.2f}" if row.cost_usd is not None else "-"
         print(f"{row.item}\t{row.category}\texpected {row.expected}\tgot {row.got}\t{row.confidence:g}\t{cost}")

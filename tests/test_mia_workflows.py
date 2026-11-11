@@ -121,7 +121,7 @@ class Mocks:
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
             rec("limits")
-            return RoundLimits(4, 16, 120, self.revisions, crop_judge=self.crop_judge)
+            return RoundLimits(4, 16, 120, self.revisions, crop_judge=self.crop_judge, judge_max_budget_usd=3.5)
 
         @activity.defn(name="set_stage")
         async def set_stage(
@@ -296,9 +296,10 @@ class Mocks:
             verify_ws: str,
             verified: list[dict],
             attempt: int = 1,
+            tag: str = "",
         ) -> str:
-            rec("prepare_judge", gate, crop_ws, verify_ws, len(verified))
-            return f"/w/{round_id}/judge-{gate}-{attempt}"
+            rec("prepare_judge", gate, crop_ws, verify_ws, len(verified), tag)
+            return f"/w/{round_id}/judge-{gate}-{tag}-{attempt}"
 
         @activity.defn(name="read_judge")
         async def read_judge(
@@ -1365,10 +1366,15 @@ async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env)
         await idle(h, m, "review")
         names = m.names()
         assert names.index("comment") < names.index("prepare_judge") < names.index("read_judge")
+        assert m.stages.index("review") < len(m.stages) and names.index(
+            "set_stage", names.index("comment")
+        ) < names.index("prepare_judge")  # the gate opens first
         (prepared,) = m.of("prepare_judge")
-        assert prepared[0] == "crops" and prepared[3] == 16  # every verified crop is evidence
+        assert (
+            prepared[0] == "crops" and prepared[3] == 16 and prepared[4] == SHA[:12]
+        )  # every verified crop is evidence
         judged = [a for a in m.of("submit") if a[1] == "judge"]
-        assert len(judged) == 1 and judged[0][2].workspace == "/w/i7-e11/judge-crops-1"
+        assert len(judged) == 1 and judged[0][2].workspace == f"/w/i7-e11/judge-crops-{SHA[:12]}-1"
         (read,) = m.of("read_judge")
         assert read[1:4] == ("crops", "crop_set", f"i7-e11:i7-e11-{SHA[:12]}") and read[4] == "shadow"
         judge_comments = [a for a in m.of("comment") if a[1].startswith("judge crops i7-e11")]
@@ -1380,14 +1386,28 @@ async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env)
 
 
 async def test_shadow_judge_failure_is_a_comment_not_a_stop(env):
-    m = Mocks(crop_judge="shadow", states={"judge-crops": ("FAILED", 1)})
+    m = Mocks(crop_judge="shadow", states={f"judge-crops-{SHA[:12]}": ("FAILED", 1)})
     async with started(env, m) as h:
         await idle(h, m, "review")
-    assert "read_judge" not in m.names()
+        await until(lambda: [a for a in m.of("comment") if a[1].startswith("judge crops")])
+    assert "read_judge" in m.names()  # the failure is an escalate on record
     (failed,) = [a for a in m.of("comment") if a[1].startswith("judge crops")]
-    assert failed[0].startswith("The crop judge did not run to the end: judge job job-mia-7-i7-e11-judge-")
-    assert failed[0].endswith("ended FAILED (exit 1). The human label decides.")
+    assert failed[0].startswith("The crop judge's judge job job-mia-7-i7-e11-judge-")
+    assert "ended FAILED (exit 1); its verdict is recorded as an escalation." in failed[0]
     assert m.stages == ["matching", "testing", "review"]
+
+
+async def test_a_refused_reservation_skips_the_shadow_judge_and_the_round_goes_on(env):
+    m = Mocks(crop_judge="shadow", reservations={"judge": [Reservation(False, "would exceed max_usd 1")]})
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await until(lambda: [a for a in m.of("comment") if a[1].startswith("judge crops")])
+        (skipped,) = [a for a in m.of("comment") if a[1].startswith("judge crops")]
+        assert skipped[0] == "The crop judge was skipped: root budget: would exceed max_usd 1. The human label decides."
+        assert "prepare_judge" in m.names() and all(a[1] != "judge" for a in m.of("submit"))
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert "publish_crops" in m.names()
 
 
 async def test_judge_off_runs_nothing(env):
@@ -1402,7 +1422,7 @@ async def test_judge_is_budgeted_and_settled(env):
     async with started(env, m) as h:
         await idle(h, m, "review")
     (reserved,) = [a for a in m.of("reserve") if a[2] == "judge"]
-    assert reserved[3] == 2.0 and reserved[1].startswith("mia-7-i7-e11-judge-")
+    assert reserved[3] == 3.5 and reserved[1].startswith("mia-7-i7-e11-judge-")  # the limits' value, not a default
     assert any(a[1] == reserved[1] for a in m.of("settle"))
 
 
@@ -1412,4 +1432,6 @@ async def test_a_pr_heads_set_is_judged_too(env):
         await to_review(h, m)
     (read,) = m.of("read_judge")
     assert read[3] == f"i7-e11:i7-e11-{H1[:12]}"
-    assert m.of("set_crop_status")[-1][1] == "success"  # the status still follows the test, not the judge
+    names = m.names()
+    status_at = max(i for i, name in enumerate(names) if name == "set_crop_status")
+    assert m.of("set_crop_status")[-1][1] == "success" and status_at < names.index("prepare_judge")  # status first

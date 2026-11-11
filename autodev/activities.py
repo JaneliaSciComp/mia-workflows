@@ -12,6 +12,7 @@ import dataclasses
 import functools
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -25,15 +26,15 @@ from temporalio.exceptions import ApplicationError
 
 from mia_core.judge.comment import render_judge_comment
 from mia_core.judge.evidence import build as build_evidence
-from mia_core.judge.evidence import evidence_digest, fenced_agent_text, read_claude_json
+from mia_core.judge.evidence import evidence_digest, fenced_text, read_claude_json
 from mia_core.judge.policy import POLICY_VERSION, new_assessment
 from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
-from mia_core.registry import Registry
+from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import SECRET_RE as SECRET_RE
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import JUDGE_DIR, log_tail, read_result, render_prompt
+from .agent import judge_dir, log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
@@ -309,47 +310,58 @@ class Activities:
     @activity.defn(name="prepare_judge")
     @permanent_errors
     async def prepare_judge(self, request: JudgeInput) -> str:
-        """Build the review judge's evidence under `<round dir>/judge-review/evidence/`: the issue (title, body,
-        the human discussion), the diff of the pushed head against the round's base, every changed file at the
-        head, CONTRIBUTING.md and SPEC.md when the repo has them. Returns "" when judge.review is off."""
+        """Build the review judge's evidence under `<key>/judge-r<n>/evidence/`: the issue (title, body, the
+        comments of people with write access), the diff of the pushed head against its merge base with the base
+        branch, every changed file at the head, CONTRIBUTING.md and SPEC.md when the repo has them. All of it is
+        read from the worker's own mirror, never from the author's clone (its config, hooks and replace refs are the
+        author's); the bot's own comments (the author's summaries and log tails) stay out. Returns "" when
+        judge.review is off."""
         if self.cfg.judge.review.mode == "off":
             return ""
-        round_dir = Path(request.workspace.dir)
-        repo, base, head = round_dir / "repo", request.workspace.base_sha, request.head_sha
+        round_dir, head = Path(request.workspace.dir), request.head_sha
         issue = await self.gh.get_issue(request.issue)
         comments = await self.gh.issue_comments(request.issue)
+        logins = {login for comment in comments if (login := (comment.get("user") or {}).get("login"))} - {self.bot}
+        writers = {login for login in logins if await self.gh.permission(login) in WRITE_PERMISSIONS}
         parts = [
             f"# Issue #{request.issue}: {issue.get('title') or ''}",
             "",
-            fenced_agent_text("Issue body", issue.get("body") or ""),
+            fenced_text("Issue body", issue.get("body") or ""),
         ]
         for comment in comments[:50]:
-            login = (comment.get("user") or {}).get("login") or "?"
-            label = "A comment by the agent under review" if login == self.bot else f"A comment by {login}"
-            parts.append(fenced_agent_text(label, comment.get("body") or ""))
+            login = (comment.get("user") or {}).get("login")
+            if login in writers:
+                parts.append(fenced_text(f"A comment by {login}, who has write access", comment.get("body") or ""))
         items: dict[str, bytes | Path] = {"issue.md": "\n".join(parts).encode()}
+        mirror, base_branch = self.mirror.path, self.cfg.github.base_branch
+
+        def show(name: str) -> bytes | None:
+            proc = subprocess.run(
+                ["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "show", f"{head}:{name}"],
+                cwd=mirror,
+                capture_output=True,
+                env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
+            )
+            return proc.stdout if proc.returncode == 0 else None
 
         def collect() -> dict[str, bytes]:
-            out = {"diff.patch": git("diff", base, head, cwd=repo).encode()}
-            changed = [line for line in git("diff", "--name-only", base, head, cwd=repo).splitlines() if line][:64]
-            for name in changed:
-                try:
-                    out[f"files/{name}"] = subprocess.run(
-                        ["git", "show", f"{head}:{name}"], cwd=repo, capture_output=True, check=True
-                    ).stdout
-                except subprocess.CalledProcessError:
-                    pass  # deleted at head: the diff says so
-            for name in ("CONTRIBUTING.md", "SPEC.md"):
-                proc = subprocess.run(["git", "show", f"{head}:{name}"], cwd=repo, capture_output=True)
-                if proc.returncode == 0:
-                    out[name] = proc.stdout
+            base = git("--no-replace-objects", "merge-base", f"refs/heads/{base_branch}", head, cwd=mirror)
+            diff = ["--no-replace-objects", "diff", "--no-ext-diff", "--no-textconv", "--no-color"]
+            out = {"diff.patch": git(*diff, base, head, cwd=mirror).encode()}
+            changed = [line for line in git(*diff, "--name-only", base, head, cwd=mirror).splitlines() if line][:64]
+            for name in [*changed, "CONTRIBUTING.md", "SPEC.md"]:
+                content = show(name)
+                if content is not None:  # a deleted file: the diff says so
+                    out[f"files/{name}" if name in changed else name] = content
             return out
 
         items.update(await asyncio.to_thread(collect))
         items["ci.json"] = json.dumps({"status": "not awaited (shadow)"}).encode()
-        judge_dir = round_dir / JUDGE_DIR
-        await asyncio.to_thread(build_evidence, judge_dir, prompt_text("review"), items, author_workspace=round_dir)
-        return str(judge_dir)
+        workspace = judge_dir(round_dir)
+        if workspace.is_symlink():
+            raise ValueError(f"{workspace} is a symlink; the judge workspace is the worker's alone")
+        await asyncio.to_thread(build_evidence, workspace, prompt_text("review"), items, author_workspace=round_dir)
+        return str(workspace)
 
     @activity.defn(name="submit_judge")
     @permanent_errors
@@ -358,7 +370,7 @@ class Activities:
 
         try:
             return await self.jobs.submit_judge(
-                request.issue, request.key, request.round, str(Path(request.workspace.dir) / JUDGE_DIR)
+                request.issue, request.key, request.round, str(judge_dir(Path(request.workspace.dir)))
             )
         except CsubError as error:
             if error.code in PERMANENT_CSUB:
@@ -371,8 +383,8 @@ class Activities:
         """Read the judge's claude.json, apply policy, write the assessment (gate `review`, subject the head) and
         `verdict.json`, and post the comment on the PR. In shadow the comment carries no `/approve` or `/revise`
         line: it is a review for the human to read, never a command (spec §4.1)."""
-        judge_dir = Path(request.workspace.dir) / JUDGE_DIR
-        text, cost, model = read_claude_json(judge_dir)
+        workspace = judge_dir(Path(request.workspace.dir))
+        text, cost, model = read_claude_json(workspace)
         try:
             verdict = parse_verdict(text)
         except ValueError as error:
@@ -392,19 +404,22 @@ class Activities:
             summary=summary,
             findings=findings,
             confidence=verdict.confidence,
-            evidence_digest=evidence_digest(judge_dir),
+            evidence_digest=evidence_digest(workspace),
             checks={"ci": "not awaited (shadow)", "why": why},
             model=model or self.cfg.judge.model,
             prompt_version=prompt_version("review"),
         )
         write_atomic(
-            judge_dir / "verdict.json",
+            workspace / "verdict.json",
             json.dumps({"assessment": row, "judge": dataclasses.asdict(verdict), "cost_usd": cost}, indent=1),
         )
         assessment_id = ""
-        if self.registry is not None:
-            await asyncio.to_thread(self.registry.put_assessment, row)
-            assessment_id = row["id"]
+        if self.registry is not None:  # shadow never blocks: a registry outage is logged, the round goes on
+            registry = self.registry
+            written = await asyncio.to_thread(
+                best_effort, lambda: registry.put_assessment(row), f"issue #{request.issue}: judge assessment", log
+            )
+            assessment_id = row["id"] if written else ""
         mode = self.cfg.judge.review.mode
         body = render_judge_comment(
             "review",
