@@ -15,6 +15,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mia_core.judge.evidence import command as judge_command
+
 from . import jobs
 from .jobs import read_untrusted
 from .models import JobOutcome, JobRef, Workspace, check_key
@@ -99,6 +101,26 @@ exit "$rc"
 """
 
 
+JUDGE_DIR = "judge-review"  # under the round dir, beside repo/: the judge's workspace, evidence/ inside it
+
+
+def judge_script(cfg: Config) -> str:
+    """The review judge's job script, cwd = the judge workspace: Claude Code with read-only tools over
+    `evidence/` (spec autonomous-gates §4), the exit code recorded for the worker."""
+    quote = shlex.quote
+    path = (
+        f'export PATH={":".join(quote(entry) for entry in cfg.agent.path_prepend)}:"$PATH"\n'
+        if cfg.agent.path_prepend
+        else ""
+    )
+    return f"""set -u
+{path}{judge_command(cfg.judge.model, cfg.judge.max_budget_usd)}
+rc=$?
+echo "$rc" > exit_code
+exit "$rc"
+"""
+
+
 def read_result(round_dir: Path, limit: int = 20000) -> tuple[str, float | None]:
     """The agent's summary and cost from result.json. Untrusted: any shape may be there."""
     try:
@@ -161,6 +183,28 @@ class AgentJobs:
             )
 
         return JobRef(await self.jobs.submit(job_key, build_spec), agent_cfg.walltime_min)
+
+    async def submit_judge(self, issue: int, key: str, round_number: int, judge_dir: str) -> JobRef:
+        """Submit the review judge once per round: a read-only Claude Code job in `judge_dir`, no hosts of its own,
+        its walltime and budget from `judge`."""
+        agent_cfg, judge_cfg = self.cfg.agent, self.cfg.judge
+        job_key = f"issue-{issue}-{check_key(key)}-r{round_number}-judge"
+
+        def build_spec() -> jobs.JobSpec:
+            return jobs.JobSpec(
+                name=f"autodev-{issue}-r{round_number}-judge",
+                command=judge_script(self.cfg),
+                workspace=judge_dir,
+                walltime_min=judge_cfg.walltime_min,
+                cpus=1,
+                mem_mb=agent_cfg.mem_mb,
+                allow_hosts=[],
+                agent="claude",
+                ro_mounts=[],
+                env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
+            )
+
+        return JobRef(await self.jobs.submit(job_key, build_spec), judge_cfg.walltime_min)
 
     async def wait(self, job_id: str, workspace: Workspace, heartbeat: Callable[[str], None]) -> JobOutcome:
         return await self.jobs.wait(job_id, workspace.dir, heartbeat)

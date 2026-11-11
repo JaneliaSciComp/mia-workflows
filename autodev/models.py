@@ -124,6 +124,30 @@ class PublishInput:
 
 
 @dataclass
+class JudgeInput:
+    """The review judge's subject (spec autonomous-gates §4.1): the round whose head was pushed."""
+
+    issue: int
+    key: str
+    round: int
+    workspace: Workspace
+    pr: int | None
+    head_sha: str
+
+
+@dataclass
+class JudgeOutcome:
+    """What the review judge said, after policy; `assessment` is "" without a registry."""
+
+    verdict: str
+    effective: str
+    confidence: float
+    summary: str
+    assessment: str = ""
+    cost_usd: float | None = None
+
+
+@dataclass
 class PrRef:
     pr: int | None
     head_sha: str | None

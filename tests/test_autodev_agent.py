@@ -290,3 +290,13 @@ async def test_job_name_leaves_out_the_deployment(tmp_path):
     j = AgentJobs(make_cfg(tmp_path, deployment="autodev-someuser"), client_factory=lambda: fake)
     await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev-someuser/issue-7"))
     assert fake.submitted[0]["name"] == "autodev-7-r1" and fake.submitted[0]["session"] == "autodev-someuser"
+
+
+def test_judge_script_is_read_only(tmp_path):
+    from autodev.agent import judge_script
+
+    script = judge_script(make_cfg(tmp_path, agent={"path_prepend": ["/opt/bin"]}, judge={"model": "opus"}))
+    assert script.startswith("set -u\nexport PATH=/opt/bin:")
+    assert '--allowedTools "Read,Glob,Grep"' in script and '--tools "Read,Glob,Grep"' in script
+    assert "--restricted" in script and "--add-dir evidence > claude.json" in script and "--model opus" in script
+    assert "> exit_code" in script and "git bundle" not in script and "Edit" not in script and "Bash" not in script

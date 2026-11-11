@@ -8,9 +8,13 @@ untrusted: read with bounds, never executed, and scrubbed of secrets and fake ma
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
+import json
 import logging
 import re
+import subprocess
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -19,14 +23,21 @@ from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import ApplicationError
 
+from mia_core.judge.comment import render_judge_comment
+from mia_core.judge.evidence import build as build_evidence
+from mia_core.judge.evidence import evidence_digest, fenced_agent_text, read_claude_json
+from mia_core.judge.policy import POLICY_VERSION, new_assessment
+from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
+from mia_core.registry import Registry
 from mia_core.untrusted import SECRET_RE as SECRET_RE
 from mia_core.untrusted import neutralize as neutralize
+from mia_core.untrusted import write_atomic
 
-from .agent import log_tail, read_result, render_prompt
+from .agent import JUDGE_DIR, log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
-from .gitops import RejectedBundleError
+from .gitops import RejectedBundleError, git
 from .models import (
     AwaitInput,
     CommentInput,
@@ -35,6 +46,8 @@ from .models import (
     IssueInput,
     JobOutcome,
     JobRef,
+    JudgeInput,
+    JudgeOutcome,
     MergeInput,
     MergeResult,
     ObserveInput,
@@ -142,6 +155,7 @@ class Activities:
         self, cfg: Config, gh: GitHub, mirror: Mirror, jobs: AgentJobs, bot: str, client: Client | None = None
     ):
         self.cfg, self.gh, self.mirror, self.jobs, self.bot, self.client = cfg, gh, mirror, jobs, bot, client
+        self.registry = Registry.from_config(cfg.service) if cfg.service else None  # where assessments go
 
     @property
     def temporal(self) -> Client:
@@ -163,6 +177,9 @@ class Activities:
             self.merge_pr,
             self.report_failure,
             self.poll_issues,
+            self.prepare_judge,
+            self.submit_judge,
+            self.read_judge,
         ]
 
     async def _comment_once(self, number: int, body: str, marker: str) -> None:
@@ -286,6 +303,126 @@ class Activities:
         body += "\n\n" + "\n".join(self.cfg.marker(marker) for marker in markers)
         await self._comment_once(pr_number or request.issue, body, self.cfg.marker(markers[0]))
         return PrRef(pr_number, head_sha)
+
+    # --- the review judge (spec autonomous-gates §4.1, §9) ------------------------------------------
+
+    @activity.defn(name="prepare_judge")
+    @permanent_errors
+    async def prepare_judge(self, request: JudgeInput) -> str:
+        """Build the review judge's evidence under `<round dir>/judge-review/evidence/`: the issue (title, body,
+        the human discussion), the diff of the pushed head against the round's base, every changed file at the
+        head, CONTRIBUTING.md and SPEC.md when the repo has them. Returns "" when judge.review is off."""
+        if self.cfg.judge.review.mode == "off":
+            return ""
+        round_dir = Path(request.workspace.dir)
+        repo, base, head = round_dir / "repo", request.workspace.base_sha, request.head_sha
+        issue = await self.gh.get_issue(request.issue)
+        comments = await self.gh.issue_comments(request.issue)
+        parts = [
+            f"# Issue #{request.issue}: {issue.get('title') or ''}",
+            "",
+            fenced_agent_text("Issue body", issue.get("body") or ""),
+        ]
+        for comment in comments[:50]:
+            login = (comment.get("user") or {}).get("login") or "?"
+            label = "A comment by the agent under review" if login == self.bot else f"A comment by {login}"
+            parts.append(fenced_agent_text(label, comment.get("body") or ""))
+        items: dict[str, bytes | Path] = {"issue.md": "\n".join(parts).encode()}
+
+        def collect() -> dict[str, bytes]:
+            out = {"diff.patch": git("diff", base, head, cwd=repo).encode()}
+            changed = [line for line in git("diff", "--name-only", base, head, cwd=repo).splitlines() if line][:64]
+            for name in changed:
+                try:
+                    out[f"files/{name}"] = subprocess.run(
+                        ["git", "show", f"{head}:{name}"], cwd=repo, capture_output=True, check=True
+                    ).stdout
+                except subprocess.CalledProcessError:
+                    pass  # deleted at head: the diff says so
+            for name in ("CONTRIBUTING.md", "SPEC.md"):
+                proc = subprocess.run(["git", "show", f"{head}:{name}"], cwd=repo, capture_output=True)
+                if proc.returncode == 0:
+                    out[name] = proc.stdout
+            return out
+
+        items.update(await asyncio.to_thread(collect))
+        items["ci.json"] = json.dumps({"status": "not awaited (shadow)"}).encode()
+        judge_dir = round_dir / JUDGE_DIR
+        await asyncio.to_thread(build_evidence, judge_dir, prompt_text("review"), items, author_workspace=round_dir)
+        return str(judge_dir)
+
+    @activity.defn(name="submit_judge")
+    @permanent_errors
+    async def submit_judge(self, request: SubmitInput) -> JobRef:
+        from csub import CsubError  # pixi-only dependency, imported where used (as in agent.csub_client)
+
+        try:
+            return await self.jobs.submit_judge(
+                request.issue, request.key, request.round, str(Path(request.workspace.dir) / JUDGE_DIR)
+            )
+        except CsubError as error:
+            if error.code in PERMANENT_CSUB:
+                raise ApplicationError(str(error), non_retryable=True) from error
+            raise
+
+    @activity.defn(name="read_judge")
+    @permanent_errors
+    async def read_judge(self, request: JudgeInput) -> JudgeOutcome:
+        """Read the judge's claude.json, apply policy, write the assessment (gate `review`, subject the head) and
+        `verdict.json`, and post the comment on the PR. In shadow the comment carries no `/approve` or `/revise`
+        line: it is a review for the human to read, never a command (spec §4.1)."""
+        judge_dir = Path(request.workspace.dir) / JUDGE_DIR
+        text, cost, model = read_claude_json(judge_dir)
+        try:
+            verdict = parse_verdict(text)
+        except ValueError as error:
+            verdict = Verdict("escalate", 0.0, (), f"unreadable verdict: {str(error)[:400]}")
+        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence)
+        findings = [
+            {"item": self._clean(f.item), "severity": f.severity, "note": self._clean(f.note)} for f in verdict.findings
+        ]
+        summary = self._clean(verdict.summary)
+        row = new_assessment(
+            gate="review",
+            subject_kind="pr_head",
+            subject_ref=request.head_sha,
+            verdict=effective,
+            by="judge",
+            at=time.time(),
+            summary=summary,
+            findings=findings,
+            confidence=verdict.confidence,
+            evidence_digest=evidence_digest(judge_dir),
+            checks={"ci": "not awaited (shadow)", "why": why},
+            model=model or self.cfg.judge.model,
+            prompt_version=prompt_version("review"),
+        )
+        write_atomic(
+            judge_dir / "verdict.json",
+            json.dumps({"assessment": row, "judge": dataclasses.asdict(verdict), "cost_usd": cost}, indent=1),
+        )
+        assessment_id = ""
+        if self.registry is not None:
+            await asyncio.to_thread(self.registry.put_assessment, row)
+            assessment_id = row["id"]
+        mode = self.cfg.judge.review.mode
+        body = render_judge_comment(
+            "review",
+            verdict.verdict,
+            effective,
+            why,
+            summary,
+            findings,
+            verdict.confidence,
+            row["model"],
+            row["prompt_version"],
+            POLICY_VERSION,
+            cost,
+            mode,
+        )
+        marker = self.cfg.marker(f"judge {request.head_sha}")
+        await self._comment_once(request.pr or request.issue, f"{body}\n{marker}", marker)
+        return JudgeOutcome(verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost)
 
     @activity.defn(name="observe_pr")
     @permanent_errors

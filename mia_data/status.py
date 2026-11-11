@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from mia_core.judge.comment import render_judge_comment as render_judge_comment
 from mia_core.untrusted import neutralize
 
 
@@ -61,53 +62,3 @@ def render_links(links: dict[str, str | None]) -> str:
     """`**Folders:** [name](url) · …` for the links that have a URL; empty when none has."""
     items = [f"[{safe_text(name)}]({quote(url, safe=':/?=&%')})" for name, url in links.items() if url]
     return f"**Folders:** {' · '.join(items)}\n" if items else ""
-
-
-JUDGE_NAMES = {"crops": "Crop judge", "review": "Review judge"}
-SHADOW_LINE = "Shadow mode: this verdict is recorded and compared with the human label; it decides nothing."
-
-
-def render_judge_comment(
-    gate: str,
-    verdict: str,
-    effective: str,
-    why: str,
-    summary: str,
-    findings: list[dict],
-    confidence: float,
-    model: str,
-    prompt_version: str,
-    policy_version: int,
-    cost_usd: float | None,
-    mode: str,
-) -> str:
-    """The judge's comment under the crop table (spec autonomous-gates §10): what it decided and why policy kept
-    or changed it, the findings table, the provenance line and what the verdict means in this mode."""
-    head = f"**{JUDGE_NAMES.get(gate, gate)}:** `{effective}`"
-    if effective != verdict:
-        head += f" (the judge said `{verdict}`: {safe_text(why)})"
-    lines = [head, "", neutralize(summary) if summary else "(no summary)", ""]
-    if findings:
-        lines += [
-            "| item | severity | note |",
-            "|---|---|---|",
-            *(
-                f"| {safe_text(finding.get('item', ''))} | {safe_text(finding.get('severity', ''))} | "
-                f"{safe_text(finding.get('note', ''))} |"
-                for finding in findings
-            ),
-            "",
-        ]
-    provenance = (
-        f"confidence {confidence:g} · model `{safe_text(model)}` · prompt `{prompt_version}` · policy v{policy_version}"
-    )
-    if cost_usd is not None:
-        provenance += f" · ${cost_usd:.2f}"
-    lines += [provenance, ""]
-    if mode == "shadow":
-        lines.append(SHADOW_LINE)
-    elif effective == "approve":
-        lines.append(f"Approved automatically under policy v{policy_version}; `data:revoke` withdraws it at any time.")
-    else:
-        lines.append(f"Decided automatically under policy v{policy_version}.")
-    return "\n".join(lines) + "\n"

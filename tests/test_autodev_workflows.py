@@ -23,6 +23,8 @@ from autodev.models import (
     IssueInput,
     JobOutcome,
     JobRef,
+    JudgeInput,
+    JudgeOutcome,
     MergeInput,
     MergeResult,
     ObserveInput,
@@ -61,6 +63,8 @@ class Mocks:
         observe_failures=0,
         report_failures=0,
         observe_fatal=False,
+        judge=False,
+        judge_state="DONE",
     ):
         self.observe_failures, self.report_failures, self.reported = observe_failures, report_failures, 0
         self.observe_fatal = observe_fatal
@@ -68,6 +72,7 @@ class Mocks:
         self.snaps = list(snaps)
         self.existing_pr, self.job_state, self.exit_code = existing_pr, job_state, exit_code
         self.publish_pr, self.await_failures, self.merge_ok = publish_pr, await_failures, merge_ok
+        self.judge, self.judge_state = judge, judge_state  # judge.review.mode on, and how its job ends
 
     def acts(self):
         @activity.defn(name="set_stage")
@@ -100,6 +105,21 @@ class Mocks:
                 return PrRef(self.publish_pr, "h1" if self.publish_pr else None)
             return PrRef(a.pr, f"h{a.round}")
 
+        @activity.defn(name="prepare_judge")
+        async def prepare_judge(a: JudgeInput) -> str:
+            self.calls.append(("prepare_judge", a))
+            return f"{a.workspace.dir}/judge-review" if self.judge else ""
+
+        @activity.defn(name="submit_judge")
+        async def submit_judge(a: SubmitInput) -> JobRef:
+            self.calls.append(("submit_judge", a))
+            return JobRef(f"judge-{a.round}", 30)
+
+        @activity.defn(name="read_judge")
+        async def read_judge(a: JudgeInput) -> JudgeOutcome:
+            self.calls.append(("read_judge", a))
+            return JudgeOutcome("approve", "approve", 0.9, "fine", "as-1", 0.5)
+
         @activity.defn(name="observe_pr")
         async def observe(a: ObserveInput) -> PrSnapshot:
             self.calls.append(("observe", a.pr))
@@ -126,7 +146,20 @@ class Mocks:
                 raise ApplicationError("github 502")
             self.reported += 1
 
-        return [set_stage, comment, find_pr, prepare, submit, publish, observe, merge, report]
+        return [
+            set_stage,
+            comment,
+            find_pr,
+            prepare,
+            submit,
+            publish,
+            observe,
+            merge,
+            report,
+            prepare_judge,
+            submit_judge,
+            read_judge,
+        ]
 
     def await_act(self):
         @activity.defn(name="await_agent")
@@ -135,6 +168,8 @@ class Mocks:
             if self.await_failures:
                 self.await_failures -= 1
                 raise ApplicationError("worker died mid-await")
+            if a.job_id.startswith("judge-"):
+                return JobOutcome(a.job_id, self.judge_state, 0 if self.judge_state == "DONE" else 1)
             return JobOutcome(a.job_id, self.job_state, self.exit_code)
 
         return [await_agent]
@@ -319,3 +354,35 @@ async def test_bad_key_is_replaced_by_run_id(env, key):
     assert await run(env, m, IssueInput(7, key=key)) == "merged"
     used = m.of("prepare")[0].key
     assert re.fullmatch(r"[0-9a-f]{8}", used) and m.of("submit")[0].key == used
+
+
+# --- the review judge in shadow (spec autonomous-gates §9) -----------------------------------------------------
+
+
+async def test_review_judge_in_shadow_runs_after_publish_and_pr_still_waits(env):
+    m = Mocks([snap(approved=True)], judge=True)
+    assert await run(env, m) == "merged"
+    names = m.names()
+    assert (
+        names.index("publish") < names.index("prepare_judge") < names.index("submit_judge") < names.index("read_judge")
+    )
+    assert names.index("read_judge") < names.index("observe")  # the judge is done before the PR is watched
+    (prepared,) = m.of("prepare_judge")
+    assert (prepared.pr, prepared.head_sha, prepared.workspace.dir) == (5, "h1", "/w/round-1")
+    assert m.of("await")[1] == "judge-1" and not [c for c in m.of("comment") if "judge" in c.marker]
+
+
+async def test_review_judge_off_runs_nothing_after_publish(env):
+    m = Mocks([snap(approved=True)])
+    assert await run(env, m) == "merged"
+    assert "prepare_judge" in m.names() and "submit_judge" not in m.names() and "read_judge" not in m.names()
+
+
+async def test_review_judge_failure_is_a_comment_not_a_stop(env):
+    m = Mocks([snap(approved=True)], judge=True, judge_state="EXIT")
+    assert await run(env, m) == "merged"
+    assert "read_judge" not in m.names()
+    (note,) = [c for c in m.of("comment") if c.marker == "judge-failed h1"]
+    assert note.number == 5 and note.body.startswith(
+        "The review judge did not run to the end: judge job judge-1 ended EXIT (exit 1)."
+    )

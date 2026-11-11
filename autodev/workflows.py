@@ -25,6 +25,8 @@ with workflow.unsafe.imports_passed_through():
         IssueInput,
         JobOutcome,
         JobRef,
+        JudgeInput,
+        JudgeOutcome,
         MergeInput,
         MergeResult,
         ObserveInput,
@@ -42,6 +44,10 @@ ROUND_DONE_LOG = "issue #%d round %d: job %s ended %s"
 MAX_POLLS_PER_EXECUTION = 500
 RETRY_MAX_INTERVAL = timedelta(minutes=5)
 QUEUE_SLACK = timedelta(hours=12)  # ponytail: covers LSF pending time; use schedule-to-start metrics if it bites
+
+
+class JudgeFailed(Exception):
+    """The review judge's job did not end well; in shadow this is a comment, never the round's end."""
 
 
 class RoundFailed(Exception):
@@ -167,7 +173,43 @@ class IssueWorkflow:
         )
         if result.head_sha:  # pushed: a later observe/merge failure must not attach this round's log tail
             self.workspace = None
+            if workflow.patched("m-review-judge"):
+                await self._judge_review(result, workspace)
         return result
+
+    async def _judge_review(self, result: PrRef, workspace: Workspace) -> None:
+        """The review judge over the pushed head (spec autonomous-gates §4.1, §9): evidence, a read-only job, the
+        assessment and a PR comment. Off: nothing. In shadow nothing here changes the round's course; a failure
+        is a comment and the human reviews as before."""
+        state = self.state
+        assert result.head_sha
+        subject = JudgeInput(state.issue, state.key, state.round, workspace, result.pr, result.head_sha)
+        try:
+            judge_dir = await self._act("prepare_judge", subject, seconds=600, result_type=str)
+            if not judge_dir:
+                return
+            job = await self._act(
+                "submit_judge", SubmitInput(state.issue, state.key, state.round, workspace), result_type=JobRef
+            )
+            outcome = await workflow.execute_activity(
+                "await_agent",
+                AwaitInput(job.job_id, Workspace(judge_dir, workspace.base_sha, workspace.branch)),
+                result_type=JobOutcome,
+                task_queue=workflow.info().task_queue + "-await",
+                start_to_close_timeout=timedelta(minutes=job.walltime_min) + QUEUE_SLACK,
+                schedule_to_close_timeout=timedelta(minutes=job.walltime_min) + timedelta(hours=24),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            )
+            if outcome.state != "DONE" or outcome.exit_code not in (0, None):
+                raise JudgeFailed(f"judge job {outcome.job_id} ended {outcome.state} (exit {outcome.exit_code})")
+            await self._act("read_judge", subject, seconds=300, result_type=JudgeOutcome)
+        except (ActivityError, JudgeFailed) as error:
+            await self._comment(
+                result.pr or state.issue,
+                f"The review judge did not run to the end: {error_message(error)}. A human reviews as before.",
+                f"judge-failed {result.head_sha}",
+            )
 
     async def _watch_pr(self) -> str:
         """Watch the PR until it is merged or closed, running revision rounds and escalations as needed.
