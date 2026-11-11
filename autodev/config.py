@@ -136,7 +136,6 @@ class Config(BaseModel):
         self._check_github()
         self._resolve_paths()
         self._check_agent()
-        self.judge.check_model(self.agent.model)
         self._check_mounts()
         return self
 

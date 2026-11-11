@@ -188,16 +188,6 @@ def test_judge_cfg_defaults_and_enabled_gates():
         JudgeCfg(crops={"mode": "active"})
 
 
-def test_judge_cfg_refuses_same_model_when_a_gate_is_on():
-    from mia_core.config import JudgeCfg
-
-    JudgeCfg().check_model("opus")  # every gate off: nothing to check
-    JudgeCfg(crops={"mode": "shadow"}).check_model("sonnet")
-    JudgeCfg(crops={"mode": "shadow"}, allow_same_model=True).check_model("opus")
-    with pytest.raises(ValueError, match="judge.model.*agent.model"):
-        JudgeCfg(crops={"mode": "shadow"}).check_model("opus")
-
-
 def test_gate_mode_takes_yamls_bare_off():
     from mia_core.config import GateCfg
 

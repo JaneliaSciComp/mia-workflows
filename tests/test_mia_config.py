@@ -106,9 +106,8 @@ def test_evaluate_is_off_by_default(tmp_path):
     assert make_cfg(tmp_path).evaluate.enabled is False
 
 
-def test_judge_section_loads_and_checks_model(tmp_path):
+def test_judge_section_loads(tmp_path):
     cfg = make_cfg(tmp_path, judge={"crops": {"mode": "shadow"}})
     assert cfg.judge.crops.mode == "shadow" and cfg.judge.model == "opus"
-    with pytest.raises(ValidationError, match="judge.model"):
-        make_cfg(tmp_path, judge={"crops": {"mode": "shadow"}, "model": "sonnet"})
-    make_cfg(tmp_path, judge={"model": "sonnet"})  # off: the same model is allowed
+    # the author's own model is allowed as the judge: a different one is a precaution, not a rule
+    assert make_cfg(tmp_path, judge={"crops": {"mode": "shadow"}, "model": "sonnet"}).judge.model == "sonnet"

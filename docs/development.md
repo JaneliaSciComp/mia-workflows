@@ -139,8 +139,8 @@ If a helper needs a new config field, add it to the protocol and to both configs
   without its `reasons`, agent-written text is fenced and labelled as data. Its final message is one JSON verdict
   (`schema.parse_verdict`); policy (`schema.effective_verdict`) turns a `reject` without a `bad` finding into an
   approve with notes and a confidence under `judge.min_confidence` into an escalate, and the result is an assessment
-  `by: judge` with the evidence digest, model and prompt version. `judge.model` must differ from `agent.model`
-  while any gate is on.
+  `by: judge` with the evidence digest, model and prompt version. A `judge.model` other than `agent.model` is a
+  precaution, not a rule.
 - **Shadow never blocks.** With `judge.<gate>.mode: shadow` the judge runs on every live round (the crop judge after
   a passing set, the review judge after a pushed head), its assessment and comment are written, and the round goes
   on to the human gate exactly as before: `authorized()` ignores a judge's approve for a gate that is not `active`,

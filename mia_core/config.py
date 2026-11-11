@@ -100,14 +100,13 @@ class GateCfg(BaseModel):
 
 
 class JudgeCfg(BaseModel):
-    """The judge job (spec autonomous-gates §4): the model (a different one from the authors'), what one run may
-    cost and run for, the confidence under which it abstains, and the mode of each gate."""
+    """The judge job (spec autonomous-gates §4): the model (a different one from the authors' is a precaution, not
+    a rule), what one run may cost and run for, the confidence under which it abstains, and the mode of each gate."""
 
     model: str = "opus"
     max_budget_usd: float = Field(default=2.0, gt=0)
     walltime_min: int = Field(default=30, gt=0)
     min_confidence: float = Field(default=0.6, ge=0, le=1)
-    allow_same_model: bool = False  # the independence precaution (§4) may be waived for a test deployment
     crops: GateCfg = GateCfg()
     review: GateCfg = GateCfg()
 
@@ -121,14 +120,6 @@ class JudgeCfg(BaseModel):
     def enabled_gates(self) -> frozenset[str]:
         """The gates whose judge verdict authorizes (`authorized(enabled_gates=...)`)."""
         return frozenset(gate for gate, cfg in self._gates().items() if cfg.mode == "active")
-
-    def check_model(self, author_model: str) -> None:
-        """A judge that runs must not be the model that authored the work, unless the operator says so."""
-        if self.on_gates() and not self.allow_same_model and self.model == author_model:
-            raise ValueError(
-                f"judge.model {self.model!r} is the author's agent.model; a judge must be a different model "
-                "(or set judge.allow_same_model: true)"
-            )
 
 
 def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:

@@ -115,8 +115,8 @@ Every former human gate gets a judge (spec `docs/specs/2026-11-09-autonomous-gat
 over the gate's evidence. It earns authority in three steps, per gate, and nothing turns on by itself.
 
 1. **Off** (`judge.<gate>.mode: off`, the default): today's behaviour.
-2. **Shadow** (`mode: shadow`): set it in `mia.yaml` (`judge.model` must differ from the deployment's
-   `agent.model`), `pixi run mia restart`. The judge runs on every live round: autodev's review judge after each
+2. **Shadow** (`mode: shadow`): set it in `mia.yaml` (a `judge.model` other than the deployment's
+   `agent.model` is a precaution, not a rule), `pixi run mia restart`. The judge runs on every live round: autodev's review judge after each
    pushed head (a PR comment headed "Review judge", no `/approve` line), mia-data's crop judge after each passing set
    (a comment under the crop table). Both write an assessment `by: judge`; the human label still decides. Watch the
    **Decisions** tab of the buffers page: per gate, how many subjects were judged and whether the newest human label

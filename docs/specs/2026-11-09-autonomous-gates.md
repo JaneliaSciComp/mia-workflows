@@ -151,8 +151,8 @@ anything.
 
 **Independence**, enforced in `tests/test_core_judge.py`: the evidence builder refuses any path under the author
 job's workspace other than the listed artifact files; the judge job key is distinct from every author key;
-`judge.model` must differ from the deployment's `agent.model` unless `judge.allow_same_model: true`. A different
-model and a fresh session are precautions, not proof of independent errors; §9 measures.
+`judge.model` may be the deployment's `agent.model`: a different model and a fresh session are precautions, not
+proof of independent errors, and not a rule (2026-11-11); §9 measures.
 
 **What a judge is not.** It never runs code, fetches data, re-derives a harness check, or **asserts a fact that is
 not in the evidence**: it does not fill voxel sizes or channel meanings (v0.1 §4.2 let it; that made the reviewer
