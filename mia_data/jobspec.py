@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from .models import JobArgs, Pins
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-MATCH_TOOLS = "Bash(harness smoke:*),Read,Write,Glob,Grep"
+MATCH_TOOLS = "Bash(harness smoke:*),Bash(harness list:*),Read,Write,Glob,Grep"
 MATCH_AVAILABLE = "Bash,Read,Write,Glob,Grep"  # --tools: what exists; MATCH_TOOLS is what runs unprompted
 HARNESS_ENV = (
     "MIA_HARNESS_JOB_BYTES",

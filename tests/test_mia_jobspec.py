@@ -218,7 +218,10 @@ def test_match_job(tmp_path):
     assert s.allow_hosts == sorted(["data.example.org", "cdn.example.net", *cfg.network.package_hosts])
     assert not any("github" in h or "anthropic" in h or "claude" in h for h in s.allow_hosts)
     assert s.agent == "claude" and f"--max-budget-usd {cfg.limits.agent_max_budget_usd}" in s.command
-    assert '--allowedTools "Bash(harness smoke:*),Read,Write,Glob,Grep"' in s.command and "> claude.json" in s.command
+    assert (
+        '--allowedTools "Bash(harness smoke:*),Bash(harness list:*),Read,Write,Glob,Grep"' in s.command
+        and "> claude.json" in s.command
+    )
     snap = str(cfg.paths.work_root / "_snapshots" / pins.snippets_commit)
     assert '--tools "Bash,Read,Write,Glob,Grep"' in s.command and "--restricted" in s.command
     assert "--strict-mcp-config" in s.command and f"--add-dir {snap}" in s.command

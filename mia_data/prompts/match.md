@@ -18,7 +18,15 @@ All in the current directory:
 
 1. Read `record.yaml`, `downloads.json`, `conversion.json` / `manifest.json` if present, `catalog/*.yaml` and
    `SPEC.md`.
-2. Write `binding.yaml` in the format SPEC.md gives, with `record: ${record}`,
+2. A record URL that is a directory (it ends in `/`) is not a file: run
+
+       harness list <url>
+
+   to see its entries (subdirectories end in `/`; list those too as needed), and bind the files you want as one
+   glob URL, `<dir url>/::<pattern>` (`fnmatch` syntax, e.g. `.../TIFs/::*.tif`), with a snippet whose
+   `snippet.yaml` or README takes glob URLs. `harness list <dir url>/::<pattern>` prints the files the glob
+   stands for.
+3. Write `binding.yaml` in the format SPEC.md gives, with `record: ${record}`,
    `record_commit: ${record_commit}` and `snippets_commit: ${snippets_commit}`. List every raw array under
    `raw` and every label array under `labels`, each with a `snippet` from `catalog/`, its `urls` (https, from
    `record.yaml`) and its `params`. Labels also need `pairs_with`, `label_key` and `segmentation_type`.
@@ -34,13 +42,13 @@ All in the current directory:
    the key folds it into `semantic`). So manually drawn cell instance masks are `manual_gt-cell-instance`, and a
    binary nuclear mask of unknown provenance is `unknown-nucleus-semantic`. A class you cannot tell from the
    inputs is `blocked`; an unlisted provenance is not, it is `unknown`.
-3. Test it:
+4. Test it:
 
        harness smoke binding.yaml --snippets ./snapshot --record record.yaml --out smoke.json
 
    Read `smoke.json`. If it has errors, change the snippet choice or the params and run it again. You may try
    several snippets and params.
-4. When you are done, write `outcome.json` with exactly one of these, then finish with a short summary:
+5. When you are done, write `outcome.json` with exactly one of these, then finish with a short summary:
 
    - The binding passes smoke:
 
@@ -68,6 +76,6 @@ All in the current directory:
   the data, report `needs_snippet`.
 - If `smoke.json` reports `host_not_allowed`, report `blocked` naming that host (and the redirect chain). Don't
   work around it.
-- You have no network tools and no GitHub access. Don't try to download files yourself; the harness reads
-  the data.
+- Your only network access is the harness (`harness smoke`, `harness list`), on the record's hosts; you have no
+  GitHub access. Don't try to download files yourself; the harness reads the data.
 - A missing or partial `outcome.json` counts as a failure.
