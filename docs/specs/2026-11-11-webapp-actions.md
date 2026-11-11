@@ -171,12 +171,13 @@ action:
   id: <integer, §4.1>          # the workflow's event id: the <event> of i<number>-e<event>
   kind: dataset | buffer | prep
   number: <subject number>
-  action: go | plan | approve | reject | revoke | keep | retire | dropped | cancel | stop
+  action: go | approve | reject | revoke | keep | retire | dropped | cancel | stop
   actor: page | prep:<number> | buffer:<number>     # §10
   at: <iso time>               # stored exactly as sent in the signal: two activities find their action by it (§6)
   key: <text | null>           # the sender's own name for this request; a repeat is the same action (§5)
   payload:            # what a label could not carry
-    spec: <YAML text>            # buffer go/plan, prep go: exactly what runs
+    spec: <YAML text>            # buffer go, prep go: exactly what runs
+    plan_first: <bool>           # buffer go: stop at the plan and wait for an approve before staging
     note: <text>                 # dataset reject: the feedback for the agent
     records: [<record id>, ...]  # buffer revoke; dropped (one record)
     root: <root request id>      # dataset go sent for a buffer or a request: who is charged for this round
@@ -187,10 +188,15 @@ action:
 | kind | actions |
 |---|---|
 | dataset | `go`, `approve`, `reject` (note), `revoke`, `cancel` |
-| buffer | `go` (spec), `plan` (spec), `approve`, `revoke` (records), `keep`, `retire`, `dropped` (record), `cancel`, `stop` |
+| buffer | `go` (spec, plan first), `approve`, `revoke` (records), `keep`, `retire`, `dropped` (record), `cancel`, `stop` |
 | prep | `go` (spec), `cancel`, `stop` |
 
 Which of these a subject accepts depends on its stage (§5).
+
+Today's `buffer:go` and `buffer:plan` are one action (*my call*). They start the same round and differ in one
+thing: a `plan` round stops at the plan and waits for an approve before it fetches anything, a `go` round stages
+first and asks at the staged gate. That is an option of `go` (`plan_first`), not a second edge in the state
+machine. The workflow keeps its two signals, and the route sends `plan` when the option is set.
 
 The root travels with the action. Today it is fixed when a buffer or a request opens the dataset's issue, so a
 dataset that already had an issue is charged to itself whoever asks; from now on each round is charged to whoever
@@ -228,7 +234,7 @@ take no token (§10).
 | route | capability | what it does |
 |---|---|---|
 | `POST /datasets/<record>/actions` | action | record the action; allocate the subject on a first `go`; start or signal (§5) |
-| `POST /specs` | action | validate a buffer spec; create or update the subject named by `name`; with `action: go \| plan`, run it |
+| `POST /specs` | action | validate a buffer spec; create or update the subject named by `name`; with `action: go`, run it |
 | `POST /specs/<name>/actions` | action | a buffer action |
 | `POST /prep` | action | validate a preparation request; create the subject; `go` |
 | `POST /prep/<number>/actions` | action | `go`, `stop` |
@@ -408,8 +414,9 @@ Still one HTML file served by buffer-api, no build step, no token.
   the page needs a read route over the workspaces, which is the upgrade if a person still reviews often once the
   crop judge is active.
 - **Buffers view.** *Create buffer* replaces the prefilled new-issue link: the current controls as spec YAML in
-  an editable box, validated by the server, then *Plan only* or *Run*. A spec's page (`#specs/<name>`) lists its
-  buffers and offers *Edit and run again*, *Approve*, *Revoke* (tick records of the pool), *Keep*, *Retire*,
+  an editable box, validated by the server, then one *Run* button with a tick box, *Show me the plan first*. A
+  spec's page (`#specs/<name>`) lists its buffers and offers *Edit and run again*, *Approve*, *Revoke* (tick
+  records of the pool), *Keep*, *Retire*,
   *Stop*, and *Files are in place* on a dataset that waits for a manual drop. A single buffer's page
   (`#buffers/<id>`) stays as it is.
 - **Preparation view.** Requests with their records and where each stands; *Run again* and *Stop*.
@@ -576,6 +583,7 @@ changed.
 24. **What is refused mid-round that is taken today** (§5): a dataset `revoke` (queued until the next gate today)
     and a buffer `retire` (cancels the rebuild today) now need the round cancelled first. `dropped` is still
     taken mid-round.
+25. **`buffer:go` and `buffer:plan` become one action** with a `plan_first` option and one button (§4.2).
 
 ## 14. Build order
 
