@@ -1,8 +1,11 @@
 # MIA: the page acts, GitHub records — Spec
 
-**Status:** draft v0.2 · 2026-11-11 · not yet approved. v0.2 takes a reviewer's pass against the code: the claim
+**Status:** draft v0.3 · 2026-11-11 · not yet approved. v0.2 took a reviewer's pass against the code: the claim
 that workflows keep their commands holds, with one named exception (§6); ids survive a ledger restore (§4.1);
-adoption runs with the first slice (§11). Decided by the user 2026-11-11: datasets, buffers and
+adoption runs with the first slice (§11). v0.3 takes a second review, on delivery and recovery: an action is
+`pending` until Temporal has it and a retry reuses its id (§5); a decision names the state the person saw (§5);
+the mirror catches up after a crash (§7); adoption carries the stage and slice E waits for label rounds to drain
+(§11). Decided by the user 2026-11-11: datasets, buffers and
 preparation requests are started and steered from the web page, never from GitHub; a click starts or signals the
 workflow at once, with no poller in between; the page always shows the state of the system; identifiers are issued
 by the registry and a GitHub issue is a read-only view of a workflow, written whenever GitHub answers; a person
@@ -119,7 +122,8 @@ A **subject** is a dataset, a buffer spec or a preparation request. It has:
 - a **kind**: `dataset`, `buffer`, `prep`;
 - a **key**, unique within the kind: the catalog record id; the spec's `name`; `prep-<number>`;
 - a **number**, an integer issued by the registry;
-- its current **stage**, set by every stage write;
+- its current **stage**, set by every stage write, and a **revision**, an integer every stage write raises;
+- for a buffer spec, its current spec text;
 - an **issue**: the GitHub issue number of its mirror, empty until the mirror has opened one (§7).
 
 The number is what the code calls `issue` today. Workflow ids (`mia-data/<repo>/issue-<number>`), round ids
@@ -140,7 +144,8 @@ addresses subjects by key, and the number shows only inside round ids.
   round's pins; a reissued number lands on another subject's workflow. So both are taken from the service clock
   and bumped past the last one issued: a number is the seconds since 2026-01-01, an action id the milliseconds
   since the epoch. Both are digits only, as every existing pattern requires, and far from any issue number or
-  GitHub event id in use.
+  GitHub event id in use. An action newer than the restored backup is gone with its payload: a round that asks
+  for it fails saying so, and the person clicks again.
 - The word "issue" in old names (`DatasetState.issue`, `issue-<n>` in workflow ids, the `issue` field of a dataset
   row) is historical and holds the number. New code says `number`.
 - **A number is never rendered as a GitHub reference.** Today the code builds `<repo>#<issue>` links from it in the
@@ -164,12 +169,13 @@ action:
   action: go | plan | approve | reject | revoke | keep | retire | dropped | stop
   actor: page | prep:<number> | buffer:<number>     # §10
   at: <iso time>               # stored exactly as sent in the signal: two activities find their action by it (§6)
+  key: <text | null>           # the sender's own name for this request; a repeat is the same action (§5)
   payload:            # what a label could not carry
     spec: <YAML text>            # buffer go/plan, prep go: exactly what runs
     note: <text>                 # dataset reject: the feedback for the agent
     records: [<record id>, ...]  # buffer revoke; dropped (one record)
     root: <root request id>      # dataset go sent for a buffer or a request: who is charged for this round
-  state: sent | failed | refused
+  state: pending | sent | failed | refused   # pending until Temporal has answered
   detail: <why it failed or was refused>
 ```
 
@@ -242,20 +248,35 @@ today. An action route:
    a spec or request parses. **The workflow, not the registry's stage, decides whether an action applies**, as it
    does for a label today: a stage write can be late (§6), and a route that refused on it could refuse an approve
    for a round that is waiting for one. The "valid actions" the page is given are advice on which buttons to show;
-2. inserts the action row (`sent`), which issues its id;
-3. calls Temporal exactly as `deliver_label` does today: `start_workflow(<type>, <State>(number),
-   id=cfg.workflow_id(number), start_signal=<action>, start_signal_args=[LabelEvent(action, str(id), actor, at)])`.
-   `LabelEvent` gets no new field; what a label could not carry is read from the action row by its id (§6);
-4. on success appends the action to the timeline and answers `202` with the action;
-5. on any Temporal failure marks the action `failed` with the error and answers `503`. There is no retry queue: the
-   page shows the failure and the person clicks again.
+2. for an approve or a reject, compares the `revision` the request carries with the subject's and answers `409`
+   when they differ, recording nothing (*my call*). The workflow takes any verdict newer than the set under
+   review, and a click is always newer, so a page that still showed the previous set could approve crops nobody
+   looked at. The registry is never ahead of the workflow, so this check cannot refuse a verdict on the set the
+   person did see;
+3. inserts the action row (`pending`), which issues its id. A request may carry a `key`; a key the registry has
+   seen is that same action: nothing is inserted, and unless it is already `sent` it is sent again under its own
+   id (*my call*);
+4. calls Temporal exactly as `deliver_label` does today, with a ten-second limit: `start_workflow(<type>,
+   <State>(number), id=cfg.workflow_id(number), start_signal=<action>, start_signal_args=[LabelEvent(action,
+   str(id), actor, at)])`. `LabelEvent` gets no new field; what a label could not carry is read from the action
+   row by its id (§6);
+5. on success marks the action `sent` and appends it to the timeline, in one transaction, and answers `202` with
+   the action;
+6. on any Temporal failure marks the action `failed` with the error and answers `503`.
+
+There is no retry queue and no background delivery. An action that is `failed`, or still `pending` ten seconds
+after it was made (the service died between steps 3 and 5, or the answer was lost), is shown as not delivered
+with a *Retry* button, which sends the same key. The workflows already drop an event id they have handled, so a
+retry of an action that did arrive starts nothing twice. The page makes one key per click.
 
 Two actions are not a start-with-signal:
 
 - **`stop`** is `retire_closed`, moved from the poller to the route and otherwise unchanged: it terminates the
   workflow (a terminate reaches a run that nondeterminism froze), retires the subject's buffers with their
   `retired` events, and sets the stage it sets today (`retired` for a buffer, `done` for a request). It is offered
-  in the stages the poller handles today (the live buffer stages and a requested preparation).
+  in the stages the poller handles today (the live buffer stages and a requested preparation). As today, it does
+  not kill a cluster job that is already running and does not stop the dataset rounds a request started; the
+  button's confirmation says both. Stopping those is separate work.
 - **`dropped`** sends the existing plain `dropped(record)` signal to a running workflow. The poller sent it only
   once the `incoming/` listing had not changed for a whole interval, because the workflow accepts any non-empty
   file and records its hash; a click during a copy would record a truncated file as good. The route therefore
@@ -284,7 +305,7 @@ fixture re-recorded as `AGENTS.md` requires; the plan names each such place.
 | `refuse_label` | remove the label, comment why | mark the action refused, timeline entry |
 | `read_feedback(issue, since, until)` | reviewer comments in the window, filtered by write access | the notes of the subject's reject actions with `since < at <= until` |
 | `revoke_targets(issue, actor, until)` | `/revoke` lines in the actor's comments of the week before `until` | `payload.records` of the subject's revoke action whose `at` is `until` |
-| `nudge_dataset`, `prep_nudge` | find or open the dataset issue, read its stage label, add `data:go` as a trusted bot | read the dataset's row; `POST /datasets/<record>/actions` `go` with the worker token, actor and root |
+| `nudge_dataset`, `prep_nudge` | find or open the dataset issue, read its stage label, add `data:go` as a trusted bot | read the dataset's row; `POST /datasets/<record>/actions` `go` with the worker token, actor, root and the key `<round id>/<record>`, so a retried activity sends no second `go` |
 | `_over_quota_comment` | comment on the newest open buffer issue | a registry notice the Cache view shows; not mirrored (*my call*) |
 | `poll` (buffers) | labels, drops, closed issues | deleted, with its schedule |
 | `poll` (data) | labels, snippet PR watch, status on PRs without a snippet | the last two only (§9) |
@@ -317,17 +338,20 @@ service signals it, starting it if needed, whenever a timeline entry is appended
 service's own entries are mirrored like the workers'). It runs one activity until the subject has no unmirrored
 entry:
 
-1. If the subject has no issue: open one in the kind's repo. Title as today. The body opens with a line saying the
-   issue is a read-only log and a link to the subject's page, then the description (for a dataset, the record
-   facts `mia-data seed` writes today, record marker on line 1 so a create that crashed before its write-back is
-   found again and not repeated). Write the issue number back.
+1. If the subject has no issue: open one in the kind's repo. Title as today. The body opens with a marker naming
+   the subject (for a dataset, today's record marker), so a create that crashed before its write-back is found
+   again and not repeated, for all three kinds. Then a line saying the issue is a read-only log, a link to the
+   subject's page, and the description (for a dataset, the record facts `mia-data seed` writes today). Write the
+   issue number back.
 2. Post each unmirrored entry in `seq` order as a comment, once per entry (the existing once-per-marker comment).
    A buffer's `go` entry carries the spec it ran.
 3. Set the stage label to the latest stage. Stage labels stay because they filter issue lists; they are output.
 4. Write `mirrored_at` and the comment URL back.
 
 The activity retries without limit with a capped backoff. A round never calls GitHub for a data or buffers issue
-and never waits for the mirror. `mia-data seed` is retired: an issue appears the first time its dataset has
+and never waits for the mirror. Appending an entry and signalling the mirror are two steps: a kick that fails is
+logged, and the service kicks every subject that has an unmirrored entry when it starts, so an entry appended
+just before a crash is not left behind. `mia-data seed` is retired: an issue appears the first time its dataset has
 something to say.
 
 Nothing reads these issues back. A label, a comment, an edit or a close by a person changes nothing; the issue body
@@ -343,8 +367,9 @@ Still one HTML file served by buffer-api, no build step, no token.
 - **Datasets view.** Each row can be selected. *Prepare selected* files one preparation request for the
   selection (`POST /prep`), so the set is followed as one thing under one budget root. A row opens the dataset's
   own page (`#datasets/<record>`): state, timeline, and its buttons: *Prepare* or *Run again* (`go`), *Approve*,
-  *Reject* with a feedback box, *Revoke*. (*My call:* one dataset is a direct `go`, a selection is a request;
-  both exist today as `data:go` and `prep:go`.)
+  *Reject* with a feedback box, *Revoke*. *Approve* and *Reject* send the revision the page is showing (§5); on
+  a `409` the page reloads the subject and says it changed. (*My call:* one dataset is a direct `go`, a
+  selection is a request; both exist today as `data:go` and `prep:go`.)
 - **Crops under review** are reached by a link from the dataset's page to the round's gallery on the data repo's
   gallery branch, where every verified set is already pushed before review (*my call*). The crops of a round in
   review sit in its workspace, which buffer-api does not serve; it serves published crops only. Showing them on
@@ -432,7 +457,8 @@ Two things on this path touch the data repo and are settled so:
    slice B on, every running round needs a subject to write to. It can be run again at any time and changes
    nothing it already adopted. Every issue of the data repo with a record marker becomes a `dataset` subject,
    every buffer and request issue a `buffer` or `prep` subject with the spec text of its body; number and issue
-   are both the issue number.
+   are both the issue number. The subject's stage is taken from the issue's stage label, so a round that is
+   already waiting at a gate, and writes no further stage until someone answers, shows under *Needs you*.
    - A buffer's key is its spec's `name`, which is free text and not unique today. The lowest-numbered issue
      takes the name; a later issue with the same name gets `<name>-<number>`; a body without exactly one valid
      spec gets `issue-<number>`. From then on `POST /specs` keeps names unique.
@@ -442,8 +468,11 @@ Two things on this path touch the data repo and are settled so:
 2. Until slice E, an issue opened on GitHub after adoption is adopted when its first label is delivered (§6).
 3. Rounds running when slice B is deployed continue: their number is their issue number, and their next activity
    writes the timeline. Their earlier comments are already on the issue; the mirror posts what comes after.
-4. At slice E, a human label still sitting on an issue is listed by `adopt-issues`; the operator clicks the action
-   on the page instead. The human labels are deleted from both repos and the mia-buffers poll schedule is removed.
+4. Slice E is two deploys. First the pollers stop delivering labels; a human label still sitting on an issue is
+   listed by `adopt-issues` and the operator clicks the action on the page instead. The fallback of §6 is deleted
+   only once no running round was started by a label event (its event id is not an action's): such a round can
+   still reach `admit` and need the issue. Then the human labels are deleted from both repos and the mia-buffers
+   poll schedule is removed.
 
 Until the last slice ships, labels and the page both work, so cutover is the moment labels stop, not the moment
 the page starts.
@@ -471,7 +500,11 @@ the page starts.
 `pixi run test` still needs no GitHub, LSF or Temporal server: the service's Temporal client is injected and faked
 like the registry's transport.
 
-Autonomous gates milestone P (a buffer files its own preparation request) files it through `POST /prep`.
+Autonomous gates milestone P (a buffer files its own preparation request) files it through `POST /prep` with the
+buffer's round id as the key, which replaces "found by marker on retry". Its way back, "`buffer:go` again if the
+spec is unchanged", is a buffer `go` sent with the worker token and the spec hash the request was filed under; the
+route runs the subject's stored spec when the hash still matches and otherwise appends an entry saying the spec
+changed.
 
 ## 13. Calls made without the user (defaults in bold)
 
@@ -496,6 +529,12 @@ Autonomous gates milestone P (a buffer files its own preparation request) files 
 17. **Labels keep working until the last slice** (§6, §11) rather than one switch-over.
 18. **The snippet PR watch stays a poll** in mia-data (§9), as agreed when autodev signalling was rejected; listed
     here because "no polling" was stated without exception.
+19. **A retry is the same action.** Keys, the `pending` state and a *Retry* button; no retry queue (§5).
+20. **An approve or reject names the revision the person saw** and is refused if the subject moved on (§5).
+21. **`stop` leaves running cluster jobs and a request's dataset rounds alone**, as closing the issue does today,
+    and says so (§5).
+22. **A request still learns that its datasets finished by asking the registry on a timer** (every
+    `poll_minutes`, doubling to 30). Each dataset shows live on the page; only the request's own `done` can lag.
 
 ## 14. Build order
 
@@ -506,6 +545,6 @@ not on the remote yet: it has to be pushed, or merged, before the first PR can b
 |---|---|---|
 | A | **registry**: subjects, actions, timeline; read routes, `/lookup`, `/needs`, `/stream`; the `action` capability and guard; `adopt-issues` | tests pass; `adopt-issues` against the live repos adopts every issue once and reports duplicates; a restored backup issues no id twice; nothing behaves differently |
 | B | **timeline and mirror**: the stage and comment activities of §6 write entries; `MiaMirror` posts them; rounds stop calling GitHub for data and buffers issues | replay fixtures pass, with at most the one guarded change §6 names; a test round completes while every issue call of a GitHub fake fails, and the issue is complete once the fake recovers; a live round's issue reads as before |
-| C | **datasets from the page**: the Temporal client, dataset actions, `admit` and `read_feedback` from the registry, the dataset page, live updates, `/health` | live: *Prepare* on a dataset with no issue shows it working within two seconds, its issue appears with the link back, and a review is approved by click and publishes |
+| C | **datasets from the page**: the Temporal client, dataset actions, `admit` and `read_feedback` from the registry, the dataset page, live updates, `/health` | live: *Prepare* on a dataset with no issue shows it working within two seconds, its issue appears with the link back, and a review is approved by click and publishes; in tests, a repeated key starts one round and an approve carrying an old revision is refused |
 | D | **buffers and requests from the page**: specs, buffer and prep actions, `stop`, `dropped`, `nudge` through the registry, *Prepare selected*, *Needs you* | live: a buffer created on the page reaches ready with no GitHub input; a request for several records starts them with no `data:go` label |
 | E | **GitHub input removed**: the buffers poller and schedule, label delivery, `trusted_bots`, markers, parsers, `seed`, human labels, the fallback of §6; docs and `AGENTS.md` | no read of a data or buffers issue remains outside the mirror and `adopt-issues`; labelling, commenting on or closing an issue changes nothing |
