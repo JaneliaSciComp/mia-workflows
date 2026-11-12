@@ -88,7 +88,9 @@ network:
   redirect_hosts: {}
 
 # buffer-api (`mia-buffers serve`) and its clients. The port is required in `url`. `token_file` holds the worker
-# token its write routes need (chmod 600; `mia init-token` creates it).
+# token its write routes need (chmod 600; `mia init-token` creates it). buffer-api also reaches Temporal (the
+# `temporal.address` above): it starts the workflow that copies each dataset's, buffer's and request's timeline
+# to its GitHub issue, on mia-buffers' namespace and on that of the service whose app is mia-data.
 service:
   url: http://host.example.org:8765
   token_file: ~/.config/mia/service-token

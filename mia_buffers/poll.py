@@ -165,7 +165,7 @@ async def retire_closed(activities: Activities, number: int, prep: bool = False,
     )
     marker = cfg.marker(f"closed {run_id}" if run_id else "closed")  # once per run: a reopened issue closes again
     lead = "issue closed and reopened" if reopened else "issue closed"
-    await activities._comment_once(activities.gh_issues, number, f"{lead}: {what}\n\n{marker}", marker)
+    await activities._post("prep" if prep else "buffer", number, f"{lead}: {what}\n\n{marker}", marker)
     return done + [f"retired {b}" for b in retired] + [f"closed #{number}"]
 
 

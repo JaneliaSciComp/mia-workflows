@@ -294,6 +294,28 @@ name) and every request issue (`prep-<number>`) becomes a subject numbered by it
 `duplicate:`, `skipped:` or `refused:`: a duplicate dataset issue at a working stage has a running workflow, which
 must be stopped before the timeline and mirror are deployed (spec webapp-actions §11).
 
+**The timeline and the mirror** (spec webapp-actions §4.3, §6, §7). A round no longer writes to its data or
+buffers issue. `set_stage`, `comment`, `comment_plan`, `comment_prep`, `comment_drop` and `refuse_label` write the
+subject's stage and a *timeline entry* to the registry (`POST /timeline/<kind>/<number>`, worker; body
+`{body, marker, round, stage}`): an entry is appended once per marker, a stage always becomes the subject's and
+raises its `revision`. This write is required: with buffer-api away the activity fails and Temporal retries it.
+`GET /timeline/<kind>/<number>` (read) answers `{subject, entries}`. mia-data without a `service` section still
+writes labels and comments itself; that path goes with the labels (slice E).
+
+Every write kicks the subject's **mirror**: buffer-api starts the `MiaMirror` workflow (id
+`mirror/<kind>/<number>`), or signals it when it runs. Its one activity posts each entry not yet posted as a
+comment on the subject's issue, in order, once (the entry's marker is in the comment, so a pass that died before
+its write-back, `PUT /timeline/<kind>/<number>/<seq>`, finds its comment again), then leaves the subject's stage
+as the issue's only stage label. It retries without limit, so GitHub being slow or away only delays the issue;
+nothing reads the issue back. mia-data's worker runs the mirror for datasets, mia-buffers' for buffers and
+requests. buffer-api therefore needs to reach Temporal: it uses `temporal.address` of its own service block, its
+own namespace and task queue for buffers and requests, and for datasets the namespace and name of the service
+whose `app` is `mia-data`. It connects on first use, so it starts and serves with Temporal away; a kick that
+fails is logged, and a start kicks every subject that has an entry not yet posted.
+
+Until labels stop starting rounds, an issue opened on GitHub after `adopt-issues` ran is adopted by the first
+stage or entry a round writes for it.
+
 A volume's `samples` (from `stage.json`) register as candidates. Train draws a candidate by weight for volumes that
 have them; val and test lists are drawn from the candidates without replacement, so a list can run out: the response
 says `exhausted` and `size` is capped by the candidates available.

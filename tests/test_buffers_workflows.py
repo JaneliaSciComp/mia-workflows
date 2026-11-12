@@ -693,6 +693,18 @@ async def test_rollover_in_plan_review_then_approve(env, monkeypatch):
 # --- the poller -------------------------------------------------------------------------------
 
 
+class EntriesToIssue:
+    """A registry stand-in's timeline write, applied straight to the GitHub fake as the mirror would apply it:
+    the poller finds a closed issue by its stage label, so these tests need the label to follow the stage."""
+
+    def append_entry(self, kind, number, *, body="", marker="", round_id=None, stage=None):
+        issue, comments = self.gh.issues[number], self.gh.comments.setdefault(number, [])
+        if stage:
+            issue["labels"] = [{"name": f"{'prep' if kind == 'prep' else 'buffer'}:{stage}"}]
+        if body and not any(marker in comment["body"] for comment in comments):
+            comments.append({"body": body})
+
+
 class PollGH:
     def __init__(self, issues, events=None, perms=None):
         self.issues, self.events, self.perms = issues, events or {}, perms or {}
@@ -833,7 +845,7 @@ async def test_poll_retires_a_closed_issue(tmp_path):
     client = FakeClient(states)
     acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
 
-    class Reg:
+    class Reg(EntriesToIssue):
         retired, events = [], []
 
         def buffers(self):
@@ -847,6 +859,7 @@ async def test_poll_retires_a_closed_issue(tmp_path):
             self.events.append((buffer, kind))
 
     acts.registry = Reg()
+    acts.registry.gh = gh
     expect = {f"terminated {cfg.workflow_id(2)}", "retired i2-e9", "closed #2", "closed #3"}
     assert set(await run_poll(acts)) == expect
     assert client.terminated == [(cfg.workflow_id(2), "issue closed")]
@@ -873,7 +886,7 @@ async def test_poll_retires_an_issue_closed_and_reopened_within_one_interval(tmp
     client.statuses[cfg.workflow_id(5)] = WorkflowExecutionStatus.TERMINATED  # a pass that stopped half-way
     acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
 
-    class Reg:
+    class Reg(EntriesToIssue):
         retired = []
 
         def buffers(self):
@@ -890,6 +903,7 @@ async def test_poll_retires_an_issue_closed_and_reopened_within_one_interval(tmp
             pass
 
     acts.registry = Reg()
+    acts.registry.gh = gh
     assert set(await run_poll(acts)) == {f"terminated {cfg.workflow_id(5)}", "retired i5-e1", "closed #5"}
     assert client.terminated == [(cfg.workflow_id(5), "issue closed")] and acts.registry.retired == ["i5-e1"]
     assert {x["name"] for x in gh.issues[5]["labels"]} == {"buffer:retired"}
