@@ -40,14 +40,17 @@ from .dispatch import DispatchError
 from .explore import (
     DATASET_FILTERS,
     DATASET_SORTS,
+    PLAN_SORTS,
     Page,
     dataset_haystack,
     dataset_row,
     facets,
     page_query,
     paged,
+    plan_view,
     record_row,
 )
+from .jobspec import levels_key
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
@@ -163,8 +166,23 @@ class RecordsBody(_Strict):
     records: list[RecordBody]
 
 
+class PlanPage(_Strict):
+    """The page of a plan's rows the designer asks for, with the toggles that narrow them (explore.plan_view)."""
+
+    limit: int = 50
+    offset: int = 0
+    sort: str | None = None
+    dir: str = "asc"
+    q: str = ""
+    fit_only: bool = False
+    prepared_only: bool = False
+    raw_cached: bool = False
+    staged_geom: bool = False
+
+
 class PlanBody(_Strict):
     spec: str  # the spec's YAML text
+    page: PlanPage | None = None  # with it: one page of joined rows and the plan's summary instead of every row
 
 
 class BoardBody(_Strict):
@@ -463,6 +481,7 @@ class BufferService:
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
         self._record_rows: tuple[str | None, list[dict]] = (None, [])  # a catalog ref's rows never change
+        self._last_plan: tuple[Any, dict] = (None, {})  # the last plan built, with what it was built from
 
     def _authorized(self, headers: dict[str, str]) -> bool:
         if self.token is None:
@@ -1278,19 +1297,44 @@ class BufferService:
         return 200, {"datasets": self.ledger.datasets(query.get("state"))}, {}
 
     def _plan(self, *, query: dict[str, str], body: bytes) -> Response:
-        text = _parse(PlanBody, body).spec
+        parsed = _parse(PlanBody, body)
+        text = parsed.spec
         try:
             spec = load_spec_text(text)
         except SpecError as error:
             raise HttpError(422, str(error)) from None
         ref = spec.catalog.ref
-        records = self.ledger.records(ref)
-        if not records:
-            raise HttpError(409, f"catalog ref {ref} is not synced; run: mia-buffers catalog sync --ref {ref}")
         states = {row["id"]: row.get("state", "unprepared") for row in self.ledger.datasets()}
-        prepared = {record for record, state in states.items() if state == "prepared"}
-        plan = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared)
-        return 200, plan.to_dict(states), {}
+        # the designer asks for the same plan once per page turn and sort: keep the last one while nothing it
+        # depends on has changed (the spec's text, which names the ref, and every dataset's state)
+        key = (text, frozenset(states.items()))
+        if self._last_plan[0] != key:
+            records = self.ledger.records(ref)
+            if not records:
+                raise HttpError(409, f"catalog ref {ref} is not synced; run: mia-buffers catalog sync --ref {ref}")
+            prepared = {record for record, state in states.items() if state == "prepared"}
+            built = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared)
+            self._last_plan = (key, built.to_dict(states))
+        plan = self._last_plan[1]
+        if parsed.page is None:
+            return 200, plan, {}
+        asked = parsed.page
+        fields = {"limit": str(asked.limit), "offset": str(asked.offset), "dir": asked.dir, "q": asked.q}
+        page = self._page_of(fields | ({"sort": asked.sort} if asked.sort else {}), PLAN_SORTS)
+        assert page is not None
+        datasets = {row["id"]: row for row in self._dataset_rows()[1]}
+        staged_as = levels_key(int((spec.patch_for("2D") or {}).get("y") or 0), spec.sampling.levels)
+        view = plan_view(
+            plan,
+            datasets,
+            staged_as,
+            page,
+            fit_only=asked.fit_only,
+            prepared_only=asked.prepared_only,
+            raw_cached=asked.raw_cached,
+            staged_geom=asked.staged_geom,
+        )
+        return 200, {**plan, **view}, {}
 
     def _sync_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         root = self.storage_root

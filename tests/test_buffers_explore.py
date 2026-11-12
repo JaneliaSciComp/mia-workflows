@@ -59,3 +59,102 @@ def test_search_matches_any_value_of_the_haystack_without_case() -> None:
 def test_mixed_types_in_a_column_do_not_break_the_sort() -> None:
     mixed = [{"id": "a", "bytes": "12"}, {"id": "b", "bytes": 3}]
     assert ids(paged(mixed, Page(9, 0, "bytes", False, ""), KEYS)[0]) == "ba"  # numbers before text
+
+
+# --- a plan as the designer shows it: one page of its rows and the numbers over all of them
+
+from mia_buffers.explore import decision_of, plan_view  # noqa: E402
+
+
+def plan_row(record: str, **fields) -> dict:
+    row = {
+        "id": record,
+        "path": f"p/{record}",
+        "dims": "2D",
+        "modality_group": "TEM",
+        "admitted": True,
+        "rule": "selected",
+    }
+    row |= {"fit": {"ok": True, "reason": "fits"}, "positions": 0, "weight": 0.0, "bytes": None, "channels": 1}
+    return row | {"prepared": "prepared", "splits": {}} | fields
+
+
+PLAN = {
+    "rows": [
+        plan_row("c", admitted=False, rule="not prepared", prepared="unprepared", bytes=30, positions=7),
+        plan_row("a", positions=10, weight=0.75, bytes=100),
+        plan_row("e", admitted=False, rule="record unreadable: boom", fit=None, prepared="unprepared"),
+        plan_row("b", positions=5, weight=0.25, bytes=50, modality_group="confocal"),
+        plan_row(
+            "d", fit={"ok": False, "reason": "footprint 4096 px exceeds the 1024 px array"}, prepared="needs-human"
+        ),
+    ],
+    "excluded": {"dims 3D not in ['2D']": 4, "license unknown and allow_unknown is false": 2},
+    "n_seen": 11,
+}
+DATASETS = {
+    "a": {
+        "title": "Alpha",
+        "licence": "CC0-1.0",
+        "issue": 7,
+        "raw": {"state": "ready", "bytes": 9},
+        "levels_keys": ["p256-l1-2"],
+    },
+    "b": {"title": "Beta", "licence": "MIT", "raw": {"state": "fetching", "bytes": None}, "levels_keys": []},
+}
+ALL = Page(50, 0, None, False, "")
+
+
+def test_a_row_decision_is_its_first_reason_in_the_planners_words() -> None:
+    by_id = {row["id"]: decision_of(row) for row in PLAN["rows"]}
+    assert by_id["a"] == {"group": "pool", "reason": "fits"}
+    assert by_id["c"] == {"group": "not prepared", "reason": "fits; dataset is unprepared"}
+    assert by_id["d"]["group"] == "footprint too large" and by_id["e"]["group"] == "record unreadable"
+    assert decision_of(plan_row("x", admitted=False, rule="something new", fit=None))["group"] == "something new"
+
+
+def test_the_plan_summary_counts_over_every_row() -> None:
+    summary = plan_view(PLAN, DATASETS, "p256-l1-2", ALL)["summary"]
+    assert (summary["fitting"], summary["pool"], summary["prepared"], summary["in_progress"]) == (3, 2, 2, 0)
+    assert (summary["unprepared"], summary["needs_human"], summary["not_prepared"]) == (1, 0, 1)
+    assert (summary["bytes_fitting"], summary["bytes_pool"], summary["bytes_to_fetch"]) == (180, 150, 80)
+    assert (summary["dims"], summary["capacity"], summary["top_share"]) == (["2D"], 22, 0.75)
+    assert [(step["label"], step["value"], step.get("remaining")) for step in summary["funnel"]] == [
+        ("dims not selected", 4, 7),
+        ("licence unknown", 2, 5),
+        ("record unreadable", 1, 4),
+        ("footprint too large", 1, 3),
+        ("not prepared", 1, 2),
+        ("in the pool", 2, None),
+    ]
+    assert summary["by_modality"] == [{"label": "TEM", "value": 2}, {"label": "confocal", "value": 1}]
+    assert summary["weight_by_modality"] == [{"label": "TEM", "value": 0.75}, {"label": "confocal", "value": 0.25}]
+    assert [(row["id"], row["weight"]) for row in summary["heaviest"]] == [("a", 0.75), ("b", 0.25)]
+    assert summary["to_prepare"] == ["c"]
+
+
+def test_the_plan_rows_are_joined_sorted_and_cut() -> None:
+    view = plan_view(PLAN, DATASETS, "p256-l1-2", ALL)
+    assert [row["id"] for row in view["rows"]] == ["a", "b", "c", "d", "e"] and view["total"] == 5  # the plan's order
+    by_decision = plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, "decision", False, ""))
+    assert [row["id"] for row in by_decision["rows"]] == ["a", "b", "e", "d", "c"]  # the pool, then the planner's rules
+    first = view["rows"][0]
+    assert (first["title"], first["licence"], first["issue"], first["staged_here"]) == ("Alpha", "CC0-1.0", 7, True)
+    assert first["fits"] and first["in_pool"] and first["decision"]["group"] == "pool"
+    assert view["rows"][2]["title"] == "" and view["rows"][2]["raw"] is None  # a record the registry knows nothing of
+    page = plan_view(PLAN, DATASETS, "p256-l1-2", Page(2, 2, "dataset", False, ""))
+    assert [row["id"] for row in page["rows"]] == ["c", "d"] and page["total"] == 5
+    assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "beta"))["rows"]] == [
+        "b"
+    ]
+    fit = plan_view(PLAN, DATASETS, "p256-l1-2", ALL, fit_only=True)
+    assert [row["id"] for row in fit["rows"]] == ["a", "b", "c"] and fit["summary"]["fitting"] == 3
+
+
+def test_the_registry_toggles_narrow_the_rows_and_the_numbers_but_not_the_funnel() -> None:
+    prepared = plan_view(PLAN, DATASETS, "p256-l1-2", ALL, prepared_only=True)
+    assert [row["id"] for row in prepared["rows"]] == ["a", "b"] and prepared["summary"]["fitting"] == 2
+    assert prepared["summary"]["funnel"] == plan_view(PLAN, DATASETS, "p256-l1-2", ALL)["summary"]["funnel"]
+    assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", ALL, raw_cached=True)["rows"]] == ["a"]
+    assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", ALL, staged_geom=True)["rows"]] == ["a"]
+    assert plan_view(PLAN, DATASETS, "p512-l1", ALL, staged_geom=True)["rows"] == []

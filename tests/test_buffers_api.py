@@ -1757,3 +1757,46 @@ def test_decisions_are_paged_and_name_their_dataset(tmp_path):
     assert [row["subject"]["ref"] for row in out["assessments"]] == ["i7-e11:s"] and out["total"] == 1
     assert call(s, "GET", "/decisions", {"record": HEMIBRAIN, "gate": "crops"})[1]["total"] == 0
     assert call(s, "GET", "/decisions", {"limit": "500"})[0] == 422
+
+
+def test_plan_paged_answers_a_page_and_the_numbers_over_the_whole_plan(tmp_path):
+    s = catalog_service(tmp_path)
+    call(s, "PUT", f"/datasets/{U937}", payload={"state": "prepared", "issue": 9})
+    call(s, "PUT", f"/assets/raw/{U937}", payload={"state": "ready", "bytes": 10})
+    text = re.sub(r"ref: [0-9a-f]{40}", f"ref: {REF_A}", SPEC_2D_TEXT)
+    whole = call(s, "POST", "/plan", payload={"spec": text})[1]
+    assert "summary" not in whole and "total" not in whole  # without `page`: the plan as it always was
+    status, out, _ = call(s, "POST", "/plan", payload={"spec": text, "page": {"limit": 2, "sort": "dataset"}})
+    assert status == 200 and out["total"] == len(whole["rows"]) and len(out["rows"]) == 2
+    assert [row["id"] for row in out["rows"]] == sorted(row["id"] for row in whole["rows"])[:2]
+    assert (
+        out["n_seen"] == whole["n_seen"] and out["excluded"] == whole["excluded"] and out["errors"] == whole["errors"]
+    )
+    fitting = [row for row in whole["rows"] if row["fit"] and row["fit"]["ok"]]
+    pool = [row for row in fitting if row["admitted"]]
+    summary = out["summary"]
+    assert (summary["fitting"], summary["pool"]) == (len(fitting), len(pool)) and summary["pool"] == 1
+    assert summary["bytes_fitting"] == sum(row["bytes"] or 0 for row in fitting)
+    assert summary["to_prepare"] == sorted(row["id"] for row in fitting if row["prepared"] != "prepared")
+    assert sum(step["value"] for step in summary["funnel"]) == whole["n_seen"]  # every record leaves or is in the pool
+    row = next(r for r in call(s, "POST", "/plan", payload={"spec": text, "page": {"q": "u937"}})[1]["rows"])
+    assert (row["id"], row["issue"], row["raw"], row["in_pool"]) == (U937, 9, {"state": "ready", "bytes": 10}, True)
+    assert row["title"].startswith("Dataset of confocal") and row["licence"] == "CC-BY-4.0"
+    only = call(s, "POST", "/plan", payload={"spec": text, "page": {"prepared_only": True}})[1]
+    assert [r["id"] for r in only["rows"]] == [U937] and only["summary"]["fitting"] == 1
+    assert call(s, "POST", "/plan", payload={"spec": text, "page": {"sort": "nope"}})[0] == 422
+    assert call(s, "POST", "/plan", payload={"spec": text, "page": {"limit": 500}})[0] == 422
+    assert call(s, "POST", "/plan", payload={"spec": text, "page": {"oops": 1}})[0] == 422
+
+
+def test_a_kept_plan_is_rebuilt_when_a_dataset_changes_state(tmp_path):
+    s = catalog_service(tmp_path)
+    text = re.sub(r"ref: [0-9a-f]{40}", f"ref: {REF_A}", SPEC_2D_TEXT)
+    first = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]["summary"]
+    assert first["pool"] == 0 and first["to_prepare"]
+    again = call(s, "POST", "/plan", payload={"spec": text, "page": {"offset": 1}})[1]["summary"]
+    assert again == first  # the same plan, another page
+    call(s, "PUT", f"/datasets/{first['to_prepare'][0]}", payload={"state": "prepared"})
+    after = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]["summary"]
+    assert after["pool"] == 1 and first["to_prepare"][0] not in after["to_prepare"]
+    assert call(s, "POST", "/plan", payload={"spec": text.replace(REF_A, "c" * 40), "page": {}})[0] == 409  # not synced

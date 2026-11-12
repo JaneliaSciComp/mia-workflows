@@ -301,14 +301,9 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
     <div class="card"><h2>Heaviest datasets</h2><div class="sub">The prepared datasets that would supply the most crops.</div><ol class="toplist" id="top"></ol></div>
   </section>
   <section>
-    <div class="tablebar">
-      <h2 style="margin:0">Datasets</h2>
-      <input type="search" id="search" placeholder="search id, title, modality, licence" aria-label="search records">
-      <label class="inline"><input type="checkbox" id="fitOnly"> fitting only</label>
-      <span class="small" id="tableCount"></span>
-    </div>
-    <div class="tablewrap"><table id="table"><thead></thead><tbody></tbody></table></div>
-    <button type="button" class="more" id="more" hidden>Show more</button>
+    <h2>The plan's datasets</h2>
+    <p class="small">Every dataset the spec's selection admits, and why it is in the pool or not.</p>
+    <div id="planTable"></div>
   </section>
   </div>
 </section>
@@ -1367,14 +1362,6 @@ async function loadRegistry() {
   S.stagedByRecord = new Map();
   for (const a of S.stagedAssets) { const r = a.data?.record; if (!r) continue; if (!S.stagedByRecord.has(r)) S.stagedByRecord.set(r, []); S.stagedByRecord.get(r).push(a); }
 }
-async function loadRecords() {
-  if (!S.ref || S.recordsRef === S.ref) return;
-  const out = await load("/records?ref=" + encodeURIComponent(S.ref));
-  if (!out) return;
-  S.records = new Map((out.records || []).map(r => [String(r.record?.id ?? r.path), r]));
-  S.recordsRef = S.ref;
-}
-
 // ---- the spec the controls describe
 const C = { name: "microscopy-2d-gray", paths: "datasets/**", dims: new Set(["2D"]), lic: new Set(["CC0-1.0","CC-BY-3.0","CC-BY-4.0","MIT","BSD-3-Clause"]),
   allowUnknown: false, annRequired: false, sources: new Set(SRC), minVox: 1e6, patch: 256, level: 4, patchZ: 32, dedup: true, T: 0.5,
@@ -1474,7 +1461,7 @@ function prepareButton(container, todo, blocker, done) {
   const label = `Prepare these ${num(todo.length)} datasets`;
   const why = blocker || (todo.length > PREP_MAX ? `a request takes at most ${PREP_MAX} datasets: prepare them in parts` : null);
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
-  container.replaceChildren(el("button", { type: "button", class: "btn", title: "one preparation request for every unprepared dataset in the list below", onclick: async e => {
+  container.replaceChildren(el("button", { type: "button", class: "btn", title: "one preparation request for these datasets", onclick: async e => {
     if (!confirm(`Start preparing ${todo.length} datasets? Each one costs an agent run.`)) return;
     e.target.disabled = true;
     // more than 25 records need the count written into the request: the confirmation above is that
@@ -1487,99 +1474,43 @@ function prepareButton(container, todo, blocker, done) {
   } }, label));
 }
 
-// ---- rules: the planner's reason strings, grouped and in its order, for the funnel and the decision column
-const RULE_GROUPS = [
-  [/^path not in/, "path not selected"], [/^excluded by path/, "excluded by path"], [/^excluded by id/, "excluded by id"],
-  [/^dims /, "dims not selected"], [/^modality /, "modality"], [/^organism /, "organism"],
-  [/^license .*unknown/, "licence unknown"], [/^license /, "licence not allowed"],
-  [/^annotations required/, "annotations required"], [/^annotation types/, "annotation types"], [/^annotation source/, "annotation source"],
-  [/^largest raw array under/, "array below minimum"], [/^no dataset folder/, "no mia-data folder"], [/^dedup/, "duplicate DOI"],
-  [/^record unreadable/, "record unreadable"], [/^no patch for dims/, "no patch for dims"], [/^no array shape/, "no array shape"],
-  [/^footprint/, "footprint too large"], [/^patch z/, "too few z slices"], [/^voxel size unknown/, "voxel size unknown"],
-  [new RegExp("^" + NOT_PREPARED + "$"), NOT_PREPARED],
-];
-const ruleGroup = rule => (RULE_GROUPS.find(([re]) => re.test(rule || "")) || [null, rule || "unknown"])[1];
-const ruleRank = group => { const i = RULE_GROUPS.findIndex(([, g]) => g === group); return i < 0 ? RULE_GROUPS.length : i; };
-function decisionOf(r) {
-  if (r.admitted && r.fit && r.fit.ok) return { group: "pool", reason: r.fit.reason };
-  if (r.rule === NOT_PREPARED) return { group: NOT_PREPARED, reason: `fits; dataset is ${r.prepared || "unprepared"}` };
-  if (r.admitted && r.fit) return { group: ruleGroup(r.fit.reason), reason: r.fit.reason };
-  return { group: ruleGroup(r.rule), reason: r.rule };
-}
-function joinRow(r) {
-  const rec = S.records.get(r.id)?.record || {};
-  const ds = S.datasets.get(r.id) || null;
-  return { ...r, title: rec.title || "", lic: rec.license?.spdx || "", url: rec.landing_url || null,
-    bytes: r.bytes ?? rec.data?.size_bytes ?? null, ds, raw: S.raw.get(r.id) || null, staged: S.stagedByRecord.get(r.id) || [],
-    fits: !!(r.fit && r.fit.ok), inPool: !!(r.admitted && r.fit && r.fit.ok), decision: decisionOf(r) };
-}
-const stagedUsable = a => !["evicted","missing"].includes(a.data?.state);
-
-// ---- the records table (the explorer's, with the registry columns)
-let sortKey = "decision", sortDir = 1, shown = 150, currentRows = [];
+// ---- the plan's table: the datasets the spec's selection admits, one page at a time (POST /plan with `page`).
+// The server joins each row with the registry and says why it is in the pool or not (mia_buffers.explore).
 const splitText = x => Object.entries(x.splits || {}).map(([k, v]) => `${k} ${num(v)}`).join(" · ");
-const COLS = [
-  { key: "id", label: "dataset", get: x => x.id, cell: x => { const td = el("td", { class: "id", title: x.title || x.id }); td.append(link(x.url, x.id)); return td; } },
-  { key: "preview", label: "preview", get: x => (x.ds?.previews || []).length, cell: x => el("td", {}, thumb(x.ds)) },
-  { key: "decision", label: "decision", get: x => x.inPool ? -1 : ruleRank(x.decision.group), cell: x => el("td", {}, pill(x.decision.group, x.inPool ? "pool" : "", x.decision.reason && x.decision.reason !== x.decision.group ? [{ t: x.decision.reason }] : [])) },
-  { key: "dims", label: "dims", get: x => x.dims || "" },
-  { key: "mod", label: "modality", get: x => x.modality_group || "" },
-  { key: "lic", label: "licence", get: x => x.lic },
-  { key: "state", label: "state", title: "preparation, then the raw cache's state, then \"staged\" when a pyramid of it exists",
-    get: x => `${x.prepared === "prepared" ? 0 : 1}${x.raw?.data ? 0 : 1}${x.staged.some(stagedUsable) ? 0 : 1}`,
-    cell: x => { const td = el("td", { class: "pills" }, statePill(x.prepared));
-      if (x.raw?.data) td.append(" ", assetPill(x.raw.data.state)); if (x.staged.some(stagedUsable)) td.append(" ", pill("staged", "pool"));
-      if (x.staged.some(a => a.data?.quarantined)) td.append(" ", assetPill("quarantined")); return td; } },
-  { key: "issue", label: "page", get: x => x.ds?.issue ? 0 : 1, cell: x => el("td", {}, el("a", { href: "#datasets/" + encodeURIComponent(x.id), title: "state, timeline and actions of this dataset" }, x.ds?.issue ? "open" : "prepare")) },
-  { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data?.bytes ? fmtBytes(x.raw.data.bytes) : "") },
-  { key: "buffers", label: "buffers", get: x => (x.raw?.refs || []).length, cell: x => { const td = el("td"); (x.raw?.refs || []).forEach((b, i) => td.append(i ? " " : "", bufferLink(b))); return td; } },
-  { key: "bytes", label: "size", num: true, get: x => x.bytes || 0, cell: x => el("td", { class: "num" }, x.bytes ? fmtBytes(x.bytes) : "") },
-  { key: "w", label: "weight", num: true, get: x => x.weight || 0, cell: x => el("td", { class: "num" }, x.weight ? pct(x.weight) : "") },
-  { key: "split", label: "split", get: splitText },
+const PLAN_COLS = [
+  { key: "dataset", label: "dataset", cell: x => { const a = datasetLink(x.id); a.title = x.title || x.id; return a; } },
+  { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
+  { label: "preview", cell: x => thumb(x) },
+  { key: "decision", label: "decision", cell: x => pill(x.decision.group, x.in_pool ? "pool" : "", x.decision.reason && x.decision.reason !== x.decision.group ? [{ t: x.decision.reason }] : []) },
+  { key: "dims", label: "dims", cell: x => x.dims || "" },
+  { key: "modality", label: "modality", cell: x => x.modality_group || "" },
+  { key: "licence", label: "licence", cell: x => x.licence || "" },
+  { key: "state", label: "state", title: "preparation, then the raw cache's state, then \"staged\" when a pyramid of it exists for this geometry",
+    cell: x => { const pills = el("span", { class: "pills" }, statePill(x.prepared)); if (x.raw) pills.append(" ", assetPill(x.raw.state)); if (x.staged_here) pills.append(" ", pill("staged", "pool")); if (x.quarantined) pills.append(" ", assetPill("quarantined")); return pills; } },
+  { key: "raw", label: "raw cache", num: true, cell: x => x.raw?.bytes ? fmtBytes(x.raw.bytes) : "" },
+  { key: "buffers", label: "buffers", cell: x => bufferLinks(x.buffers) },
+  { key: "bytes", label: "size", num: true, cell: x => x.bytes ? fmtBytes(x.bytes) : "" },
+  { key: "weight", label: "weight", num: true, cell: x => x.weight ? pct(x.weight) : "" },
+  { label: "split", cell: splitText },
 ];
-function renderTableHead() {
-  const tr = el("tr");
-  for (const c of COLS) tr.append(el("th", { class: c.num ? "num" : "", title: c.title || null, onclick: () => { if (sortKey === c.key) sortDir = -sortDir; else { sortKey = c.key; sortDir = c.num ? -1 : 1; } renderTable(); } }, c.label + (sortKey === c.key ? (sortDir > 0 ? " ▲" : " ▼") : "")));
-  $("table").tHead.replaceChildren(tr);
-}
-function tableRows() {  // the results list: the view rows after the search box and the fitting-only toggle
-  const q = $("search").value.trim().toLowerCase(), fitOnly = $("fitOnly").checked;
-  return currentRows.filter(x => (!fitOnly || x.fits) && (!q || [x.id, x.title, x.modality_group, x.lic, x.decision.group, x.prepared].join(" ").toLowerCase().includes(q)));
-}
-function renderTable() {
-  renderTableHead();
-  const rows = tableRows();
-  const col = COLS.find(c => c.key === sortKey);
-  rows.sort((a, b) => { const va = col.get(a), vb = col.get(b); return (va < vb ? -1 : va > vb ? 1 : 0) * sortDir || (a.path < b.path ? -1 : 1); });
-  $("tableCount").textContent = `${num(rows.length)} rows` + (rows.length > shown ? `, showing ${num(shown)}` : "");
-  const tb = $("table").tBodies[0];
-  tb.replaceChildren(...rows.slice(0, shown).map(x => el("tr", { class: x.inPool ? "" : "out" }, ...COLS.map(c => c.cell ? c.cell(x) : el("td", { class: c.num ? "num" : "" }, String(c.get(x)))))));
-  if (!rows.length) tb.append(el("tr", {}, el("td", { colspan: COLS.length, class: "empty" }, currentRows.length ? "no row matches the search or the registry toggles" : "the spec admits no record")));
-  $("more").hidden = rows.length <= shown;
-  renderActions();  // the preparation request follows the list
-}
 
 // ---- datasets: controls → YAML → POST /plan (debounced) → KPIs, funnel, charts, table, actions
 function chips(container, values, set, onchange) {
   container.replaceChildren(...values.map(v => { const input = el("input", { type: "checkbox" }); input.checked = set.has(v); input.addEventListener("change", () => { if (input.checked) set.add(v); else set.delete(v); onchange(); }); return el("label", { class: "chip" }, input, v); }));
 }
-let planTimer = 0, planSeq = 0;
-function schedulePlan(ms) { clearTimeout(planTimer); planTimer = setTimeout(runPlan, ms ?? PLAN_DEBOUNCE_MS); renderActions(); }
-async function runPlan() {
-  if (!S.ref) return;
+let planTimer = 0, planSeq = 0, planTable = null, fitOnly = false;
+function schedulePlan(ms) { clearTimeout(planTimer); planTimer = setTimeout(() => { if (planTable) planTable.reload(true); }, ms ?? PLAN_DEBOUNCE_MS); renderActions(); }
+async function planPage(state) {  // the table's source: the plan of the spec the controls describe, one page of its rows
+  if (!S.ref) return null;
   const seq = ++planSeq;
   $("planStatus").textContent = "planning…";
-  try {
-    const plan = await api("/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ spec: toSpecYaml(C, S.ref, S.meta.catalog_repo) }) });
-    if (seq !== planSeq) return;
-    S.plan = plan; S.planError = null;
-  } catch (e) {
-    if (seq !== planSeq) return;
-    S.plan = null; S.planError = e;
-    if (e.status !== 422 && e.status !== 409) banner(`POST /plan → ${e.status || "network error"}: ${e.message}`);
-  }
-  $("planStatus").textContent = "";
-  renderDatasets();
+  const page = { limit: state.limit, offset: state.offset, dir: state.dir, q: state.q, ...(state.sort ? { sort: state.sort } : {}),
+    fit_only: fitOnly, prepared_only: C.preparedOnly, raw_cached: C.rawCached, staged_geom: C.stagedGeom };
+  let out = null, error = null;
+  try { out = await api("/plan", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: toSpecYaml(C, S.ref, S.meta.catalog_repo), page }) }); }
+  catch (e) { error = e; if (e.status !== 422 && e.status !== 409) banner(`POST /plan → ${e.status || "network error"}: ${e.message}`); }
+  if (seq === planSeq) { S.plan = out; S.planError = error; $("planStatus").textContent = ""; renderDesigner(); }
+  return { rows: out?.rows || [], total: out?.total || 0, out };
 }
 function bindControls() {
   const replan = () => schedulePlan();
@@ -1591,22 +1522,12 @@ function bindControls() {
   bind("allowUnknown", "allowUnknown", null, replan); bind("annRequired", "annRequired", null, replan);
   bind("minVox", "minVox", int, replan); bind("patch", "patch", int, replan); bind("level", "level", int, replan); bind("patchZ", "patchZ", int, replan);
   bind("dedup", "dedup", null, replan); bind("temp", "T", int, replan);
-  for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, renderDatasets);  // registry state: no new plan
+  for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, () => schedulePlan(0));  // registry state: the same plan, fewer rows
   $("download").addEventListener("click", () => {
     const blob = new Blob([toSpecYaml(C, S.ref, S.meta.catalog_repo)], { type: "application/yaml" });
     const a = el("a", { href: URL.createObjectURL(blob), download: `${C.name.trim() || "buffer"}.yaml` }); document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   });
-  $("search").addEventListener("input", () => { shown = 150; renderTable(); });
-  $("fitOnly").addEventListener("change", () => { shown = 150; renderTable(); });
-  $("more").addEventListener("click", () => { shown += 300; renderTable(); });
-}
-function viewRows() {
-  if (!S.plan) return [];
-  const key = levelsKey(C);
-  return (S.plan.rows || []).map(joinRow).filter(x => (!C.preparedOnly || x.prepared === "prepared")
-    && (!C.rawCached || x.raw?.data?.state === "ready")
-    && (!C.stagedGeom || x.staged.some(a => a.data?.levels_key === key && stagedUsable(a))));
 }
 // Why a buffer issue for the current spec would be refused by the planner, or null when the plan is clean.
 function bufferBlocker() {
@@ -1615,16 +1536,15 @@ function bufferBlocker() {
   if (!S.plan) return "planning…";
   const errors = S.plan.errors || [];
   if (!errors.length) return null;
-  const waiting = (S.plan.rows || []).filter(r => r.rule === NOT_PREPARED).length;
+  const waiting = S.plan.summary?.not_prepared || 0;
   if (errors.includes("no dataset admitted") && waiting) return `no prepared dataset fits yet; ${num(waiting)} fit but are not prepared: request preparation first`;
   return "the plan has errors: " + errors.join("; ");
 }
 function renderActions() {
   createBuffer($("bufferIssue"), toSpecYaml(C, S.ref, S.meta.catalog_repo), bufferBlocker());
-  // every unprepared record in the results list below (search and fitting-only applied); in progress is already on its way
-  const todo = tableRows().filter(x => x.prepared !== "prepared" && x.prepared !== "in-progress").map(x => x.id);
-  const none = C.preparedOnly ? "the prepared-only toggle hides the unprepared records" : "every record in the list is prepared or in progress";
-  prepareButton($("prepIssue"), todo, !S.plan ? "no plan yet" : todo.length ? null : none);
+  // every dataset that fits the spec and is not prepared; one in progress is already on its way
+  const todo = S.plan?.summary?.to_prepare || [];
+  prepareButton($("prepIssue"), todo, !S.plan ? "no plan yet" : todo.length ? null : "every dataset that fits is prepared or in progress");
 }
 function renderPlanMessages() {
   const box = $("planMsgs"); box.replaceChildren();
@@ -1633,52 +1553,41 @@ function renderPlanMessages() {
   for (const msg of S.plan?.errors || []) box.append(el("div", { class: "notice" }, "plan error: " + msg));
   for (const msg of S.plan?.warnings || []) box.append(el("div", { class: "notice" }, "warning: " + msg));
 }
-function renderDatasets() {
+function renderDesigner() {  // the numbers over the whole plan, as the server summed them (`summary`)
   const F = C.patch * C.level;
   $("footprint").textContent = `footprint ${num(F)} px = ${C.patch} × ${C.level} · levels ${levelsOf(C.level).join(", ")}`;
   $("tVal").textContent = C.T.toFixed(2);
   $("levelsKey").textContent = levelsKey(C);
   renderPlanMessages();
-  const plan = S.plan, rows = viewRows(); currentRows = rows;
-  const fitting = rows.filter(x => x.fits), pool = rows.filter(x => x.inPool);
-  const count = state => fitting.filter(x => x.prepared === state).length;
-  const prepared = count("prepared"), inProgress = count("in-progress"), unprepared = fitting.length - prepared - inProgress;
-  const bytes = fitting.reduce((a, x) => a + (x.bytes || 0), 0), poolBytes = pool.reduce((a, x) => a + (x.bytes || 0), 0);
-  const toFetch = fitting.filter(x => x.raw?.data?.state !== "ready").reduce((a, x) => a + (x.bytes || 0), 0);
-  const dimsIn = [...new Set(fitting.map(x => x.dims))].sort();
-  const top = pool.reduce((m, x) => Math.max(m, x.weight || 0), 0);
+  const plan = S.plan, m = plan?.summary || {}, dims = m.dims || [];
   $("kpis").replaceChildren(
-    tile("Datasets that fit", plan ? num(fitting.length) : "—", plan ? `of ${num(plan.n_seen)} records seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
-    tile("Prepared", num(prepared), "the buffer's pool today"),
-    tile("In progress", num(inProgress), "mia-data is preparing them"),
-    tile("Unprepared", num(unprepared), `${num(count("needs-human"))} need a human`),
-    tile("Raw bytes", `${fmtBytes(poolBytes)} / ${fmtBytes(bytes)}`, `the prepared pool now / every fitting dataset; ${fmtBytes(toFetch)} not in the raw cache`),
-    tile("Dimensionalities", dimsIn.length ? dimsIn.join(" · ") : "none", dimsIn.length > 1 ? "one buffer serves one: narrow dims" : "one buffer, one model", "text"),
-    tile("Capacity", fmt(fitting.reduce((a, x) => a + (x.positions || 0), 0)), "non-overlapping coarsest crops in the fitting datasets"),
-    tile("Top dataset share", pool.length ? pct(top) : "—", "of the crops drawn from the prepared pool"));
-  // funnel: the plan's own counts, so it ignores the registry toggles
-  const groups = new Map();
-  const add = (g, n) => groups.set(g, (groups.get(g) || 0) + n);
-  for (const [rule, n] of Object.entries(plan?.excluded || {})) add(ruleGroup(rule), n);
-  for (const r of plan?.rows || []) { const d = decisionOf(r); if (d.group !== "pool") add(d.group, 1); }
-  let remaining = plan?.n_seen || 0;
-  const funnel = [...groups].sort((a, b) => ruleRank(a[0]) - ruleRank(b[0])).map(([label, value]) => { remaining -= value; return { label, value, sub: `${num(remaining)} remain after this rule`, color: label === NOT_PREPARED ? "var(--s4)" : "var(--accent)" }; });
-  if (plan) funnel.push({ label: "in the pool", value: (plan.rows || []).filter(r => r.admitted && r.fit && r.fit.ok).length, color: "var(--s3)" });
-  hbars($("funnel"), funnel, { labelW: 165, aria: "Records removed per rule", empty: S.planError ? "no plan: see the message above the actions" : "planning…" });
-  const byMod = new Map(); fitting.forEach(x => byMod.set(x.modality_group || "none", (byMod.get(x.modality_group || "none") || 0) + 1));
-  hbars($("bymod"), [...byMod].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, value]) => ({ label, value })), { labelW: 140, aria: "Fitting datasets by modality", empty: "no dataset fits this spec" });
-  const share = new Map(); pool.forEach(x => share.set(x.modality_group || "none", (share.get(x.modality_group || "none") || 0) + (x.weight || 0)));
-  hbars($("byweight"), [...share].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([label, value]) => ({ label, value, text: pct(value) })), { labelW: 140, aria: "Weight share by modality", empty: "no prepared dataset in the pool yet: weights cover prepared datasets only" });
-  const heavy = pool.slice().sort((a, b) => (b.weight || 0) - (a.weight || 0)).slice(0, 8);
+    tile("Datasets that fit", plan ? num(m.fitting) : "—", plan ? `of ${num(plan.n_seen)} records seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
+    tile("Prepared", num(m.prepared || 0), "the buffer's pool today"),
+    tile("In progress", num(m.in_progress || 0), "mia-data is preparing them"),
+    tile("Unprepared", num(m.unprepared || 0), `${num(m.needs_human || 0)} need a human`),
+    tile("Raw bytes", `${fmtBytes(m.bytes_pool || 0)} / ${fmtBytes(m.bytes_fitting || 0)}`, `the prepared pool now / every fitting dataset; ${fmtBytes(m.bytes_to_fetch || 0)} not in the raw cache`),
+    tile("Dimensionalities", dims.length ? dims.join(" · ") : "none", dims.length > 1 ? "one buffer serves one: narrow dims" : "one buffer, one model", "text"),
+    tile("Capacity", fmt(m.capacity || 0), "non-overlapping coarsest crops in the fitting datasets"),
+    tile("Top dataset share", m.pool ? pct(m.top_share) : "—", "of the crops drawn from the prepared pool"));
+  // the funnel is the plan's own: it ignores the registry toggles
+  const steps = (m.funnel || []).map(step => ({ label: step.label, value: step.value, sub: step.remaining == null ? undefined : `${num(step.remaining)} remain after this rule`,
+    color: step.label === NOT_PREPARED ? "var(--s4)" : step.remaining == null ? "var(--s3)" : "var(--accent)" }));
+  hbars($("funnel"), steps, { labelW: 165, aria: "Records removed per rule", empty: S.planError ? "no plan: see the message above the actions" : "planning…" });
+  hbars($("bymod"), m.by_modality || [], { labelW: 140, aria: "Fitting datasets by modality", empty: "no dataset fits this spec" });
+  hbars($("byweight"), (m.weight_by_modality || []).map(bar => ({ ...bar, text: pct(bar.value) })), { labelW: 140, aria: "Weight share by modality", empty: "no prepared dataset in the pool yet: weights cover prepared datasets only" });
+  const heavy = m.heaviest || [];
   $("top").replaceChildren(...(heavy.length ? heavy.map(x => el("li", {}, el("b", {}, pct(x.weight || 0)), el("span", { title: x.id }, `${x.id} · ${x.modality_group || "none"} · ${fmt(x.positions || 0)} positions · ${x.channels ?? "?"} ch`))) : [el("li", { class: "empty" }, "no prepared dataset in the pool yet")]));
-  shown = 150; renderTable();
+  renderActions();
 }
-async function viewDesigner() {
+function viewDesigner() {
   $("dsEmpty").hidden = !!S.ref; $("dsBody").hidden = !S.ref;
   if (!S.ref) return;
-  await Promise.all([loadRegistry(), loadRecords()]);
-  renderDatasets();
-  schedulePlan(0);
+  if (planTable) return planTable.reload();
+  const fit = el("input", { type: "checkbox" });
+  fit.addEventListener("change", () => { fitOnly = fit.checked; planTable.reload(true); });
+  planTable = pagedTable("plan", { source: planPage, cols: PLAN_COLS, sort: "decision", search: "search id, title, modality, licence",
+    tools: [el("label", { class: "inline" }, fit, " fitting only")], empty: "The spec admits no dataset.", rowAttrs: x => ({ class: x.in_pool ? "" : "out" }) });
+  $("planTable").replaceChildren(planTable);
 }
 
 // ---- datasets: every dataset of the catalog with what the registry knows about it, one page at a time
