@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import quote
 
 import yaml
 from temporalio import activity
@@ -148,6 +149,15 @@ def _small_dict(value: Any, limit: int = 16384) -> dict | None:
 def _job_json(workspace: str | Path, rel: str) -> Any:
     """A JSON file a job wrote, or None if missing, unreadable or malformed."""
     return _loads(read_untrusted(Path(workspace), rel, 1 << 20))
+
+
+def _when(iso: str | None) -> datetime | None:
+    """An ISO-8601 time as an aware datetime (GitHub's `Z`, or an offset; none given is UTC); None if unreadable."""
+    try:
+        parsed = datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _fenced(text: str, lang: str = "") -> str:
@@ -306,6 +316,21 @@ class Activities:
             await asyncio.to_thread(write)
         return None
 
+    async def _action(self, number: int, event_id: str) -> dict | None:
+        """The action whose id is this event id, with its `subject` and the subject's `actions`; None when the
+        event is not an action (a GitHub label event, or no buffer-api). An action of another subject is an error."""
+        if (registry := self.registry) is None:
+            return None
+        action = await asyncio.to_thread(registry.action, event_id)
+        if action is None:
+            return None
+        if (action["kind"], action["number"]) != ("dataset", number):
+            raise ValueError(f"event {event_id} is not an action on dataset #{number}")
+        found = await asyncio.to_thread(registry.timeline, "dataset", number)
+        if found is None:
+            raise ValueError(f"dataset #{number} is not in the registry")
+        return {**action, "subject": found["subject"], "actions": found["actions"]}
+
     async def _swap_label(self, issue: int, stage: str) -> None:
         """Leave `data:<stage>` as the issue's only stage label (the path without buffer-api; else the mirror's)."""
         gh, want = self.gh_data, self.cfg.label(stage)
@@ -412,13 +437,21 @@ class Activities:
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
         if (round_dir / "pins.json").is_file():
             return Pins(**json.loads((round_dir / "pins.json").read_text()))
-        body = (await self.gh_data.get_issue(issue)).get("body") or ""
-        match = MARKER_RE.match(body)
-        if not (match and ID_RE.fullmatch(match.group(1))):
-            raise ValueError(f"issue #{issue} has no valid record marker on its first line")
-        record_id = match.group(1)
-        root_marker = ROOT_RE.search(body)  # a buffer or prep opened the issue: its request is the root
-        root = root_marker.group(1) if root_marker else self.cfg.root_of(issue)
+        if (action := await self._action(issue, event_id)) is not None:
+            # started from the page, or by a worker for a request: the record is the subject's key and the round
+            # is charged to whoever asked for it (spec webapp-actions §4.2, §6); no issue is read
+            record_id = action["subject"]["key"]
+            if not ID_RE.fullmatch(record_id):
+                raise ValueError(f"dataset #{issue} has no valid record id: {record_id!r}")
+            root = action["payload"].get("root") or self.cfg.root_of(issue)
+        else:  # ponytail: a GitHub label event, until labels stop starting rounds (slice E)
+            body = (await self.gh_data.get_issue(issue)).get("body") or ""
+            match = MARKER_RE.match(body)
+            if not (match and ID_RE.fullmatch(match.group(1))):
+                raise ValueError(f"issue #{issue} has no valid record marker on its first line")
+            record_id = match.group(1)
+            root_marker = ROOT_RE.search(body)  # a buffer or prep opened the issue: its request is the root
+            root = root_marker.group(1) if root_marker else self.cfg.root_of(issue)
         entry = (await catalog.downloaded(self.gh_catalog)).get(record_id)
         if entry is None:
             entry = {"record_commit": await self.gh_catalog.get_ref_sha("main"), "downloaders": []}
@@ -688,7 +721,11 @@ class Activities:
         actions = (*HUMAN_LABELS, "cancel")  # cancel is an action only: it never was a label
         if label not in {self.cfg.label(kind) for kind in actions} or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
-        await self.gh_data.remove_label(issue, label)
+        if await self._action(issue, event_id) is not None:  # a click: the page shows the reason against it
+            assert self.registry is not None  # _action found the action there
+            await asyncio.to_thread(self.registry.refuse_action, event_id, self._clean(reason))
+        else:
+            await self.gh_data.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
         await self._post(issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
 
@@ -1161,6 +1198,26 @@ class Activities:
         """The reviewer's comments on the data issue after `since` (the set's report) and up to `until` (the
         reject), by people with write access, the bot's own left out: what goes to the agent fixing the snippet
         (spec §14). Neutralized and capped; "(no details)" when there are none."""
+        if (registry := self.registry) is not None:
+            # the note each reject action in the window carries (spec webapp-actions §6); the workflow passes
+            # the reject's own `at` as `until`, which is why an action's time is stored exactly as it was sent
+            found = await asyncio.to_thread(registry.timeline, "dataset", issue)
+            after, upto = _when(since), _when(until)
+
+            def in_window(action: dict) -> bool:
+                acted = _when(action["at"])
+                return bool(acted and upto and (after is None or after < acted) and acted <= upto)
+
+            actions = (found or {}).get("actions", [])
+            rejects = [action for action in actions if action["action"] == "reject" and in_window(action)]
+            if rejects:
+                notes = [
+                    f"{action['actor']} wrote:\n{_text(action['payload'].get('note'), 8000)}"
+                    for action in rejects
+                    if action["payload"].get("note")
+                ]
+                return self._clean("\n\n".join(notes))[:16000] or "(no details)"
+        # ponytail: no action in the window: a label-era reject, whose feedback is the comments (until slice E)
         comments, permission = [], {}
         for comment in await self.gh_data.issue_comments(issue):
             login, at = (comment.get("user") or {}).get("login"), comment.get("created_at") or ""
@@ -1217,7 +1274,13 @@ class Activities:
             {key: record.get(key) for key in ("title", "imaging", "data", "technical")}, sort_keys=False
         )
         draft = draft or {}
-        data_link = f"[{github_cfg.data_repo}#{issue}](https://github.com/{github_cfg.data_repo}/issues/{issue})"
+        # the dataset's page, not its issue: a dataset started from the page may have no issue yet, and its
+        # number is not an issue number (spec webapp-actions §4.1, §9); without buffer-api, the issue as before
+        if self.cfg.service is not None:
+            page = f"{self.cfg.service.url.rstrip('/')}/#datasets/{quote(pins.record, safe='')}"
+            data_link = f"[{pins.record}]({page})"
+        else:
+            data_link = f"[{github_cfg.data_repo}#{issue}](https://github.com/{github_cfg.data_repo}/issues/{issue})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}

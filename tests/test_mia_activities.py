@@ -218,6 +218,8 @@ def _registry_seen(t, handler=None):
     seen = []
 
     def record(request):
+        if request.method == "GET":  # a lookup: this registry knows no action and no subject
+            return httpx.Response(404, json={"error": "not found"})
         seen.append((request.url.path, json.loads(request.content)))
         return httpx.Response(200, json={})
 
@@ -256,8 +258,8 @@ async def test_set_stage_fails_while_the_registry_is_down_and_nothing_reaches_gi
 
     t = _setup(tmp_path)
     t.data.issues[1]["labels"] = [{"name": "data:new"}]
-    _registry_seen(t, down)
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
+    _registry_seen(t, down)
     with caplog.at_level(logging.WARNING), pytest.raises(RegistryError):  # Temporal retries the activity
         await t.a.set_stage(1, "matching", state)
     assert "registry write skipped" in caplog.text  # the dataset's row stays best effort; the stage does not
@@ -950,3 +952,66 @@ async def test_kill_job_kills_by_id_and_a_cancelled_dataset_reads_as_stopped(tmp
     assert t.a.dataset_fields(1, ROUND, "cancelled")["state"] == "needs-human"  # what follows it stops waiting
     await t.a.refuse_label(1, "data:cancel", "there is no round in progress to cancel", "42")  # an action's name
     assert "Ignoring `data:cancel`" in t.data.comments[1][0]["body"]
+
+
+async def test_admit_for_an_action_reads_the_record_and_the_root_from_the_registry(tmp_path):
+    t = _setup(tmp_path)
+    ledger = _with_service(t, tmp_path)
+    number = ledger.create_subject("dataset", "rec-1")["number"]  # started from the page: it has no issue
+    go, _ = ledger.add_action("dataset", number, "go", "prep:9", payload={"root": "o/buffers#9"})
+
+    async def no_issue(issue_number):
+        raise AssertionError("an action's round must not read the issue")
+
+    t.data.get_issue = no_issue
+    pins = await t.a.admit(number, str(go["id"]))
+    assert (pins.record, pins.root) == ("rec-1", "o/buffers#9")  # charged to whoever asked
+    plain, _ = ledger.add_action("dataset", number, "go", "page")
+    assert (await t.a.admit(number, str(plain["id"]))).root == f"o/data#{number}"  # nobody else: itself
+    other = ledger.create_subject("dataset", "rec-2")["number"]
+    with pytest.raises(ApplicationError, match="is not an action on dataset"):
+        await t.a.admit(other, str(go["id"]))
+
+
+async def test_read_feedback_is_the_note_of_the_reject_action_in_the_window(tmp_path, monkeypatch):
+    from mia_buffers import ledger as ledger_module
+
+    t = _setup(tmp_path)
+    ledger = _with_service(t, tmp_path)
+    ledger.adopt_subject("dataset", 1, "rec-1")
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(ledger_module.time, "time", lambda: now[0])
+    ledger.add_action("dataset", 1, "reject", "page", payload={"note": "an earlier set's note"})
+    now[0] += 600
+    reject, _ = ledger.add_action("dataset", 1, "reject", "page", payload={"note": "the masks are shifted <!-- by one"})
+    text = await t.a.read_feedback(1, "2027-01-15T08:05:00Z", reject["at"])  # since the set's report, up to the reject
+    assert text == "page wrote:\nthe masks are shifted &lt;!-- by one"
+    now[0] += 600
+    bare, _ = ledger.add_action("dataset", 1, "reject", "page")
+    assert await t.a.read_feedback(1, reject["at"], bare["at"]) == "(no details)"  # a reject without a note
+    (await t.data.comment(1, "from the label days", "alice"))["created_at"] = "2026-10-27T10:10:00Z"
+    t.data.permissions = {"alice": "write"}
+    by_label = await t.a.read_feedback(1, "2026-10-27T10:05:00Z", "2026-10-27T10:12:00Z")  # no action in the window
+    assert by_label == "alice wrote:\nfrom the label days"
+
+
+async def test_refusing_an_action_marks_it_refused_and_touches_no_label(tmp_path):
+    t = _setup(tmp_path)
+    ledger = _with_service(t, tmp_path)
+    ledger.adopt_subject("dataset", 1, "rec-1")
+    go, _ = ledger.add_action("dataset", 1, "go", "page")
+    await t.a.refuse_label(1, "data:go", "busy <!-- x -->", str(go["id"]))
+    refused = ledger.action(go["id"])
+    assert (refused["state"], refused["detail"]) == ("refused", "busy &lt;!-- x -->") and t.data.removed == []
+    assert ledger.timeline("dataset", 1)[0]["body"].startswith("Ignoring `data:go`: busy")
+
+
+async def test_the_snippet_issue_links_the_datasets_page_when_there_is_one(tmp_path):
+    from mia_core.config import ServiceCfg
+
+    t = _setup(tmp_path)
+    t.cfg.service = ServiceCfg(url="http://svc.example.org:8765")
+    await t.a.admit(1, "99")
+    await t.a.open_snippet_issue(1, ROUND, {"draft_binding": BINDING, "what_fails": "no reader", "tried": []})
+    body = t.snip.created[0][1]
+    assert "For [rec-1](http://svc.example.org:8765/#datasets/rec-1): dataset" in body and "o/data#1" not in body

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from temporalio.service import RPCError, RPCStatusCode
 
-from mia_buffers.dispatch import DispatchError, Dispatcher, Target, dispatcher_for
+from mia_buffers.dispatch import Dispatcher, DispatchError, Target, dispatcher_for
 from mia_buffers.models import BufferState, PrepState
 from mia_data.models import DatasetState, LabelEvent
 from tests.test_buffers_config import make_cfg
