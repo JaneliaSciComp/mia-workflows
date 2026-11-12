@@ -347,6 +347,34 @@ itself. The mirror opens the issue of a dataset that has none.
 `GET /health` says whether Temporal answers and whether a worker polls each task queue; `GET /run/<kind>/<number>`
 is the Temporal status of a subject's latest run. The page opens `GET /stream` and refetches what an event names.
 
+**Buffer specs and preparation requests from the page.** `POST /specs` with `{spec}` saves a buffer spec under
+its `name` (a name that exists is an edit of that subject, never a second one); with `action: go` it also runs
+it, and `plan_first: true` makes it a round that waits at the plan (the workflow's `plan` signal). The go's
+payload is the spec text, the round runs exactly that (`admit` reads the action), and its timeline entry shows
+it. `POST /specs/<name>/actions` takes `go` (the stored spec, or a `spec` to store and run), `approve`, `keep`,
+`retire`, `revoke` (`records`), `dropped` (`record`), `cancel`, `stop`. `POST /prep` with `{spec}` files a
+preparation request as a new subject `prep-<number>` and runs it; `POST /prep/<number>/actions` takes `go`,
+`cancel`, `stop`. `GET /subjects/<kind>` lists a kind's subjects; `GET /needs` also names the actions of the last
+day that did not reach Temporal.
+
+- `cancel` ends a round in progress (`planning`, `plan-review`, `sourcing`, `staged`; a request at
+  `requested`): its dataset tasks are cancelled, every cluster job it waits on is killed by id, locks are
+  released, reservations settled, the round's buffer is retired, and the stage is `cancelled`. A buffer that is
+  `ready` or `idle` is being served: the route refuses the cancel, and the workflow refuses one that crossed.
+  Cancelling a request also cancels the dataset rounds it started (`prep_cancel`: the datasets whose latest go
+  this request sent and that are still in a round), no others.
+- `stop` is the force stop for a run that does not answer a cancel: the route terminates the workflow (a
+  terminate needs no replay), retires the spec's buffers with their `retired` events and sets `retired` (`done`
+  for a request). It does not kill a cluster job already running, nor a request's dataset rounds; its entry says so.
+- `dropped` (the page's *Files are in place*) sends the workflow's `dropped(record)` signal. It is refused while
+  `<raw_root>/<record>/incoming/` is empty or holds a file modified in the last minute: the workflow takes any
+  non-empty file and records its hash, so a click during a copy would record a truncated file.
+
+A buffer or a request hands a dataset to mia-data by sending its dataset a `go` through buffer-api with the worker
+token (`Registry.send_action`): actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and
+the key `<round id>/<record>`, so a retried activity sends no second go. No issue is opened or labelled in the
+datasets repo. The mirror opens the issue of a spec or a request created on the page (`mia_buffers/mirror.py`).
+
 A volume's `samples` (from `stage.json`) register as candidates. Train draws a candidate by weight for volumes that
 have them; val and test lists are drawn from the candidates without replacement, so a list can run out: the response
 says `exhausted` and `size` is capped by the candidates available.

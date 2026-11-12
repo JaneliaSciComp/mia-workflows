@@ -58,8 +58,9 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **An artifact id is a recipe hash.** Binding, levels key, voxel size, harness commit, env digest and plan digest.
   Changing how the harness derives samples (`plan.py`) changes plan digests, so every volume restages; a buffer that
   re-registers a volume under a new artifact loses its frozen eval lists by design.
-- **A buffer never asks mia-data for a dataset; a `prep:go` issue does.** `MiaBuffer` fails an unprepared record;
-  `MiaPrep` opens the `data:go` issues and follows them through the registry.
+- **A buffer never asks mia-data for a dataset; a preparation request does.** `MiaBuffer` fails an unprepared
+  record; `MiaPrep` sends each dataset a `go` through buffer-api (worker token, the request's root, a key per
+  round and record) and follows it through the registry. Nothing opens or labels an issue in the datasets repo.
 - **The page holds no token.** Its buttons call `action` routes: no token, JSON only, this origin only, checked
   against the stage table. Every other route the page needs is a read route (`tests/test_buffers_ui.py` enforces
   it). An action can ask a workflow to do something; it cannot write what a workflow found, which stays behind the
