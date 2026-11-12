@@ -940,3 +940,13 @@ async def test_a_refusal_is_a_timeline_entry(tmp_path):
     assert t.data.issues[1]["labels"] == [] and t.data.comments == {}  # the label goes; the text is the mirror's
     (entry,) = ledger.timeline("dataset", 1)
     assert entry["body"].startswith("Ignoring `data:go`: a round is running") and entry["stage"] is None
+
+
+async def test_kill_job_kills_by_id_and_a_cancelled_dataset_reads_as_stopped(tmp_path):
+    t = _setup(tmp_path)
+    await t.a.kill_job("777")
+    assert t.csub.killed == ["777"]
+    await t.a.admit(1, "99")
+    assert t.a.dataset_fields(1, ROUND, "cancelled")["state"] == "needs-human"  # what follows it stops waiting
+    await t.a.refuse_label(1, "data:cancel", "there is no round in progress to cancel", "42")  # an action's name
+    assert "Ignoring `data:cancel`" in t.data.comments[1][0]["body"]

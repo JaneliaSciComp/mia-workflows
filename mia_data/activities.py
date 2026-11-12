@@ -249,6 +249,7 @@ class Activities:
             self.revoke_dataset,
             self.prepare_judge,
             self.read_judge,
+            self.kill_job,
         ]
 
     # --- helpers -----------------------------------------------------------------------------
@@ -377,7 +378,8 @@ class Activities:
             row.pop("record")
             fields = row
         else:
-            fields = {"state": "needs-human" if stage == "needs-human" else "in-progress"}
+            # a cancelled round did not prepare the dataset: whatever follows it reads that as it reads a stop
+            fields = {"state": "needs-human" if stage in ("needs-human", "cancelled") else "in-progress"}
         return {**fields, "data_stage": stage, "issue": issue}
 
     def _report_dataset(self, registry: Registry, issue: int, round_id: str, stage: str) -> None:
@@ -683,7 +685,8 @@ class Activities:
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
         """Remove a human label we won't act on and say why, once per event (busy `go`, stray `approve`, ...)."""
-        if label not in {self.cfg.label(kind) for kind in HUMAN_LABELS} or not re.fullmatch(r"\d+", str(event_id)):
+        actions = (*HUMAN_LABELS, "cancel")  # cancel is an action only: it never was a label
+        if label not in {self.cfg.label(kind) for kind in actions} or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         await self.gh_data.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
@@ -789,6 +792,12 @@ class Activities:
         except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
             raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
         return JobDone(outcome.job_id, outcome.state, outcome.exit_code)
+
+    @activity.defn(name="kill_job")
+    async def kill_job(self, job_id: str) -> None:
+        """Kill a cluster job by id: the job of a round that was cancelled (spec webapp-actions §5). The wait on
+        it is cancelled by the workflow; a job that already ended is not an error to the runner."""
+        await asyncio.to_thread(self.jobs.client.kill, [job_id])
 
     # --- locks -------------------------------------------------------------------------------
 

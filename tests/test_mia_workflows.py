@@ -233,6 +233,10 @@ class Mocks:
             rec("open_snippet_issue", round_id, snippet_issue, *([binding, draft] if binding else []))
             return 100
 
+        @activity.defn(name="kill_job")
+        async def kill_job(job_id: str) -> None:
+            rec("kill_job", job_id)
+
         @activity.defn(name="read_feedback")
         async def read_feedback(issue: int, since: str | None, until: str) -> str:
             rec("read_feedback", issue, since, until)
@@ -342,6 +346,7 @@ class Mocks:
             revoke_dataset,
             prepare_judge,
             read_judge,
+            kill_job,
         ]
 
     def await_act(self):
@@ -1140,6 +1145,7 @@ async def test_poll_signals_a_pr_only_when_it_changes(tmp_path):
 HISTORY = Path(__file__).parent / "fixtures" / "mia" / "dataset_history.json"
 DEVELOP_HISTORY = HISTORY.with_name("develop_history.json")
 LOCK_HISTORY = HISTORY.with_name("dataset_history_c.json")
+CANCEL_HISTORY = HISTORY.with_name("dataset_history_cancel.json")
 AWAITED_HISTORY = HISTORY.with_name("dataset_history_b.json")
 
 
@@ -1203,6 +1209,68 @@ async def test_replay_dataset_history_b(env):
             await idle(h, m, "done")
             AWAITED_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("mia-stage-awaited", AWAITED_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def cancelled_mid_match(h, m):
+    """Cancel the round while its match job runs, then let the abandoned wait end."""
+    await until(lambda: m.of("await"))
+    await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+    await idle(h, m, "cancelled")
+    m.gate.set()
+
+
+async def test_cancel_ends_the_round_kills_its_job_and_a_new_go_starts_over(env):
+    """spec webapp-actions §5: a round in progress is cancelled before anything else is asked of its dataset. The
+    round ends now: its job is killed by id, its reservation settled, and the dataset is `cancelled`."""
+    m = Mocks(gate=asyncio.Event(), gate_on="match")
+    async with started(env, m) as h:
+        await cancelled_mid_match(h, m)
+        job = "job-mia-7-i7-e11-match-1"
+        assert m.of("kill_job") == [(job,)] and m.of("await")[0][0] == job
+        assert [a[1] for a in m.of("settle")] == ["mia-7-i7-e11-match-1"]  # the reservation does not stay open
+        assert m.of("set_stage")[-1][:2] == ("cancelled", "cancelled by alice") and "read_match" not in m.names()
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await idle(h, m, "review")
+    assert m.stages == ["matching", "cancelled", "matching", "testing", "review"]
+    assert not m.of("refuse_label")
+
+
+async def test_cancel_at_review_ends_the_round_and_releases_nothing_twice(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        assert m.of("kill_job") == [] and "publish_crops" not in m.names()  # no job was running
+        fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
+        await h.signal(MiaDataDataset.approve, ev("approve", "13", shift(fin, 5)))  # the set is no longer under review
+        await until(lambda: m.of("refuse_label"))
+    assert m.stages[-1] == "cancelled" and m.of("refuse_label")[0][0] == "data:approve"
+
+
+async def test_a_cancel_with_no_round_running_is_refused(env):
+    m = Mocks(outcome="blocked")
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await until(lambda: m.of("refuse_label"))
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))  # a redelivery: answered once
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await idle(h, m, "needs-human")
+    assert [a[0] for a in m.of("refuse_label")] == ["data:cancel"] and "no round" in m.of("refuse_label")[0][1]
+    assert m.stages == ["matching", "needs-human", "matching", "needs-human"] and m.of("kill_job") == []
+
+
+async def test_replay_dataset_history_cancel(env):
+    """A round cancelled while its match job ran, as test_replay_dataset_history. Re-record this one alone:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_cancel"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks(gate=asyncio.Event(), gate_on="match")
+        async with started(env, m) as h:
+            await cancelled_mid_match(h, m)
+            CANCEL_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-cancelled", CANCEL_HISTORY.read_text())
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 
