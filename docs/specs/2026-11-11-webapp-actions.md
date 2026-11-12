@@ -1,6 +1,8 @@
 # MIA: the page acts, GitHub records — Spec
 
-**Status:** draft v0.4 · 2026-11-11 · not yet approved. v0.4: the service accepts only the actions a subject's
+**Status:** v0.5 · 2026-11-11 · approved by the user 2026-11-11 (as v0.4). v0.5 writes out the stage tables
+(§5.1) and moves each table and guard into the slice of its first writer (§14). v0.4: the service accepts
+only the actions a subject's
 stage allows, and a round in progress accepts only `cancel`, which is new (§5; the user's ruling). v0.2 took a
 reviewer's pass against the code: the claim that workflows keep their commands holds, with two named changes
 (§6); ids survive a ledger restore (§4.1);
@@ -245,6 +247,7 @@ take no token (§10).
 | `GET /stream` | read | server-sent events: `{kind, number}` whenever a subject, action, timeline or board row changes |
 | `GET /health` | read | whether Temporal answers and whether a worker polls each task queue |
 | `POST /timeline/<kind>/<number>` | worker | append an entry (the activities, §6); kicks the mirror (§7) |
+| `PUT /subjects/<kind>/<number>` | worker | adopt an existing issue as a subject (§11) |
 | `PUT /subjects/<kind>/<number>/issue` | worker | the mirror's write-back |
 | `PUT /actions/<id>` | worker | mark an action refused, with the reason |
 
@@ -319,6 +322,52 @@ The workflow's own refusal stays as the backstop for a click that crossed a stag
 and appends the reason to the timeline, where the page shows it against the click.
 
 The Temporal client connects lazily: buffer-api starts and serves reads with Temporal down, and `/health` says so.
+
+### 5.1 The stage tables
+
+Each stage has a status word (§8.3) and the actions it accepts. "working" means a round is in progress.
+`cancel` and the `cancelled` stage arrive with the slice that builds cancel for the kind (§14); until then the
+working stages accept nothing but what is listed without it.
+
+**Datasets** (`mia_data/config.py`)
+
+| stage | status | accepts |
+|---|---|---|
+| `new` | not started | `go` |
+| `matching`, `developing`, `testing`, `merging` | working | `cancel` |
+| `review` | waiting | `approve`, `reject`, `go`, `cancel` |
+| `done` | done | `go`, `revoke` |
+| `needs-human` | stuck | `go`, `revoke` |
+| `cancelled` | done | `go`, `revoke` |
+
+**Buffers** (`mia_buffers/config.py`)
+
+| stage | status | accepts |
+|---|---|---|
+| `new` | not started | `go` |
+| `planning` | working | `cancel`, `stop` |
+| `plan-review` | waiting | `approve`, `go`, `cancel`, `stop` |
+| `sourcing` | working | `cancel`, `dropped`, `stop` |
+| `staged` | waiting | `approve`, `go`, `dropped`, `cancel`, `stop` |
+| `ready` | done | `go`, `revoke`, `retire`, `stop` |
+| `idle` | waiting | `keep`, `retire`, `go`, `revoke`, `stop` |
+| `retired` | done | `go` |
+| `needs-human` | stuck | `go` |
+| `cancelled` | done | `go` |
+
+**Preparation requests** (`mia_buffers/config.py`)
+
+| stage | status | accepts |
+|---|---|---|
+| `new` | not started | `go` |
+| `requested` | working | `cancel`, `stop` |
+| `done` | done | `go` |
+| `needs-human` | stuck | `go` |
+| `cancelled` | done | `go` |
+
+Two things a stage alone does not say, both left to the workflow's refusal: a `staged` buffer whose late datasets
+still have a job running refuses a `go`, and a `ready` buffer that is rebuilding a lost volume abandons the
+rebuild on a `go` or a `retire`, as today.
 
 ## 6. Activities read the registry; workflows keep their commands
 
@@ -494,7 +543,7 @@ Two things on this path touch the data repo and are settled so:
 
 ## 11. Cutover
 
-1. `mia adopt-issues` (in a worker, since it needs GitHub) runs when slice A is deployed, not at the end: from
+1. `mia-buffers adopt-issues` (in a worker, since it needs GitHub) runs when slice A is deployed, not at the end: from
    slice B on, every running round needs a subject to write to. It can be run again at any time and changes
    nothing it already adopted. Every issue of the data repo with a record marker becomes a `dataset` subject,
    every buffer and request issue a `buffer` or `prep` subject with the spec text of its body; number and issue
@@ -592,8 +641,8 @@ not on the remote yet: it has to be pushed, or merged, before the first PR can b
 
 | # | slice | done when |
 |---|---|---|
-| A | **registry**: subjects, actions, timeline; read routes, `/lookup`, `/needs`, `/stream`; the `action` capability and guard; `adopt-issues` | tests pass; `adopt-issues` against the live repos adopts every issue once and reports duplicates; a restored backup issues no id twice; nothing behaves differently |
-| B | **timeline and mirror**: the stage and comment activities of §6 write entries; `MiaMirror` posts them; rounds stop calling GitHub for data and buffers issues | replay fixtures pass, with the one guarded change §6 names (stage writes awaited); a test round completes while every issue call of a GitHub fake fails, and the issue is complete once the fake recovers; a live round's issue reads as before |
-| C | **datasets from the page**: the Temporal client, dataset actions, `admit` and `read_feedback` from the registry, the dataset page, live updates, `/health` | live: *Prepare* on a dataset with no issue shows it working within two seconds, its issue appears with the link back, and a review is approved by click and publishes; in tests, a repeated key starts one round and an approve carrying an old revision is refused; live: *Prepare* on a dataset whose round is running is refused, *Cancel* ends the round and its cluster job is gone from the queue |
+| A | **subjects**: the `subjects` table, the stage tables of §5.1 (without cancel), `GET /subjects`, `/needs`, `/lookup`, `/stream`, `adopt-issues` | tests pass; `adopt-issues` against the live repos adopts every issue once and reports duplicates; nothing behaves differently |
+| B | **timeline and mirror**: the `timeline` table and its routes; the stage and comment activities of §6 write entries; `MiaMirror` posts them; rounds stop calling GitHub for data and buffers issues | replay fixtures pass, with the one guarded change §6 names (stage writes awaited); a test round completes while every issue call of a GitHub fake fails, and the issue is complete once the fake recovers; a live round's issue reads as before |
+| C | **datasets from the page**: the `actions` table, clock-derived ids, the `action` capability and its guard, the Temporal client, dataset actions with `cancel`, `admit` and `read_feedback` from the registry, the dataset page, live updates, `/health` | live: *Prepare* on a dataset with no issue shows it working within two seconds, its issue appears with the link back, and a review is approved by click and publishes; in tests, a repeated key starts one round and an approve carrying an old revision is refused, a restored backup issues no id twice; live: *Prepare* on a dataset whose round is running is refused, *Cancel* ends the round and its cluster job is gone from the queue |
 | D | **buffers and requests from the page**: specs, buffer and prep actions, `stop`, `dropped`, `nudge` through the registry, *Prepare selected*, *Needs you* | live: a buffer created on the page reaches ready with no GitHub input; a request for several records starts them with no `data:go` label |
 | E | **GitHub input removed**: the buffers poller and schedule, label delivery, `trusted_bots`, markers, parsers, `seed`, human labels, the fallback of §6; docs and `AGENTS.md` | no read of a data or buffers issue remains outside the mirror and `adopt-issues`; labelling, commenting on or closing an issue changes nothing |
