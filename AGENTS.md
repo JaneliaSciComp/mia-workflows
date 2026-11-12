@@ -36,8 +36,17 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **No real paths or hostnames in tracked files.** `git diff | grep -n 'rokickik\|/nrs/'` must be empty.
 - **One config file.** Deployments read their block of `mia.yaml` (`MIA_SERVICE`, `MIA_CONFIG`); the per-app YAML
   files are deprecated. `paths.local_root` and a managed `temporal.state_dir` must be host-local disk.
-- **Worker routes of buffer-api take the bearer token.** Every PUT/POST/DELETE other than the consumer routes needs
-  `Authorization: Bearer <service.token_file>`; use `mia_core.registry.Registry`, never a bare httpx call.
+- **Worker routes of buffer-api take the bearer token.** Every PUT/POST/DELETE other than the consumer and action
+  routes needs `Authorization: Bearer <service.token_file>`; use `mia_core.registry.Registry`, never a bare httpx
+  call.
+- **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
+  `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there.
+  buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`.
+  A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
+  workflow's.
+- **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
+  (`Activities._post`); the `MiaMirror` workflow copies them to GitHub, and nothing reads a data or buffers
+  issue back as input.
 - **One writer per raw cache.** No job writes a record's raw cache unless its worker holds
   `<local_root>/locks/raw/<record>` (`mia_core.locks`; TTL 900 s, heartbeat with every `await_job` poll). A wait
   whose heartbeat finds the lock gone kills its job (`csub kill`) and fails the round; a stale lease is never
@@ -51,8 +60,10 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   re-registers a volume under a new artifact loses its frozen eval lists by design.
 - **A buffer never asks mia-data for a dataset; a `prep:go` issue does.** `MiaBuffer` fails an unprepared record;
   `MiaPrep` opens the `data:go` issues and follows them through the registry.
-- **The page is read-only and holds no token.** Its only actions are GitHub links; a route the page needs is a read
-  route (`tests/test_buffers_ui.py` enforces it).
+- **The page holds no token.** Its buttons call `action` routes: no token, JSON only, this origin only, checked
+  against the stage table. Every other route the page needs is a read route (`tests/test_buffers_ui.py` enforces
+  it). An action can ask a workflow to do something; it cannot write what a workflow found, which stays behind the
+  worker token.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 

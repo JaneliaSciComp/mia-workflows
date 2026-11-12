@@ -316,6 +316,37 @@ fails is logged, and a start kicks every subject that has an entry not yet poste
 Until labels stop starting rounds, an issue opened on GitHub after `adopt-issues` ran is adopted by the first
 stage or entry a round writes for it.
 
+**Actions** (spec webapp-actions §4.2, §5, §10). A button on the page is a `POST` to an *action route*; for a
+dataset, `POST /datasets/<record>/actions` with `{action, key, revision, note}`. Action routes take no token; they
+take `application/json` only and refuse a request whose `Origin` is another site's. With `curl`:
+
+```
+curl -X POST -H 'Content-Type: application/json' -d '{"action": "go"}' <service>/datasets/<record>/actions
+```
+
+In one request the service: checks the action against the subject's stage table (`409` with what the stage does
+take; a round in progress takes only `cancel`); for `approve` and `reject`, compares `revision` with the
+subject's (`409` when the subject moved on since the page showed it); records the action (`pending`), whose id
+is the workflow's event id; starts the kind's workflow with the action as its signal, as the poller's label
+delivery did (`cancel` is a plain signal to the running workflow); marks it `sent` and appends it to the
+timeline, or marks it `failed` and answers `503`. Nothing retries in the background: a `key` sent again is the
+same action sent again under its id, which the workflow drops if it already handled it, and the page's *Retry*
+does exactly that. A first `go` on a record of the synced catalog creates its subject, numbered from the clock
+(whole seconds since 2026-01-01; action ids are milliseconds since the epoch), so a ledger restored from a backup
+issues no id twice. A worker may send an action with the token and name its `actor` and the `root` the round is
+charged to.
+
+A round started by an action reads the registry, not the issue: `admit` takes the record from the subject and the
+root from the action, `read_feedback` returns the reject's note, `refuse_label` marks the action `refused`
+(`PUT /actions/<id>`) with the reason. An event id the registry does not know is a GitHub label event, handled as
+before. `MiaDataDataset` has a `cancel` signal: the round's task is cancelled where it waits, its cluster job is
+killed by id (`kill_job`), its reservation settled and its lock released, and the dataset ends in `cancelled`.
+If the registry says a round is in progress and Temporal has no run for it, the cancel route writes `cancelled`
+itself. The mirror opens the issue of a dataset that has none.
+
+`GET /health` says whether Temporal answers and whether a worker polls each task queue; `GET /run/<kind>/<number>`
+is the Temporal status of a subject's latest run. The page opens `GET /stream` and refetches what an event names.
+
 A volume's `samples` (from `stage.json`) register as candidates. Train draws a candidate by weight for volumes that
 have them; val and test lists are drawn from the candidates without replacement, so a list can run out: the response
 says `exhausted` and `size` is capped by the candidates available.
