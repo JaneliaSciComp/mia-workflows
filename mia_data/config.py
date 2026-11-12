@@ -38,8 +38,9 @@ STAGES = {
     "merging": ("1d76db", "mia-data: crops approved; autodev is merging the snippet PR"),
     "done": ("5319e7", "mia-data: crops published"),
     "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
+    "cancelled": ("cccccc", "mia-data: the round was cancelled"),
 }
-HUMAN_LABELS = {  # set by humans
+HUMAN_LABELS = {  # the actions a person takes; they were labels set by humans
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
     "approve": ("0e8a16", "Approve the crops under review: they are published (a snippet PR merges first)"),
     "reject": (
@@ -52,17 +53,19 @@ HUMAN_LABELS = {  # set by humans
     ),
 }
 STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done")
-# stage -> (status word, the actions it accepts); "working" means a round is in progress, and it accepts nothing
-# until cancel is built (spec webapp-actions §5.1). The workflow stays the code that carries a round out.
+# stage -> (status word, the actions it accepts); "working" means a round is in progress, and a round in progress
+# accepts only `cancel` (spec webapp-actions §5.1). buffer-api refuses any other action, the page offers only
+# these. The workflow stays the code that carries a round out.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
-    "matching": ("working", frozenset()),
-    "developing": ("working", frozenset()),
-    "testing": ("working", frozenset()),
-    "review": ("waiting", frozenset({"approve", "reject", "go"})),
-    "merging": ("working", frozenset()),
+    "matching": ("working", frozenset({"cancel"})),
+    "developing": ("working", frozenset({"cancel"})),
+    "testing": ("working", frozenset({"cancel"})),
+    "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),
+    "merging": ("working", frozenset({"cancel"})),
     "done": ("done", frozenset({"go", "revoke"})),
     "needs-human": ("stuck", frozenset({"go", "revoke"})),
+    "cancelled": ("done", frozenset({"go", "revoke"})),
 }
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),

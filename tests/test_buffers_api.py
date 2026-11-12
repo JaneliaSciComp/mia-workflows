@@ -12,9 +12,11 @@ import pytest
 import yaml
 
 from mia_buffers.api import BufferService, ledger_path, make_server, open_ledger, prune_backups
+from mia_buffers.dispatch import DispatchError
 from mia_buffers.ledger import Ledger
 from mia_buffers.plan import load_records
 from mia_core.locks import LockDir
+from mia_data.models import LabelEvent
 from tests.test_buffers_config import make_cfg
 from tests.test_buffers_plan import CATALOG as FIXTURE_CATALOG
 from tests.test_buffers_plan import FIXTURES, ONE_CH, U937
@@ -1061,7 +1063,7 @@ def test_adopt_then_read_a_subject(tmp_path):
     status, row, _ = call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "stage": "review"})
     assert status == 200 and row["issue"] == 234
     status, row, _ = call(s, "GET", "/subjects/dataset/rec-a")
-    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "go", "reject"])
+    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "go", "reject"])
     assert call(s, "GET", "/subjects/dataset/nope")[0] == 404
     assert call(s, "GET", "/subjects/widget/x")[0] == 404
     assert call(s, "PUT", "/subjects/dataset/235", payload={"key": "rec-b", "stage": "bogus"})[0] == 422
@@ -1184,3 +1186,173 @@ def test_a_start_kicks_every_subject_with_something_to_mirror(tmp_path):
     kicks.kicked.clear()
     s.kick_unmirrored()
     assert kicks.kicked == [("buffer", 8)]
+
+
+# --- actions: what the page's buttons call (spec webapp-actions §4.2, §5, §10) ---
+
+JSON = {"Content-Type": "application/json", "Host": "svc:8765"}
+REF_A = "a" * 40
+
+
+def act(s, path, payload, headers=None):
+    return s.handle("POST", path, {}, json.dumps(payload).encode(), {**JSON, **(headers or {})})
+
+
+class Gateway(Kicks):
+    """Stands in for the Temporal gateway: records what was sent; `fail` makes Temporal unreachable."""
+
+    def __init__(self, running=True):
+        super().__init__()
+        self.sent, self.fail, self.running = [], None, running
+
+    def send(self, kind, number, signal, event):
+        if self.fail:
+            raise DispatchError(self.fail)
+        self.sent.append((kind, number, signal, event))
+
+    def signal_running(self, kind, number, signal, event):
+        if self.fail:
+            raise DispatchError(self.fail)
+        if self.running:
+            self.sent.append((kind, number, signal, event))
+        return self.running
+
+    def health(self):
+        return {"temporal": True, "queues": {"mia-data": True, "mia-buffers": False}}
+
+    def run_status(self, kind, number):
+        return "RUNNING" if self.running else None
+
+
+def _acting(tmp_path, **gateway_kwargs):
+    """A service with a worker token, a gateway stand-in and a synced catalog holding rec-a and rec-b."""
+    gateway = Gateway(**gateway_kwargs)
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", dispatcher=gateway)
+    records = [{"path": f"{name}.yaml", "record": {"id": name}} for name in ("rec-a", "rec-b")]
+    assert worker(s, "PUT", f"/records/{REF_A}", {"records": records})[0] == 200
+    return s, gateway
+
+
+def test_a_first_go_creates_the_dataset_subject_and_starts_its_workflow(tmp_path):
+    s, gateway = _acting(tmp_path)
+    status, action, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-1"})
+    assert status == 202 and (action["state"], action["actor"], action["action"]) == ("sent", "page", "go")
+    subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert subject["issue"] is None and subject["number"] == action["number"] > 20_000_000  # from the clock
+    (sent,) = gateway.sent
+    event = LabelEvent("go", str(action["id"]), "page", action["at"])
+    assert sent == ("dataset", subject["number"], "go", event)
+    timeline = call(s, "GET", f"/timeline/dataset/{subject['number']}")[1]
+    assert [entry["body"] for entry in timeline["entries"]] == ["**Action:** `go` by `page`"]
+    assert timeline["entries"][0]["marker"] == f"<!-- mia: action {action['id']} -->"
+    assert [row["id"] for row in timeline["actions"]] == [action["id"]]
+    assert gateway.kicked == [("dataset", subject["number"])]  # the mirror opens the issue
+    # a double click, or a retry after a lost answer: the same key is the same action and starts nothing
+    assert act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-1"})[1]["id"] == action["id"]
+    assert len(gateway.sent) == 1
+
+
+def test_a_go_for_a_dataset_with_a_known_issue_keeps_that_issues_number(tmp_path):
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/datasets/rec-b", {"state": "needs-human", "issue": 234})  # labelled once, never adopted
+    assert act(s, "/datasets/rec-b/actions", {"action": "go"})[0] == 202
+    subject = call(s, "GET", "/subjects/dataset/rec-b")[1]
+    assert (subject["number"], subject["issue"]) == (234, 234) and gateway.sent[0][1] == 234
+
+
+def test_an_action_for_something_that_is_not_there_is_refused(tmp_path):
+    s, gateway = _acting(tmp_path)
+    assert act(s, "/datasets/nope/actions", {"action": "go"})[0] == 404  # not a record of the synced catalog
+    assert act(s, "/datasets/rec-a/actions", {"action": "approve", "revision": 0})[0] == 404  # nothing to approve
+    assert act(s, "/datasets/rec-a/actions", {"action": "dance"})[0] == 422
+    assert gateway.sent == [] and call(s, "GET", "/subjects/dataset/rec-a")[0] == 404
+
+
+def test_only_the_actions_the_stage_accepts_are_taken(tmp_path):
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "testing"})
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "go"})
+    assert status == 409 and "`testing`" in out["error"] and "cancel" in out["error"]  # says what it would take
+    assert act(s, "/datasets/rec-a/actions", {"action": "revoke"})[0] == 409
+    assert gateway.sent == [] and call(s, "GET", "/timeline/dataset/7")[1]["actions"] == []  # nothing recorded
+    assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent[0][2] == "cancel"
+
+
+def test_a_verdict_names_the_revision_the_person_saw(tmp_path):
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "review"})  # revision 1: the set the page shows
+    assert act(s, "/datasets/rec-a/actions", {"action": "approve"})[0] == 422  # a verdict must say what it saw
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "testing"})
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "review"})  # revision 3: another set since
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "approve", "revision": 1})
+    assert status == 409 and "changed" in out["error"] and gateway.sent == []
+    note = "the labels are shifted <!-- mia-data: x --> by one plane"
+    status, action, _ = act(s, "/datasets/rec-a/actions", {"action": "reject", "revision": 3, "note": note})
+    assert status == 202 and action["payload"] == {"note": note} and gateway.sent[0][2] == "reject"
+    body = call(s, "GET", "/timeline/dataset/7")[1]["entries"][-1]["body"]
+    assert body.startswith("**Action:** `reject` by `page`") and "shifted" in body and "<!-- mia-data" not in body
+
+
+def test_temporal_away_fails_the_action_and_a_retry_sends_the_same_one(tmp_path):
+    s, gateway = _acting(tmp_path)
+    gateway.fail = "Temporal did not answer within 10 seconds"
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-1"})
+    assert status == 503 and out["action"]["state"] == "failed" and "did not answer" in out["action"]["detail"]
+    number = out["action"]["number"]
+    assert call(s, "GET", f"/timeline/dataset/{number}")[1]["entries"] == []  # nothing is claimed to have happened
+    gateway.fail = None
+    worker(s, "POST", f"/timeline/dataset/{number}", {"stage": "matching"})  # the first try did arrive after all
+    status, again, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-1"})  # Retry: the same key
+    assert status == 202 and (again["id"], again["state"]) == (out["action"]["id"], "sent")
+    assert [sent[3].event_id for sent in gateway.sent] == [str(again["id"])]  # the workflow drops a repeat by this id
+
+
+def test_a_cancel_with_no_workflow_running_settles_the_subject_itself(tmp_path):
+    s, gateway = _acting(tmp_path, running=False)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "matching"})  # its run was terminated by hand
+    assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent == []
+    subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (subject["stage"], subject["actions"]) == ("cancelled", ["go", "revoke"])
+    assert "no workflow was running" in call(s, "GET", "/timeline/dataset/7")[1]["entries"][-1]["body"]
+
+
+def test_action_routes_take_json_from_this_origin_only_and_a_named_actor_needs_the_token(tmp_path):
+    s, gateway = _acting(tmp_path)
+    go = json.dumps({"action": "go"}).encode()
+    form = {"Content-Type": "application/x-www-form-urlencoded", "Host": "svc:8765"}
+    assert s.handle("POST", "/datasets/rec-a/actions", {}, go, form)[0] == 415
+    assert act(s, "/datasets/rec-a/actions", {"action": "go"}, {"Origin": "http://evil.example"})[0] == 403
+    assert gateway.sent == []
+    assert act(s, "/datasets/rec-a/actions", {"action": "go"}, {"Origin": "http://svc:8765"})[0] == 202
+    named = {"action": "go", "actor": "prep:9", "root": "o/buffers#9"}
+    assert act(s, "/datasets/rec-b/actions", named)[0] == 401  # anyone may click; only a worker may be someone
+    status, action, _ = act(s, "/datasets/rec-b/actions", named, AUTH)
+    assert status == 202 and action["actor"] == "prep:9" and action["payload"] == {"root": "o/buffers#9"}
+    assert gateway.sent[-1][3].actor == "prep:9"
+
+
+def test_a_worker_marks_an_action_refused(tmp_path):
+    s, _ = _acting(tmp_path)
+    action = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]
+    path = f"/actions/{action['id']}"
+    assert call(s, "PUT", path, payload={"state": "refused", "detail": "a round is running"})[0] == 401
+    status, out, _ = worker(s, "PUT", path, {"state": "refused", "detail": "a round is running"})
+    assert status == 200 and (out["state"], out["detail"]) == ("refused", "a round is running")
+    assert call(s, "GET", path)[1]["state"] == "refused" and call(s, "GET", "/actions/1")[0] == 404
+    assert worker(s, "PUT", "/actions/1", {"state": "refused", "detail": "x"})[0] == 404
+    assert worker(s, "PUT", path, {"state": "sent", "detail": ""})[0] == 422  # only a refusal comes from a worker
+
+
+def test_health_run_status_and_the_issue_write_back(tmp_path):
+    s, _ = _acting(tmp_path)
+    assert call(s, "GET", "/health")[1] == {"temporal": True, "queues": {"mia-data": True, "mia-buffers": False}}
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    assert call(s, "GET", f"/run/dataset/{number}")[1] == {"status": "RUNNING"}
+    assert call(s, "PUT", f"/subjects/dataset/{number}/issue", payload={"issue": 240})[0] == 401
+    assert worker(s, "PUT", f"/subjects/dataset/{number}/issue", {"issue": 240})[1]["issue"] == 240
+    assert [row["key"] for row in call(s, "GET", "/lookup", {"q": "#240"})[1]["subjects"]] == ["rec-a"]
+    bare = svc(tmp_path / "bare")  # no gateway: a dev service says so instead of pretending
+    assert call(bare, "GET", "/health")[1] == {"temporal": False, "queues": {}}
+    worker(bare, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
+    assert act(bare, "/datasets/rec-a/actions", {"action": "go"})[0] == 503

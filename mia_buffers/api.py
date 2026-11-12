@@ -31,10 +31,12 @@ from mia_core.fs import require_local_dir
 from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
-from mia_core.untrusted import read_untrusted
+from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
+from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
+from .dispatch import DispatchError
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
@@ -197,6 +199,26 @@ class MirroredBody(_Strict):
     comment_url: str | None = None
 
 
+class ActionBody(_Strict):
+    """One thing a person (or a worker for a request) asks of a subject (spec webapp-actions §4.2)."""
+
+    action: Literal["go", "approve", "reject", "revoke", "keep", "retire", "dropped", "cancel", "stop"]
+    key: str | None = None  # the sender's own name for this request: a repeat is the same action
+    revision: int | None = None  # approve, reject: the subject's revision the person was looking at
+    note: str = ""  # reject: the feedback for the agent
+    root: str | None = None  # a worker's go: the root request this round is charged to
+    actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
+
+
+class RefusalBody(_Strict):
+    state: Literal["refused"]
+    detail: str
+
+
+class IssueBody(_Strict):
+    issue: int
+
+
 class AssessmentBody(_Strict):
     """One assessment as `mia_core.judge.policy.new_assessment` shapes it (spec autonomous-gates §5)."""
 
@@ -312,6 +334,13 @@ ROUTES = [
     ("POST", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "append_entry", "worker"),
     ("GET", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "timeline", "read"),
     ("PUT", re.compile(r"^/timeline/([a-z]+)/(\d+)/(\d+)$"), "mark_mirrored", "worker"),
+    # the routes the page's buttons call: no token; JSON from this origin only (`_guard_action`)
+    ("POST", re.compile(r"^/datasets/([^/]+)/actions$"), "dataset_action", "action"),
+    ("GET", re.compile(r"^/actions/(\d+)$"), "get_action", "read"),
+    ("PUT", re.compile(r"^/actions/(\d+)$"), "refuse_action", "worker"),
+    ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)/issue$"), "set_subject_issue", "worker"),
+    ("GET", re.compile(r"^/health$"), "health", "read"),
+    ("GET", re.compile(r"^/run/([a-z]+)/(\d+)$"), "run_status", "read"),
 ]
 
 
@@ -366,6 +395,9 @@ class BufferService:
                     if capability == "worker" and not self._authorized(headers or {}):
                         return 401, {"error": "unauthorized"}, {}
                     segments = [unquote(group) for group in match.groups()]  # volume ids hold "/" (record/v0.zarr)
+                    if capability == "action":
+                        self._guard_action(headers or {})
+                        return getattr(self, f"_{name}")(*segments, query=query, body=body, headers=headers or {})
                     return getattr(self, f"_{name}")(*segments, query=query, body=body)
             raise HttpError(404, f"no route {method} {path}")
         except HttpError as error:
@@ -616,8 +648,134 @@ class BufferService:
 
     def _timeline(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
         subject = self._numbered(kind, number)
-        entries = self.ledger.timeline(kind, int(number))
-        return 200, {"subject": self._subject_view(subject), "entries": entries}, {}
+        entries, actions = self.ledger.timeline(kind, int(number)), self.ledger.actions(kind, int(number))
+        return 200, {"subject": self._subject_view(subject), "entries": entries, "actions": actions}, {}
+
+    # --- actions: a click on the page, recorded and sent to its workflow in one request (spec §5, §10) ---
+
+    @staticmethod
+    def _guard_action(headers: dict[str, str]) -> None:
+        """Action routes take no token, so they take JSON only and no other site's request: without this a web
+        page open in a browser on the same network could post a form here. This is not identity."""
+        given = {key.lower(): value for key, value in headers.items()}
+        if given.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            raise HttpError(415, "an action is a JSON body (Content-Type: application/json)")
+        origin = given.get("origin")
+        if origin and urlsplit(origin).netloc != given.get("host"):
+            raise HttpError(403, "an action must come from this service's own page")
+
+    def _actor(self, headers: dict[str, str], parsed: ActionBody) -> str:
+        """Who asks (spec §10): `page` for anyone, since there is no sign-in yet; a worker, which proves itself
+        with the token, may name itself and the root request its round is charged to. Sign-in changes this
+        function and nothing else."""
+        if parsed.actor is None and parsed.root is None:
+            return "page"
+        if self.token is not None and not self._authorized(headers):
+            raise HttpError(401, "naming an actor or a root needs the worker token")
+        return parsed.actor or "page"
+
+    def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        parsed = _parse(ActionBody, body)
+        actor = self._actor(headers, parsed)
+        subject = self.ledger.subject("dataset", record)
+        if subject is None:
+            if parsed.action != "go":
+                raise HttpError(404, f"no dataset {record!r} has been started")
+            ref = self.ledger.latest_catalog()
+            # ponytail: reads the catalog's records to find one id; a lookup by id when a catalog holds 100,000
+            if ref is None or all(row.get("id") != record for _, row in self.ledger.records(ref)):
+                raise HttpError(404, f"{record!r} is not a record of the synced catalog")
+            # a dataset whose issue is known (it ran from a label, was never adopted) keeps that number: its
+            # workflow id, rounds and budget root are built from it
+            known = (self.ledger.dataset(record) or {}).get("issue")
+            subject = self.ledger.create_subject("dataset", record, number=known if isinstance(known, int) else None)
+        payload = {name: value for name, value in (("note", parsed.note), ("root", parsed.root)) if value}
+        return self._act_on(subject, parsed, actor, payload)
+
+    def _act_on(self, subject: dict, parsed: ActionBody, actor: str, payload: dict) -> Response:
+        """Steps 1 to 6 of spec §5 for one subject: check the stage and the revision, record the action, send it
+        to Temporal, and settle it with its timeline entry. A key seen before is the same action sent again
+        under its id, whatever the stage is by now: the workflow drops an event id it has handled."""
+        kind, number, key, stage = subject["kind"], subject["number"], subject["key"], subject["stage"]
+        repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
+        if repeat is None:
+            status, accepted = SUBJECT_RULES[kind][stage]
+            if parsed.action not in accepted:
+                takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
+                raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
+            if parsed.action in ("approve", "reject"):
+                if parsed.revision is None:
+                    raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
+                if parsed.revision != subject["revision"]:
+                    raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal: no workflow can be started from it")
+        try:
+            action, _ = self.ledger.add_action(kind, number, parsed.action, actor, key=parsed.key, payload=payload)
+        except ValueError as error:
+            raise HttpError(409, str(error)) from None
+        if action["state"] == "sent":
+            return 202, action, {}
+        event = LabelEvent(parsed.action, str(action["id"]), action["actor"], action["at"])
+        try:
+            if parsed.action == "cancel":  # only a running round can be cancelled: nothing is started for it
+                running = self.dispatcher.signal_running(kind, number, "cancel", event)
+            else:
+                self.dispatcher.send(kind, number, parsed.action, event)
+                running = True
+        except DispatchError as error:
+            failed = self.ledger.settle_action(action["id"], "failed", str(error))
+            self.changes.announce(kind, number)
+            return 503, {"error": f"not delivered: {error}", "action": failed}, {}
+        text = f"**Action:** `{parsed.action}` by `{action['actor']}`"
+        if note := action["payload"].get("note"):
+            text += "\n\n" + "\n".join(f"> {line}" for line in neutralize(note)[:16000].splitlines())
+        sent = self.ledger.settle_action(action["id"], "sent", entry=(text, f"<!-- mia: action {action['id']} -->"))
+        if not running:
+            # the registry says a round is in progress and Temporal has no run for it (terminated by hand, or
+            # failed): the subject must not read "working" for ever, so the route ends the round itself
+            marker = f"<!-- mia: cancelled {action['id']} -->"
+            said = f"cancelled: no workflow was running for this {kind}\n\n{marker}"
+            self.ledger.append_entry(kind, number, body=said, marker=marker, stage="cancelled")
+        self._changed(kind, number)
+        return 202, sent, {}
+
+    def _get_action(self, action_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        action = self.ledger.action(int(action_id))
+        if action is None:
+            raise HttpError(404, f"no action {action_id}")
+        return 200, action, {}
+
+    def _refuse_action(self, action_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A workflow would not act on an action that reached it (a click that crossed a stage change)."""
+        parsed = _parse(RefusalBody, body)
+        action = self.ledger.settle_action(int(action_id), parsed.state, parsed.detail)
+        if action is None:
+            raise HttpError(404, f"no action {action_id}")
+        self.changes.announce(action["kind"], action["number"])
+        return 200, action, {}
+
+    def _set_subject_issue(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        subject = self.ledger.set_subject_issue(kind, int(number), _parse(IssueBody, body).issue)
+        if subject is None:
+            raise HttpError(404, f"no {kind} #{number}")
+        self.changes.announce(kind, int(number))
+        return 200, self._subject_view(subject), {}
+
+    def _health(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Whether Temporal answers and whether a worker polls each task queue: the page's banner (spec §8.3)."""
+        if self.dispatcher is None:
+            return 200, {"temporal": False, "queues": {}}, {}
+        return 200, self.dispatcher.health(), {}
+
+    def _run_status(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._numbered(kind, number)
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal")
+        try:
+            return 200, {"status": self.dispatcher.run_status(kind, int(number))}, {}
+        except DispatchError as error:
+            raise HttpError(503, str(error)) from None
 
     def _mark_mirrored(self, kind: str, number: str, seq: str, *, query: dict[str, str], body: bytes) -> Response:
         parsed = _parse(MirroredBody, body)

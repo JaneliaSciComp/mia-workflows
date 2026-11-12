@@ -680,6 +680,11 @@ class Ledger:
             found = self._actions(self._db, "WHERE id = ?", (action_id,))
         return found[0] if found else None
 
+    def action_by_key(self, key: str) -> dict | None:
+        with self._lock:
+            found = self._actions(self._db, "WHERE key = ?", (key,))
+        return found[0] if found else None
+
     def actions(self, kind: str, number: int) -> list[dict]:
         with self._lock:
             return self._actions(self._db, "WHERE kind = ? AND number = ?", (kind, number))

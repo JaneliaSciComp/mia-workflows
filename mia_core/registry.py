@@ -139,6 +139,25 @@ class Registry:
     def mark_mirrored(self, kind: str, number: int, seq: int, comment_url: str | None) -> None:
         self.request("PUT", f"/timeline/{quote(kind, safe='')}/{number}/{seq}", json={"comment_url": comment_url})
 
+    def set_subject_issue(self, kind: str, number: int, issue: int) -> dict:
+        """The mirror's write-back: the GitHub issue it opened for the subject."""
+        return self.request("PUT", f"/subjects/{quote(kind, safe='')}/{number}/issue", json={"issue": issue})
+
+    # --- actions: what a person, or a worker for a request, asked of a subject (spec webapp-actions §4.2) ---
+
+    def action(self, action_id: int | str) -> dict | None:
+        """The action with this id; None when the id is not an action's (a GitHub label event's, until slice E)."""
+        return self._lookup(f"/actions/{action_id}")
+
+    def refuse_action(self, action_id: int | str, detail: str) -> dict:
+        """Mark an action its workflow would not act on, with the reason the page shows against the click."""
+        return self.request("PUT", f"/actions/{action_id}", json={"state": "refused", "detail": detail})
+
+    def send_action(self, path: str, action: str, **fields: Any) -> dict:
+        """Ask for an action as a worker: POST it to an action route (`/datasets/<record>/actions`). `key` makes
+        a retried call the same action; `actor` and `root` are honoured because the token is sent."""
+        return self.request("POST", quote(path), json={"action": action, **fields})
+
     def put_asset(self, kind: str, key: str, data: dict) -> dict:
         return self.request("PUT", f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}", json=data)
 
