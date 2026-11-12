@@ -271,6 +271,50 @@ class Activities:
         """Post the comment unless one with this marker exists. Returns the comment's URL (the earlier one, on a retry)."""
         return (await self._bot_comment(gh, number, marker) or await gh.comment(number, body)).get("html_url")
 
+    async def _post(
+        self, issue: int, body: str, marker: str, *, round_id: str | None = None, stage: str | None = None
+    ) -> str | None:
+        """Write what a round has to say about its dataset: a stage, a text (once per marker), or both.
+
+        With buffer-api configured this is the subject's stage and a timeline entry, a required write, and no
+        GitHub call: the mirror copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7).
+        Without one (a dev set-up) it is the label swap and the comment on the issue; that returns its URL."""
+        if (registry := self.registry) is None:
+            if stage:
+                await self._swap_label(issue, stage)
+            return await self._comment_once(self.gh_data, issue, body, marker) if body else None
+        write = functools.partial(
+            registry.append_entry, "dataset", issue, body=body, marker=marker, round_id=round_id, stage=stage
+        )
+        try:
+            await asyncio.to_thread(write)
+        except RegistryError as err:
+            if err.status != 404:
+                raise
+            # ponytail: an issue opened on GitHub after `adopt-issues` ran is adopted here from its marker (spec
+            # §11 step 2); this read of the issue goes when labels stop starting rounds (slice E).
+            match = MARKER_RE.match((await self.gh_data.get_issue(issue)).get("body") or "")
+            if not match:
+                raise ValueError(f"issue #{issue} has no record marker: it is not a dataset") from None
+            try:
+                await asyncio.to_thread(registry.adopt_subject, "dataset", issue, match.group(1))
+            except RegistryError as taken:
+                if taken.status == 409:  # a second issue for one record: its round has nowhere to write
+                    raise ValueError(f"issue #{issue}: {taken.message}; a dataset has one issue") from None
+                raise
+            await asyncio.to_thread(write)
+        return None
+
+    async def _swap_label(self, issue: int, stage: str) -> None:
+        """Leave `data:<stage>` as the issue's only stage label (the path without buffer-api; else the mirror's)."""
+        gh, want = self.gh_data, self.cfg.label(stage)
+        current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
+        for other in STAGES:
+            if (name := self.cfg.label(other)) in current and name != want:
+                await gh.remove_label(issue, name)
+        if want not in current:
+            await gh.add_labels(issue, [want])
+
     def _round_dir(self, round_id: str) -> Path:
         """state_dir/rounds/<round_id>: the round's record, downloads entry, pins and bindings (never mounted)."""
         if not ROUND_RE.fullmatch(round_id):
@@ -597,17 +641,12 @@ class Activities:
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         round_id = state.round_id if state else None
-        if round_id and (registry := self.registry):  # the registry row first: machines read it, GitHub may wait
+        if round_id and (registry := self.registry):  # the dataset's row: what buffers and requests read
             await asyncio.to_thread(self._report_dataset, registry, issue, round_id, stage)
-        gh, want = self.gh_data, self.cfg.label(stage)
-        current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
-        for other in STAGES:
-            if (name := self.cfg.label(other)) in current and name != want:
-                await gh.remove_label(issue, name)
-        if want not in current:
-            await gh.add_labels(issue, [want])
         if not round_id:
+            await self._post(issue, "", "", stage=stage)
             return
+        gh = self.gh_data
         paths = self.cfg.paths
         links = {"Workspace": paths.link(self._round_workspace(issue, round_id))}
         if stage == "done":
@@ -618,7 +657,8 @@ class Activities:
             )
         marker = self.cfg.marker(f"stage {round_id} {stage}")
         parts = [render_stage(stage, self._clean(detail)), self._clean(extra) if extra else "", render_links(links)]
-        await self._comment_once(gh, issue, "\n".join(part for part in parts if part) + f"\n{marker}", marker)
+        body = "\n".join(part for part in parts if part) + f"\n{marker}"
+        await self._post(issue, body, marker, round_id=round_id, stage=stage)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
@@ -631,13 +671,13 @@ class Activities:
         binding_path: str | None = None,
         binding_hash: str | None = None,
     ) -> str | None:
-        """Post once per marker, on a data issue or (repo="snippets") a snippets issue or PR, with the binding
-        appended when one is given. Returns the comment's URL."""
+        """Post once per marker, with the binding appended when one is given: a comment on a snippets issue or PR
+        (repo="snippets"; returns its URL), or an entry of the dataset's timeline (returns None; see `_post`)."""
         full_marker = self.cfg.marker(marker)
         body = self._clean(body) + (f"\n\n{render_binding(binding_path, binding_hash)}" if binding_path else "")
-        return await self._comment_once(
-            self.gh_snippets if repo == "snippets" else self.gh_data, issue, f"{body}\n\n{full_marker}", full_marker
-        )
+        if repo == "snippets":
+            return await self._comment_once(self.gh_snippets, issue, f"{body}\n\n{full_marker}", full_marker)
+        return await self._post(issue, f"{body}\n\n{full_marker}", full_marker)
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
@@ -647,7 +687,7 @@ class Activities:
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         await self.gh_data.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
-        await self._comment_once(self.gh_data, issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
+        await self._post(issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
 
     # --- jobs --------------------------------------------------------------------------------
 

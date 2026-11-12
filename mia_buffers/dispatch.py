@@ -49,7 +49,11 @@ class Dispatcher:
         try:
             client = await self._client(namespace)
             await client.start_workflow(
-                MIRROR_WORKFLOW, args=[kind, number], id=mirror_id(kind, number), task_queue=task_queue, start_signal="kick"
+                MIRROR_WORKFLOW,
+                args=[kind, number],
+                id=mirror_id(kind, number),
+                task_queue=task_queue,
+                start_signal="kick",
             )
         except Exception as error:  # never the caller's problem: the entry is written, the issue catches up later
             log.warning("mirror of %s #%d not kicked: %s", kind, number, error)

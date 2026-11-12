@@ -8,7 +8,7 @@ The workflow that runs this (`MiaMirror`) is in `workflows.py`; each worker regi
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -22,7 +22,7 @@ class Mirror:
     whose comments count as ours."""
 
     def __init__(
-        self, gh: GitHub, registry: Registry, bot: str, labels: dict[str, tuple[Callable[[str], str], Iterable[str]]]
+        self, gh: GitHub, registry: Registry, bot: str, labels: Mapping[str, tuple[Callable[[str], str], Iterable[str]]]
     ) -> None:
         self.gh, self.registry, self.bot, self.labels = gh, registry, bot, labels
 

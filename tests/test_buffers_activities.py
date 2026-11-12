@@ -66,6 +66,9 @@ def spec_text() -> str:
     return yaml.safe_dump(spec.model_dump(by_alias=True, exclude={"warnings"}), sort_keys=False)
 
 
+SPEC_NAME = load_spec(FIXTURES / "spec.yaml").name  # the key a buffer issue with this spec is adopted under
+
+
 def issue_body(spec: str | None = None, fences: int = 1) -> str:
     block = f"```yaml\n{spec or spec_text()}```\n"
     return "A buffer for the demo.\n\n" + block * fences + "\nNotes below.\n"
@@ -119,6 +122,11 @@ def acts(tmp_path, monkeypatch, token_server):  # noqa: F811
 def server(acts, token_server):  # noqa: F811
     """The buffer-api the activities' registry client talks to (the `acts` fixture starts it)."""
     return token_server
+
+
+def posted(acts, kind="buffer", number=7) -> list[str]:
+    """The texts a round wrote to the subject's timeline, in order (they were issue comments before the mirror)."""
+    return [entry["body"] for entry in acts.registry.timeline(kind, number)["entries"]]
 
 
 async def admitted(acts) -> BufferPins:
@@ -241,7 +249,7 @@ async def test_comment_plan_posts_once(acts):
     await acts.plan(7, ROUND, await admitted(acts))
     await acts.comment_plan(7, ROUND)
     await acts.comment_plan(7, ROUND)
-    bodies = [c["body"] for c in acts.gh.comments[7]]
+    bodies = posted(acts)
     assert (
         len(bodies) == 1
         and "2 in the pool" in bodies[0]
@@ -419,11 +427,11 @@ async def test_comment_plan_reposts_once_per_dropped_set(acts):
     await acts.comment_plan(7, ROUND)
     await acts.comment_plan(7, ROUND, {BCSS: "data:ineligible on o/data#5"})
     await acts.comment_plan(7, ROUND, {BCSS: "data:ineligible on o/data#5"})
-    bodies = [c["body"] for c in acts.gh.comments[7]]
+    bodies = posted(acts)
     assert len(bodies) == 2 and "**Dropped**" in bodies[1] and f"- `{BCSS}`: data:ineligible" in bodies[1]
     assert "1 in the pool" in bodies[1] and f"| `{BCSS}` |" not in bodies[1]
     await acts.comment_plan(7, ROUND, {BCSS: "x", U937: "y"})
-    assert len(acts.gh.comments[7]) == 3
+    assert len(posted(acts)) == 3 and acts.gh.comments == {}  # the timeline, never the issue
 
 
 # -- bindings and the manual drop
@@ -648,21 +656,35 @@ async def test_large_stage_json_with_many_sampled_volumes_is_read_and_registered
 # -- labels and comments
 
 
-async def test_set_stage_swaps_label_and_comments_once(acts):
+async def test_set_stage_writes_the_subjects_stage_and_one_entry(acts):
     state = BufferState(7, round_id=ROUND, stage="plan-review")
     await acts.set_stage(7, "plan-review", state, "approve the plan")
     await acts.set_stage(7, "plan-review", state, "approve the plan")
-    assert [x["name"] for x in acts.gh.issues[7]["labels"]] == ["buffer:plan-review"]
-    bodies = [c["body"] for c in acts.gh.comments[7]]
+    subject = acts.registry.timeline("buffer", 7)["subject"]  # the issue was adopted by its first write
+    assert (subject["key"], subject["stage"], subject["revision"]) == (SPEC_NAME, "plan-review", 2)
+    assert f"name: {SPEC_NAME}" in subject["data"]["spec"] and subject["status"] == "waiting"
+    bodies = posted(acts)
     assert len(bodies) == 1 and "`buffer:plan-review`" in bodies[0] and "approve the plan" in bodies[0]
+    assert [x["name"] for x in acts.gh.issues[7]["labels"]] == ["buffer:planning"]  # the label is the mirror's
+    await acts.set_stage(7, "ready")  # outside a round: the stage alone
+    assert acts.registry.timeline("buffer", 7)["subject"]["stage"] == "ready" and len(posted(acts)) == 1
+
+
+async def test_a_second_issue_with_a_taken_spec_name_is_adopted_under_name_and_number(acts):
+    acts.gh.issues[9] = {"number": 9, "body": issue_body(), "labels": []}
+    await acts.set_stage(7, "planning")
+    await acts.set_stage(9, "planning")
+    assert acts.registry.timeline("buffer", 9)["subject"]["key"] == f"{SPEC_NAME}-9"
 
 
 async def test_refuse_label_removes_and_explains(acts):
     acts.gh.issues[7]["labels"].append({"name": "buffer:approve"})
     await acts.refuse_label(7, "buffer:approve", "it is older than the plan", "12")
-    assert (7, "buffer:approve") in acts.gh.removed and "older than the plan" in acts.gh.comments[7][0]["body"]
-    await acts.refuse_label(7, "prep:go", "busy", "13")  # MiaPrep refuses a go while its round runs
-    assert (7, "prep:go") in acts.gh.removed and "Ignoring `prep:go`: busy" in acts.gh.comments[7][1]["body"]
+    assert (7, "buffer:approve") in acts.gh.removed and "older than the plan" in posted(acts)[0]
+    prep_issue(acts)
+    await acts.refuse_label(8, "prep:go", "busy", "13")  # MiaPrep refuses a go while its round runs
+    assert (8, "prep:go") in acts.gh.removed and "Ignoring `prep:go`: busy" in posted(acts, "prep", 8)[0]
+    assert acts.gh.comments == {}
     with pytest.raises(ApplicationError):
         await acts.refuse_label(7, "data:go", "x", "12")
 
@@ -1337,9 +1359,10 @@ async def test_set_stage_writes_the_event(acts, server):
     events = httpx.get(f"{server}/buffers/{ROUND}/events").json()["events"]
     assert [event["kind"] for event in events] == ["created", "planned", "sourcing", "ready"]
     assert {(event["issue"], event["detail"]) for event in events} == {(7, "x" * 200)}
-    acts.registry = Registry("http://127.0.0.1:9")
-    await acts.set_stage(7, "idle", state)  # buffer-api down: the label still moves
-    assert [label["name"] for label in acts.gh.issues[7]["labels"]] == ["buffer:idle"]
+    live, acts.registry = acts.registry, Registry("http://127.0.0.1:9")
+    with pytest.raises(RegistryError):  # buffer-api down: the stage is not written, so the activity is retried
+        await acts.set_stage(7, "idle", state)
+    assert live.timeline("buffer", 7)["subject"]["stage"] == "ready" and acts.gh.comments == {}
 
 
 async def test_mark_dataset_and_retire(acts, server):
@@ -1577,9 +1600,9 @@ async def test_prep_admit_and_nudge_report_prepared_records(acts):
     assert outcome == PrepOutcome(U937, "prepared") and gh.created == [] and gh.issues == {}
     await acts.comment_prep(8, PREP_ROUND, [outcome, PrepOutcome(BCSS, "opened", 100)])
     await acts.comment_prep(8, PREP_ROUND, [outcome])  # once per round
-    (comment,) = acts.gh.comments[8]
-    assert "| record | outcome | issue |" in comment["body"] and f"| `{U937}` | prepared |  |" in comment["body"]
-    assert f"| `{BCSS}` | opened | o/data#100 |" in comment["body"]
+    (comment,) = posted(acts, "prep", 8)
+    assert "| record | outcome | issue |" in comment and f"| `{U937}` | prepared |  |" in comment
+    assert f"| `{BCSS}` | opened | o/data#100 |" in comment
 
 
 async def test_prep_admit_refuses_unknown_records(acts):
@@ -1641,14 +1664,16 @@ async def test_prep_status_reads_the_registry(acts):
         await acts.prep_status([U937])
 
 
-async def test_set_prep_stage_swaps_label_and_comments_once(acts):
+async def test_set_prep_stage_writes_the_requests_stage_and_one_entry(acts):
     prep_issue(acts)
     state = PrepState(8, round_id=PREP_ROUND, stage="requested")
     await acts.set_prep_stage(8, "done", state, "every record is prepared")
     await acts.set_prep_stage(8, "done", state, "every record is prepared")
-    assert [x["name"] for x in acts.gh.issues[8]["labels"]] == ["prep:done"]
-    (comment,) = acts.gh.comments[8]
-    assert "`prep:done`" in comment["body"] and "every record is prepared" in comment["body"]
+    subject = acts.registry.timeline("prep", 8)["subject"]
+    assert (subject["key"], subject["stage"]) == ("prep-8", "done") and "kind: preparation" in subject["data"]["spec"]
+    (comment,) = posted(acts, "prep", 8)
+    assert "`prep:done`" in comment and "every record is prepared" in comment
+    assert [x["name"] for x in acts.gh.issues[8]["labels"]] == ["prep:requested"]  # the label is the mirror's
     with pytest.raises(ApplicationError):
         await acts.set_prep_stage(8, "new", state, "")
 

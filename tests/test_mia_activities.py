@@ -15,7 +15,7 @@ from test_autodev_agent import FakeCsub
 from test_buffers_register import token_server  # noqa: F401  (fixture)
 
 from autodev.jobs import CsubJobs
-from mia_core.registry import Registry
+from mia_core.registry import Registry, RegistryError
 from mia_data.activities import Activities
 from mia_data.jobspec import lock_dir
 from mia_data.models import (
@@ -230,9 +230,10 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     seen = _registry_seen(t)
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     await t.a.set_stage(1, "matching", state)
-    assert seen[-1] == ("/datasets/rec-1", {"state": "in-progress", "data_stage": "matching", "issue": 1})
+    assert seen[-2] == ("/datasets/rec-1", {"state": "in-progress", "data_stage": "matching", "issue": 1})
+    assert seen[-1][0] == "/timeline/dataset/1" and seen[-1][1]["stage"] == "matching"  # then the stage itself
     await t.a.set_stage(1, "needs-human", state)
-    assert seen[-1][1]["state"] == "needs-human"
+    assert seen[-2][1]["state"] == "needs-human"
     dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"  # binding.yaml + a manifest that matches it
     dataset_dir.mkdir(parents=True)
     binding_bytes = yaml.safe_dump(BINDING).encode()
@@ -240,14 +241,16 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     manifest = {"count": 2, "binding": {"sha256": hashlib.sha256(binding_bytes).hexdigest()}}
     (dataset_dir / "manifest.json").write_text(json.dumps(manifest))
     await t.a.set_stage(1, "done", state)
-    row = seen[-1][1]
+    row = seen[-2][1]
     assert row["state"] == "prepared" and row["crops"] == 2 and row["binding_hash"] and row["folder"]
     assert "record" not in row and row["issue"] == 1
-    await t.a.set_stage(1, "matching", None)  # no round: no write
-    assert len(seen) == 3
+    await t.a.set_stage(1, "matching", None)  # no round: no dataset row, the stage alone
+    assert [path for path, _ in seen].count("/datasets/rec-1") == 3
+    assert seen[-1] == ("/timeline/dataset/1", {"body": "", "marker": "", "round": None, "stage": "matching"})
+    assert t.data.comments == {} and t.data.issues[1]["labels"] == []  # nothing goes to the issue from a round
 
 
-async def test_set_stage_survives_a_down_registry(tmp_path, caplog):
+async def test_set_stage_fails_while_the_registry_is_down_and_nothing_reaches_github(tmp_path, caplog):
     def down(request):
         raise httpx.ConnectError("down")
 
@@ -255,10 +258,10 @@ async def test_set_stage_survives_a_down_registry(tmp_path, caplog):
     t.data.issues[1]["labels"] = [{"name": "data:new"}]
     _registry_seen(t, down)
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
-    with caplog.at_level(logging.WARNING):
-        await t.a.set_stage(1, "matching", state)  # no exception
-    assert "registry write skipped" in caplog.text
-    assert [x["name"] for x in t.data.issues[1]["labels"]] == ["data:matching"] and len(t.data.comments[1]) == 1
+    with caplog.at_level(logging.WARNING), pytest.raises(RegistryError):  # Temporal retries the activity
+        await t.a.set_stage(1, "matching", state)
+    assert "registry write skipped" in caplog.text  # the dataset's row stays best effort; the stage does not
+    assert [x["name"] for x in t.data.issues[1]["labels"]] == ["data:new"] and t.data.comments == {}
 
 
 async def test_set_stage_needs_human_with_an_unclear_record_still_comments(tmp_path):
@@ -268,9 +271,9 @@ async def test_set_stage_needs_human_with_an_unclear_record_still_comments(tmp_p
     record_file = t.cfg.paths.state_dir / "rounds" / ROUND / "record.yaml"
     record_file.write_text(yaml.safe_dump({"imaging": {"modality": ["confocal"], "organism": []}}))  # no folder
     await t.a.set_stage(1, "needs-human", state, "why")
-    assert seen == [("/datasets/rec-1", {"state": "needs-human", "data_stage": "needs-human", "issue": 1})]
-    assert [x["name"] for x in t.data.issues[1]["labels"]] == ["data:needs-human"]
-    assert len(t.data.comments[1]) == 1 and "why" in t.data.comments[1][0]["body"]
+    assert seen[0] == ("/datasets/rec-1", {"state": "needs-human", "data_stage": "needs-human", "issue": 1})
+    (path, entry) = seen[1]
+    assert path == "/timeline/dataset/1" and entry["stage"] == "needs-human" and "why" in entry["body"]
 
 
 async def test_set_stage_with_a_malformed_record_still_comments(tmp_path, caplog):
@@ -281,9 +284,8 @@ async def test_set_stage_with_a_malformed_record_still_comments(tmp_path, caplog
     record_file = t.cfg.paths.state_dir / "rounds" / ROUND / "record.yaml"
     record_file.write_text(yaml.safe_dump({"imaging": "x"}))  # untrusted catalog data of the wrong shape
     await t.a.set_stage(1, "needs-human", state, "why")
-    assert seen == [] and "rec-1: registry write skipped" in caplog.text
-    assert [x["name"] for x in t.data.issues[1]["labels"]] == ["data:needs-human"]
-    assert len(t.data.comments[1]) == 1 and "why" in t.data.comments[1][0]["body"]
+    assert "rec-1: registry write skipped" in caplog.text  # no dataset row; the stage is still written
+    assert [path for path, _ in seen] == ["/timeline/dataset/1"] and "why" in seen[0][1]["body"]
 
 
 async def test_comment_can_carry_the_binding(tmp_path):
@@ -867,3 +869,74 @@ async def test_read_judge_applies_the_suspect_cap(tmp_path):
     _claude_json(ws, {"verdict": "approve", "confidence": 0.9, "findings": findings, "summary": "meh"})
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
     assert out.effective == "reject" and "more than the cap of 2" in out.comment
+
+
+# --- with buffer-api: a round writes the timeline, the mirror writes the issue (spec webapp-actions §6, §7) ---
+
+
+def _with_service(t, tmp_path):
+    """Give the activities a registry backed by a real service in this process; returns its ledger."""
+    from mia_buffers.api import BufferService
+    from mia_buffers.ledger import Ledger
+    from tests.test_buffers_adopt import registry_for
+
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    t.a.registry = registry_for(BufferService(ledger))
+    return ledger
+
+
+async def test_a_round_completes_its_writes_with_every_issue_call_failing_and_the_mirror_catches_up(tmp_path):
+    from mia_data.config import STAGES
+    from mia_data.mirror import Mirror
+
+    t = _setup(tmp_path)
+    ledger = _with_service(t, tmp_path)
+    state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
+    t.a.registry.adopt_subject("dataset", 1, "rec-1")
+    working = {name: getattr(t.data, name) for name in ("get_issue", "issue_comments", "comment", "add_labels")}
+
+    async def away(*args, **kwargs):
+        raise RuntimeError("GitHub is away")
+
+    for name in working:
+        setattr(t.data, name, away)
+    await t.a.set_stage(1, "matching", state)
+    await t.a.set_stage(1, "matching", state)  # a retry adds nothing
+    assert await t.a.comment(1, "Test crops: **passed**", "test r 1") is None
+    await t.a.set_stage(1, "needs-human", state, "host <!-- x --> missing")
+    subject = ledger.subject("dataset", "rec-1")
+    assert (subject["stage"], subject["revision"]) == ("needs-human", 3)
+    entries = ledger.timeline("dataset", 1)
+    assert [entry["stage"] for entry in entries] == ["matching", None, "needs-human"]
+    assert entries[0]["round"] == ROUND and "<!-- x" not in entries[2]["body"] and "host" in entries[2]["body"]
+    for name, method in working.items():  # GitHub is back: the issue reads as it always did
+        setattr(t.data, name, method)
+    mirror = Mirror(t.data, t.a.registry, "bot", {"dataset": (t.cfg.label, STAGES)})
+    assert await mirror.mirror("dataset", 1) == 3
+    bodies = [comment["body"] for comment in t.data.comments[1]]
+    assert bodies[0].startswith("**Stage:** `data:matching`") and bodies[1].startswith("Test crops: **passed**")
+    assert [label["name"] for label in t.data.issues[1]["labels"]] == ["data:needs-human"]
+
+
+async def test_an_issue_the_registry_does_not_know_is_adopted_by_its_first_write(tmp_path):
+    t = _setup(tmp_path)
+    ledger = _with_service(t, tmp_path)
+    await t.a.set_stage(1, "new")  # labelled on GitHub after adopt-issues ran
+    assert ledger.subject("dataset", "rec-1")["number"] == 1
+    t.data.issues[2] = {"number": 2, "body": "<!-- mia-data:record=rec-1 -->\n", "labels": []}
+    with pytest.raises(ApplicationError, match="a dataset has one issue"):
+        await t.a.set_stage(2, "new")  # a second issue for the record has nowhere to write
+    t.data.issues[3] = {"number": 3, "body": "not a dataset", "labels": []}
+    with pytest.raises(ApplicationError, match="no record marker"):
+        await t.a.set_stage(3, "new")
+
+
+async def test_a_refusal_is_a_timeline_entry(tmp_path):
+    t = _setup(tmp_path)
+    ledger = _with_service(t, tmp_path)
+    t.a.registry.adopt_subject("dataset", 1, "rec-1")
+    t.data.issues[1]["labels"] = [{"name": "data:go"}]
+    await t.a.refuse_label(1, "data:go", "a round is running", "42")
+    assert t.data.issues[1]["labels"] == [] and t.data.comments == {}  # the label goes; the text is the mirror's
+    (entry,) = ledger.timeline("dataset", 1)
+    assert entry["body"].startswith("Ignoring `data:go`: a round is running") and entry["stage"] is None

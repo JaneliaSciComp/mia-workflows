@@ -402,15 +402,50 @@ class Activities:
                 return comment.get("html_url")
         return (await gh.comment(number, body)).get("html_url")
 
-    async def _swap_label(self, issue: int, want: str, stage_labels: list[str]) -> None:
-        """Leave `want` as the issue's only label among `stage_labels`."""
-        gh = self.gh_issues
-        current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
-        for name in stage_labels:
-            if name in current and name != want:
-                await gh.remove_label(issue, name)
-        if want not in current:
-            await gh.add_labels(issue, [want])
+    async def _post(
+        self,
+        kind: str,
+        issue: int,
+        body: str,
+        marker: str,
+        *,
+        round_id: str | None = None,
+        stage: str | None = None,
+    ) -> None:
+        """Write what a round has to say about its buffer spec (`buffer`) or preparation request (`prep`): a
+        stage, a text (once per marker), or both. It is the subject's stage and a timeline entry in the registry,
+        a required write, and no GitHub call: the mirror copies it to the issue whenever GitHub answers (spec
+        webapp-actions §6, §7)."""
+        write = functools.partial(
+            self.registry.append_entry, kind, issue, body=body, marker=marker, round_id=round_id, stage=stage
+        )
+        try:
+            await asyncio.to_thread(write)
+        except RegistryError as err:
+            if err.status != 404:
+                raise
+            await self._adopt(kind, issue)
+            await asyncio.to_thread(write)
+
+    async def _adopt(self, kind: str, issue: int) -> None:
+        """Make an issue the registry has no subject for a subject, named as `adopt-issues` would name it."""
+        # ponytail: an issue opened on GitHub after `adopt-issues` ran is adopted by its first write (spec
+        # webapp-actions §11 step 2); this read of the issue goes when labels stop starting rounds (slice E).
+        from .adopt import buffer_subject, prep_subject
+
+        found = await self.gh_issues.get_issue(issue)
+        if kind == "prep":
+            key, data = prep_subject(found)
+        else:
+            name, data = buffer_subject(found)
+            key = name or f"issue-{issue}"
+        adopt = functools.partial(self.registry.adopt_subject, kind, issue, data=data)
+        try:
+            await asyncio.to_thread(adopt, key)
+        except RegistryError as taken:
+            if taken.status != 409 or kind == "prep":
+                raise
+            await asyncio.to_thread(adopt, f"{key}-{issue}")  # an earlier issue holds this spec name
 
     def _round_dir(self, round_id: str) -> Path:
         if not ROUND_RE.fullmatch(round_id):
@@ -606,11 +641,11 @@ class Activities:
     async def set_stage(
         self, issue: int, stage: str, state: BufferState | None = None, detail: str = "", extra: str = ""
     ) -> None:
-        """Swap the `buffer:<stage>` label and, within a round, post the stage's comment once."""
+        """Write the buffer spec's stage and, within a round, the stage's timeline entry once."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
-        await self._swap_label(issue, self.cfg.label(stage), [self.cfg.label(other) for other in STAGES])
         if not (state and state.round_id):
+            await self._post("buffer", issue, "", "", stage=stage)
             return
         if (kind := STAGE_EVENTS.get(stage)) is not None:
             buffer, registry = state.buffer_id or state.round_id, self.registry
@@ -630,16 +665,17 @@ class Activities:
             self._clean(extra) if extra else "",
             render_links(links),
         ]
-        await self._comment_once(
-            self.gh_issues, issue, "\n".join(part for part in parts if part) + f"\n{marker}", marker
-        )
+        body = "\n".join(part for part in parts if part) + f"\n{marker}"
+        await self._post("buffer", issue, body, marker, round_id=state.round_id, stage=stage)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
     async def comment(self, issue: int, body: str, marker: str) -> str | None:
-        """Post once per marker. Returns the comment's URL."""
+        """Add an entry to the buffer spec's timeline, once per marker. Returns None (it returned the comment's
+        URL when it posted to GitHub; the signature is recorded in histories)."""
         full_marker = self.cfg.marker(marker)
-        return await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
+        await self._post("buffer", issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
+        return None
 
     @activity.defn(name="comment_plan")
     @mia_permanent_errors
@@ -652,7 +688,7 @@ class Activities:
         marker = self.cfg.marker(f"plan {round_id}{suffix}")
         link = self.cfg.paths.link(self._round_workspace(issue, round_id))
         body = render_plan_comment(self._plan(round_id), link, dropped)
-        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n{marker}", marker)
+        await self._post("buffer", issue, f"{self._clean(body)}\n{marker}", marker, round_id=round_id)
 
     @activity.defn(name="nudge_dataset")
     @mia_permanent_errors
@@ -787,15 +823,15 @@ class Activities:
     @activity.defn(name="set_prep_stage")
     @mia_permanent_errors
     async def set_prep_stage(self, issue: int, stage: str, state: PrepState | None = None, detail: str = "") -> None:
-        """Swap the `prep:<stage>` label and, within a request's round, post the stage's comment once."""
+        """Write the request's stage and, within its round, the stage's timeline entry once."""
         if stage not in PREP_STAGES:
             raise ValueError(f"unknown preparation stage {stage!r}")
-        await self._swap_label(issue, self.cfg.prep_label(stage), [self.cfg.prep_label(other) for other in PREP_STAGES])
         if not (state and state.round_id):
+            await self._post("prep", issue, "", "", stage=stage)
             return
         marker = self.cfg.marker(f"prep stage {state.round_id} {stage}")
         body = render_stage(stage, self._clean(detail), prefix="prep") + f"\n{marker}"
-        await self._comment_once(self.gh_issues, issue, body, marker)
+        await self._post("prep", issue, body, marker, round_id=state.round_id, stage=stage)
 
     @activity.defn(name="comment_prep")
     @mia_permanent_errors
@@ -808,7 +844,7 @@ class Activities:
             lines.append(f"| `{entry.record}` | {outcome} | {f'{repo}#{entry.issue}' if entry.issue else ''} |")
         marker = self.cfg.marker(f"prep outcomes {round_id}")
         body = "\n".join(lines)
-        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n\n{marker}", marker)
+        await self._post("prep", issue, f"{self._clean(body)}\n\n{marker}", marker, round_id=round_id)
 
     @activity.defn(name="comment_drop")
     @mia_permanent_errors
@@ -820,7 +856,7 @@ class Activities:
         suffix = " " + hashlib.sha256("\n".join(sorted(missing)).encode()).hexdigest()[:8] if missing else ""
         marker = self.cfg.marker(f"drop {round_id} {record}{suffix}")
         body = render_drop_comment(record, link, files, list(missing))
-        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n{marker}", marker)
+        await self._post("buffer", issue, f"{self._clean(body)}\n{marker}", marker, round_id=round_id)
 
     @activity.defn(name="poll")
     async def poll(self) -> list[str]:
@@ -837,9 +873,8 @@ class Activities:
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         await self.gh_issues.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
-        await self._comment_once(
-            self.gh_issues, issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker
-        )
+        kind = "prep" if label.startswith(self.cfg.prep_label("")) else "buffer"
+        await self._post(kind, issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
 
     # --- sourcing: binding, drop, stage job, registration ------------------------------------
 

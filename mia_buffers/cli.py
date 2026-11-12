@@ -107,7 +107,6 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     from temporalio.worker import Worker
 
     from autodev.jobs import CsubJobs
-
     from mia_data.mirror import Mirror
     from mia_data.workflows import MiaMirror
 

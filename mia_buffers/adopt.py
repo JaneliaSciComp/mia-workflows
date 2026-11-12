@@ -27,6 +27,21 @@ def _fences(issue: dict) -> list[str]:
     return SPEC_FENCE.findall((issue.get("body") or "").replace("\r\n", "\n"))  # GitHub saves CRLF
 
 
+def prep_subject(issue: dict) -> tuple[str, dict]:
+    """A request issue's (key, data): `prep-<number>`, with the request text when the body has exactly one fence."""
+    fences = _fences(issue)
+    return f"prep-{issue['number']}", {"spec": fences[0]} if len(fences) == 1 else {}
+
+
+def buffer_subject(issue: dict) -> tuple[str | None, dict]:
+    """A buffer issue's (spec name, data); (None, {}) when its body has no single valid spec to name it by."""
+    fences = _fences(issue)
+    try:
+        return (load_spec_text(fences[0]).name, {"spec": fences[0]}) if len(fences) == 1 else (None, {})
+    except SpecError:
+        return None, {}
+
+
 async def adopt_issues(gh_data: GitHub, gh_buffers: GitHub, registry: Registry, *, dry_run: bool = False) -> list[str]:
     """Write a subject per issue and return the report, one line per issue looked at. A line starting `duplicate:`,
     `skipped:` or `refused:` names an issue that got no subject. `dry_run` reports and writes nothing."""
@@ -58,20 +73,17 @@ async def adopt_issues(gh_data: GitHub, gh_buffers: GitHub, registry: Registry, 
 
     names_taken: set[str] = set()
     for issue in sorted(await gh_buffers.list_issues(state="all"), key=lambda issue: issue["number"]):
-        number, fences = issue["number"], _fences(issue)
+        number = issue["number"]
         if prep_stage := _stage(issue, "prep:", PREP_STAGES):
-            adopt("prep", number, f"prep-{number}", prep_stage, {"spec": fences[0]} if len(fences) == 1 else {})
+            adopt("prep", number, *prep_subject(issue)[:1], prep_stage, prep_subject(issue)[1])
         elif buffer_stage := _stage(issue, "buffer:", STAGES):
-            try:
-                name = load_spec_text(fences[0]).name if len(fences) == 1 else None
-            except SpecError:
-                name = None
+            name, data = buffer_subject(issue)
             if name is None:  # no single valid spec: nothing to name it by
                 adopt("buffer", number, f"issue-{number}", buffer_stage, {})
                 continue
             key = f"{name}-{number}" if name in names_taken else name  # a later issue with the same spec name
             names_taken.add(name)
-            adopt("buffer", number, key, buffer_stage, {"spec": fences[0]})
+            adopt("buffer", number, key, buffer_stage, data)
         else:
             lines.append(f"skipped: #{number} has no buffer or prep label")
     return lines
