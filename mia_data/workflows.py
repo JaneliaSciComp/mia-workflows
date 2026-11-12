@@ -53,6 +53,8 @@ with workflow.unsafe.imports_passed_through():
 GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:revoke"
 CANCEL = "data:cancel"  # an action only: there was never such a label
 NO_ROUND = "there is no round in progress to cancel"
+ROUND_ENDED = "the round ended before the cancel reached it"
+CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the round's activity in flight to answer
 NOTHING_TO_REVOKE = "nothing to revoke: this dataset has published no crops"
 REVOKED = "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; running it again repairs it"
 BUSY = "busy, ignored: a round is already running. Cancel it first, or ask again once it has ended."
@@ -98,7 +100,12 @@ class MiaDataDataset:
         self.reject_events: list[LabelEvent] = []
         self.revoke_events: list[LabelEvent] = []
         self.cancel_events: list[LabelEvent] = []
-        self.job_id: str | None = None  # the cluster job the round is waiting on: what a cancel kills
+        # a cancel in progress (see _cancel_round): the round starts no new activity, the one in flight answers
+        self.cancelling = False
+        self.unwinding = False  # the round's task has been told to stop: what it runs from here on is clean-up
+        self.in_flight = 0  # the round's activities in flight (clean-up not counted)
+        self.round_task: asyncio.Future[None] | None = None
+        self.unkilled: list[str] = []  # jobs a cancel could not kill, each with the reason
         self.limits: RoundLimits | None = None  # read from config at the start of a round
         self.stage_write: Any = None  # the handle of a stage write still running beside the round (see _stage)
 
@@ -143,7 +150,7 @@ class MiaDataDataset:
         elif (state.stage in DEVELOP or state.stage == "review") and state.snippet_issue:  # ... or following the PR
             await self._guard(self._follow_pr())
         while True:
-            await workflow.wait_condition(lambda: bool(self._labels() or self.cancel_events) or _rollover_due())
+            await workflow.wait_condition(lambda: bool(self._labels() or self.cancel_events) or self._roll_due())
             if not (self._labels() or self.cancel_events):
                 await self._rollover()  # idle, nothing queued
             await self._refuse_cancels()  # idle: no round to cancel
@@ -156,26 +163,55 @@ class MiaDataDataset:
                 continue
             rounds += 1
             await self._guard(self._round(event))
-            if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not self._labels():
+            if (rounds >= MAX_ROUNDS_PER_EXECUTION or self._roll_due()) and not (self._labels() or self.cancel_events):
                 await self._rollover()
 
     # --- helpers ---------------------------------------------------------------------------
 
     async def _act(
-        self, name: str, *args: Any, seconds: int = 60, budget: timedelta = timedelta(hours=6), result_type: Any = None
+        self,
+        name: str,
+        *args: Any,
+        seconds: int = 60,
+        budget: timedelta = timedelta(hours=6),
+        result_type: Any = None,
+        cleanup: bool = False,
     ) -> Any:
         """Run an activity with a per-attempt timeout and an overall retry budget.
 
         Transient failures retry until the budget runs out; activities raise a non-retryable
-        ApplicationError for failures that a retry cannot fix."""
-        return await workflow.execute_activity(
-            name,
-            args=list(args),
-            start_to_close_timeout=timedelta(seconds=seconds),
-            schedule_to_close_timeout=budget,
-            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
-            result_type=result_type,
-        )
+        ApplicationError for failures that a retry cannot fix.
+
+        While a cancel is in progress the round's task starts no new activity: it is stopped here instead (the
+        round's own clean-up, `cleanup` or anything after it was told to stop, goes through). An activity
+        already in flight is left to answer, so what it did (a job submitted, a lock taken, a reservation
+        opened) is known and undone; `_cancel_round` waits for that."""
+        of_round = asyncio.current_task() is self.round_task and not self.unwinding and not cleanup
+        if of_round and self.cancelling:
+            self.unwinding = True
+            raise asyncio.CancelledError
+        self.in_flight += of_round
+        try:
+            return await workflow.execute_activity(
+                name,
+                args=list(args),
+                start_to_close_timeout=timedelta(seconds=seconds),
+                schedule_to_close_timeout=budget,
+                retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+                result_type=result_type,
+            )
+        except ActivityError as error:
+            if self.cancelling and isinstance(error.cause, CancelledError) and not cleanup:
+                # the cancel landed in the activity after all (the wait for it ran out): never a failed
+                # activity to a best-effort caller, which would carry the round on
+                raise asyncio.CancelledError from error
+            raise
+        finally:
+            self.in_flight -= of_round
+
+    def _roll_due(self) -> bool:
+        """Whether to continue as new now: never with a cancel queued, which a new run would not hear."""
+        return _rollover_due() and not self.cancel_events
 
     async def _limits(self) -> RoundLimits:
         """The round's config values. They are not part of the durable state, so a rollover re-reads them."""
@@ -187,15 +223,12 @@ class MiaDataDataset:
         """Run a step of the round; any failure ends the round in needs-human instead of failing the workflow.
 
         The step runs as a task so a `cancel` can end it wherever it is waiting (a job, a lock, a verdict, a PR):
-        the task is cancelled, which cancels its outstanding activity and runs its own clean-up (the job's
-        reservation is settled, the raw lock released); the cluster job is killed by id, since a job that keeps
-        running under a dataset that reads `cancelled` would be a false state; the dataset ends in `cancelled`,
-        from which a new go starts over (spec webapp-actions §5)."""
+        see `_cancel_round` (spec webapp-actions §5)."""
         self.cancel_events = [event for event in self.cancel_events if not self._seen(event)]
         for stale in self.cancel_events:  # sent before this round began: it was not aimed at it
             await self._refuse(CANCEL, NO_ROUND, stale)
         self.cancel_events = []
-        round_task = asyncio.ensure_future(step)
+        round_task = self.round_task = asyncio.ensure_future(step)
         cancel = asyncio.ensure_future(workflow.wait_condition(lambda: bool(self.cancel_events)))
         try:
             await workflow.wait([round_task, cancel], return_when=asyncio.FIRST_COMPLETED)
@@ -206,31 +239,60 @@ class MiaDataDataset:
         except (ActivityError, RoundFailed) as error:
             await self._finish("needs-human", error_message(error))
         except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up, as before
+            self.unwinding = True
             round_task.cancel()
             await workflow.wait([round_task])
             raise
         finally:
             cancel.cancel()
+            self.round_task, self.cancelling, self.unwinding = None, False, False
         await self._settle_stage_write(cancel=False)  # quiet point: the last stage write lands before a rollover
 
     async def _cancel_round(self, round_task: asyncio.Future[None]) -> None:
-        """End the round a `cancel` was sent for: stop its task, kill its job, write `cancelled`."""
+        """End the round a `cancel` was sent for, leaving nothing of it behind.
+
+        From now on the round starts no activity (`_act`). The one in flight is left to answer, so that a job it
+        submitted, a lock it took or a reservation it opened is known: the round's task then stops at its next
+        step and cleans up as it unwinds. A task that is waiting (a job, a lock, a verdict, a snippet PR) is
+        cancelled there. Its cluster job is killed first, then its reservation settled and its raw lock
+        released (`_job`): one writer per raw cache holds until the job is dead. A job that cannot be killed
+        makes the dataset `needs-human`, saying so, never `cancelled` over a job that runs on."""
         events, self.cancel_events = self.cancel_events, []
+        self.cancelling, self.unkilled = True, []
+        if self.in_flight:
+            with contextlib.suppress(TimeoutError):  # after this long the cancel goes in anyway (see _act)
+                await workflow.wait_condition(lambda: not self.in_flight or round_task.done(), timeout=CANCEL_PATIENCE)
+        if not round_task.done() and not self.unwinding:  # waiting somewhere: stop it there
+            self.unwinding = True
+            round_task.cancel()
+        await workflow.wait([round_task])
+        self.cancelling = self.unwinding = False
+        if not round_task.cancelled() and round_task.exception() is None:
+            # the round reached its end by itself while the cancel was on its way: its stage stands
+            for event in events:
+                if not self._seen(event):
+                    await self._refuse(CANCEL, ROUND_ENDED, event)
+            return
         for event in events:
             self._seen(event)
-        job_id = self.job_id  # read before the task's clean-up clears it
-        round_task.cancel()
-        await workflow.wait([round_task])
-        if not round_task.cancelled() and (error := round_task.exception()) is not None:
-            workflow.logger.warning("issue #%d: the cancelled round ended with: %s", self.state.issue, error)
-        if job_id:
-            try:
-                await self._act("kill_job", job_id, budget=timedelta(minutes=30))
-            except ActivityError as error:  # the job may be gone already; the dataset is cancelled either way
-                workflow.logger.warning(
-                    "issue #%d: could not kill %s: %s", self.state.issue, job_id, error_message(error)
-                )
+        if not round_task.cancelled():
+            workflow.logger.warning(
+                "issue #%d: the cancelled round ended with: %s", self.state.issue, round_task.exception()
+            )
+        if self.unkilled:
+            jobs = "; ".join(self.unkilled)
+            return await self._finish(
+                "needs-human",
+                f"cancelled by {events[-1].actor}, but a job could not be killed and may still be running: {jobs}",
+            )
         await self._finish("cancelled", f"cancelled by {events[-1].actor}")
+
+    async def _kill(self, job_id: str) -> None:
+        """Kill a job of a round being cancelled; a failure is kept for the round's last word, never raised."""
+        try:
+            await self._act("kill_job", job_id, budget=timedelta(minutes=30), cleanup=True)
+        except ActivityError as error:
+            self.unkilled.append(f"{job_id}: {error_message(error)}")
 
     async def _refuse_cancels(self) -> None:
         """A cancel that arrived with no round in progress (a click that crossed the round's end): refuse it."""
@@ -408,6 +470,7 @@ class MiaDataDataset:
             usd = {"match": limits.agent_max_budget_usd, "judge": limits.judge_max_budget_usd}.get(kind, 0.0)
             await self._reserve(key, kind, usd)
         walltime = timedelta(minutes=limits.walltime_min)
+        job_id = None
         try:
             job_id = await self._act(
                 "submit",
@@ -417,7 +480,6 @@ class MiaDataDataset:
                 seconds=600,
                 result_type=str,
             )
-            self.job_id = job_id
             done = await workflow.execute_activity(
                 "await_job",
                 args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
@@ -428,12 +490,15 @@ class MiaDataDataset:
                 heartbeat_timeout=timedelta(minutes=3),
                 retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
             )
-        except (ActivityError, asyncio.CancelledError):
+        except (ActivityError, asyncio.CancelledError) as error:
+            if self.cancelling and job_id:  # first the job, then its reservation; the caller's lock comes last
+                await self._kill(job_id)
             if budgeted:
                 await self._settle(key)
+            if self.cancelling:  # never a failed job to a best-effort caller (the crop judge), which would go on
+                self.unwinding = True
+                raise asyncio.CancelledError from error
             raise
-        finally:
-            self.job_id = None
         if budgeted:
             await self._settle(key)
         return done
@@ -459,7 +524,7 @@ class MiaDataDataset:
         """Close the job's reservation; an accounting write that fails is logged, never the round's end."""
         assert self.state.pins
         try:
-            await self._act("settle", self.state.pins.root, key, None, 0, budget=timedelta(minutes=10))
+            await self._act("settle", self.state.pins.root, key, None, 0, budget=timedelta(minutes=10), cleanup=True)
         except ActivityError as error:
             workflow.logger.warning("issue #%d: settle %s failed: %s", self.state.issue, key, error_message(error))
 
@@ -488,7 +553,7 @@ class MiaDataDataset:
         if lock is None:
             return
         try:
-            await self._act("release_lock", *lock, budget=timedelta(minutes=30))
+            await self._act("release_lock", *lock, budget=timedelta(minutes=30), cleanup=True)
         except ActivityError as error:
             workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
@@ -615,7 +680,12 @@ class MiaDataDataset:
         open (see _resume_pr); its snippets issue is remembered either way, so a retry never opens a second one."""
         state = self.state
         snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
-        if state.stage == "needs-human" and state.snippet_issue and workflow.patched("resume-snippet-pr"):
+        # (a cancelled develop round left its snippet issue and PR open too: autodev is not asked twice)
+        if (
+            state.stage in ("needs-human", "cancelled")
+            and state.snippet_issue
+            and workflow.patched("resume-snippet-pr")
+        ):
             snippet_issue, snippet_pr = state.snippet_issue, state.pr
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
@@ -932,7 +1002,7 @@ class MiaDataDataset:
     async def _review(self) -> tuple[str, LabelEvent | None]:
         """Wait at review for a verdict newer than the set (see _verdict), or a new go: ("go", None)."""
         while True:
-            await workflow.wait_condition(lambda: self._labels() or _rollover_due())
+            await workflow.wait_condition(lambda: self._labels() or self._roll_due())
             if not self._labels():
                 await self._rollover()  # stage review: the next run resumes here
             if await self._revokes():
@@ -992,7 +1062,7 @@ class MiaDataDataset:
         await self._limits()
         loop = workflow.patched("review-loop")
         while True:
-            await workflow.wait_condition(lambda: bool(state.pending) or self._labels() or _rollover_due())
+            await workflow.wait_condition(lambda: bool(state.pending) or self._labels() or self._roll_due())
             if not (state.pending or self._labels()):
                 await self._rollover()  # the develop state is all in `state`: the next run resumes here
             if await self._revokes():

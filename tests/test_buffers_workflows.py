@@ -117,7 +117,11 @@ class Mocks:
         assess_refused=None,
         revoke_targets_answer=None,
         submit_error=None,
+        submit_gate=None,
+        retire_gate=None,
     ):
+        self.submit_gate = submit_gate  # an asyncio.Event: every submit waits for it, as a slow bsub would
+        self.retire_gate = retire_gate  # an asyncio.Event: retire_buffer waits for it, as a large archive would
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
         self.drops, self.states, self.refuse = drops or {}, states or {}, refuse or {}
@@ -207,6 +211,8 @@ class Mocks:
             rec("submit", key, args)
             if self.submit_error:
                 raise ApplicationError(self.submit_error, non_retryable=True)
+            if self.submit_gate:
+                await self.submit_gate.wait()
             return f"job-{key}"
 
         @activity.defn(name="read_stage")
@@ -342,6 +348,8 @@ class Mocks:
         @activity.defn(name="retire_buffer")
         async def retire_buffer(round_id: str, buffer_id: str) -> dict:
             rec("retire_buffer", buffer_id)
+            if self.retire_gate:
+                await self.retire_gate.wait()
             return {"refs": 2, "draws": 5, "archive": f"/state/archive/{buffer_id}.draws.jsonl.gz"}
 
         @activity.defn(name="missing_records")
@@ -2318,6 +2326,8 @@ async def test_cancel_while_sourcing_kills_the_jobs_releases_what_the_round_held
         assert m.of("kill_job") == [(m.of("await")[0][0],)]  # the one job in flight, by its id
         assert m.of("retire_buffer") == [("i7-e11",)] and state.retired  # nothing serves a cancelled round
         assert [a[1] for a in m.of("settle")] == [a[0] for a in m.of("submit")]  # no reservation left open
+        names = m.names()
+        assert names.index("kill_job") < names.index("release_lock")  # one writer per raw cache
         taken = {a[2] for a in m.of("take_lock")}  # a lock is re-taken after a slot wait: owners, not calls
         assert {a[2] for a in m.of("release_lock")} == taken and taken  # every raw lock is released
         assert {d.record: (d.status, d.reason) for d in state.datasets} == {
@@ -2358,6 +2368,39 @@ async def test_a_cancel_that_reaches_a_serving_buffer_is_refused_and_it_keeps_se
     assert "cancelled" not in m.stages and not m.of("kill_job") and not m.of("retire_buffer")
 
 
+async def test_cancel_inside_a_best_effort_step_still_ends_the_round(env):
+    """A go at `staged` starts a new round whose first step retires the staged buffer, best effort; the stage
+    still reads `staged`, so a cancel is accepted. It used to be caught there as a failed retire: the new round
+    ran on and no later cancel was heard."""
+    m = Mocks(plan=ONLY_U937, retire_gate=asyncio.Event())
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await until(lambda: m.of("retire_buffer"), m=m)
+        await h.signal(MiaBuffer.cancel, ev("cancel", "16"))
+        await asyncio.sleep(0.3)
+        m.retire_gate.set()
+        await idle(h, m, "cancelled")
+        state = await h.query(MiaBuffer.status)
+    assert state.round_id == "i7-e15" and m.stages[-1] == "cancelled" and m.stages.count("staged") == 1
+
+
+async def test_cancel_while_a_stage_job_is_being_submitted_kills_the_job_that_was_submitted(env):
+    m = Mocks(plan=ONLY_U937, submit_gate=asyncio.Event(), gate=asyncio.Event(), gate_on="stage-u937")
+    async with started(env, m, signal="go") as h:
+        await until(lambda: m.of("submit"), m=m)
+        await h.signal(MiaBuffer.cancel, ev("cancel", "12"))
+        await asyncio.sleep(0.5)
+        assert "cancelled" not in m.stages  # not cancelled while the job's fate is unknown
+        m.submit_gate.set()  # the cluster has the job now
+        await idle(h, m, "cancelled")
+        m.gate.set()
+    key = m.of("submit")[0][0]
+    assert m.of("kill_job") == [(f"job-{key}",)] and [a[1] for a in m.of("settle")] == [key]
+    names = m.names()
+    assert names.index("kill_job") < names.index("release_lock")  # the lock outlives the job, never the reverse
+
+
 async def test_replay_buffer_history_cancel(env):
     """A go round cancelled while a stage job ran and a dataset waited for its files. Re-record this one alone:
     MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_cancel"""
@@ -2371,11 +2414,14 @@ async def test_replay_buffer_history_cancel(env):
 
 
 async def prep_cancelled(h, m):
-    """A request cancelled while it hands its second record to mia-data."""
+    """A request cancelled while it hands its second record to mia-data. That hand-over still sends its go, so
+    the cancel waits for it to answer: the dataset round it started is then one `prep_cancel` knows of."""
     await until(lambda: len(m.of("prep_nudge")) == 2, m=m)
     await h.signal(workflows.MiaPrep.cancel, ev("cancel", "22"))
-    await prep_settled(h, m, "cancelled")
+    await asyncio.sleep(0.3)
+    assert m.stages == ["requested"] and not m.of("prep_cancel")  # not while a go is on its way
     m.gate.set()
+    await prep_settled(h, m, "cancelled")
 
 
 async def test_cancelling_a_request_cancels_the_dataset_rounds_it_started_and_a_go_runs_it_again(env):

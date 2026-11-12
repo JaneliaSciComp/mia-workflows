@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from mia_helpers import FakeGH, make_cfg
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHistory
 from temporalio.exceptions import ApplicationError
@@ -92,7 +92,11 @@ class Mocks:
         revocation=None,
         crop_judge="off",
         judge_result=None,
+        submit_gate=None,
+        kill_error=None,
     ):
+        self.submit_gate = submit_gate  # an asyncio.Event: every submit waits for it, as a slow bsub would
+        self.kill_error = kill_error  # a message: kill_job fails with it
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
         self.outcome, self.smoke, self.states = outcome, smoke or SmokeResult(True, True), states or {}
@@ -165,6 +169,8 @@ class Mocks:
                 raise ApplicationError(self.submit_error, non_retryable=True)
             if kind == "crop":
                 self.crop_jobs[a.workspace] = a
+            if self.submit_gate:
+                await self.submit_gate.wait()
             return f"job-{key}"
 
         @activity.defn(name="read_match")
@@ -236,6 +242,8 @@ class Mocks:
         @activity.defn(name="kill_job")
         async def kill_job(job_id: str) -> None:
             rec("kill_job", job_id)
+            if self.kill_error:
+                raise ApplicationError(self.kill_error, non_retryable=True)
 
         @activity.defn(name="read_feedback")
         async def read_feedback(issue: int, since: str | None, until: str) -> str:
@@ -1237,6 +1245,96 @@ async def test_a_cancel_with_no_round_running_is_refused(env):
         await idle(h, m, "needs-human")
     assert [a[0] for a in m.of("refuse_label")] == ["data:cancel"] and "no round" in m.of("refuse_label")[0][1]
     assert m.stages == ["matching", "needs-human", "matching", "needs-human"] and m.of("kill_job") == []
+
+
+async def test_cancel_while_the_shadow_judge_job_runs_ends_the_round_and_publishes_nothing(env):
+    """The stage is `review` and the crop judge's job still runs: a cancel landing in that wait used to be caught
+    by the judge's best-effort handler, the round went on, and a later approve published a set that then read
+    `cancelled`."""
+    m = Mocks(crop_judge="shadow", gate=asyncio.Event(), gate_on="judge")
+    async with started(env, m) as h:
+        await until(lambda: any("judge" in call[1] for call in m.of("await")))
+        assert m.stages[-1] == "review"
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        m.gate.set()
+        judge_job = next(call[0] for call in m.of("await") if "judge" in call[1])
+        assert m.of("kill_job") == [(judge_job,)] and "publish_crops" not in m.names()
+        assert not any("did not run to the end" in call[0] for call in m.of("comment"))  # not mistaken for a failure
+        fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
+        await h.signal(MiaDataDataset.approve, ev("approve", "13", shift(fin, 5)))
+        await until(lambda: m.of("refuse_label"))
+    assert m.stages[-1] == "cancelled" and "publish_crops" not in m.names()
+
+
+async def test_cancel_while_a_job_is_being_submitted_kills_the_job_that_was_submitted(env):
+    """A submit in flight is not interrupted by a cancel: the cluster gets the job. The round must wait for the
+    submit to answer, then kill that job, or it runs on with nobody waiting on it."""
+    m = Mocks(submit_gate=asyncio.Event(), gate=asyncio.Event(), gate_on="match")
+    async with started(env, m) as h:
+        await until(lambda: m.of("submit"))
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await asyncio.sleep(0.5)
+        assert m.stages == ["matching"]  # not cancelled while the job's fate is unknown
+        m.submit_gate.set()  # the cluster has the job now
+        await idle(h, m, "cancelled")
+        m.gate.set()
+    assert m.of("kill_job") == [("job-mia-7-i7-e11-match-1",)]
+    assert [a[1] for a in m.of("settle")] == ["mia-7-i7-e11-match-1"]
+
+
+async def test_a_job_that_cannot_be_killed_is_said_and_the_dataset_needs_a_human(env):
+    m = Mocks(gate=asyncio.Event(), gate_on="match", kill_error="the broker is away")
+    async with started(env, m) as h:
+        await until(lambda: m.of("await"))
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "needs-human")
+        m.gate.set()
+    detail = m.of("set_stage")[-1][1]
+    assert "job-mia-7-i7-e11-match-1" in detail and "may still be running" in detail and "the broker is away" in detail
+    assert "cancelled" not in m.stages
+
+
+async def test_cancel_kills_the_job_before_the_raw_lock_is_released(env):
+    """One writer per raw cache: the lock a job ran under is given up only once the job is dead."""
+    m = Mocks(gate=asyncio.Event(), gate_on="smoke")
+    async with started(env, m) as h:
+        await until(lambda: any("smoke" in call[1] for call in m.of("await")))
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        m.gate.set()
+    names = m.names()
+    assert names.index("kill_job") < names.index("release_lock") and m.of("release_lock")
+
+
+async def test_a_cancel_that_arrives_when_a_rollover_is_due_is_acted_on_not_lost(env, monkeypatch):
+    due = {"on": False}
+    monkeypatch.setattr(workflows, "_rollover_due", lambda: due["on"] and workflow.info().continued_run_id is None)
+    m = Mocks()
+    async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
+        await idle(h, m, "review")
+        due["on"] = True  # the history has grown past the server's suggestion: the next activation sees it
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+
+
+async def test_run_again_after_cancelling_a_develop_round_reuses_its_snippet_issue(env):
+    """A cancel while autodev writes the snippet leaves its issue and PR open; the next round must not ask
+    autodev for the same snippet a second time."""
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await until(
+            lambda: len(m.of("open_snippet_issue")) == 2 or m.stages[-1:] == ["developing"] and len(m.stages) > 3
+        )
+        await until(lambda: m.stages.count("developing") == 2)
+    remembered = [call[1] for call in m.of("open_snippet_issue")]
+    assert remembered[0] is None and (
+        len(remembered) == 1 or remembered[1] == 100
+    )  # resumed, or reopened by its number
 
 
 async def test_replay_dataset_history_cancel(env):
