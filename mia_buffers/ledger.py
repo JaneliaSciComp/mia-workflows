@@ -596,16 +596,21 @@ class Ledger:
         db.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (f"last_{name}", json.dumps({"last": issued})))
         return issued
 
-    def create_subject(self, kind: str, key: str, *, data: dict | None = None, number: int | None = None) -> dict:
+    def create_subject(
+        self, kind: str, key: str | None, *, data: dict | None = None, number: int | None = None
+    ) -> dict:
         """The subject with this key, created when there is none: stage `new`, a number from the clock and no
-        issue yet, or the given `number` as both (a dataset whose GitHub issue is known but was never adopted)."""
+        issue yet, or the given `number` as both (a dataset whose GitHub issue is known but was never adopted).
+        Without a key (a preparation request has no name of its own) the key is `<kind>-<number>`."""
         with self._transaction() as db:
-            found = self._subjects(db, "WHERE kind = ? AND key = ?", (kind, key))
+            found = self._subjects(db, "WHERE kind = ? AND key = ?", (kind, key)) if key is not None else []
             if found:
                 return found[0]
             issue = number
             if number is None:
                 number = self._issue(db, "number", int(time.time() - NUMBER_EPOCH))
+            if key is None:
+                key = f"{kind}-{number}"
             db.execute(
                 "INSERT INTO subjects VALUES (?, ?, ?, 'new', 0, ?, ?, ?)",
                 (kind, number, key, issue, json.dumps(data or {}), time.time()),
@@ -684,6 +689,12 @@ class Ledger:
         with self._lock:
             found = self._actions(self._db, "WHERE key = ?", (key,))
         return found[0] if found else None
+
+    def undelivered(self, since: float) -> list[dict]:
+        """The actions that failed to reach Temporal and were not retried since, newer than `since` (epoch)."""
+        at = datetime.fromtimestamp(since, UTC).isoformat()
+        with self._lock:
+            return self._actions(self._db, "WHERE state = 'failed' AND at > ?", (at,))
 
     def actions(self, kind: str, number: int) -> list[dict]:
         with self._lock:

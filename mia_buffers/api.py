@@ -40,7 +40,7 @@ from .dispatch import DispatchError
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
-from .spec import SpecError, load_spec_text, spec_text_hash
+from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
 from .stream import Changes
 from .sync import scan_assets, scan_storage
 
@@ -69,6 +69,8 @@ Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
 SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
 NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
+RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
+DROP_QUIET_S = 60  # `dropped` is refused while a file under incoming/ changed this recently
 
 SERVING = ("approved", "ready", "idle")  # latest events under which consumers draw
 UNAPPROVED = ("created", "planned", "sourcing", "staged")  # a round not yet approved: only picks the 409 message
@@ -208,6 +210,19 @@ class ActionBody(_Strict):
     note: str = ""  # reject: the feedback for the agent
     root: str | None = None  # a worker's go: the root request this round is charged to
     actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
+    spec: str | None = None  # a buffer's or a request's go: the YAML text that runs (default: the stored one)
+    plan_first: bool = False  # a buffer's go: stop at the plan and wait for an approve before staging anything
+    records: list[str] = []  # a buffer's revoke: the records that leave it
+    record: str | None = None  # dropped: the dataset whose files are in place
+
+
+class SpecBody(_Strict):
+    """A buffer spec saved under its name, and run when `action` is `go`; or a preparation request, always run."""
+
+    spec: str
+    action: Literal["go"] | None = None
+    plan_first: bool = False
+    key: str | None = None
 
 
 class RefusalBody(_Strict):
@@ -336,6 +351,10 @@ ROUTES = [
     ("PUT", re.compile(r"^/timeline/([a-z]+)/(\d+)/(\d+)$"), "mark_mirrored", "worker"),
     # the routes the page's buttons call: no token; JSON from this origin only (`_guard_action`)
     ("POST", re.compile(r"^/datasets/([^/]+)/actions$"), "dataset_action", "action"),
+    ("POST", re.compile(r"^/specs$"), "put_spec", "action"),
+    ("POST", re.compile(r"^/specs/([^/]+)/actions$"), "spec_action", "action"),
+    ("POST", re.compile(r"^/prep$"), "file_prep", "action"),
+    ("POST", re.compile(r"^/prep/(\d+)/actions$"), "prep_action", "action"),
     ("GET", re.compile(r"^/actions/(\d+)$"), "get_action", "read"),
     ("PUT", re.compile(r"^/actions/(\d+)$"), "refuse_action", "worker"),
     ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)/issue$"), "set_subject_issue", "worker"),
@@ -587,9 +606,15 @@ class BufferService:
         return 200, self._subject_view(row), {}
 
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Everything that waits on a person: the subjects waiting or stuck, and the actions of the last day that
+        did not reach Temporal (each with its subject, for the Retry)."""
         views = [self._subject_view(row) for row in self.ledger.find_subjects()]
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
-        return 200, {"needs": [view for view in views if view["status"] in NEEDS_A_PERSON]}, {}
+        failed = []
+        for action in self.ledger.undelivered(time.time() - 86400):
+            found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
+            failed.append({**action, "subject": self._subject_view(found[0]) if found else None})
+        return 200, {"needs": [view for view in views if view["status"] in NEEDS_A_PERSON], "failed": failed}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) in every kind, an issue
@@ -692,24 +717,162 @@ class BufferService:
         payload = {name: value for name, value in (("note", parsed.note), ("root", parsed.root)) if value}
         return self._act_on(subject, parsed, actor, payload)
 
-    def _act_on(self, subject: dict, parsed: ActionBody, actor: str, payload: dict) -> Response:
-        """Steps 1 to 6 of spec §5 for one subject: check the stage and the revision, record the action, send it
-        to Temporal, and settle it with its timeline entry. A key seen before is the same action sent again
-        under its id, whatever the stage is by now: the workflow drops an event id it has handled."""
-        kind, number, key, stage = subject["kind"], subject["number"], subject["key"], subject["stage"]
-        repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
-        if repeat is None:
-            status, accepted = SUBJECT_RULES[kind][stage]
-            if parsed.action not in accepted:
-                takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
+    # --- buffer specs and preparation requests: created and run from the page (spec §4.4, §8.1) ---
+
+    @staticmethod
+    def _spec_name(text: str) -> str:
+        try:
+            return load_spec_text(text).name
+        except SpecError as error:
+            raise HttpError(422, f"not a buffer spec: {error}") from None
+
+    def _save_spec(self, text: str) -> dict:
+        """The buffer subject named by the spec's `name`, holding this text: created, or its text replaced. A
+        spec posted under a name that exists is an edit of that subject, never a second one."""
+        subject = self.ledger.create_subject("buffer", self._spec_name(text), data={"spec": text})
+        if subject["data"].get("spec") != text:
+            edited = self.ledger.set_subject_data("buffer", subject["number"], {**subject["data"], "spec": text})
+            assert edited is not None  # it was just read
+            subject = edited
+        self.changes.announce("buffer", subject["number"])
+        return subject
+
+    def _put_spec(self, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        parsed = _parse(SpecBody, body)
+        if parsed.action is None:
+            return 200, {"subject": self._subject_view(self._save_spec(parsed.spec))}, {}
+        name = self._spec_name(parsed.spec)
+        go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, plan_first=parsed.plan_first)
+        return self._buffer_action(name, go, headers, create=True)
+
+    def _spec_action(self, name: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        return self._buffer_action(name, _parse(ActionBody, body), headers)
+
+    def _buffer_action(self, name: str, parsed: ActionBody, headers: dict[str, str], create: bool = False) -> Response:
+        actor = self._actor(headers, parsed)
+        subject = self.ledger.subject("buffer", name)
+        if subject is None and not create:
+            raise HttpError(404, f"no buffer spec {name!r}")
+        payload: dict = {}
+        if parsed.action == "go":
+            text = parsed.spec if parsed.spec is not None else (subject or {}).get("data", {}).get("spec")
+            if not text:
+                raise HttpError(422, f"buffer spec {name!r} has no spec text to run: send one")
+            if self._spec_name(text) != name:
                 raise HttpError(
-                    409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`"
+                    422, f"the spec's name is not {name!r}: a spec's name is its subject, post it to /specs"
                 )
-            if parsed.action in ("approve", "reject"):
-                if parsed.revision is None:
-                    raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
-                if parsed.revision != subject["revision"]:
-                    raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
+            self._accepts(subject or {"kind": "buffer", "key": name, "stage": "new", "revision": 0}, parsed)
+            subject = self._save_spec(text)  # only once the stage takes a go: what is stored is what ran last
+            payload = {"spec": text, **({"plan_first": True} if parsed.plan_first else {})}
+        assert subject is not None
+        if parsed.action == "revoke":
+            if not parsed.records:
+                raise HttpError(422, "a revoke names the records that leave the buffer: `records`")
+            payload = {"records": parsed.records}
+        if parsed.action == "dropped":
+            payload = {"record": self._dropped_record(subject, parsed)}
+        return self._act_on(subject, parsed, actor, payload)
+
+    def _dropped_record(self, subject: dict, parsed: ActionBody) -> str:
+        """The record of a `dropped`, once its files look complete. The workflow takes any non-empty file and
+        records its hash, so a click during a copy would record a truncated file as good: refuse while anything
+        under `incoming/` changed in the last minute (the poller waited a whole interval for the same reason)."""
+        record = parsed.record or ""
+        if not RECORD_ID_RE.fullmatch(record):
+            raise HttpError(422, "`dropped` names the record whose files are in place: `record`")
+        self._accepts(subject, parsed)
+        incoming = self.raw_root / record / "incoming" if self.raw_root else None
+        files = [path for path in incoming.rglob("*") if path.is_file()] if incoming and incoming.is_dir() else []
+        if not files:
+            raise HttpError(409, f"no file under {incoming}: copy the dataset's files there first")
+        newest = max(path.stat().st_mtime for path in files)
+        if time.time() - newest < DROP_QUIET_S:
+            raise HttpError(409, f"a file under {incoming} is still being written; try again in a minute")
+        return record
+
+    def _file_prep(self, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        """File a preparation request and run it: a new subject `prep-<number>` holding the request's text."""
+        parsed = _parse(SpecBody, body)
+        try:
+            load_prep_text(parsed.spec)
+        except SpecError as error:
+            raise HttpError(422, f"not a preparation request: {error}") from None
+        go = ActionBody(action="go", key=parsed.key, spec=parsed.spec)
+        repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
+        if repeat is not None and repeat["kind"] == "prep":  # a double click: the request filed by the first one
+            subject = self.ledger.find_subjects(kind="prep", number=repeat["number"])[0]
+        else:
+            subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec})
+        return self._act_on(subject, go, self._actor(headers, go), {"spec": parsed.spec})
+
+    def _prep_action(self, number: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        parsed = _parse(ActionBody, body)
+        subject = self._numbered("prep", number)
+        payload: dict = {}
+        if parsed.action == "go":
+            text = parsed.spec if parsed.spec is not None else subject["data"].get("spec")
+            if not text:
+                raise HttpError(422, f"request {subject['key']} has no text to run: send one as `spec`")
+            try:
+                load_prep_text(text)
+            except SpecError as error:
+                raise HttpError(422, f"not a preparation request: {error}") from None
+            payload = {"spec": text}
+        return self._act_on(subject, parsed, self._actor(headers, parsed), payload)
+
+    def _stop(self, subject: dict, action: dict, stopped: bool) -> None:
+        """The force stop, for a run that does not answer a cancel (one frozen by nondeterminism), once its
+        workflow is terminated (`stopped`: one was running): retire the subject's buffers with their `retired`
+        events and set the stage a closed issue got (`retired`, or `done` for a request). The entry says what
+        was done and what is left running."""
+        kind, number = subject["kind"], subject["number"]
+        retired = []
+        if kind == "buffer":
+            for buffer in self.ledger.buffers():
+                mine = re.fullmatch(rf"i{number}-e\d+", buffer["id"]) is not None
+                if mine and (buffer.get("latest_event") or {}).get("kind") != "retired":
+                    self.ledger.retire(buffer["id"], self.archive_dir)
+                    self.ledger.add_event(buffer["id"], "retired", issue=number, event_id=None, detail="stopped")
+                    retired.append(buffer["id"])
+        what = "workflow stopped" if stopped else "no workflow was running"
+        if retired:
+            what += "; retired " + ", ".join(f"`{buffer}`" for buffer in retired)
+        left = "A cluster job that was already running is not killed."
+        if kind == "prep":
+            left += " The dataset rounds this request started keep running: cancel them on their own pages."
+        marker = f"<!-- mia: stopped {action['id']} -->"
+        self.ledger.append_entry(
+            kind,
+            number,
+            body=f"stopped: {what}. {left}\n\n{marker}",
+            marker=marker,
+            stage="retired" if kind == "buffer" else "done",
+        )
+
+    def _accepts(self, subject: dict, parsed: ActionBody) -> None:
+        """Steps 1 and 2 of spec §5: the subject's stage accepts the action (409 with what it does take), and a
+        verdict names the revision that was looked at (409 when the subject has moved on). A key seen before is
+        the same action sent again and is not checked: the workflow drops an event id it has handled."""
+        if parsed.key and self.ledger.action_by_key(parsed.key) is not None:
+            return
+        kind, key, stage = subject["kind"], subject["key"], subject["stage"]
+        status, accepted = SUBJECT_RULES[kind][stage]
+        if parsed.action not in accepted:
+            takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
+            raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
+        if parsed.action in ("approve", "reject"):
+            if parsed.revision is None:
+                raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
+            if parsed.revision != subject["revision"]:
+                raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
+
+    def _act_on(self, subject: dict, parsed: ActionBody, actor: str, payload: dict) -> Response:
+        """Steps 1 to 6 of spec §5 for one subject: check the stage and the revision (`_accepts`), record the
+        action, send it to Temporal, and settle it with its timeline entry. A key seen before is the same action
+        sent again under its id, whatever the stage is by now."""
+        kind, number = subject["kind"], subject["number"]
+        self._accepts(subject, parsed)
         if self.dispatcher is None:
             raise HttpError(503, "this service has no way to Temporal: no workflow can be started from it")
         try:
@@ -718,22 +881,42 @@ class BufferService:
             raise HttpError(409, str(error)) from None
         if action["state"] == "sent":
             return 202, action, {}
-        event = LabelEvent(parsed.action, str(action["id"]), action["actor"], action["at"])
+        payload = action["payload"]
+        # the workflow's signal: a buffer's `plan` is a go that waits at the plan too (its event's kind says so)
+        signal = "plan" if payload.get("plan_first") else parsed.action
+        event = LabelEvent(signal, str(action["id"]), action["actor"], action["at"])
+        running = True
         try:
             if parsed.action == "cancel":  # only a running round can be cancelled: nothing is started for it
                 running = self.dispatcher.signal_running(kind, number, "cancel", event)
+            elif parsed.action == "dropped":  # the workflow's plain `dropped(record)`, as the poller sent it
+                if not self.dispatcher.signal_running(kind, number, "dropped", payload["record"]):
+                    raise DispatchError("no workflow is running for it")
+            elif parsed.action == "stop":  # a terminate needs no replay: it also ends a run nondeterminism froze
+                reason = f"stopped from the page (action {action['id']})"
+                running = self.dispatcher.terminate(kind, number, reason)
             else:
-                self.dispatcher.send(kind, number, parsed.action, event)
-                running = True
+                self.dispatcher.send(kind, number, signal, event)
         except DispatchError as error:
             failed = self.ledger.settle_action(action["id"], "failed", str(error))
             self.changes.announce(kind, number)
             return 503, {"error": f"not delivered: {error}", "action": failed}, {}
         text = f"**Action:** `{parsed.action}` by `{action['actor']}`"
-        if note := action["payload"].get("note"):
+        if payload.get("plan_first"):
+            text += " (plan first)"
+        if payload.get("records"):
+            text += ": " + ", ".join(f"`{neutralize(record)}`" for record in payload["records"])
+        if payload.get("record"):
+            text += f": `{neutralize(payload['record'])}`"
+        if note := payload.get("note"):
             text += "\n\n" + "\n".join(f"> {line}" for line in neutralize(note)[:16000].splitlines())
+        if spec := payload.get("spec"):  # the timeline, and so the issue, says exactly what ran
+            fenced = neutralize(spec).replace("```", "` ` `")
+            text += f"\n\n```yaml\n{fenced}{'' if fenced.endswith(chr(10)) else chr(10)}```"
         sent = self.ledger.settle_action(action["id"], "sent", entry=(text, f"<!-- mia: action {action['id']} -->"))
-        if not running:
+        if parsed.action == "stop":
+            self._stop(subject, action, running)
+        elif not running:
             # the registry says a round is in progress and Temporal has no run for it (terminated by hand, or
             # failed): the subject must not read "working" for ever, so the route ends the round itself
             marker = f"<!-- mia: cancelled {action['id']} -->"

@@ -54,6 +54,7 @@ def test_labels_ids_and_markers(tmp_path):
         "idle",
         "retired",
         "needs-human",
+        "cancelled",
     }
     assert set(HUMAN_LABELS) == {"go", "plan", "approve", "keep", "retire", "revoke"}
 
@@ -188,15 +189,19 @@ def test_every_label_description_fits_github():
 
 
 def test_every_buffer_and_prep_stage_has_a_rule():
-    from mia_buffers.config import PREP_STAGE_ACTIONS, STAGE_ACTIONS
+    from mia_buffers.config import CANCELLABLE, PREP_STAGE_ACTIONS, STAGE_ACTIONS
     from mia_buffers.poll import LIVE_STAGES
     from mia_data.config import STATUS_WORDS
 
     assert set(STAGE_ACTIONS) == set(STAGES) and set(PREP_STAGE_ACTIONS) == {"new", *PREP_STAGES}
-    vocabulary = (set(HUMAN_LABELS) - {"plan"}) | {"dropped", "stop"}  # plan is an option of go (spec §4.2)
+    vocabulary = (set(HUMAN_LABELS) - {"plan"}) | {"dropped", "stop", "cancel"}  # plan is an option of go (§4.2)
     for status, actions in [*STAGE_ACTIONS.values(), *PREP_STAGE_ACTIONS.values()]:
         assert status in STATUS_WORDS and actions <= vocabulary
     assert STAGE_ACTIONS["idle"] == ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"}))
-    assert PREP_STAGE_ACTIONS["requested"] == ("working", frozenset({"stop"}))
+    assert PREP_STAGE_ACTIONS["requested"] == ("working", frozenset({"cancel", "stop"}))
     # stop is offered exactly where closing the issue retires today
     assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "stop" in actions} == set(LIVE_STAGES)
+    # a round in progress takes cancel and nothing that starts or ends something else; a serving buffer no cancel
+    assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "cancel" in actions} == set(CANCELLABLE)
+    for status, actions in STAGE_ACTIONS.values():
+        assert status != "working" or actions <= {"cancel", "dropped", "stop"}

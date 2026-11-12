@@ -1204,7 +1204,11 @@ class Gateway(Kicks):
 
     def __init__(self, running=True):
         super().__init__()
-        self.sent, self.fail, self.running = [], None, running
+        self.sent, self.fail, self.running, self.terminated = [], None, running, []
+
+    def terminate(self, kind, number, reason):
+        self.terminated.append((kind, number))
+        return self.running
 
     def send(self, kind, number, signal, event):
         if self.fail:
@@ -1357,3 +1361,141 @@ def test_health_run_status_and_the_issue_write_back(tmp_path):
     assert call(bare, "GET", "/health")[1] == {"temporal": False, "queues": {}}
     worker(bare, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
     assert act(bare, "/datasets/rec-a/actions", {"action": "go"})[0] == 503
+
+
+# --- buffer specs and preparation requests from the page (spec webapp-actions §4.4, §5) ---
+
+SPEC_TEXT = (FIXTURES / "spec.yaml").read_text()
+SPEC_NAME = yaml.safe_load(SPEC_TEXT)["name"]
+SPEC_ACTIONS = f"/specs/{quote(SPEC_NAME, safe='')}/actions"
+PREP_TEXT = yaml.safe_dump(
+    {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/catalog", "ref": REF_A}, "records": ["rec-a"]}
+)
+
+
+def _stage(s, kind, number, stage):
+    """Write a stage as a worker would; the subject's new revision."""
+    return worker(s, "POST", f"/timeline/{kind}/{number}", {"stage": stage})[1]["subject"]["revision"]
+
+
+def test_a_spec_is_created_run_and_edited_under_its_name(tmp_path):
+    s, gateway = _acting(tmp_path)
+    status, out, _ = act(s, "/specs", {"spec": SPEC_TEXT})
+    assert status == 200 and (out["subject"]["key"], out["subject"]["stage"]) == (SPEC_NAME, "new")
+    assert out["subject"]["data"] == {"spec": SPEC_TEXT} and gateway.sent == []  # saved, not run
+    number = out["subject"]["number"]
+    status, action, _ = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go", "plan_first": True, "key": "c1"})
+    assert status == 202 and action["payload"] == {"spec": SPEC_TEXT, "plan_first": True}
+    assert gateway.sent[0][:3] == ("buffer", number, "plan")  # "show me the plan first" is the plan signal
+    entry = call(s, "GET", f"/timeline/buffer/{number}")[1]["entries"][0]["body"]
+    assert entry.startswith("**Action:** `go` by `page` (plan first)") and f"```yaml\n{SPEC_TEXT}```" in entry
+    edited = SPEC_TEXT + "# tuned\n"
+    again = act(s, "/specs", {"spec": edited})[1]["subject"]  # the name exists: an edit of that subject
+    assert (again["number"], again["data"]) == (number, {"spec": edited})
+    assert len(s.ledger.find_subjects(kind="buffer")) == 1
+    status, out, _ = act(s, "/specs", {"spec": "name: [not a spec"})
+    assert status == 422 and "error" in out
+    assert act(s, "/specs", {"spec": PREP_TEXT})[0] == 422  # a preparation request is not a buffer spec
+
+
+def test_buffer_actions_follow_the_stage_table(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]["number"]
+    status, action, _ = act(s, SPEC_ACTIONS, {"action": "go"})  # runs the stored spec
+    assert (
+        status == 202 and action["payload"] == {"spec": SPEC_TEXT} and gateway.sent[-1][:3] == ("buffer", number, "go")
+    )
+    _stage(s, "buffer", number, "sourcing")
+    for refused in ("go", "retire", "approve", "revoke", "keep"):
+        assert act(s, SPEC_ACTIONS, {"action": refused, "revision": 1, "records": ["rec-a"]})[0] == 409, refused
+    revision = _stage(s, "buffer", number, "staged")
+    assert act(s, SPEC_ACTIONS, {"action": "approve", "revision": revision - 1})[0] == 409  # an older board
+    assert act(s, SPEC_ACTIONS, {"action": "approve", "revision": revision})[0] == 202
+    _stage(s, "buffer", number, "ready")
+    assert act(s, SPEC_ACTIONS, {"action": "cancel"})[0] == 409  # a serving buffer is not a round in progress
+    assert act(s, SPEC_ACTIONS, {"action": "revoke"})[0] == 422  # which records?
+    status, action, _ = act(s, SPEC_ACTIONS, {"action": "revoke", "records": ["rec-a", "rec-b"]})
+    assert status == 202 and action["payload"] == {"records": ["rec-a", "rec-b"]}
+    _stage(s, "buffer", number, "idle")
+    assert act(s, SPEC_ACTIONS, {"action": "keep"})[0] == 202 and act(s, SPEC_ACTIONS, {"action": "retire"})[0] == 202
+    assert [sent[2] for sent in gateway.sent] == ["go", "approve", "revoke", "keep", "retire"]
+    edited = SPEC_TEXT + "# tuned\n"
+    status, action, _ = act(s, SPEC_ACTIONS, {"action": "go", "spec": edited})  # edit and run again
+    assert status == 202 and action["payload"] == {"spec": edited}
+    assert call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]["data"] == {"spec": edited}
+    assert act(s, "/specs/nope/actions", {"action": "go"})[0] == 404
+    renamed = edited.replace(f"name: {SPEC_NAME}", "name: another-name")
+    assert act(s, SPEC_ACTIONS, {"action": "go", "spec": renamed})[0] == 422  # a spec's name is its subject
+
+
+def test_files_are_in_place_is_refused_while_a_copy_is_still_writing(tmp_path):
+    import os
+    import time
+
+    gateway = Gateway()
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", raw_root=tmp_path / "raw", dispatcher=gateway)
+    number = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]["number"]
+    _stage(s, "buffer", number, "sourcing")
+    dropped = {"action": "dropped", "record": "rec-a"}
+    status, out, _ = act(s, SPEC_ACTIONS, dropped)
+    assert status == 409 and "no file" in out["error"]
+    incoming = tmp_path / "raw" / "rec-a" / "incoming"
+    incoming.mkdir(parents=True)
+    (incoming / "a.tif").write_bytes(b"x")
+    status, out, _ = act(s, SPEC_ACTIONS, dropped)
+    assert status == 409 and "still being written" in out["error"] and gateway.sent == []
+    old = time.time() - 300
+    os.utime(incoming / "a.tif", (old, old))
+    assert act(s, SPEC_ACTIONS, dropped)[0] == 202 and gateway.sent == [("buffer", number, "dropped", "rec-a")]
+    assert act(s, SPEC_ACTIONS, {"action": "dropped"})[0] == 422  # which record?
+    assert act(s, SPEC_ACTIONS, {"action": "dropped", "record": "../x"})[0] == 422
+
+
+def test_stop_terminates_the_run_retires_the_subjects_buffers_and_says_what_it_leaves(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]["number"]
+    mine, other = f"i{number}-e5", "i999-e1"
+    for buffer in (mine, other):
+        worker(s, "PUT", f"/buffers/{buffer}", CFG)
+        worker(s, "POST", f"/buffers/{buffer}/events", {"kind": "approved"})
+    assert act(s, SPEC_ACTIONS, {"action": "stop"})[0] == 409  # nothing live at `new`
+    _stage(s, "buffer", number, "ready")
+    assert act(s, SPEC_ACTIONS, {"action": "stop"})[0] == 202
+    assert gateway.terminated == [("buffer", number)]
+    assert call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]["stage"] == "retired"
+    latest = {row["id"]: (row["latest_event"] or {}).get("kind") for row in call(s, "GET", "/buffers")[1]["buffers"]}
+    assert latest == {mine: "retired", other: "approved"}
+    said = call(s, "GET", f"/timeline/buffer/{number}")[1]["entries"][-1]["body"]
+    assert "workflow stopped" in said and f"`{mine}`" in said and "cluster job" in said
+
+
+def test_a_preparation_request_is_filed_and_run_in_one_post(tmp_path):
+    s, gateway = _acting(tmp_path)
+    status, action, _ = act(s, "/prep", {"spec": PREP_TEXT, "key": "selection-1"})
+    assert status == 202 and action["payload"] == {"spec": PREP_TEXT}
+    number = action["number"]
+    subject = call(s, "GET", f"/subjects/prep/prep-{number}")[1]
+    assert subject["data"] == {"spec": PREP_TEXT} and gateway.sent[-1][:3] == ("prep", number, "go")
+    assert act(s, "/prep", {"spec": PREP_TEXT, "key": "selection-1"})[1]["id"] == action["id"]  # a double click
+    assert len(s.ledger.find_subjects(kind="prep")) == 1 and len(gateway.sent) == 1
+    assert act(s, "/prep", {"spec": SPEC_TEXT})[0] == 422  # a buffer spec is not a preparation request
+    _stage(s, "prep", number, "requested")
+    actions = f"/prep/{number}/actions"
+    assert act(s, actions, {"action": "go"})[0] == 409  # a request in progress is cancelled first
+    assert act(s, actions, {"action": "cancel"})[0] == 202 and gateway.sent[-1][2] == "cancel"
+    assert act(s, actions, {"action": "stop"})[0] == 202 and gateway.terminated == [("prep", number)]
+    assert call(s, "GET", f"/subjects/prep/prep-{number}")[1]["stage"] == "done"
+    assert "dataset rounds" in call(s, "GET", f"/timeline/prep/{number}")[1]["entries"][-1]["body"]
+    assert act(s, actions, {"action": "go"})[0] == 202 and gateway.sent[-1][3].kind == "go"  # run again
+    assert act(s, "/prep/1/actions", {"action": "go"})[0] == 404
+
+
+def test_needs_names_the_actions_that_were_not_delivered(tmp_path):
+    s, gateway = _acting(tmp_path)
+    gateway.fail = "Temporal is away"
+    failed = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "k"})[1]["action"]
+    needs = call(s, "GET", "/needs")[1]
+    assert [(row["id"], row["subject"]["key"]) for row in needs["failed"]] == [(failed["id"], "rec-a")]
+    gateway.fail = None
+    act(s, "/datasets/rec-a/actions", {"action": "go", "key": "k"})  # retried: delivered
+    assert call(s, "GET", "/needs")[1]["failed"] == []

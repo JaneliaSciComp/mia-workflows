@@ -128,6 +128,24 @@ class Dispatcher:
             raise
         return True
 
+    def terminate(self, kind: str, number: int, reason: str) -> bool:
+        """Terminate the subject's running workflow (a terminate needs no replay, so it also ends a run that
+        nondeterminism froze); False when no run is open."""
+        return self._wait(self._terminate(kind, number, reason))
+
+    async def _terminate(self, kind: str, number: int, reason: str) -> bool:
+        from temporalio.service import RPCError, RPCStatusCode
+
+        target = self.targets[kind]
+        client = await self._client(target.namespace)
+        try:
+            await client.get_workflow_handle(target.workflow_id(number)).terminate(reason=reason)
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                return False
+            raise
+        return True
+
     def run_status(self, kind: str, number: int) -> str | None:
         """The Temporal status of the subject's latest run (`RUNNING`, `COMPLETED`, `FAILED`, `TERMINATED`, ...);
         None when it never ran."""

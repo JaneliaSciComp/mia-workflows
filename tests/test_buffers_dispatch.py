@@ -35,6 +35,7 @@ class FakeClient:
     def get_workflow_handle(self, workflow_id):
         return SimpleNamespace(
             signal=lambda name, *args: self._signal(workflow_id, name, args),
+            terminate=lambda reason: self._signal(workflow_id, "terminate", (reason,)),
             describe=lambda: self._describe(workflow_id),
         )
 
@@ -125,6 +126,14 @@ def test_a_plain_signal_reaches_a_running_workflow_and_says_when_there_is_none()
     assert dispatcher.signal_running("dataset", 235, "cancel", EVENT) is False
     assert calls == [("data-ns", "signal", "data/234", "cancel", [EVENT])]
     assert dispatcher.run_status("dataset", 234) == "RUNNING" and dispatcher.run_status("dataset", 235) is None
+
+
+def test_terminate_ends_a_running_workflow_and_says_when_there_is_none():
+    calls = []
+    dispatcher, _ = gateway(calls, open_runs={"buffer/8"})
+    assert dispatcher.terminate("buffer", 8, "stopped from the page") is True
+    assert dispatcher.terminate("prep", 9, "stopped from the page") is False
+    assert calls == [("buf-ns", "signal", "buffer/8", "terminate", ["stopped from the page"])]
 
 
 def test_health_names_each_queue_and_whether_a_worker_polls_it():
