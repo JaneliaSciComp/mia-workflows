@@ -706,10 +706,11 @@ class BufferService:
         if subject is None:
             if parsed.action != "go":
                 raise HttpError(404, f"no dataset {record!r} has been started")
-            ref = self.ledger.latest_catalog()
-            # ponytail: reads the catalog's records to find one id; a lookup by id when a catalog holds 100,000
-            if ref is None or all(row.get("id") != record for _, row in self.ledger.records(ref)):
-                raise HttpError(404, f"{record!r} is not a record of the synced catalog")
+            # ponytail: reads the synced catalogs' records to find one id (newest first; usually the first
+            # holds it); a lookup by id when a catalog holds 100,000 records
+            refs = [catalog["ref"] for catalog in self.ledger.catalogs()]
+            if not any(row.get("id") == record for ref in refs for _, row in self.ledger.records(ref)):
+                raise HttpError(404, f"{record!r} is not a record of a synced catalog")
             # a dataset whose issue is known (it ran from a label, was never adopted) keeps that number: its
             # workflow id, rounds and budget root are built from it
             known = (self.ledger.dataset(record) or {}).get("issue")

@@ -16,7 +16,7 @@ name (see activities.py). The durable state is a `BufferState`, handed to contin
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -72,6 +72,11 @@ WAITING = ("waiting-dataset", "waiting-drop", "blocked")
 GATE_WAITING = WAITING + ("waiting-lock",)  # no job of its own: the staged gate opens over these (spec §15)
 SETTLED = ("servable", "failed", "dropped")
 ABANDONED = "abandoned: a new buffer:go started another round"
+CANCELLED = "abandoned: the round was cancelled"
+CANCEL, PREP_CANCEL = "buffer:cancel", "prep:cancel"  # actions only: there never were such labels
+NO_ROUND = "there is no round in progress to cancel"
+# the stages a `cancel` ends a round at (mia_buffers.config.CANCELLABLE; a ready or idle buffer keeps serving)
+CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")
 RETIRED_WHILE = "abandoned: the buffer was retired"
 NO_BUFFER = "this issue has no ready or idle buffer"
 SOURCING = "{count} datasets still sourcing; add `{label}` again once they settle"
@@ -167,10 +172,19 @@ class MiaBuffer:
         self.degraded_records: set[str] = set()  # records of the degraded signals the running rebuild answers
         self.degraded_reason = ""
         self.paused_round = False  # a job of this round met autonomy.pause: the round stops once nothing runs
+        self.cancel_events: list[LabelEvent] = []
+        self.jobs: set[str] = set()  # the cluster jobs this run is waiting on: what a cancel kills
+        self.sourcing_tasks: list[asyncio.Task] = []  # the dataset tasks of the sourcing pass in progress
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
         self.go_events.append(event)
+
+    @workflow.signal
+    def cancel(self, event: LabelEvent) -> None:
+        """End the round in progress now (spec webapp-actions §5): see `_guard`. A buffer that is ready or idle
+        keeps serving and the cancel is refused."""
+        self.cancel_events.append(event)
 
     @workflow.signal
     def plan(self, event: LabelEvent) -> None:
@@ -232,10 +246,14 @@ class MiaBuffer:
             await self._guard(self._steady())
         while True:
             await workflow.wait_condition(
-                lambda: bool(self.go_events or self.approve_events or self._lifecycle()) or _rollover_due()
+                lambda: (
+                    bool(self.go_events or self.approve_events or self._lifecycle() or self.cancel_events)
+                    or _rollover_due()
+                )
             )
-            if not (self.go_events or self.approve_events or self._lifecycle()):
+            if not (self.go_events or self.approve_events or self._lifecycle() or self.cancel_events):
                 workflow.continue_as_new(self.state)  # idle, nothing queued
+            await self._refuse_cancels()  # idle: no round to cancel
             await self._refuse_queued(gos=False)  # idle: an approve has no plan under review to apply to
             await self._refuse_lifecycle()  # nor a lifecycle signal a buffer to act on
             if not self.go_events:
@@ -268,12 +286,70 @@ class MiaBuffer:
             self.limits = await self._act("limits", result_type=SourcingLimits)
         return self.limits
 
-    async def _guard(self, step: Awaitable[None]) -> None:
-        """Run a step of the round; any failure ends the round in needs-human instead of failing the workflow."""
+    async def _guard(self, step: Coroutine[Any, Any, None]) -> None:
+        """Run a step of the round; any failure ends the round in needs-human instead of failing the workflow.
+
+        The step runs as a task so a `cancel` can end it wherever it waits (spec webapp-actions §5). A cancel
+        counts only while a round is in progress or at a gate (`CANCELLABLE`): a buffer that is ready or idle is
+        being served, so there the cancel is refused and the step goes on."""
+        await self._refuse_cancels()  # sent before this step began: not aimed at it
+        round_task = asyncio.ensure_future(step)
         try:
-            await step
+            while True:
+                cancel = asyncio.ensure_future(workflow.wait_condition(lambda: bool(self.cancel_events)))
+                try:
+                    await workflow.wait([round_task, cancel], return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    cancel.cancel()
+                if round_task.done():
+                    await round_task  # re-raises what ended it: a failure below, or a continue-as-new
+                    break
+                if self.state.stage in CANCELLABLE:
+                    await self._cancel_round(round_task)
+                    break
+                await self._refuse_cancels()
         except (ActivityError, RoundFailed) as error:
             await self._finish("needs-human", error_message(error))
+        except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up, as before
+            round_task.cancel()
+            await workflow.wait([round_task])
+            raise
+
+    async def _cancel_round(self, round_task: asyncio.Future[None]) -> None:
+        """End the round a `cancel` was sent for. The round's task and its dataset tasks are cancelled (each
+        releases its raw lock and settles its job's reservation as it unwinds), every cluster job the run was
+        waiting on is killed by id (a job running under a buffer that reads `cancelled` would be a false state),
+        the round's unfinished buffer is retired as a failed round's is, and the spec ends in `cancelled`."""
+        state = self.state
+        events, self.cancel_events = self.cancel_events, []
+        for event in events:
+            self._seen(event)
+        jobs = sorted(self.jobs)  # read before the tasks' clean-up forgets them
+        tasks, self.sourcing_tasks = self.sourcing_tasks, []
+        for task, dataset in zip(tasks, state.datasets, strict=False):
+            if dataset.status not in SETTLED:
+                self._set(dataset, "failed", CANCELLED)  # before the cancel: its task then ends without a comment
+            if not task.done():
+                task.cancel()
+        round_task.cancel()
+        await workflow.wait([round_task, *tasks])
+        await self._flush_board()
+        for job_id in jobs:
+            try:
+                await self._act("kill_job", job_id, budget=timedelta(minutes=30))
+            except ActivityError as error:  # the job may be gone already; the round is cancelled either way
+                workflow.logger.warning("issue #%d: could not kill %s: %s", state.issue, job_id, error_message(error))
+        if state.buffer_id and not state.retired:
+            await self._retire_failed(state.buffer_id, "cancelled")
+            state.retired = True
+        await self._finish("cancelled", f"cancelled by {events[-1].actor}")
+
+    async def _refuse_cancels(self) -> None:
+        """A cancel with no round in progress (a click that crossed the round's end, or a serving buffer)."""
+        events, self.cancel_events = self.cancel_events, []
+        for event in events:
+            if not self._seen(event):
+                await self._refuse(CANCEL, NO_ROUND, event)
 
     def _seen(self, event: LabelEvent) -> bool:
         if event.event_id in self.state.handled:
@@ -382,7 +458,8 @@ class MiaBuffer:
     async def _round(self, event: LabelEvent) -> None:
         """Admit, plan, post the plan, wait for review; an approve continues into sourcing."""
         state = self.state
-        over = state.stage in ("needs-human", "staged")  # a staged round a go supersedes is retired like a failed one
+        # a staged round a go supersedes is retired like a failed one (a cancelled round retired its own already)
+        over = state.stage in ("needs-human", "staged")
         failed = state.buffer_id if over and state.buffer_id and not state.retired else None
         state.round_id = f"i{state.issue}-e{event.event_id}"
         state.pins = state.buffer_id = state.planned_at = None
@@ -435,13 +512,14 @@ class MiaBuffer:
         await self._refuse_queued(approves=False)  # gos that came while planning; approves are judged below
         await self._from_review()
 
-    async def _retire_failed(self, buffer: str) -> None:
-        """A new go supersedes the buffer of a round that ended needs-human: nothing serves it, so it is retired now
-        (refs released, `retired` event) and the page shows the new round as the issue's one live buffer. Best
-        effort: a retire buffer-api refuses is logged, and the keeper's rules still reach the buffer later."""
+    async def _retire_failed(self, buffer: str, how: str = "failed") -> None:
+        """A new go supersedes the buffer of a round that ended needs-human, or a round was cancelled: nothing
+        serves it, so it is retired now (refs released, `retired` event) and the page shows the next round as the
+        spec's one live buffer. Best effort: a retire buffer-api refuses is logged, and the keeper's rules still
+        reach the buffer later."""
         try:
             await self._act("retire_buffer", buffer, buffer, seconds=900, result_type=dict)
-            await self._comment(f"failed round's buffer `{buffer}` retired: refs released", f"retired {buffer}")
+            await self._comment(f"{how} round's buffer `{buffer}` retired: refs released", f"retired {buffer}")
         except ActivityError as error:
             workflow.logger.warning("issue #%d: retire of %s: %s", self.state.issue, buffer, error_message(error))
 
@@ -537,6 +615,7 @@ class MiaBuffer:
             index: asyncio.create_task(self._source(datasets[index], semaphore, fetch_slots)) for index in starts
         }
         tasks = [created[index] for index in range(len(datasets))]  # in state.datasets order, as the zips below need
+        self.sourcing_tasks = tasks
         deadline = workflow.now() + timedelta(days=state.timeout_days)
         try:
             while True:
@@ -606,6 +685,7 @@ class MiaBuffer:
             index: asyncio.create_task(self._source(datasets[index], semaphore, fetch_slots)) for index in starts
         }
         tasks = [created[index] for index in range(len(datasets))]
+        self.sourcing_tasks = tasks
         # one timer for the round's day limit: the waits below start none of their own (a timer per wake would
         # litter the history and never let it look idle)
         deadline = asyncio.create_task(asyncio.sleep(state.timeout_days * 86400))
@@ -1543,16 +1623,20 @@ class MiaBuffer:
     ) -> JobDone:
         """Wait for a job on the await queue (a worker restart reattaches to it), heartbeating `lock` if given."""
         walltime = timedelta(minutes=walltime_min)
-        return await workflow.execute_activity(
-            "await_job",
-            args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
-            result_type=JobDone,
-            task_queue=workflow.info().task_queue + "-await",
-            start_to_close_timeout=walltime + QUEUE_SLACK,
-            schedule_to_close_timeout=walltime + timedelta(hours=24),
-            heartbeat_timeout=timedelta(minutes=3),
-            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
-        )
+        self.jobs.add(job_id)
+        try:
+            return await workflow.execute_activity(
+                "await_job",
+                args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
+                result_type=JobDone,
+                task_queue=workflow.info().task_queue + "-await",
+                start_to_close_timeout=walltime + QUEUE_SLACK,
+                schedule_to_close_timeout=walltime + timedelta(hours=24),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            )
+        finally:
+            self.jobs.discard(job_id)
 
 
 @workflow.defn(name="MiaPrep")
@@ -1564,10 +1648,17 @@ class MiaPrep:
     def __init__(self, state: PrepState) -> None:
         self.state = state
         self.go_events: list[LabelEvent] = []
+        self.cancel_events: list[LabelEvent] = []
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
         self.go_events.append(event)
+
+    @workflow.signal
+    def cancel(self, event: LabelEvent) -> None:
+        """End the request's round now (spec webapp-actions §5): it stops following its datasets, and the dataset
+        rounds it started that are still in progress are cancelled too, no others."""
+        self.cancel_events.append(event)
 
     @workflow.query
     def status(self) -> PrepState:
@@ -1577,19 +1668,35 @@ class MiaPrep:
     async def run(self, state: PrepState) -> None:
         rounds = 0
         while True:
-            await workflow.wait_condition(lambda: bool(self.go_events) or _rollover_due())
-            if not self.go_events:
+            await workflow.wait_condition(lambda: bool(self.go_events or self.cancel_events) or _rollover_due())
+            if not (self.go_events or self.cancel_events):
                 workflow.continue_as_new(self.state)  # idle, nothing queued
+            await self._refuse_cancels()  # idle: no round to cancel
+            if not self.go_events:
+                continue
             event = self.go_events.pop(0)
             if self._seen(event):  # redelivery
                 continue
             rounds += 1
+            # the round runs as a task so a `cancel` can end it wherever it waits (a nudge, the poll's timer)
+            round_task = asyncio.ensure_future(self._round(event))
+            cancel = asyncio.ensure_future(workflow.wait_condition(lambda: bool(self.cancel_events)))
             try:
-                await self._round(event)
+                await workflow.wait([round_task, cancel], return_when=asyncio.FIRST_COMPLETED)
+                if round_task.done():
+                    await round_task
+                else:
+                    await self._cancel_round(round_task)
             except ActivityError as error:  # an activity gave up (a bad request, the registry down too long)
                 if isinstance(error.cause, CancelledError):
                     raise
                 await self._stage("needs-human", error_message(error))
+            except asyncio.CancelledError:  # the workflow itself is being cancelled
+                round_task.cancel()
+                await workflow.wait([round_task])
+                raise
+            finally:
+                cancel.cancel()
             await self._refuse_queued()
             if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not self.go_events:
                 workflow.continue_as_new(self.state)
@@ -1620,6 +1727,39 @@ class MiaPrep:
             if stage == "requested":
                 raise
             workflow.logger.error("issue #%d: could not set %s: %s", self.state.issue, stage, error_message(error))
+
+    async def _cancel_round(self, round_task: asyncio.Future[None]) -> None:
+        """End the round a `cancel` was sent for: stop following, cancel the dataset rounds this request started
+        that are still in progress (`prep_cancel` knows which: the ones whose latest go this request sent), and
+        end `cancelled`."""
+        state = self.state
+        events, self.cancel_events = self.cancel_events, []
+        for event in events:
+            self._seen(event)
+        round_task.cancel()
+        await workflow.wait([round_task])
+        records = list(state.pins.records) if state.pins else []
+        if records:
+            try:
+                await self._act("prep_cancel", state.issue, records, result_type=list[str])
+            except ActivityError as error:  # the request is cancelled either way; its datasets show on their pages
+                workflow.logger.warning(
+                    "issue #%d: could not cancel its dataset rounds: %s", state.issue, error_message(error)
+                )
+        await self._stage("cancelled", f"cancelled by {events[-1].actor}")
+
+    async def _refuse_cancels(self) -> None:
+        """A cancel with no round in progress: refused."""
+        events, self.cancel_events = self.cancel_events, []
+        for event in events:
+            if self._seen(event):
+                continue
+            try:
+                await self._act("refuse_label", self.state.issue, PREP_CANCEL, NO_ROUND, event.event_id)
+            except ActivityError as error:  # best effort: the event is handled either way
+                workflow.logger.warning(
+                    "issue #%d: could not refuse %s: %s", self.state.issue, event.event_id, error_message(error)
+                )
 
     async def _refuse_queued(self) -> None:
         """A go while a round runs is busy; one this run handled already is a redelivery."""

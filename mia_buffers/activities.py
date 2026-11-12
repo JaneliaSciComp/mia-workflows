@@ -45,7 +45,7 @@ from mia_data.catalog import dataset_folder
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
 from mia_data.models import JobDone, LockTaken, Reservation
 from mia_data.publish import prepared_row
-from mia_data.seed import ID_RE, MARKER, render_issue
+from mia_data.seed import ID_RE
 from mia_data.status import render_links, render_stage
 
 from .api import BufferConfig
@@ -109,8 +109,6 @@ STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per chann
 FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
 FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
 DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
-DATA_GO = DATA_LABEL.format("go")
-DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
 KEEPER = "keeper"  # the cache keeper's lock owner
 KEEPER_LOCK_TTL_S = 900
 KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, whatever step it is in
@@ -252,6 +250,8 @@ class Activities:
             self.unregister_volumes,
             self.revoke_targets,
             self.revoke_artifacts,
+            self.kill_job,
+            self.prep_cancel,
         ]
 
     # --- assessments at the staged gate (spec autonomous-gates §5) -----------------------------------
@@ -316,6 +316,13 @@ class Activities:
     async def revoke_targets(self, issue: int, actor: str, until: str) -> list[str]:
         """The records named as `/revoke <record>` lines in `actor`'s comments on the issue within the week before
         `until` (the label's time), deduplicated in order of first mention. A line, never a mention mid-sentence."""
+        # a revoke sent from the page names its records itself: the action whose time is `until` (the workflow
+        # passes the event's own time, which is why an action's `at` is stored exactly as sent; spec §6)
+        found_subject = await asyncio.to_thread(self.registry.timeline, "buffer", issue)
+        for action in (found_subject or {}).get("actions", []):
+            if action["action"] == "revoke" and action["at"] == until:
+                return [str(record) for record in action["payload"].get("records", [])]
+        # ponytail: a label's revoke names them in comments; this goes with the labels (slice E)
         end = _parse_iso(until)
         if end is None:
             raise ValueError(f"buffer:revoke: the label's time {until!r} is not an ISO-8601 time")
@@ -427,6 +434,33 @@ class Activities:
             await self._adopt(kind, issue)
             await asyncio.to_thread(write)
 
+    async def _action(self, kind: str | None, number: int, event_id: str) -> dict | None:
+        """The action whose id is this event id; None when the event is not an action (a GitHub label event, until
+        labels stop starting rounds). An action of another subject is an error. `kind` None: either kind."""
+        action = await asyncio.to_thread(self.registry.action, event_id)
+        if action is None:
+            return None
+        if action["number"] != number or (kind is not None and action["kind"] != kind):
+            raise ValueError(f"event {event_id} is not an action on {kind or 'subject'} #{number}")
+        return action
+
+    async def _spec_text(self, kind: str, issue: int, event_id: str, what: str) -> str:
+        """The YAML a round runs: the `spec` its action carries, exactly as it was sent (spec webapp-actions §6);
+        for a GitHub label event, the one ```yaml fence of the issue's body."""
+        if (action := await self._action(kind, issue, event_id)) is not None:
+            text = action["payload"].get("spec")
+            if not text:
+                raise ValueError(f"action {event_id} carries no {what}")
+            return str(text)
+        # ponytail: the issue is read only for a label's round; this goes with the labels (slice E)
+        body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")  # GitHub saves CRLF
+        fences = SPEC_FENCE.findall(body)
+        if len(fences) != 1:
+            raise ValueError(
+                f"issue #{issue}: expected exactly one ```yaml block holding the {what}, found {len(fences)}"
+            )
+        return str(fences[0])
+
     async def _adopt(self, kind: str, issue: int) -> None:
         """Make an issue the registry has no subject for a subject, named as `adopt-issues` would name it."""
         # ponytail: an issue opened on GitHub after `adopt-issues` ran is adopted by its first write (spec
@@ -537,22 +571,17 @@ class Activities:
     @activity.defn(name="admit")
     @mia_permanent_errors
     async def admit(self, issue: int, event_id: str) -> BufferPins:
-        """Pin the round: the spec from the issue body's one ```yaml fence, the catalog at the spec's ref and
-        the harness checkout. Written once to state_dir/rounds/<round>/; a retry returns the same pins."""
+        """Pin the round: the spec its action carries (see `_spec_text`), the catalog at the spec's ref and the
+        harness checkout. Written once to state_dir/rounds/<round>/; a retry returns the same pins."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
         if (round_dir / "pins.json").is_file():
             return self._pins(round_dir.name)
-        body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")  # GitHub saves CRLF
-        fences = SPEC_FENCE.findall(body)
-        if len(fences) != 1:
-            raise ValueError(
-                f"issue #{issue}: expected exactly one ```yaml block holding the buffer spec, found {len(fences)}"
-            )
+        text = await self._spec_text("buffer", issue, event_id, "buffer spec")
         round_dir.mkdir(parents=True, exist_ok=True)
         spec_path = round_dir / "spec.yaml"
-        write_atomic(spec_path, fences[0])
+        write_atomic(spec_path, text)
         try:
             spec = load_spec(spec_path)
         except SpecError as error:
@@ -693,45 +722,54 @@ class Activities:
     @activity.defn(name="nudge_dataset")
     @mia_permanent_errors
     async def nudge_dataset(self, round_id: str, record: str) -> DatasetIssue:
-        """Hand a dataset without a binding to mia-data (spec §3 step 1): find its issue in the datasets repo by
-        the record marker, open one if there is none (mia-data's own issue body, pinned to the round's catalog
-        ref), and add `data:go` unless mia-data is already working on it or has finished. A stale `data:ineligible`
-        (a verdict mia-data no longer gives, spec §12) is nudged like `new`: mia-data's first stage replaces it."""
+        """Hand a dataset without a binding to mia-data (spec §3 step 1): send its dataset a `go` unless mia-data
+        is already working on it or has finished (see `_nudge`)."""
         return (await self._nudge(round_id, record))[0]
 
     async def _nudge(self, round_id: str, record: str) -> tuple[DatasetIssue, bool]:
-        """nudge_dataset's work, and whether it opened the dataset issue."""
-        gh, record_yaml = self.gh_datasets, self._record(round_id, record)
-        folder = dataset_folder(record_yaml, record)
-        issue = await gh.find_issue_by_marker(MARKER.format(record))
-        created = issue is None
-        if issue is None:
-            pins = self._pins(round_id)
-            title, body, labels = render_issue(
-                record_yaml,
-                {"record_commit": pins.catalog_ref},
-                self.cfg.github.catalog_repo,
-                self._row(round_id, record)["path"],
-                record,
-                root=pins.root,
-            )
-            issue = await gh.create_issue(title, body, labels)
-        number = int(issue["number"])
-        names = {label["name"] for label in issue.get("labels") or []}
-        stages = [name[len("data:") :] for name in names if name.startswith("data:")]
-        stages = [stage for stage in stages if stage not in ("go", "approve")]  # human labels are not stages
-        stage = stages[0] if stages else "new"
+        """nudge_dataset's work, and whether the dataset was started for the first time. The dataset's subject
+        says where it stands; a dataset that needs a round gets a `go` sent to buffer-api with the worker token:
+        actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
+        `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). No issue is
+        searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
+        registry, folder = self.registry, dataset_folder(self._record(round_id, record), record)
+        subject = await asyncio.to_thread(registry.subject, "dataset", record)
+        number, stage = (subject["number"], subject["stage"]) if subject else (0, "new")
         if stage == "done":
             path = self.cfg.paths.storage_root / folder
             note = (
-                f"the dataset issue is `data:done` but `{path}` has no binding.yaml with a matching manifest.json: "
-                "run the dataset again (add `data:go` on it) so mia-data publishes both"
+                f"the dataset is `done` but `{path}` has no binding.yaml with a matching manifest.json: "
+                "run it again from its page so mia-data publishes both"
             )
-            return DatasetIssue(number, stage, False, note, folder), created
-        if DATA_GO in names or stage in DATA_IN_PROGRESS:
-            return DatasetIssue(number, stage, False, folder=folder), created
-        await gh.add_labels(number, [DATA_GO])
-        return DatasetIssue(number, stage, True, folder=folder), created
+            return DatasetIssue(number, stage, False, note, folder), False
+        if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
+            return DatasetIssue(number, stage, False, folder=folder), False
+        pins = self._pins(round_id)
+        kind = "prep" if round_id.startswith("p") else "buffer"
+        go = functools.partial(
+            registry.send_action,
+            f"/datasets/{record}/actions",
+            "go",
+            key=f"{round_id}/{record}",
+            actor=f"{kind}:{_issue_of(round_id)}",
+            root=pins.root,
+        )
+        try:
+            try:
+                action = await asyncio.to_thread(go)
+            except RegistryError as error:
+                if error.status != 404:
+                    raise
+                # buffer-api has not seen this record: load the round's catalog ref into it, as the plan does
+                from .cli import catalog_sync
+
+                await catalog_sync(self.cfg, self.gh_catalog, registry, pins.catalog_ref)
+                action = await asyncio.to_thread(go)
+        except RegistryError as error:
+            if error.status != 409:
+                raise
+            return DatasetIssue(number, stage, False, folder=folder), False  # a round began meanwhile
+        return DatasetIssue(int(action["number"]), stage, True, folder=folder), subject is None
 
     # --- preparation requests (milestone E) --------------------------------------------------
 
@@ -747,14 +785,9 @@ class Activities:
         round_dir = self._round_dir(f"p{int(issue)}-e{event_id}")
         if (round_dir / "prep.json").is_file():
             return PrepPins(**json.loads((round_dir / "prep.json").read_text()))
-        body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")
-        fences = SPEC_FENCE.findall(body)
-        if len(fences) != 1:
-            raise ValueError(
-                f"issue #{issue}: expected exactly one ```yaml block holding the preparation request, found {len(fences)}"
-            )
+        text = await self._spec_text("prep", issue, event_id, "preparation request")
         try:
-            spec = load_prep_text(fences[0])
+            spec = load_prep_text(text)
         except SpecError as error:
             raise ValueError(f"preparation request refused: {error}") from error
         ref = spec.catalog.ref
@@ -780,11 +813,11 @@ class Activities:
                 f"set max_records: {len(records)} in the request to confirm, or split it"
             )
         round_dir.mkdir(parents=True, exist_ok=True)
-        write_atomic(round_dir / "spec.yaml", fences[0])
+        write_atomic(round_dir / "spec.yaml", text)
         write_atomic(
             round_dir / "plan.json", json.dumps({"rows": [{"id": id_, "path": paths[id_]} for id_ in records]})
         )
-        spec_hash, root = hashlib.sha256(fences[0].encode()).hexdigest(), self.cfg.root_of(issue)
+        spec_hash, root = hashlib.sha256(text.encode()).hexdigest(), self.cfg.root_of(issue)
         buffer_pins = BufferPins(spec_hash, ref, "", "", root=root)
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(buffer_pins)))
         pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root)
@@ -794,8 +827,8 @@ class Activities:
     @activity.defn(name="prep_nudge")
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
-        """Hand one requested record to mia-data unless the registry already settled it (prepared or needs-human:
-        GitHub is not touched); otherwise nudge_dataset, its result named for the request's comment."""
+        """Hand one requested record to mia-data unless the registry already settled it (prepared or
+        needs-human); otherwise nudge_dataset, its result named for the request's entry."""
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
         except RegistryError as error:  # best effort: the dataset issue tells the rest
@@ -836,12 +869,14 @@ class Activities:
     @activity.defn(name="comment_prep")
     @mia_permanent_errors
     async def comment_prep(self, issue: int, round_id: str, outcomes: list[PrepOutcome]) -> None:
-        """Post, once per round, what was done for each requested record, with its dataset issue."""
-        repo = self.cfg.github.datasets_repo  # the dataset issues live there: a bare #N would link this repo's
-        lines = ["| record | outcome | issue |", "|---|---|---|"]
+        """Write, once per round, what was done for each requested record, with a link to its dataset's page
+        (a dataset's number is not an issue number, so it is never written as `<repo>#<n>`; spec §4.1)."""
+        base = self.cfg.service.url.rstrip("/")
+        lines = ["| record | outcome | page |", "|---|---|---|"]
         for entry in outcomes:
             outcome = f"{entry.outcome}: {entry.note}" if entry.note else entry.outcome
-            lines.append(f"| `{entry.record}` | {outcome} | {f'{repo}#{entry.issue}' if entry.issue else ''} |")
+            page = f"[open]({base}/#datasets/{quote(entry.record, safe='')})" if entry.issue else ""
+            lines.append(f"| `{entry.record}` | {outcome} | {page} |")
         marker = self.cfg.marker(f"prep outcomes {round_id}")
         body = "\n".join(lines)
         await self._post("prep", issue, f"{self._clean(body)}\n\n{marker}", marker, round_id=round_id)
@@ -866,15 +901,57 @@ class Activities:
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
         """Remove a human label we won't act on and say why, once per event."""
-        humans = {self.cfg.label(kind) for kind in HUMAN_LABELS} | {
-            self.cfg.prep_label(kind) for kind in PREP_HUMAN_LABELS
-        }
+        humans = {self.cfg.label(kind) for kind in (*HUMAN_LABELS, "cancel")} | {
+            self.cfg.prep_label(kind) for kind in (*PREP_HUMAN_LABELS, "cancel")
+        }  # cancel is an action only: it never was a label
         if label not in humans or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
-        await self.gh_issues.remove_label(issue, label)
-        marker = self.cfg.marker(f"refused {label} {event_id}")
         kind = "prep" if label.startswith(self.cfg.prep_label("")) else "buffer"
+        if await self._action(kind, issue, event_id) is not None:  # a click: the page shows the reason against it
+            await asyncio.to_thread(self.registry.refuse_action, event_id, self._clean(reason))
+        else:
+            await self.gh_issues.remove_label(issue, label)
+        marker = self.cfg.marker(f"refused {label} {event_id}")
         await self._post(kind, issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
+
+    @activity.defn(name="kill_job")
+    async def kill_job(self, job_id: str) -> None:
+        """Kill a cluster job by id: a job of a round that was cancelled (spec webapp-actions §5). The wait on it
+        is cancelled by the workflow; a job that already ended is not an error to the runner."""
+        if self.jobs is None:
+            raise RuntimeError("no job runner: this activity runs only inside the worker")
+        await asyncio.to_thread(self.jobs.client.kill, [job_id])
+
+    @activity.defn(name="prep_cancel")
+    @mia_permanent_errors
+    async def prep_cancel(self, issue: int, records: list[str]) -> list[str]:
+        """A request was cancelled: cancel the dataset rounds it started and no others. A record counts when its
+        dataset is still in a round and that round's `go` was sent by this request (`prep:<issue>`); a dataset
+        somebody else started, or one that has settled, is left alone. Returns the records cancelled."""
+        registry, actor, cancelled = self.registry, f"prep:{int(issue)}", []
+        for record in records:
+            subject = await asyncio.to_thread(registry.subject, "dataset", record)
+            if subject is None or "cancel" not in subject["actions"]:
+                continue
+            found = await asyncio.to_thread(registry.timeline, "dataset", subject["number"])
+            gos = [a for a in (found or {}).get("actions", []) if a["action"] == "go" and a["state"] == "sent"]
+            if not gos or gos[-1]["actor"] != actor:
+                continue
+            cancel = functools.partial(
+                registry.send_action,
+                f"/datasets/{record}/actions",
+                "cancel",
+                key=f"cancel {actor} {gos[-1]['id']}",
+                actor=actor,
+            )
+            try:
+                await asyncio.to_thread(cancel)
+            except RegistryError as error:
+                if error.status != 409:  # its round ended meanwhile: nothing to cancel
+                    raise
+                continue
+            cancelled.append(record)
+        return cancelled
 
     # --- sourcing: binding, drop, stage job, registration ------------------------------------
 

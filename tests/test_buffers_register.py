@@ -168,12 +168,39 @@ def server(tmp_path):
     srv.shutdown()
 
 
+class SentActions:
+    """Stands in for buffer-api's Temporal gateway: records the actions sent to workflows."""
+
+    def __init__(self):
+        self.sent = []
+
+    def kick_mirror(self, kind, number):
+        pass
+
+    def send(self, kind, number, signal, event):
+        self.sent.append((kind, number, signal, event))
+
+    def signal_running(self, kind, number, signal, *args):
+        self.sent.append((kind, number, signal, *args))
+        return True
+
+
+class ServerUrl(str):
+    """The service's URL, carrying the stand-in for its Temporal gateway (`.gateway.sent`)."""
+
+    gateway: SentActions
+
+
 @pytest.fixture
 def token_server(tmp_path):
-    """A buffer-api that wants the worker token `t` on its worker routes."""
-    srv = make_server(BufferService(Ledger(tmp_path / "l.sqlite"), token="t"), "127.0.0.1", 0)
+    """A buffer-api that wants the worker token `t` on its worker routes; what it sends to Temporal is recorded
+    on the URL it yields (`token_server.gateway.sent`)."""
+    stand_in = SentActions()
+    srv = make_server(BufferService(Ledger(tmp_path / "l.sqlite"), token="t", dispatcher=stand_in), "127.0.0.1", 0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    url = ServerUrl(f"http://127.0.0.1:{srv.server_address[1]}")
+    url.gateway = stand_in
+    yield url
     srv.shutdown()
 
 
