@@ -11,6 +11,7 @@ import httpx
 import pytest
 import yaml
 
+from mia_buffers import api as api_module
 from mia_buffers.api import BufferService, ledger_path, make_server, open_ledger, prune_backups
 from mia_buffers.dispatch import DispatchError
 from mia_buffers.ledger import Ledger
@@ -1335,6 +1336,60 @@ def test_action_routes_take_json_from_this_origin_only_and_a_named_actor_needs_t
     status, action, _ = act(s, "/datasets/rec-b/actions", named, AUTH)
     assert status == 202 and action["actor"] == "prep:9" and action["payload"] == {"root": "o/buffers#9"}
     assert gateway.sent[-1][3].actor == "prep:9"
+
+
+def test_a_sent_action_is_asked_until_its_workflow_answers(tmp_path):
+    """Between a click and its workflow's first write the stage is still the old one. The subject says what was
+    asked, so the page does not offer the old stage's buttons as if nothing had been clicked."""
+    s, _ = _acting(tmp_path)
+    action = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]
+    number = action["number"]
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["actions"]) == ("new", ["go"])  # the stage table is not bent
+    assert (view["asked"]["id"], view["asked"]["action"]) == (action["id"], "go") and 0 < view["asked"]["wait_s"] <= 60
+    assert call(s, "GET", f"/timeline/dataset/{number}")[1]["subject"]["asked"]["id"] == action["id"]
+    assert call(s, "GET", "/subjects/dataset", {"limit": "5"})[1]["subjects"][0]["asked"]["id"] == action["id"]
+    # the mirror's writes are not the workflow's answer
+    worker(s, "PUT", f"/subjects/dataset/{number}/issue", {"issue": 240})
+    worker(s, "PUT", f"/timeline/dataset/{number}/1", {"comment_url": None})
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["asked"]["id"] == action["id"]
+    # a stage the workflow writes is
+    worker(s, "POST", f"/timeline/dataset/{number}", {"stage": "matching"})
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert view["asked"] is None and view["actions"] == ["cancel"]
+
+
+def test_what_ends_an_asked_action(tmp_path, monkeypatch):
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    asked = lambda: call(s, "GET", "/subjects/dataset/rec-a")[1]["asked"]  # noqa: E731
+    assert asked() is None  # nothing was clicked
+    # an entry of the workflow's, with no stage
+    act(s, "/datasets/rec-a/actions", {"action": "go"})
+    assert asked()["action"] == "go"
+    worker(s, "POST", "/timeline/dataset/7", {"body": "a round is running", "marker": "m1"})
+    assert asked() is None
+    # a refusal
+    action = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]
+    worker(s, "PUT", f"/actions/{action['id']}", {"state": "refused", "detail": "a round is running"})
+    assert asked() is None
+    # an action that never reached Temporal was not asked of any workflow
+    gateway.fail = "temporal is away"
+    assert act(s, "/datasets/rec-a/actions", {"action": "go"})[0] == 503
+    assert asked() is None
+    gateway.fail = None
+    # the service's own answer: a cancel with no workflow running, and a force stop
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "testing"})
+    gateway.running = False
+    assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["asked"]) == ("cancelled", None)
+    gateway.running = True
+    # a workflow that never answers does not hold the buttons for ever
+    act(s, "/datasets/rec-a/actions", {"action": "go"})
+    assert asked()["action"] == "go"
+    monkeypatch.setattr(api_module, "ASKED_WAIT_S", 0)
+    assert asked() is None
 
 
 def test_a_worker_marks_an_action_refused(tmp_path):

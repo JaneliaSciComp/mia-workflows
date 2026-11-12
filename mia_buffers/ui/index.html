@@ -1944,6 +1944,9 @@ const ACTION_CONFIRM = {
 const UNDELIVERED_AFTER_S = 10;  // an action still pending this long was not delivered: the service died, or the answer was lost
 let shownSubject = null;  // {kind, key, number} of the subject page on screen: what the stream refetches
 let shownView = "";  // the view on screen, so the stream can refresh Needs you
+let subjectTurn = 0;  // the newest load of a subject's page: one that started earlier never paints over it
+let askedTimer = 0;  // looks again when an asked action's wait ends, should its workflow never answer
+const refreshShown = () => { if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, "stream"); else if (shownView === "needs") viewNeeds("", "stream"); };
 const newKey = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);  // one per click; Retry sends it again
 async function sendAction(subject, body, after) {  // the answer is shown by the reload that follows, a refusal by the banner
   const send = { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) };
@@ -2016,19 +2019,24 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
   const bar = el("div", { class: "actions" });
   const note = el("textarea", { rows: 3, placeholder: "What is wrong with these crops? This goes to the agent that fixes the reader.", "aria-label": "feedback sent with Reject" });
   const offered = ACTION_ORDER.filter(a => subject.actions.includes(a) && !(skip || []).includes(a));
+  // an action was sent and its workflow has not answered: the stage, and so these buttons, are still the old
+  // ones, so none can be pressed until the answer (or the end of the wait) reloads this
+  const asked = subject.asked;
+  if (asked) { clearTimeout(askedTimer); askedTimer = setTimeout(refreshShown, asked.wait_s * 1000 + 300); }
   for (const action of offered) {
     const word = action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
       : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Prepare again" : "Prepare") : "Run") : ACTION_WORDS[action] || action;
-    bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), onclick: e => {
+    bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), disabled: !!subject.asked, onclick: e => {
       if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
       bar.querySelectorAll("button").forEach(b => { b.disabled = true; });
       e.target.textContent = word + "…";
       // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
       const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
       sendAction(subject, { action, key: newKey(), ...verdict, ...(action === "reject" ? { note: note.value } : {}) }, after);
-    } }, word));
+    } }, asked && asked.action === action ? word + "…" : word));
   }
   if (offered.includes("reject")) bar.append(note);
+  if (asked) bar.append(el("span", { class: "small" }, "Sent: waiting for its workflow to answer."));
   if (!subject.actions.length) bar.append(el("span", { class: "small" }, "Nothing can be asked of it at this stage."));
   return bar;
 }
@@ -2063,13 +2071,13 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   if (subject.actions.includes("dropped")) {
     const waiting = board.filter(d => d.status === "waiting-drop");
     for (const d of waiting) box.append(el("div", { class: "notice" }, el("b", {}, d.record), " waits for its files to be copied into its incoming/ folder. ",
-      el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, { action: "dropped", record: d.record, key: newKey() }, again); } }, "Files are in place")));
+      el("button", { type: "button", class: "btn", disabled: !!subject.asked, onclick: e => { e.target.disabled = true; sendAction(subject, { action: "dropped", record: d.record, key: newKey() }, again); } }, "Files are in place")));
   }
   if (subject.actions.includes("revoke")) {
     const records = board.filter(d => d.status === "servable").map(d => d.record);
     const ticks = el("div", { class: "ticks" }, ...records.map(r => el("label", { class: "inline" }, el("input", { type: "checkbox", value: r }), " " + r)));
     box.append(card("Revoke datasets", "The ticked datasets leave this buffer: their volumes are unregistered and their staged pyramids quarantined.", records.length ? ticks : el("div", { class: "empty" }, "no dataset is being served"),
-      el("div", { class: "actions" }, el("button", { type: "button", class: "btn danger", onclick: e => {
+      el("div", { class: "actions" }, el("button", { type: "button", class: "btn danger", disabled: !!subject.asked, onclick: e => {
         const chosen = [...ticks.querySelectorAll("input:checked")].map(i => i.value);
         if (!chosen.length) return banner("Tick the datasets to revoke first.");
         if (!confirm(ACTION_CONFIRM.revoke)) return;
@@ -2079,7 +2087,7 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   if (subject.actions.includes("go")) {
     const area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML" }); area.value = subject.data?.spec || "";
     box.append(card(subject.stage === "new" ? "Plan" : "Edit and plan again", "The spec as it was last saved. Plan starts a new round with this text, which stops at its plan until you press Run; the buffer it builds gets a new id, and training jobs keep the buffer they connected to.", area,
-      el("div", { class: "actions" }, el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, { action: "go", spec: area.value, plan_first: true, key: newKey() }, again); } }, "Plan"))));
+      el("div", { class: "actions" }, el("button", { type: "button", class: "btn", disabled: !!subject.asked, onclick: e => { e.target.disabled = true; sendAction(subject, { action: "go", spec: area.value, plan_first: true, key: newKey() }, again); } }, subject.asked?.action === "go" ? "Plan…" : "Plan"))));
   }
   box.append(card("Buffers of this spec", "Newest first; each run builds a new one.", pagedTable("spec-buffers:" + subject.key, { source: pageOf("/buffers", "buffers", () => ({ spec: subject.number })), search: false, empty: "No buffer yet.", cols: [
     { key: "buffer", label: "buffer", cell: b => bufferLink(b.id) },
@@ -2101,18 +2109,21 @@ async function viewSubject(kind, key, refresh) {
   delete root.dataset.dirty;
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   shownSubject = { kind, key, number: shownSubject && shownSubject.kind === kind && shownSubject.key === key ? shownSubject.number : null };
+  const turn = ++subjectTurn;
   const [subject, detail] = await Promise.all([load(`/subjects/${kind}/${encodeURIComponent(key)}`, true), kind === "dataset" ? load(`/catalog/datasets/${encodeURIComponent(key)}`, true) : null]);
-  if (location.hash !== hash) return;  // the reader moved on while this loaded
+  if (location.hash !== hash || turn !== subjectTurn) return;  // the reader moved on, or a later load started, while this loaded
   const about = detail ? datasetCards(detail) : [];
+  const again = !!detail && detail.row.state !== "unprepared";  // Prepare, or Prepare again: the same word before and after the click
   if (!subject) {  // nothing was ever asked of it on this page: the first Prepare creates it
-    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again: !!detail && detail.row.state !== "unprepared" };
+    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again };
     const missing = kind === "dataset" ? (detail ? null : "No dataset with this id in the newest catalog or the registry.") : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
     root.replaceChildren(el("h2", {}, key), el("div", { class: "facts" }, statePill(detail ? detail.row.state : "not started")), actionBar(fresh), missing ? el("div", { class: "empty" }, missing) : "", ...about);
     return;
   }
   shownSubject.number = subject.number;
+  subject.again = again;
   const [timeline, run, extras] = await Promise.all([load(`/timeline/${kind}/${subject.number}`), api(`/run/${kind}/${subject.number}`).catch(() => null), kind === "buffer" ? specControls(subject) : null]);
-  if (location.hash !== hash) return;
+  if (location.hash !== hash || turn !== subjectTurn) return;
   const entries = timeline?.entries || [];
   const parts = [el("h2", {}, key), subjectFacts(subject, run, entries)];
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
@@ -2162,7 +2173,7 @@ function viewNeeds(arg, refresh) {
         { key: "updated", label: "since", cell: x => when(x.updated) },
         { label: "answer", wrap: true, cell: x => el("div", {}, actionBar(x, again, x.kind === "buffer" ? ["go", "revoke"] : []),
           ...(x.drops || []).map(record => el("div", { class: "notice" }, el("b", {}, record), " waits for its files in its incoming/ folder. ",
-            el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(x, { action: "dropped", record, key: newKey() }, again); } }, "Files are in place")))) },
+            el("button", { type: "button", class: "btn", disabled: !!x.asked, onclick: e => { e.target.disabled = true; sendAction(x, { action: "dropped", record, key: newKey() }, again); } }, "Files are in place")))) },
       ] }));
 }
 async function checkHealth() {  // so that "working" is true: say when nothing can start, or nothing is being worked on
@@ -2174,7 +2185,7 @@ async function checkHealth() {  // so that "working" is true: say when nothing c
 function followStream() {  // told what changed, the page refetches it; a lost stream reconnects by itself
   const stream = new EventSource("/stream");
   let timer = 0;
-  const refresh = () => { if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, "stream"); else if (shownView === "needs") viewNeeds("", "stream"); };
+  const refresh = refreshShown;
   stream.onopen = () => { checkHealth(); refresh(); };
   stream.onmessage = e => {
     let change; try { change = JSON.parse(e.data); } catch { return; }

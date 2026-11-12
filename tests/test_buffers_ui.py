@@ -207,3 +207,11 @@ def test_a_buffer_is_always_planned_first() -> None:
     assert "Show me the plan first" not in PAGE and "first.checked" not in PAGE
     assert PAGE.count("plan_first: true") == 2  # New buffer, and a spec's own page
     assert 'subject.stage === "plan-review" ? "Run"' in PAGE
+
+
+def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
+    """A click is not shown as the old stage's buttons again: while the subject says an action is `asked`, every
+    button that would send an action is disabled, and a reload that started earlier never paints over a later one."""
+    assert PAGE.count("disabled: !!subject.asked") == 4 and "disabled: !!x.asked" in PAGE
+    assert "waiting for its workflow to answer" in PAGE
+    assert "turn !== subjectTurn" in PAGE

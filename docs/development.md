@@ -336,6 +336,14 @@ does exactly that. A first `go` on a record of the synced catalog creates its su
 issues no id twice. A worker may send an action with the token and name its `actor` and the `root` the round is
 charged to.
 
+**Between a click and the workflow's answer.** A sent action changes no stage: its workflow does, a moment later.
+Until then a subject's view carries `asked` (`{id, action, at, wait_s}`): the action that was sent and that the
+workflow has not answered. Any stage or entry the workflow writes, a refusal, or `ASKED_WAIT_S` (60 s, so a worker
+that is away cannot hold the buttons) ends it; a cancel or a stop the service settles itself is never asked. The
+page disables every action button of a subject that has `asked` and marks the one that was pressed, so the old
+stage's buttons are never offered as if nothing had been clicked. It is kept in memory (`BufferService._asked`),
+and the stage table is not bent: `actions` still lists what the stage accepts.
+
 A round started by an action reads the registry, not the issue: `admit` takes the record from the subject and the
 root from the action, `read_feedback` returns the reject's note, `refuse_label` marks the action `refused`
 (`PUT /actions/<id>`) with the reason. An event id the registry does not know is a GitHub label event, handled as

@@ -88,6 +88,9 @@ DROP_QUIET_S = 60  # `dropped` is refused while a file under incoming/ changed t
 # a key sent again this soon is the same click again (a retry after a lost answer) and is not checked a second
 # time; later it is a new decision about an old notice, and the stage table applies to it like to any click
 RETRY_WINDOW_S = 120
+# How long a sent action counts as asked while its workflow has written nothing: the page offers no button for that
+# long, then the stage's own again (a worker that is away must not hold a subject's buttons for ever).
+ASKED_WAIT_S = 60
 
 SERVING = ("approved", "ready", "idle")  # latest events under which consumers draw
 UNAPPROVED = ("created", "planned", "sourcing", "staged")  # a round not yet approved: only picks the 409 message
@@ -520,6 +523,10 @@ class BufferService:
         self.meta = meta  # what the page needs from mia.yaml (page_meta); None answers nulls
         self.ui_dir = ui_dir  # the page's files; None serves no page
         self.changes = Changes()  # every write to a subject is announced here; `GET /stream` follows it
+        # (kind, number) -> (the action sent to its workflow, when): there until the workflow writes anything.
+        # ponytail: in memory, so a restart forgets it and the old stage's buttons are back for the rest of the
+        # minute, as they were before this existed; a column on `actions` if that ever matters.
+        self._asked: dict[tuple[str, int], tuple[dict, float]] = {}
         self._empty: dict[str, deque[float]] = {}  # per buffer, the times of the last hour's 204s
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
@@ -830,11 +837,17 @@ class BufferService:
 
     # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
 
-    @staticmethod
-    def _subject_view(row: dict) -> dict:
-        """The row plus its status word and the actions its stage accepts (sorted, for a stable page)."""
+    def _subject_view(self, row: dict) -> dict:
+        """The row plus its status word, the actions its stage accepts (sorted, for a stable page) and `asked`:
+        the action that was sent to its workflow and that the workflow has not answered yet. Until it does the
+        stage is still the old one, and the page must not offer that stage's buttons as if nothing was clicked."""
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
-        return {**row, "status": status, "actions": sorted(actions)}
+        asked = None
+        if (held := self._asked.get((row["kind"], row["number"]))) is not None:
+            action, since = held
+            if (wait_s := ASKED_WAIT_S - (time.monotonic() - since)) > 0:
+                asked = {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
+        return {**row, "status": status, "actions": sorted(actions), "asked": asked}
 
     def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
         if kind not in SUBJECT_RULES:
@@ -942,6 +955,7 @@ class BufferService:
             kind, int(number), body=parsed.body, marker=parsed.marker, round_id=parsed.round, stage=parsed.stage
         )
         assert written is not None  # the subject was just found, and nothing deletes one
+        self._asked.pop((kind, int(number)), None)  # the workflow wrote: whatever was asked of it is answered
         self._changed(kind, int(number))
         return 200, {"subject": self._subject_view(written[0]), "entry": written[1]}, {}
 
@@ -1165,6 +1179,7 @@ class BufferService:
         signal = "plan" if payload.get("plan_first") else parsed.action
         event = LabelEvent(signal, str(action["id"]), action["actor"], action["at"])
         running = True
+        self._asked[(kind, number)] = (action, time.monotonic())  # before the send: the answer may beat this request
         try:
             if parsed.action == "cancel":  # only a running round can be cancelled: nothing is started for it
                 running = self.dispatcher.signal_running(kind, number, "cancel", event)
@@ -1177,6 +1192,7 @@ class BufferService:
             else:
                 self.dispatcher.send(kind, number, signal, event)
         except DispatchError as error:
+            self._asked.pop((kind, number), None)  # nothing was asked of any workflow
             failed = self.ledger.settle_action(action["id"], "failed", str(error))
             self.changes.announce(kind, number)
             return 503, {"error": f"not delivered: {error}", "action": failed}, {}
@@ -1195,6 +1211,8 @@ class BufferService:
             fenced = neutralize(spec).replace("```", "` ` `")
             text += f"\n\n```yaml\n{fenced}{'' if fenced.endswith(chr(10)) else chr(10)}```"
         sent = self.ledger.settle_action(action["id"], "sent", entry=(text, f"<!-- mia: action {action['id']} -->"))
+        if parsed.action == "stop" or not running:
+            self._asked.pop((kind, number), None)  # the service answers these itself, just below
         if parsed.action == "stop":
             self._stop(subject, action, running)
         elif not running:
@@ -1218,6 +1236,7 @@ class BufferService:
         action = self.ledger.settle_action(int(action_id), parsed.state, parsed.detail)
         if action is None:
             raise HttpError(404, f"no action {action_id}")
+        self._asked.pop((action["kind"], action["number"]), None)
         self.changes.announce(action["kind"], action["number"])
         return 200, action, {}
 
