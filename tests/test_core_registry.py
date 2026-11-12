@@ -172,3 +172,14 @@ def test_assessment_budget_and_volume_paths():
         ("GET", "/buffers/b/volumes"),
     ]
     assert json.loads(seen[5].content) == {"reservation_id": "job-1", "usd": 1.0, "fetched_bytes": 3, "staged_bytes": 0}
+
+
+def test_subject_calls():
+    seen = []
+    reg = Registry("http://svc", "tok", transport=transport(seen))
+    reg.adopt_subject("buffer", 8, "EM pool/2", stage="ready", data={"spec": "s"})
+    reg.subject("buffer", "EM pool/2")
+    assert (seen[0].method, seen[0].url.raw_path) == ("PUT", b"/subjects/buffer/8")
+    assert json.loads(seen[0].content) == {"key": "EM pool/2", "stage": "ready", "data": {"spec": "s"}}
+    assert (seen[1].method, seen[1].url.raw_path) == ("GET", b"/subjects/buffer/EM%20pool%2F2")
+    assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).subject("buffer", "x") is None

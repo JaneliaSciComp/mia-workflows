@@ -107,6 +107,16 @@ class Registry:
     def datasets(self, state: str | None = None) -> list[dict]:
         return self.request("GET", "/datasets", params={"state": state} if state else None)["datasets"]
 
+    # --- subjects: a dataset, a buffer spec or a preparation request (spec webapp-actions §4.1) ------
+
+    def adopt_subject(self, kind: str, number: int, key: str, *, stage: str = "new", data: dict | None = None) -> dict:
+        """Make an existing issue a subject (or refresh one no workflow has written a stage to); 409: key taken."""
+        body = {"key": key, "stage": stage, "data": data or {}}
+        return self.request("PUT", f"/subjects/{quote(kind, safe='')}/{number}", json=body)
+
+    def subject(self, kind: str, key: str) -> dict | None:
+        return self._lookup(f"/subjects/{quote(kind, safe='')}/{quote(key, safe='')}")
+
     def put_asset(self, kind: str, key: str, data: dict) -> dict:
         return self.request("PUT", f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}", json=data)
 
