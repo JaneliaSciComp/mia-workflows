@@ -347,6 +347,41 @@ itself. The mirror opens the issue of a dataset that has none.
 `GET /health` says whether Temporal answers and whether a worker polls each task queue; `GET /run/<kind>/<number>`
 is the Temporal status of a subject's latest run. The page opens `GET /stream` and refetches what an event names.
 
+## From labels to the page
+
+GitHub issues of the data and buffers repos are a read-only log (spec `docs/specs/2026-11-11-webapp-actions.md`).
+Nothing polls them: labelling, commenting on, closing or reopening one changes nothing. Sections of this guide
+written before that change still name the labels; each is now the action of the same name on the page.
+
+| was | is |
+|---|---|
+| `data:go`, `data:approve`, `data:reject` (+ comments), `data:revoke` | *Prepare* / *Run again*, *Approve*, *Reject* with the feedback box, *Revoke* on `#datasets/<record>` |
+| a buffer issue with a YAML block, `buffer:go` / `buffer:plan` | *Create buffer* on the Datasets view; *Run*, with *Show me the plan first* |
+| `buffer:approve`, `buffer:keep`, `buffer:retire`, `buffer:revoke` + `/revoke <record>` lines | the buttons on `#specs/<name>`; *Revoke the ticked* |
+| files in `incoming/` noticed by the poller | *Files are in place* on the spec's page |
+| closing a buffer or request issue | *Cancel the round*; *Force stop* when a run does not answer |
+| a `prep:go` issue | *Prepare these datasets* on the Datasets view; `#requests/<key>` |
+| nothing | *Needs you*: everything that waits on a person |
+
+Gone: mia-buffers' poller (`MiaBufferPoll`, `mia_buffers/poll.py`) and its schedule, label delivery in mia-data's
+poller (it still watches snippet PRs, the one GitHub poll left), `mia-data seed`, `github.trusted_bots` of
+mia-data, the root marker, the keeper's over-quota comment (the Cache view shows the keeper's report), and the
+human labels in `init-labels` (it creates stage labels only: they are output the mirror sets).
+
+**Cutover, by the operator.**
+
+1. Deploy buffer-api, then `mia exec mia-buffers adopt-issues --dry-run`, read the report, run it for real.
+2. Restart both workers. `mia exec mia-buffers schedule apply` deletes the old `mia-buffers-poll` schedule
+   (its workflow type is no longer registered) and keeps the keeper's.
+3. A human label still sitting on an issue does nothing: click the action on the page instead. Delete the human
+   labels (`data:go`, `data:approve`, `data:reject`, `data:revoke`, `buffer:go`, `buffer:plan`,
+   `buffer:approve`, `buffer:keep`, `buffer:retire`, `buffer:revoke`, `prep:go`) from both repos by hand.
+4. **Second deploy, later.** A round that a label started before the cutover can still reach an activity that
+   needs its issue (its event id is not an action's). The branches that serve it are marked
+   `ponytail: ... a label's round` in `mia_data/activities.py` and `mia_buffers/activities.py`; delete them, and
+   the no-`service` path of mia-data's `_post`, once no such round is running. The list is in
+   `docs/plans/2026-11-11-webapp-actions-e-github-input-removed.md`.
+
 **Buffer specs and preparation requests from the page.** `POST /specs` with `{spec}` saves a buffer spec under
 its `name` (a name that exists is an edit of that subject, never a second one); with `action: go` it also runs
 it, and `plan_first: true` makes it a round that waits at the plan (the workflow's `plan` signal). The go's
@@ -629,10 +664,11 @@ older buffer fixtures are untouched.
 
 ## The page (milestone F)
 
-buffer-api serves one read-only page at `/` on `service.url` (static files under `/ui/`). It holds no token: it
-fetches only read routes (and `POST /plan`, which carries the spec text and writes nothing), and every action that
-needs an identity is a GitHub link. `tests/test_buffers_ui.py` fails if the page requests a route that does not
-exist or is a worker route, uses an `Authorization` header, or calls a host other than github.com and Google Fonts.
+buffer-api serves one page at `/` on `service.url` (static files under `/ui/`). It holds no token: it fetches
+read routes (and `POST /plan`, which carries the spec text and writes nothing), and its buttons call the action
+routes, which take no token (see "Actions" above). `tests/test_buffers_ui.py` fails if the page requests a route
+that does not exist or is a worker route, uses an `Authorization` header, or calls a host other than github.com
+and Google Fonts.
 
 - **Datasets** reads `/meta`, `/catalogs`, `/records?ref=`, `/datasets`, `/assets/raw|staged` and runs the controls'
   spec through `POST /plan` (debounced 300 ms): fit funnel, charts, records table.
@@ -738,8 +774,8 @@ itself added `data:go` on a dataset issue and sat in `waiting-dataset` until the
 `workflow.deprecate_patch`, so a history that carries it still replays; no run from before E is live.
 
 **Operator setup.** the `mia-buffers` block names mia-data's issue repo as `github.datasets_repo`. mia-data's own
-`mia-data` block lists the buffer worker's App slug in `github.trusted_bots` (`[mia-autodev]`; the `[bot]` login suffix is added by the loader; both deployments
-run as the same GitHub App, so it is mia-data's own login) so its poller accepts a `data:go` the buffer adds. mia-data
+`mia-data` block needs nothing for it: a buffer or a request starts a dataset by sending a `go` to buffer-api
+with the worker token (`github.trusted_bots` is gone with the label it guarded). mia-data
 no longer needs the catalog's downloads state: a record that is on the catalog's `main` is admitted with
 `record_commit` = main's head when no downloads entry exists, and its jobs fetch through the harness cache as before.
 

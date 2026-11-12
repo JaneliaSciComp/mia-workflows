@@ -1,5 +1,10 @@
 # The mia-data workflow
 
+> **Since the webapp-actions change (2026-11):** datasets are started and steered from the buffers page, and
+> the data repo's issues are a read-only log the system writes. Where this document says a `data:*` label is
+> added by a person, read the button of the same name on the dataset's page; `mia-data seed` and
+> `github.trusted_bots` are gone. See "From labels to the page" in [`development.md`](development.md).
+
 How a dataset in the MIA catalog becomes a set of verified, published image crops, and which component does
 each step. The authoritative design is [`docs/mia-crops-spec.md`](mia-crops-spec.md); the setup
 checklist is the mia-data section of [`docs/autodev-runbook.md`](autodev-runbook.md).

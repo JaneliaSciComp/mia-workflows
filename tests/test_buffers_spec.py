@@ -132,7 +132,7 @@ def test_prep_spec_refused(body, needle):
 
 def test_buffer_spec_refuses_a_prep_request_by_name():
     data = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "c" * 40}, "records": ["a"]}
-    with pytest.raises(SpecError, match="prep:go"):
+    with pytest.raises(SpecError, match="file it with Prepare"):
         load_spec_text(yaml.safe_dump(data))
 
 

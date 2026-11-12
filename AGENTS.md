@@ -4,7 +4,7 @@ Four Python packages: `mia_core/` (what every package shares: the `mia.yaml` loa
 untrusted-output helpers), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → published crops),
 both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and `mia_buffers/` (training
 buffers: the `MiaBuffer` and `MiaPrep` workflows, the planner, the cache keeper, the buffer-api service with its ledger,
-registry and read-only page, and the `BufferDataset` client). `mia_data` imports from `autodev`, `mia_buffers` from
+registry and page, and the `BufferDataset` client). `mia_data` imports from `autodev`, `mia_buffers` from
 both, never the reverse; every package may import `mia_core`, which imports none of them. Full guide:
 [`docs/development.md`](docs/development.md); what each part is for: the [README](README.md).
 
@@ -45,8 +45,12 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
-  (`Activities._post`); the `MiaMirror` workflow copies them to GitHub, and nothing reads a data or buffers
-  issue back as input.
+  (`Activities._post`); the `MiaMirror` workflow copies them to GitHub.
+- **Nothing reads a data or buffers issue.** No label, comment, body, close or reopen is input: nothing polls
+  those repos, and a new feature gets an action route and a button, never a label. The exceptions are the mirror
+  (it looks for its own issue and comments), `adopt-issues`, and the branches marked `ponytail: ... a label's
+  round`, which only serve rounds that a label started before the cutover and are deleted with them
+  (`docs/plans/2026-11-11-webapp-actions-e-github-input-removed.md`). autodev and the snippets repo stay on GitHub.
 - **One writer per raw cache.** No job writes a record's raw cache unless its worker holds
   `<local_root>/locks/raw/<record>` (`mia_core.locks`; TTL 900 s, heartbeat with every `await_job` poll). A wait
   whose heartbeat finds the lock gone kills its job (`csub kill`) and fails the round; a stale lease is never

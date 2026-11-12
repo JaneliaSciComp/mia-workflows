@@ -174,8 +174,8 @@ names what is missing); P4 see the plan.
    `mia ps`, `mia logs mia-data [worker|broker]` (`-n N`, `-f`), `mia attach mia-data`, `mia down mia-data`,
    `mia restart mia-data` (needed after a config change; wait for running rounds to finish first). `mia down`
    with no service stops everything, Temporal last; naming a service never touches Temporal.
-4. `pixi run mia exec mia-data init-labels` creates the `data:*` labels; `pixi run mia exec mia-data seed` seeds
-   dataset issues from the catalog.
+4. `pixi run mia exec mia-data init-labels` creates the `data:*` stage labels. Datasets are started from the
+   buffers page (*Prepare*); an issue appears in the data repo the first time its dataset has something to say.
 5. `pixi run mia exec mia-data test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.
 6. Labels on a dataset issue: `data:go` starts a run; `data:approve` publishes the crops under review (and merges

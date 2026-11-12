@@ -1,4 +1,4 @@
-"""The `mia-data` command line: health checks, seeding issues, labels, the worker, the poll schedule, a
+"""The `mia-data` command line: health checks, labels, the worker, the poll schedule, a
 synchronous crop test for snippet PRs and storage maintenance (deployments start and stop with
 `pixi run mia`). Heavy imports happen inside the commands that need them.
 """
@@ -29,7 +29,7 @@ from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from autodev.github import GitHub
 from mia_core.fs import require_local_dir, require_secret_file
 
-from .config import EXTRA_LABELS, HUMAN_LABELS, STAGES, load_config
+from .config import EXTRA_LABELS, STAGES, load_config
 
 if TYPE_CHECKING:
     from .activities import Activities
@@ -232,22 +232,10 @@ async def cmd_reindex(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-async def cmd_seed(cfg: Config, args: argparse.Namespace) -> int:
-    from .seed import seed
-
-    gh_data, gh_catalog = _gh(cfg, cfg.github.data_repo), _gh(cfg, cfg.github.catalog_repo)
-    try:
-        created = await seed(cfg, gh_data, gh_catalog, args.dry_run)
-    finally:
-        await gh_data.aclose()
-        await gh_catalog.aclose()
-    print(f"{'would create' if args.dry_run else 'created'} {len(created)} issue(s)")
-    return 0
-
-
 async def cmd_init_labels(cfg: Config, args: argparse.Namespace) -> int:
     gh = _gh(cfg, cfg.github.data_repo)
-    labels = {**{cfg.label(kind): spec for kind, spec in {**STAGES, **HUMAN_LABELS}.items()}, **EXTRA_LABELS}
+    # stage labels only: they filter issue lists and the mirror sets them; nothing reads a label as a command
+    labels = {**{cfg.label(kind): spec for kind, spec in STAGES.items()}, **EXTRA_LABELS}
     try:
         for name, (color, description) in labels.items():
             if await gh.ensure_label(name, color, description):
@@ -543,10 +531,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("reindex", help="rebuild manifest.json with current WITHDRAWN marks").add_argument(
         "dataset", nargs="?"
     )
-    sub.add_parser("seed", help="create one issue per downloaded dataset").add_argument(
-        "--dry-run", action="store_true"
-    )
-    sub.add_parser("init-labels", help="create the stage, human and extra labels on the data repo")
+    sub.add_parser("init-labels", help="create the stage and extra labels on the data repo")
     test_pr = sub.add_parser("test-pr", help="run the test crops on a snippets PR head and post mia-data/crops")
     test_pr.add_argument("pr", type=int)
     test_pr.add_argument("--binding", required=True, help="binding YAML to test (e.g. the PR's examples/<record>.yaml)")
@@ -566,7 +551,6 @@ def main(argv: list[str] | None = None) -> int:
         "check": cmd_check,
         "crops-by-snippet": cmd_crops_by_snippet,
         "reindex": cmd_reindex,
-        "seed": cmd_seed,
         "init-labels": cmd_init_labels,
         "worker": cmd_worker,
         "test-pr": cmd_test_pr,

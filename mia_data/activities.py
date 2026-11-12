@@ -302,8 +302,8 @@ class Activities:
         except RegistryError as err:
             if err.status != 404:
                 raise
-            # ponytail: an issue opened on GitHub after `adopt-issues` ran is adopted here from its marker (spec
-            # §11 step 2); this read of the issue goes when labels stop starting rounds (slice E).
+            # ponytail: a label's round on an issue `adopt-issues` never saw: adopted here from its marker
+            # (spec webapp-actions §11 step 2; slice E, second deploy).
             match = MARKER_RE.match((await self.gh_data.get_issue(issue)).get("body") or "")
             if not match:
                 raise ValueError(f"issue #{issue} has no record marker: it is not a dataset") from None
@@ -444,7 +444,7 @@ class Activities:
             if not ID_RE.fullmatch(record_id):
                 raise ValueError(f"dataset #{issue} has no valid record id: {record_id!r}")
             root = action["payload"].get("root") or self.cfg.root_of(issue)
-        else:  # ponytail: a GitHub label event, until labels stop starting rounds (slice E)
+        else:  # ponytail: a label's round, deleted with them (slice E, second deploy)
             body = (await self.gh_data.get_issue(issue)).get("body") or ""
             match = MARKER_RE.match(body)
             if not (match and ID_RE.fullmatch(match.group(1))):
@@ -721,13 +721,15 @@ class Activities:
         actions = (*HUMAN_LABELS, "cancel")  # cancel is an action only: it never was a label
         if label not in {self.cfg.label(kind) for kind in actions} or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
+        said = f"Ignoring `{label}`: {self._clean(reason)}"
         if await self._action(issue, event_id) is not None:  # a click: the page shows the reason against it
             assert self.registry is not None  # _action found the action there
             await asyncio.to_thread(self.registry.refuse_action, event_id, self._clean(reason))
-        else:
+            said = f"Refused `{label.partition(':')[2]}`: {self._clean(reason)}"
+        else:  # ponytail: a label's round (slice E, second deploy)
             await self.gh_data.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
-        await self._post(issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
+        await self._post(issue, f"{said}\n\n{marker}", marker)
 
     # --- jobs --------------------------------------------------------------------------------
 
@@ -1217,7 +1219,7 @@ class Activities:
                     if action["payload"].get("note")
                 ]
                 return self._clean("\n\n".join(notes))[:16000] or "(no details)"
-        # ponytail: no action in the window: a label-era reject, whose feedback is the comments (until slice E)
+        # ponytail: a label's round: no action in the window, so the feedback is the comments (slice E, second deploy)
         comments, permission = [], {}
         for comment in await self.gh_data.issue_comments(issue):
             login, at = (comment.get("user") or {}).get("login"), comment.get("created_at") or ""

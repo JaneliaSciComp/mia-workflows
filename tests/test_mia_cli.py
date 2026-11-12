@@ -177,8 +177,9 @@ def test_help_lists_app_commands(capsys):
         main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("check", "seed", "worker", "test-pr", "schedule"):
+    for cmd in ("check", "worker", "test-pr", "schedule"):
         assert cmd in out
+    assert "seed" not in out  # an issue appears when its dataset has something to say: the mirror opens it
     assert "restart" not in out and "attach" not in out
 
 

@@ -102,9 +102,9 @@ def test_attach(stack, fake):  # noqa: F811
 
 
 def test_exec_runs_the_app_cli_with_its_config(stack, fake, tmp_path):  # noqa: F811
-    assert cli.main(["exec", "mia-data", "seed", "--dry-run"]) == 0
+    assert cli.main(["exec", "mia-data", "reindex", "rec-1"]) == 0
     argv, kw = fake.calls[-1]
-    assert argv == [str(services.PY), "-m", "mia_data.cli", "seed", "--dry-run"]
+    assert argv == [str(services.PY), "-m", "mia_data.cli", "reindex", "rec-1"]
     assert kw["env"]["MIA_DATA_CONFIG"] == f"{tmp_path}/mia_data.yaml"
 
 

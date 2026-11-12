@@ -13,7 +13,7 @@ import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -24,7 +24,7 @@ from mia_core.registry import Registry, RegistryError, read_token
 from mia_data.cli import _gh, _github_clients
 from mia_data.jobspec import harness_env, harness_pin
 
-from .config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES, load_config
+from .config import PREP_STAGES, STAGES, load_config
 from .jobspec import catalog_snapshot
 from .plan import build_plan, load_records, plan_hash
 from .spec import SpecError, load_spec, spec_hash
@@ -112,7 +112,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
 
     from .activities import Activities
     from .mirror import buffer_issue, prep_issue
-    from .workflows import MiaBuffer, MiaBufferPoll, MiaCacheKeeper, MiaPrep
+    from .workflows import MiaBuffer, MiaCacheKeeper, MiaPrep
 
     client = await _client(cfg)
     clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
@@ -132,7 +132,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
-        workflows=[MiaBuffer, MiaBufferPoll, MiaCacheKeeper, MiaPrep, MiaMirror],
+        workflows=[MiaBuffer, MiaCacheKeeper, MiaPrep, MiaMirror],
         activities=[*activities.all(), mirror.mirror],
         max_concurrent_activities=8,
     )
@@ -156,9 +156,22 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     return 0
 
 
+async def delete_schedule(client: Any, schedule_id: str) -> bool:
+    """Delete a Temporal schedule; False when there is none."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    try:
+        await client.get_schedule_handle(schedule_id).delete()
+    except RPCError as error:
+        if error.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return True
+
+
 async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> int:
-    """Create or update the Temporal schedules: MiaBufferPoll every poll interval, MiaCacheKeeper every
-    `keeper.minutes`."""
+    """Create or update the Temporal schedule of MiaCacheKeeper (every `keeper.minutes`), and delete the buffers
+    poller's: nothing polls GitHub for a command any more, and its workflow type is no longer registered."""
     from temporalio.client import (
         Schedule,
         ScheduleActionStartWorkflow,
@@ -168,20 +181,18 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> i
         ScheduleSpec,
     )
 
-    from .workflows import MiaBufferPoll, MiaCacheKeeper
+    from .workflows import MiaCacheKeeper
 
     client = await _client(cfg)
-    for name, run, minutes in (
-        ("poll", MiaBufferPoll.run, cfg.temporal.poll_minutes),
-        ("keeper", MiaCacheKeeper.run, cfg.keeper.minutes),
-    ):
-        schedule_id = f"{cfg.deployment}-{name}"
-        schedule = Schedule(
-            action=ScheduleActionStartWorkflow(run, id=f"{schedule_id}-run", task_queue=cfg.task_queue),
-            spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=minutes))]),
-            policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
-        )
-        print(f"{await apply_schedule(client, schedule_id, schedule)} schedule {schedule_id}")
+    if await delete_schedule(client, f"{cfg.deployment}-poll"):
+        print(f"deleted schedule {cfg.deployment}-poll")
+    schedule_id = f"{cfg.deployment}-keeper"
+    schedule = Schedule(
+        action=ScheduleActionStartWorkflow(MiaCacheKeeper.run, id=f"{schedule_id}-run", task_queue=cfg.task_queue),
+        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=cfg.keeper.minutes))]),
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+    )
+    print(f"{await apply_schedule(client, schedule_id, schedule)} schedule {schedule_id}")
     return 0
 
 
@@ -189,8 +200,9 @@ async def cmd_init_labels(cfg: Config, args: argparse.Namespace | None = None) -
     """Create the stage and human labels of buffers (`buffer:*`) and preparation requests (`prep:*`) on the issue
     repo."""
     gh = _gh(cfg, cfg.github.buffers_repo)
-    labels = {cfg.label(kind): value for kind, value in {**STAGES, **HUMAN_LABELS}.items()}
-    labels |= {cfg.prep_label(kind): value for kind, value in {**PREP_STAGES, **PREP_HUMAN_LABELS}.items()}
+    # stage labels only: they filter issue lists and the mirror sets them; nothing reads a label as a command
+    labels = {cfg.label(kind): value for kind, value in STAGES.items()}
+    labels |= {cfg.prep_label(kind): value for kind, value in PREP_STAGES.items()}
     try:
         for name, (color, description) in labels.items():
             if await gh.ensure_label(name, color, description):
@@ -449,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
     for name, help_text in (
         ("serve", "run buffer-api, the sampler and ledger for buffers (spec §5)"),
         ("worker", "run the Temporal workers (main and await queues)"),
-        ("schedule", "create or update the poll Schedule"),
+        ("schedule", "create or update the keeper Schedule (and delete the old poll Schedule)"),
         ("init-labels", "create the buffer:* labels on the issue repo"),
         (
             "check",

@@ -1003,7 +1003,7 @@ async def test_refusing_an_action_marks_it_refused_and_touches_no_label(tmp_path
     await t.a.refuse_label(1, "data:go", "busy <!-- x -->", str(go["id"]))
     refused = ledger.action(go["id"])
     assert (refused["state"], refused["detail"]) == ("refused", "busy &lt;!-- x -->") and t.data.removed == []
-    assert ledger.timeline("dataset", 1)[0]["body"].startswith("Ignoring `data:go`: busy")
+    assert ledger.timeline("dataset", 1)[0]["body"].startswith("Refused `go`: busy")  # the action, not a label
 
 
 async def test_the_snippet_issue_links_the_datasets_page_when_there_is_one(tmp_path):

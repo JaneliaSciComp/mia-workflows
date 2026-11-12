@@ -126,11 +126,12 @@ def test_init_labels_creates_buffer_labels(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_gh", lambda cfg_, repo, tokens=None: FakeGitHub(repo))
     assert main(["init-labels"]) == 0
     names = [name for _, name, _ in created]
-    assert len(names) == 21 and {"buffer:new", "buffer:ready", "buffer:go", "buffer:revoke"} <= set(names)
+    assert len(names) == 14 and {"buffer:new", "buffer:ready", "prep:requested"} <= set(names)
+    assert not {"buffer:go", "buffer:revoke", "prep:go"} & set(names)  # no label is a command any more
     assert {"buffer:cancelled", "prep:cancelled"} <= set(names)  # the stage a cancelled round ends in
-    assert {"buffer:keep", "buffer:retire", "buffer:plan", "buffer:staged"} <= set(names)
-    assert {"prep:go", "prep:requested", "prep:done", "prep:needs-human"} <= set(names) and "prep:new" not in names
-    assert all(repo == "o/buffers" for repo, _, _ in created) and "created buffer:go" in capsys.readouterr().out
+    assert not {"buffer:keep", "buffer:retire", "buffer:plan"} & set(names) and "buffer:staged" in names
+    assert {"prep:requested", "prep:done", "prep:needs-human"} <= set(names) and "prep:new" not in names
+    assert all(repo == "o/buffers" for repo, _, _ in created) and "created buffer:ready" in capsys.readouterr().out
 
 
 class _CheckGitHub:
@@ -270,9 +271,9 @@ def test_retire_prints_the_result_and_fails_on_a_registry_error(tmp_path, monkey
     assert len(events) == 1  # no event for a retire that failed
 
 
-def test_schedule_applies_the_poll_and_the_keeper(tmp_path, monkeypatch, capsys):
+def test_schedule_applies_the_keeper_and_deletes_the_old_poll_schedule(tmp_path, monkeypatch, capsys):
     _sync_cfg(tmp_path, monkeypatch)
-    applied = []
+    applied, deleted = [], []
 
     async def fake_client(cfg_):
         return None
@@ -281,15 +282,20 @@ def test_schedule_applies_the_poll_and_the_keeper(tmp_path, monkeypatch, capsys)
         applied.append((schedule_id, schedule.spec.intervals[0].every, schedule.policy.overlap.name))
         return "created"
 
+    async def fake_delete(client, schedule_id):
+        deleted.append(schedule_id)
+        return True
+
     monkeypatch.setattr(cli, "_client", fake_client)
     monkeypatch.setattr(cli, "apply_schedule", fake_apply)
+    monkeypatch.setattr(cli, "delete_schedule", fake_delete)
     assert cli.main(["schedule", "apply"]) == 0
     assert [(name, every.total_seconds(), overlap) for name, every, overlap in applied] == [
-        ("mia-buffers-poll", 120.0, "SKIP"),
         ("mia-buffers-keeper", 1800.0, "SKIP"),
     ]
+    assert deleted == ["mia-buffers-poll"]  # nothing polls GitHub for a command: the old schedule must not linger
     assert capsys.readouterr().out.splitlines() == [
-        "created schedule mia-buffers-poll",
+        "deleted schedule mia-buffers-poll",
         "created schedule mia-buffers-keeper",
     ]
 

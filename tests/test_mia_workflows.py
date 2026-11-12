@@ -834,7 +834,7 @@ async def test_stale_and_misplaced_rejects_are_refused(env):
         await until(lambda: len(m.of("refuse_label")) == 2)
         await idle(h, m, "review")
     assert [(a[0], a[2]) for a in m.of("refuse_label")] == [("data:reject", "12"), ("data:reject", "13")]
-    assert "data:review" in m.of("refuse_label")[0][1] and "older" in m.of("refuse_label")[1][1]
+    assert "at `review`" in m.of("refuse_label")[0][1] and "older" in m.of("refuse_label")[1][1]
     assert not m.of("read_feedback") and m.stages[-1] == "review"
 
 
@@ -1069,29 +1069,6 @@ def _poll(tmp_path, data, snip):
     return Activities(make_cfg(tmp_path), data, snip, None, None, bot="bot", client=fc), fc
 
 
-async def test_poll_starts_a_round_per_go_and_refuses_an_unprivileged_label(tmp_path):
-    at = "2026-10-12T10:00:00Z"
-    data = PollGH(
-        "o/data",
-        issues={1: issue(1, "data:go", "licence-excluded"), 2: issue(2, "data:go"), 3: issue(3, "data:approve")},
-        events={
-            (1, "data:go"): ("alice", "51", at),
-            (2, "data:go"): ("alice", "52", at),
-            (3, "data:approve"): ("mallory", "53", at),
-        },
-        perms={"alice": "write"},
-    )
-    a, fc = _poll(tmp_path, data, PollGH("o/snippets"))
-    await a.poll()
-    started_ids = sorted(kw["id"] for _, _, kw in fc.started)  # a stale `licence-excluded` label refuses nothing
-    assert started_ids == ["mia-data/o/data/issue-1", "mia-data/o/data/issue-2"]
-    (_, arg, kw) = next(s for s in fc.started if s[2]["id"].endswith("issue-2"))
-    assert (arg, kw["task_queue"], kw["start_signal"]) == (DatasetState(2), "mia-data", "go")
-    assert kw["start_signal_args"] == [LabelEvent("go", "52", "alice", at)]
-    assert sorted(data.removed) == [(1, "data:go"), (2, "data:go"), (3, "data:approve")]
-    assert "mallory" in data.comments[3][0]["body"] and 1 not in data.comments and 2 not in data.comments
-
-
 async def test_poll_sets_status_for_non_snippet_pr(tmp_path):
     h = ["1" * 40, "2" * 40, "3" * 40, "4" * 40]
     snip = PollGH(
@@ -1274,26 +1251,6 @@ async def test_replay_dataset_history_cancel(env):
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 
-async def test_poll_accepts_go_only_from_listed_bot(tmp_path):
-    at = "2026-10-12T10:00:00Z"
-    data = PollGH(
-        "o/data",
-        issues={1: issue(1, "data:go"), 2: issue(2, "data:go")},
-        events={(1, "data:go"): ("mia-bot[bot]", "61", at), (2, "data:go"): ("other[bot]", "62", at)},
-    )
-    fc = FakeClient()
-    cfg = make_cfg(tmp_path, github={"trusted_bots": ["mia-bot[bot]"]})
-    a = Activities(cfg, data, PollGH("o/snippets"), None, None, bot="bot", client=fc)
-    await a.poll()
-    ((wf, arg, kw),) = fc.started
-    assert (arg, kw["start_signal_args"]) == (DatasetState(1), [LabelEvent("go", "61", "mia-bot[bot]", at)])
-    assert sorted(data.removed) == [(1, "data:go"), (2, "data:go")]
-    assert 1 not in data.comments and "does not have write access" in data.comments[2][0]["body"]
-
-
-# --- milestone L: budgets and the pause ---------------------------------------------------------
-
-
 async def test_every_job_is_reserved_against_the_root_and_settled(env):
     m = Mocks()
     async with started(env, m) as h:
@@ -1378,7 +1335,7 @@ async def test_revoke_after_done_ends_in_needs_human_and_lists_the_blast_radius(
     assert m.of("revoke_dataset") == [("i7-e11", "alice", "77")]
     detail, extra = m.of("set_stage")[-1][1:3]
     assert (
-        detail == "revoked by alice: the dataset row is `revoked`, 1 artifact quarantined; a new `data:go` repairs it"
+        detail == "revoked by alice: the dataset row is `revoked`, 1 artifact quarantined; running it again repairs it"
     )
     assert "art1" in extra and "i3-e4" in extra
 
@@ -1401,7 +1358,7 @@ async def test_revoke_with_nothing_published_is_refused(env):
         await idle(h, m, "needs-human")
         await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
         await until(lambda: m.of("refuse_label"))
-    assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this issue has published no crops")
+    assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this dataset has published no crops")
     assert len(m.of("revoke_dataset")) == 1
 
 
@@ -1487,7 +1444,9 @@ async def test_a_refused_reservation_skips_the_shadow_judge_and_the_round_goes_o
         await idle(h, m, "review")
         await until(lambda: [a for a in m.of("comment") if a[1].startswith("judge crops")])
         (skipped,) = [a for a in m.of("comment") if a[1].startswith("judge crops")]
-        assert skipped[0] == "The crop judge was skipped: root budget: would exceed max_usd 1. The human label decides."
+        assert (
+            skipped[0] == "The crop judge was skipped: root budget: would exceed max_usd 1. A person's verdict decides."
+        )
         assert "prepare_judge" in m.names() and all(a[1] != "judge" for a in m.of("submit"))
         await approve_review(h, m)
         await idle(h, m, "done")

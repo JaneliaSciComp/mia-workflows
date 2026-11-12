@@ -53,18 +53,14 @@ with workflow.unsafe.imports_passed_through():
 GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:revoke"
 CANCEL = "data:cancel"  # an action only: there was never such a label
 NO_ROUND = "there is no round in progress to cancel"
-NOTHING_TO_REVOKE = "nothing to revoke: this issue has published no crops"
-REVOKED = (
-    "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; a new `data:go` repairs it"
-)
-BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
-NOT_REVIEW = (
-    "`data:approve` and `data:reject` count only while the issue is in `data:review`, for the round under review."
-)
+NOTHING_TO_REVOKE = "nothing to revoke: this dataset has published no crops"
+REVOKED = "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; running it again repairs it"
+BUSY = "busy, ignored: a round is already running. Cancel it first, or ask again once it has ended."
+NOT_REVIEW = "an approve or a reject counts only while the dataset is at `review`, for the set under review."
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
 NOT_AUTHORIZED = "approve recorded as {id}, but publication is not authorized: {why}"
-PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the label again"
+PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then run it again"
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
 
@@ -766,7 +762,10 @@ class MiaDataDataset:
                 if limits.crop_judge != "shadow":
                     raise
                 await self._act(
-                    "comment", state.issue, f"The crop judge was skipped: {refused}. The human label decides.", marker
+                    "comment",
+                    state.issue,
+                    f"The crop judge was skipped: {refused}. A person's verdict decides.",
+                    marker,
                 )
                 return None
             if not job_succeeded(job):
@@ -787,7 +786,7 @@ class MiaDataDataset:
             await self._act(
                 "comment",
                 state.issue,
-                f"The crop judge did not run to the end: {error_message(error)}. The human label decides.",
+                f"The crop judge did not run to the end: {error_message(error)}. A person's verdict decides.",
                 marker,
             )
             return None
@@ -1189,7 +1188,7 @@ class MiaDataDataset:
 
 @workflow.defn(name="MiaDataPoll")
 class MiaDataPoll:
-    """Run on a schedule: turn new labels and PR changes into signals for the dataset workflows."""
+    """Run on a schedule: turn snippet PR changes into signals for the dataset workflows."""
 
     @workflow.run
     async def run(self) -> list[str]:

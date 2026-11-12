@@ -305,6 +305,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
   </nav>
   <!-- guide: the loop from spec to training, for the person training a model -->
   <article data-doc="guide">
+<div class="notice"><b>Labels are no longer commands.</b> Everything this guide calls a label you add is now a button on this page, and GitHub issues are a read-only log that the system writes: labelling, commenting on or closing an issue changes nothing. Where the text or a figure below still says a label, read it so: <code>buffer:go</code> is <i>Run</i> (Create buffer on the Datasets tab, or <i>Edit and run again</i> on the spec's page); <code>buffer:plan</code> is <i>Run</i> with <i>Show me the plan first</i> ticked; <code>buffer:approve</code>, <code>buffer:keep</code>, <code>buffer:retire</code> are <i>Approve</i>, <i>Keep</i>, <i>Retire</i> on the spec's page; <code>buffer:revoke</code> is <i>Revoke the ticked</i> there; <code>prep:go</code> is <i>Prepare these datasets</i> on the Datasets tab; <code>data:go</code>, <code>data:approve</code>, <code>data:reject</code>, <code>data:revoke</code> are <i>Prepare</i> or <i>Run again</i>, <i>Approve</i>, <i>Reject</i> (with your feedback in the box) and <i>Revoke</i> on the dataset's page. A round in progress takes only <i>Cancel the round</i>; cancel it before asking for anything else. <i>Needs you</i> lists everything that waits on a person.</div>
 <header>
   <div class="eyebrow">user guide · training on a buffer</div>
   <h1>Training on a MIA buffer</h1>
@@ -363,16 +364,16 @@ ready:
   min_fraction: 0.5                     <span class="c"># how much of each weighting group must be servable before the board says "ready"</span></pre>
 
 <h2>Step 2. Start the buffer</h2>
-<p><b>Open buffer issue</b> on the Datasets tab opens a prefilled issue in the buffers repository: the spec in a YAML block, with the catalog commit pinned. Creating the issue runs nothing.</p>
-<p>Adding the label <code>buffer:go</code> starts the buffer. The poller picks the label up within a couple of minutes and removes it once the signal is accepted; the first comment follows. From then on every stage change is a label the system sets and a comment that says what happened and what, if anything, it needs from a human.</p>
+<p><b>Create buffer</b> on the Datasets tab shows the spec as YAML, with the catalog commit pinned; edit it there if the controls do not offer what you need. <b>Run</b> saves the spec under its name and starts the buffer at once; tick <b>Show me the plan first</b> to stop after the plan, before any job runs.</p>
+<p>The page then shows the spec's own page: its stage, what it is waiting for, and a timeline of every step. Each stage change appears there as it happens, and a copy is written to an issue in the buffers repository, which is a log and takes no input.</p>
 <div class="tw"><table>
 <tr><th>label a human adds</th><th>what it does</th></tr>
 <tr><td><code>buffer:go</code></td><td>Plan, download, stage, then stop once at <code>buffer:staged</code>. Also how a round is started over after editing the spec: the earlier round's buffer is retired.</td></tr>
 <tr><td><code>buffer:plan</code></td><td>Like <code>buffer:go</code>, but also stop after the plan, before any job runs.</td></tr>
 <tr><td><code>buffer:approve</code></td><td>Continue from whichever gate the issue is at: the plan, or the staged board.</td></tr>
 <tr><td><code>buffer:keep</code></td><td>An idle buffer stays; back to ready.</td></tr>
-<tr><td><code>buffer:retire</code></td><td>Release the buffer's staged data now. Closing the issue does the same.</td></tr>
-<tr><td><code>buffer:revoke</code></td><td>Revoke records of a serving buffer: write <code>/revoke &lt;record&gt;</code> lines in a comment, then add the label. Their volumes leave the buffer and their artifacts are quarantined; the buffer serves on at its floor or asks for a human.</td></tr>
+<tr><td><code>buffer:retire</code></td><td>Release the buffer's staged data now (<i>Retire</i> on the spec's page).</td></tr>
+<tr><td><code>buffer:revoke</code></td><td>Revoke records of a serving buffer: tick them on the spec's page and press <i>Revoke the ticked</i>. Their volumes leave the buffer and their artifacts are quarantined; the buffer serves on at its floor or asks for a human.</td></tr>
 </table></div>
 <div class="tw"><table>
 <tr><th>the system sets</th><th>the buffer is</th></tr>
@@ -419,7 +420,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <ul>
   <li><b>Degraded.</b> When a group's servable share falls under the floor set at the approve (a pyramid was evicted or lost), the issue says so and the worker stages the missing datasets again from the cache.</li>
   <li><b>Idle.</b> No consumer for <code>idle.hours</code> (default 72) puts <code>buffer:idle</code> on the issue; <code>buffer:keep</code> returns it to ready. After <code>retire_after_days</code> (default 14) more days without a draw the keeper retires the buffer and its space is reclaimed.</li>
-  <li><b>Closed.</b> Closing the issue stops its workflow and retires its buffer; the label becomes <code>buffer:retired</code>. Reopening it and adding <code>buffer:go</code> runs the same spec again, reusing what is still in the cache.</li>
+  <li><b>Stopped.</b> <i>Cancel the round</i> ends a round in progress: its cluster jobs are killed and its buffer is retired. <i>Force stop</i> is for a run that does not answer a cancel: it terminates the workflow and retires the buffers, but does not kill a job already running. <i>Run</i> afterwards runs the spec again, reusing what is still in the cache. Closing the issue does nothing.</li>
 </ul>
 
 <h2>Symptoms and their causes</h2>
@@ -430,12 +431,12 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>approve refused: jobs still running</td><td>the round is between gates</td><td>wait for <code>buffer:staged</code></td></tr>
 <tr><td>no weighting group reached <code>ready.min_fraction</code></td><td>every dataset of every group failed or is still waiting</td><td>the board names the failures; edit the spec or request preparation, then <code>buffer:go</code></td></tr>
 <tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td><b>Request preparation</b> on the Datasets tab, then a new round later</td></tr>
-<tr><td><code>BufferNotApproved</code> (409 buffer not approved)</td><td>the round is staged but not approved</td><td>add <code>buffer:approve</code> on the issue</td></tr>
+<tr><td><code>BufferNotApproved</code> (409 buffer not approved)</td><td>the round is staged but not approved</td><td>press <i>Approve</i> on the spec's page (it is listed under <i>Needs you</i>)</td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer needs a human)</td><td>the buffer's latest event is <code>needs-human</code>: a degraded rebuild or a round that stopped</td><td>read the issue's last comment; the buffer serves again once the round writes <code>approved</code> or <code>ready</code></td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorized to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
 <tr><td>410 buffer retired</td><td>the buffer was retired: by a label, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
-<tr><td>the issue seems stuck for hours with no comment</td><td>the run may be frozen</td><td>close the issue, wait for its "issue closed" comment, reopen, <code>buffer:go</code></td></tr>
+<tr><td>the issue seems stuck for hours with no comment</td><td>the run may be frozen</td><td><i>Cancel the round</i> on the spec's page; if that gets no answer, <i>Force stop</i>, then <i>Run</i> again</td></tr>
 <tr><td><code>needs-human</code> whose comment starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then add the label again</td></tr>
 <tr><td><code>needs-human</code> whose comment starts "revoked by", or a dataset row <code>revoked</code></td><td>a human withdrew the dataset's crops (<code>data:revoke</code>): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <code>data:go</code> on the dataset issue; a publication that succeeds repairs the row</td></tr>
 </table></div>
@@ -1688,7 +1689,7 @@ async function viewBuffer(root, id, refresh) {
       n && meta.buffers_repo ? link(`https://github.com/${meta.buffers_repo}/issues/${n}`, `issue #${n}`) : null,
       ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),
     retired ? el("div", { class: "notice" }, `Retired ${ago(retired.at)}; the draws are archived at `, el("code", {}, archive || "none"), ".") : null,
-    status && evs[0]?.kind === "staged" ? el("div", { class: "notice" }, "Staged, waiting for ", el("code", {}, "buffer:approve"), " on the issue: the approve serves what the board shows as servable, partial or not; consumers are refused until then.") : null,
+    status && evs[0]?.kind === "staged" ? el("div", { class: "notice" }, "Staged, waiting for ", el("b", {}, "Approve"), " on its spec's page: the approve serves what the board shows as servable, partial or not; consumers are refused until then.") : null,
     !status && evs.length ? el("div", { class: "notice" }, "Not sourced yet: the buffer is registered when sourcing starts, at once for a ", el("code", {}, "buffer:go"), " round, after ", el("code", {}, "buffer:approve"), " for a ", el("code", {}, "buffer:plan"), " round. Until then it has only its events.") : null,
     !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
     el("section", { class: "grid2" },

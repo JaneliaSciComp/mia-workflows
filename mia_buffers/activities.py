@@ -83,7 +83,6 @@ from .models import (
     job_key,
 )
 from .plan import MANUAL_DROP_NOTE, UNREADABLE, Row, _group_key, build_plan, load_records, plan_hash
-from .poll import run_poll
 from .register import buffer_config, recipe_for, volume_bodies
 from .select import decide_all
 from .spec import SpecError, load_prep_text, load_spec
@@ -108,7 +107,6 @@ MANIFEST_SOURCE_MANUAL = "manual"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
 FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
 FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
-DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
 KEEPER = "keeper"  # the cache keeper's lock owner
 KEEPER_LOCK_TTL_S = 900
 KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, whatever step it is in
@@ -178,12 +176,10 @@ class Activities:
         self._gh_datasets = gh_datasets
         self.registry = Registry.from_config(cfg.service)  # synchronous: call it through asyncio.to_thread
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
-        self._dropped: dict[tuple[int, str], tuple] = {}  # poll: (issue, record) -> incoming/ listing last signalled
-        self._seen_listing: dict[tuple[int, str], tuple] = {}  # poll: the listing seen on the previous pass
 
     @property
     def gh_data(self) -> GitHub:
-        """mia-data's name for the issue repo client (mia_data.poll.deliver_label posts through it)."""
+        """mia-data's name for the issue repo client."""
         return self.gh_issues
 
     @property
@@ -241,7 +237,6 @@ class Activities:
             self.prep_status,
             self.set_prep_stage,
             self.comment_prep,
-            self.poll,
             self.keep,
             self.paused,
             self.reserve,
@@ -322,7 +317,7 @@ class Activities:
         for action in (found_subject or {}).get("actions", []):
             if action["action"] == "revoke" and action["at"] == until:
                 return [str(record) for record in action["payload"].get("records", [])]
-        # ponytail: a label's revoke names them in comments; this goes with the labels (slice E)
+        # ponytail: a label's round: its revoke names them in comments (slice E, second deploy)
         end = _parse_iso(until)
         if end is None:
             raise ValueError(f"buffer:revoke: the label's time {until!r} is not an ISO-8601 time")
@@ -452,7 +447,7 @@ class Activities:
             if not text:
                 raise ValueError(f"action {event_id} carries no {what}")
             return str(text)
-        # ponytail: the issue is read only for a label's round; this goes with the labels (slice E)
+        # ponytail: a label's round: the only read of the issue's body (slice E, second deploy)
         body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")  # GitHub saves CRLF
         fences = SPEC_FENCE.findall(body)
         if len(fences) != 1:
@@ -463,8 +458,8 @@ class Activities:
 
     async def _adopt(self, kind: str, issue: int) -> None:
         """Make an issue the registry has no subject for a subject, named as `adopt-issues` would name it."""
-        # ponytail: an issue opened on GitHub after `adopt-issues` ran is adopted by its first write (spec
-        # webapp-actions §11 step 2); this read of the issue goes when labels stop starting rounds (slice E).
+        # ponytail: a label's round on an issue `adopt-issues` never saw: adopted by its first write
+        # (spec webapp-actions §11 step 2; slice E, second deploy).
         from .adopt import buffer_subject, prep_subject
 
         found = await self.gh_issues.get_issue(issue)
@@ -893,10 +888,6 @@ class Activities:
         body = render_drop_comment(record, link, files, list(missing))
         await self._post("buffer", issue, f"{self._clean(body)}\n{marker}", marker, round_id=round_id)
 
-    @activity.defn(name="poll")
-    async def poll(self) -> list[str]:
-        return await run_poll(self)
-
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
@@ -907,12 +898,14 @@ class Activities:
         if label not in humans or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         kind = "prep" if label.startswith(self.cfg.prep_label("")) else "buffer"
+        said = f"Ignoring `{label}`: {self._clean(reason)}"
         if await self._action(kind, issue, event_id) is not None:  # a click: the page shows the reason against it
             await asyncio.to_thread(self.registry.refuse_action, event_id, self._clean(reason))
-        else:
+            said = f"Refused `{label.partition(':')[2]}`: {self._clean(reason)}"
+        else:  # ponytail: a label's round (slice E, second deploy)
             await self.gh_issues.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
-        await self._post(kind, issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
+        await self._post(kind, issue, f"{said}\n\n{marker}", marker)
 
     @activity.defn(name="kill_job")
     async def kill_job(self, job_id: str) -> None:
@@ -1763,8 +1756,8 @@ class Activities:
             report.evicted.append(f"{kind} {row['key']}")
         over_by = int(live_bytes(rows) - live_bytes(evicted) - limit)
         if over_by > 0 and not dry_run:
-            report.over_quota[kind] = over_by
-            await self._over_quota_comment(kind, over_by)
+            report.over_quota[kind] = over_by  # the Cache view shows it from the keeper's report
+            log.warning("keeper: %s", OVER_QUOTA.format(kind=kind, over_by=over_by))
 
     async def _keeper_remove(
         self, report: KeeperReport, kind: str, row: dict, roots: tuple[Path, ...], now: float
@@ -1786,22 +1779,6 @@ class Activities:
         await asyncio.to_thread(registry.put_asset, kind, key, {"state": "evicted", "evicted_at": now, "bytes": 0})
         log.info("keeper: evicted %s %s (%s bytes, last used %s)", kind, key, data.get("bytes"), data.get("last_used"))
         return True
-
-    async def _over_quota_comment(self, kind: str, over_by: int) -> None:
-        """Comment once on the newest open issue labelled `buffer:*`; with none open, only log."""
-        prefix = self.cfg.label("")
-        issues = [
-            issue
-            for issue in await self.gh_issues.list_issues(state="open")
-            if any(str((label or {}).get("name", "")).startswith(prefix) for label in issue.get("labels") or [])
-        ]
-        message = OVER_QUOTA.format(kind=kind, over_by=over_by)
-        if not issues:
-            log.warning("keeper: %s (no open buffer issue to tell)", message)
-            return
-        marker = self.cfg.marker(f"keeper over-quota {kind}")
-        newest = max(issues, key=lambda issue: issue["number"])
-        await self._comment_once(self.gh_issues, newest["number"], f"{message}\n\n{marker}", marker)
 
 
 def _parse_iso(text: str) -> datetime | None:

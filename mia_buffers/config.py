@@ -31,7 +31,7 @@ STAGES = {
     "needs-human": ("d93f0b", "mia-buffers: stopped, needs a human"),
     "cancelled": ("cccccc", "mia-buffers: the round was cancelled"),
 }
-HUMAN_LABELS = {  # set by humans; the poller delivers each as the workflow signal of the same name
+HUMAN_LABELS = {  # the actions a person takes, each the workflow signal of the same name; they were labels
     "go": (
         "0e8a16",
         "Plan and stage this buffer, then wait for buffer:approve (or run it again after editing the spec)",

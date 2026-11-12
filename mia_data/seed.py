@@ -1,42 +1,34 @@
-"""`mia-data seed`: create one issue in the data repo for every dataset the catalog has downloaded.
+"""How a dataset's GitHub issue reads, and the markers of the issues written before the page acted.
 
-The issue body starts with a hidden marker naming the record id, which is how every later step finds
-the record for an issue, and it carries the modality and whether labels ship so humans can pick
-datasets to `go`.
+The mirror opens a dataset's issue (`mia_data.mirror.dataset_issue`) with the body built here: it starts with a
+hidden marker naming the record id, so an issue opened just before a crash is found again, and carries the
+record's facts. The module keeps its name from `mia-data seed`, the command that once created these issues in
+bulk; nothing seeds issues now: one appears when its dataset has something to say.
 """
 
 from __future__ import annotations
 
-import logging
 import re
-from typing import TYPE_CHECKING
 
-from . import catalog
 from .status import safe_text
 
-if TYPE_CHECKING:
-    from autodev.github import GitHub
-
-    from .config import Config
-
-log = logging.getLogger(__name__)
 MARKER = "<!-- mia-data:record={} -->"
 MARKER_RE = re.compile(r"<!-- mia-data:record=(\S+) -->")  # matched only at the start of a body
-ROOT_MARKER = "<!-- mia-data:root={} -->"  # the root request a buffer- or prep-opened issue is charged to
+# ponytail: a label's round: the root marker a buffer or a request wrote on line 2 of the issue it opened
+# (slice E, second deploy); a round started by an action is charged to the root its action carries
 ROOT_RE = re.compile(r"<!-- mia-data:root=(\S+) -->")
 
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")
 
 
 def render_issue(
-    record: dict, entry: dict, repo: str = "", path: str = "", record_id: str | None = None, root: str = ""
+    record: dict, entry: dict, repo: str = "", path: str = "", record_id: str | None = None
 ) -> tuple[str, str, list[str]]:
     """Build (title, body, labels) for a dataset issue.
 
     `record` is the catalog's YAML record, `entry` its downloads-state entry (dataset_dir, record_commit,
     bytes_on_disk, downloaders) or just `{"record_commit": sha}` for a record nobody downloaded (a buffer asks
-    for it; its jobs fetch on demand), `repo`/`path` locate the record on GitHub for links; `root`, when given, is
-    the request the issue's rounds are charged to, written as the body's second-line marker."""
+    for it; its jobs fetch on demand), `repo`/`path` locate the record on GitHub for links."""
     record_id = record_id or record["id"]
     imaging, spdx = record.get("imaging") or {}, (record.get("license") or {}).get("spdx")
     arrays = (record.get("technical") or {}).get("arrays") or []
@@ -51,7 +43,6 @@ def render_issue(
     urls = data.get("download_url") or []
     lines = [
         MARKER.format(record_id),
-        *([ROOT_MARKER.format(root)] if root else []),
         "",
         f"- Record: [main]({base_url}/main/{path}), "
         f"[at `{entry['record_commit'][:12]}`]({base_url}/{entry['record_commit']}/{path})",
@@ -74,37 +65,3 @@ def render_issue(
     ]
     title = f"{record_id}: {safe_text(record.get('short_name') or record.get('title'))}"
     return title, "\n".join(lines) + "\n", labels
-
-
-async def seed(cfg: Config, gh_data: GitHub, gh_catalog: GitHub, dry_run: bool = False) -> list[str]:
-    """Create an issue in the data repo for each downloaded dataset that has none yet.
-
-    `gh_data` is the GitHub client for the data repo (where the issues go) and `gh_catalog` the one for the
-    catalog repo (where the records and download state are read). Returns the record ids created (or that
-    would be, with `dry_run`)."""
-    existing = {
-        match.group(1)
-        for issue in await gh_data.list_issues(state="all")
-        if (match := MARKER_RE.match(issue.get("body") or ""))
-    }
-    paths = await catalog.record_paths(gh_catalog)
-    created = []
-    for record_id, entry in sorted((await catalog.downloaded(gh_catalog)).items()):
-        if record_id in existing:
-            continue
-        if not ID_RE.fullmatch(record_id):
-            log.warning("seed: bad record id %r; skipping", record_id)
-            continue
-        if record_id not in paths:
-            log.warning("seed: %s is downloaded but not on main; skipping", record_id)
-            continue
-        record = await catalog.record(gh_catalog, paths[record_id], "main")
-        if record.get("id") not in (None, record_id):  # the file name is the trusted id; the field must agree
-            log.warning("seed: %s has id %r inside; skipping", record_id, record["id"])
-            continue
-        title, body, labels = render_issue(record, entry, gh_catalog.repo, paths[record_id], record_id)
-        print(f"{'would create' if dry_run else 'creating'} {title} {labels}", flush=True)
-        if not dry_run:
-            await gh_data.create_issue(title, body, labels)
-        created.append(record_id)
-    return created

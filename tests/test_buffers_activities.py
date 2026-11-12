@@ -264,7 +264,7 @@ async def test_comment_plan_posts_once(acts):
     )
 
 
-CALL_TO_ACTION = "approve with `buffer:approve` to serve it as it is, or edit the spec and add `buffer:go` again"
+CALL_TO_ACTION = "approve to serve it as it is, or edit the spec and run it again"
 
 
 def test_render_staged_lists_outcomes_groups_and_the_call_to_action():
@@ -1191,7 +1191,7 @@ async def test_keep_evicts_a_free_staged_asset_under_quota(acts, keeper_server, 
     assert (await acts.keep()).evicted == []  # under quota now
 
 
-async def test_keep_posts_once_when_held_set_is_over_quota(acts, keeper_server):
+async def test_keep_reports_a_held_set_over_quota_and_writes_nothing_to_github(acts, keeper_server, caplog):
     from mia_core.fs import dir_bytes
 
     registry = keeper_server
@@ -1204,11 +1204,12 @@ async def test_keep_posts_once_when_held_set_is_over_quota(acts, keeper_server):
     for _ in range(2):
         report = await acts.keep()
         assert report.errors == [] and report.evicted == [] and report.over_quota == {"staged": over_by}
-    assert held.is_dir() and fresh.is_dir() and 9 not in acts.gh.comments
-    [comment] = acts.gh.comments[7]
-    assert f"over quota by {over_by} bytes" in comment["body"] and "keeper over-quota staged" in comment["body"]
+    assert held.is_dir() and fresh.is_dir()
+    # the Cache view shows the keeper's report; no issue is commented on (spec webapp-actions §6)
+    assert acts.gh.comments == {} and f"over quota by {over_by} bytes" in caplog.text
+    assert acts.registry.request("GET", "/keeper")["over_quota"] == {"staged": over_by}
     dry = await acts.keep(dry_run=True)
-    assert dry.over_quota == {} and len(acts.gh.comments[7]) == 1
+    assert dry.over_quota == {}
 
 
 async def test_keep_resets_stale_builds_and_removes_old_building_dirs(acts, keeper_server):

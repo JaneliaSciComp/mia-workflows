@@ -25,13 +25,15 @@ known gaps: [`docs/autodev-runbook.md`](docs/autodev-runbook.md). Design rationa
 ## mia-data
 
 mia-data is a dataset → binding → test crops → human approval → production crops loop. Each dataset that
-[mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) has downloaded gets an issue in
-[mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data). On `data:go`, a Claude agent in a cluster
+[mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) has catalogued is started from the buffers
+page (*Prepare*); its issue in [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) is a
+read-only log the system writes. On *Prepare*, a Claude agent in a cluster
 sandbox matches the dataset to a reader snippet from [mia-snippets](https://github.com/JaneliaSciComp/mia-snippets)
 and writes a binding; plain harness jobs check it, cut the round's crops, verify them and show them in the issue.
-A human approves with `data:approve`, and those crops are published to shared storage and a `galleries` branch; or
-rejects with `data:reject` and comments, which go to the agent fixing the snippet (a new snippet's PR, which autodev
-writes, is merged only when its crops are approved). Every verdict is recorded as an assessment, and `data:revoke`
+A human approves on the dataset's page (*Approve*), and those crops are published to shared storage and a
+`galleries` branch; or rejects (*Reject*) with feedback, which goes to the agent fixing the snippet (a new
+snippet's PR, which autodev writes, is merged only when its crops are approved). Every verdict is recorded as an
+assessment, and *Revoke*
 withdraws a published dataset later: nothing is deleted, the buffers that drew from it are degraded. A **judge**
 (a second model, read-only, over the same gallery) can look at every set before the human does: in shadow mode its
 verdict is recorded beside the human's and decides nothing, and the buffers page's Decisions tab shows how often
@@ -42,23 +44,24 @@ step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/m
 ## mia-buffers
 
 mia-buffers is a buffer spec → plan → staged pyramids → served crops loop, with no agent in it. A spec (which
-datasets by catalog fields, patch size and pyramid levels, splits, weighting, how many samples per volume) is filed
-as an issue in [mia-buffers](https://github.com/JaneliaSciComp/mia-buffers). On `buffer:go` the worker plans it
+datasets by catalog fields, patch size and pyramid levels, splits, weighting, how many samples per volume) is
+created and run on the buffers page (*Create buffer*, *Run*); its issue in
+[mia-buffers](https://github.com/JaneliaSciComp/mia-buffers) is a read-only log. On *Run* the worker plans it
 against the catalog at a pinned commit and the registry's **prepared** datasets, then sources every dataset of the
 pool in parallel: the raw files are fetched into a shared raw cache (one writer per record), and a harness job
 stages one **sparse OME-Zarr 0.6 pyramid per volume**, holding only the chunks that cover the planned samples, with
 the derivation (source bytes, code commits, plan, voxel size, verification) recorded in the Zarr itself and
 checked against the 0.6 schemas before publication. Each volume is registered with buffer-api as it becomes
-servable; the round is staged before a human approves it (`buffer:approve`; `buffer:plan` adds a gate after the
-plan), and the buffer is `ready` once every weighting group reaches the spec's minimum. A staged artifact is
+servable; the round is staged before a human approves it (*Approve*; *Show me the plan first* adds a gate after
+the plan), and the buffer is `ready` once every weighting group reaches the spec's minimum. A staged artifact is
 addressed by its recipe, so a later buffer with the same binding, levels and plan reuses it instead of staging
-again. After that the buffer lives as long as the issue: idle when no consumer has drawn for a while,
-`buffer:keep` to hold it, `buffer:retire` to release what it references, `buffer:revoke` (with `/revoke <record>`
-lines) to withdraw single records; a keeper evicts unreferenced caches under the configured quotas and is the only
-code that deletes.
+again. After that the buffer lives until it is retired: idle when no consumer has drawn for a while, *Keep* to
+hold it, *Retire* to release what it references, *Revoke* to withdraw single records; a round in progress takes
+only *Cancel*. A keeper evicts unreferenced caches under the configured quotas and is the only code that deletes.
 
-A dataset that is not prepared is out of the pool. A `prep:go` request issue hands its records to mia-data
-(`data:go` on their dataset issues) and follows them through the registry until each is prepared, so buffering
+A dataset that is not prepared is out of the pool. A preparation request (*Prepare these datasets* on the page)
+hands its records to mia-data, each with a `go` sent through buffer-api and charged to the request, and follows
+them through the registry until each is prepared, so buffering
 never asks an agent anything. Design: the [training buffers](docs/specs/2026-10-21-training-buffers.md),
 [prep and buffering](docs/specs/2026-10-25-prep-and-buffering.md) and
 [sparse OME-Zarr 0.6 staging](docs/specs/2026-11-01-sparse-ome-zarr-0.6-staging.md) specs under `docs/specs/`.

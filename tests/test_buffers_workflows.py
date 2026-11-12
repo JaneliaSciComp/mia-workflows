@@ -6,22 +6,19 @@ import json
 import os
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError, WorkflowHistory
+from temporalio.client import WorkflowFailureError, WorkflowHistory
 from temporalio.exceptions import ApplicationError, CancelledError
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
-from test_buffers_config import make_cfg
 
 from mia_buffers import workflows
-from mia_buffers.activities import Activities
 from mia_buffers.models import (
     BindingInfo,
     BoardAssessed,
@@ -49,10 +46,8 @@ from mia_buffers.models import (
     fetch_job_key,
     job_key,
 )
-from mia_buffers.poll import run_poll
 from mia_buffers.workflows import MiaBuffer
 from mia_data.models import JobDone, LabelEvent, LockTaken, Reservation
-from mia_data.publish import reindex
 
 PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64, root="o/buffers#7")
 PLAN = PlanResult(
@@ -695,242 +690,6 @@ async def test_rollover_in_plan_review_then_approve(env, monkeypatch):
     assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"] and len(m.of("admit")) == 1
 
 
-# --- the poller -------------------------------------------------------------------------------
-
-
-class EntriesToIssue:
-    """A registry stand-in's timeline write, applied straight to the GitHub fake as the mirror would apply it:
-    the poller finds a closed issue by its stage label, so these tests need the label to follow the stage."""
-
-    def append_entry(self, kind, number, *, body="", marker="", round_id=None, stage=None):
-        issue, comments = self.gh.issues[number], self.gh.comments.setdefault(number, [])
-        if stage:
-            issue["labels"] = [{"name": f"{'prep' if kind == 'prep' else 'buffer'}:{stage}"}]
-        if body and not any(marker in comment["body"] for comment in comments):
-            comments.append({"body": body})
-
-
-class PollGH:
-    def __init__(self, issues, events=None, perms=None):
-        self.issues, self.events, self.perms = issues, events or {}, perms or {}
-        self.comments, self.removed, self.closed_at = {}, [], {}
-
-    def tokens(self):
-        return "tok"
-
-    async def list_issues(self, labels=None, state=None, **_):
-        return [
-            i
-            for i in self.issues.values()
-            if (not labels or labels in {x["name"] for x in i["labels"]})
-            and (state is None or i.get("state", "open") == state)
-        ]
-
-    async def add_labels(self, n, names):
-        self.issues[n]["labels"] += [{"name": x} for x in names]
-
-    async def label_event(self, n, label):
-        return self.events[(n, label)]
-
-    async def permission(self, login):
-        return self.perms.get(login, "none")
-
-    async def remove_label(self, n, name):
-        self.removed.append((n, name))
-        self.issues[n]["labels"] = [x for x in self.issues[n]["labels"] if x["name"] != name]
-
-    async def issue_comments(self, n):
-        return self.comments.get(n, [])
-
-    async def comment(self, n, body):
-        self.comments.setdefault(n, []).append({"body": body, "user": {"login": "bot"}, "html_url": "u"})
-        return self.comments[n][-1]
-
-    async def get_issue(self, n):
-        return self.issues[n]
-
-    async def last_closed_at(self, n):
-        return self.closed_at.get(n)
-
-
-class FakeClient:
-    def __init__(self, states, starts=None):
-        self.states, self.started, self.signals, self.terminated = states, [], [], []
-        self.starts = starts or {}  # workflow id -> start time of its running run
-        self.describe_run = lambda wid: f"run-{wid}"
-        self.statuses = {}  # workflow id -> status of its latest run, RUNNING when absent
-
-    async def start_workflow(self, wf, arg, **kw):
-        self.started.append((wf, arg, kw))
-
-    def get_workflow_handle(self, wid):
-        client = self
-
-        class Handle:
-            async def signal(self, name, arg=None, *, args=None):
-                client.signals.append((wid, name, tuple(args) if args is not None else arg))
-
-            async def query(self, name, result_type=None):
-                return client.states[wid]
-
-            async def terminate(self, reason=None):
-                if wid not in client.states:
-                    raise RPCError("workflow execution already completed", None, None)
-                client.terminated.append((wid, reason))
-
-            async def describe(self):
-                if wid not in client.states:
-                    raise RPCError("not found", RPCStatusCode.NOT_FOUND, b"")
-                return SimpleNamespace(
-                    start_time=client.starts.get(wid),
-                    status=client.statuses.get(wid, WorkflowExecutionStatus.RUNNING),
-                    run_id=client.describe_run(wid),
-                )
-
-        return Handle()
-
-
-def issue(n, *labels):
-    return {"number": n, "body": "", "labels": [{"name": x} for x in labels]}
-
-
-async def test_poll_delivers_labels_and_drops(tmp_path):
-    cfg = make_cfg(tmp_path)
-    at = "2026-10-24T10:00:00Z"
-    gh = PollGH(
-        issues={
-            1: issue(1, "buffer:new", "buffer:go"),
-            2: issue(2, "buffer:sourcing"),
-            3: issue(3, "buffer:ready"),
-            4: issue(4, "buffer:staged"),  # at the gate: a waiting dataset's drop is still delivered (spec §15)
-        },
-        events={(1, "buffer:go"): ("alice", "501", at)},
-        perms={"alice": "write"},
-    )
-    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
-    waiting.datasets = [
-        workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-drop"),
-        workflows.DatasetStatus("u937", "confocal", False, "servable"),
-    ]
-    ready = BufferState(
-        3, round_id="i3-e1", stage="ready", datasets=[workflows.DatasetStatus("x", "g", True, "waiting-drop")]
-    )
-    staged = BufferState(
-        4, round_id="i4-e2", stage="staged", datasets=[workflows.DatasetStatus("y", "g", True, "waiting-drop")]
-    )
-    client = FakeClient({cfg.workflow_id(2): waiting, cfg.workflow_id(3): ready, cfg.workflow_id(4): staged})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-    (cfg.paths.raw_root / "bcss" / "incoming").mkdir(parents=True)
-    (cfg.paths.raw_root / "bcss" / "incoming" / "a.zip").write_bytes(b"z")
-    (cfg.paths.raw_root / "x" / "incoming").mkdir(parents=True)  # empty: nothing to signal
-    (cfg.paths.raw_root / "y" / "incoming").mkdir(parents=True)
-    (cfg.paths.raw_root / "y" / "incoming" / "b.tif").write_bytes(b"t")
-    assert await run_poll(acts) == ["go #1"]  # the drop is not signalled on first sight (a copy may be running)
-    assert set(await run_poll(acts)) == {"dropped #2 bcss", "dropped #4 y"}
-    ((wf, state, kw),) = client.started
-    assert wf == "MiaBuffer" and state == BufferState(1) and kw["start_signal"] == "go"
-    assert kw["start_signal_args"] == [LabelEvent("go", "501", "alice", at)] and kw["id"] == cfg.workflow_id(1)
-    assert gh.removed == [(1, "buffer:go")]
-    assert set(client.signals) == {(cfg.workflow_id(2), "dropped", "bcss"), (cfg.workflow_id(4), "dropped", "y")}
-    assert await run_poll(acts) == []  # nothing new: the drop was signalled once
-    (cfg.paths.raw_root / "bcss" / "incoming" / "b.zip").write_bytes(b"z")
-    assert await run_poll(acts) == []  # a new file: seen, not yet stable
-    assert await run_poll(acts) == ["dropped #2 bcss"]  # once more
-
-
-async def test_poll_retires_a_closed_issue(tmp_path):
-    """Closing the issue is the retire: the workflow is terminated (frozen or not), the buffer released, the
-    label swapped, once; a closed issue with no workflow and no buffer just gets its label."""
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={2: issue(2, "buffer:sourcing"), 3: issue(3, "buffer:plan-review"), 4: issue(4, "buffer:ready")})
-    gh.issues[2]["state"] = gh.issues[3]["state"] = "closed"
-    states = {
-        cfg.workflow_id(n): BufferState(n, round_id=f"i{n}-e1", stage=s) for n, s in ((2, "sourcing"), (4, "ready"))
-    }
-    client = FakeClient(states)
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-
-    class Reg(EntriesToIssue):
-        retired, events = [], []
-
-        def buffers(self):
-            return [{"id": "i2-e9", "latest_event": {"kind": "approved"}}, {"id": "i4-e1", "latest_event": None}]
-
-        def retire(self, buffer):
-            self.retired.append(buffer)
-            return {"refs": 1, "draws": 0, "archive": None}
-
-        def event(self, buffer, kind, **kw):
-            self.events.append((buffer, kind))
-
-    acts.registry = Reg()
-    acts.registry.gh = gh
-    expect = {f"terminated {cfg.workflow_id(2)}", "retired i2-e9", "closed #2", "closed #3"}
-    assert set(await run_poll(acts)) == expect
-    assert client.terminated == [(cfg.workflow_id(2), "issue closed")]
-    assert acts.registry.retired == ["i2-e9"] and acts.registry.events == [("i2-e9", "retired")]
-    assert {x["name"] for x in gh.issues[2]["labels"]} == {"buffer:retired"}
-    assert {x["name"] for x in gh.issues[3]["labels"]} == {"buffer:retired"}
-    assert {x["name"] for x in gh.issues[4]["labels"]} == {"buffer:ready"}  # open: untouched
-    assert "workflow stopped; retired `i2-e9`" in gh.comments[2][0]["body"]
-    assert "no workflow running" in gh.comments[3][0]["body"]
-    assert await run_poll(acts) == [] and len(gh.comments[2]) == 1  # the label is gone: nothing to do again
-
-
-async def test_poll_retires_an_issue_closed_and_reopened_within_one_interval(tmp_path):
-    """A close the poller never saw (the issue was reopened before the next pass) still retires the run it was
-    aimed at: an open live issue whose latest close is newer than its running workflow's start is retired, once."""
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={5: issue(5, "buffer:plan-review"), 6: issue(6, "buffer:ready")})
-    gh.closed_at = {5: "2026-10-28T12:08:29Z", 6: "2026-10-27T09:00:00Z"}  # 6 was closed before its run began
-    states = {
-        cfg.workflow_id(n): BufferState(n, round_id=f"i{n}-e1", stage=s) for n, s in ((5, "plan-review"), (6, "ready"))
-    }
-    starts = {cfg.workflow_id(n): datetime(2026, 10, 27, 19, 52, tzinfo=UTC) for n in (5, 6)}
-    client = FakeClient(states, starts)
-    client.statuses[cfg.workflow_id(5)] = WorkflowExecutionStatus.TERMINATED  # a pass that stopped half-way
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-
-    class Reg(EntriesToIssue):
-        retired = []
-
-        def buffers(self):
-            return [
-                {"id": "i5-e1", "latest_event": {"kind": "planned"}},
-                {"id": "i6-e1", "latest_event": {"kind": "ready"}},
-            ]
-
-        def retire(self, buffer):
-            self.retired.append(buffer)
-            return {"refs": 0, "draws": 0, "archive": None}
-
-        def event(self, buffer, kind, **kw):
-            pass
-
-    acts.registry = Reg()
-    acts.registry.gh = gh
-    assert set(await run_poll(acts)) == {f"terminated {cfg.workflow_id(5)}", "retired i5-e1", "closed #5"}
-    assert client.terminated == [(cfg.workflow_id(5), "issue closed")] and acts.registry.retired == ["i5-e1"]
-    assert {x["name"] for x in gh.issues[5]["labels"]} == {"buffer:retired"}
-    assert {x["name"] for x in gh.issues[6]["labels"]} == {"buffer:ready"}  # closed before this run: untouched
-    assert "closed and reopened" in gh.comments[5][0]["body"]
-    assert await run_poll(acts) == []  # the label is gone: nothing to do again
-    # a later run of the same issue, closed again: said again (the once-guard is per run, not per issue)
-    gh.issues[5]["labels"], gh.issues[5]["state"] = [{"name": "buffer:sourcing"}], "closed"
-    client.starts[cfg.workflow_id(5)] = datetime(2026, 10, 29, tzinfo=UTC)
-    client.describe_run = lambda wid: f"run2-{wid}"
-    assert "closed #5" in await run_poll(acts) and len(gh.comments[5]) == 2
-
-
-async def test_poll_refuses_go_from_a_reader(tmp_path):
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={1: issue(1, "buffer:go")}, events={(1, "buffer:go"): ("eve", "7", "2026-10-24T10:00:00Z")})
-    client = FakeClient({})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-    assert await run_poll(acts) == [] and not client.started and gh.removed == [(1, "buffer:go")]
-    assert "does not have write access" in gh.comments[1][0]["body"]
-
-
 async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
     """read_binding found this binding's pyramid in the registry (an earlier round or buffer staged it): no
     workspace, no job; read_stage re-reads it and registration proceeds."""
@@ -953,7 +712,7 @@ async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
 TWO_GROUPS = PlanResult(
     True, [], [DatasetPlan("a", "TEM", 0.5, False), DatasetPlan("b", "SEM", 0.5, False)], 1, levels=[1], patch=64
 )
-NOT_GATE_TEXT = "`buffer:approve` counts only while the issue is in `buffer:plan-review` or `buffer:staged`"
+NOT_GATE_TEXT = "an approve counts only while the spec is at `plan-review` or `staged`"
 
 
 def staged_comments(m):
@@ -968,7 +727,7 @@ async def test_go_stages_then_waits_at_staged_and_approve_serves(env):
         await idle(h, m, "staged")  # opens as soon as nothing runs: u937 servable, bcss waiting for its drop
         staged = m.of("set_stage")[-1]
         assert m.stages == ["planning", "sourcing", "staged"]
-        assert "`u937` | servable" in staged[2] and "approve with `buffer:approve` to serve it as it is" in staged[1]
+        assert "`u937` | servable" in staged[2] and "approve to serve it as it is" in staged[1]
         await h.signal(MiaBuffer.dropped, "bcss")
         await until(lambda: any("`bcss` | servable" in c[0] for c in staged_comments(m)), m=m)  # the drop landed
         await idle(h, m, "staged")
@@ -1120,7 +879,7 @@ async def test_stale_approve_at_staged_is_refused(env):
         await h.signal(MiaBuffer.approve, ev("approve", "12", shift(staged_at, -60)))
         await until(lambda: m.of("refuse_label"), m=m)
         await asyncio.sleep(0.3)
-    assert "older than the staged comment" in " ".join(map(str, m.of("refuse_label")[-1]))
+    assert "older than the staged board" in " ".join(map(str, m.of("refuse_label")[-1]))
     assert m.stages[-1] == "staged"
 
 
@@ -1236,23 +995,6 @@ async def test_go_after_ready_with_a_straggler_starts_a_new_round(env):
     assert not m.of("verify_drop")  # the straggler was abandoned, not dropped
 
 
-async def test_poll_signals_only_a_stable_listing(tmp_path):
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
-    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
-    waiting.datasets = [workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-drop")]
-    client = FakeClient({cfg.workflow_id(2): waiting})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-    incoming = cfg.paths.raw_root / "bcss" / "incoming"
-    incoming.mkdir(parents=True)
-    (incoming / "a.zip").write_bytes(b"part")
-    assert await run_poll(acts) == []  # first sight: the file may still be copying
-    (incoming / "a.zip").write_bytes(b"part two")  # grew: still copying
-    assert await run_poll(acts) == []
-    assert await run_poll(acts) == ["dropped #2 bcss"]  # unchanged for a whole pass: stable
-    assert await run_poll(acts) == []
-
-
 # --- milestone 4: datasets without a binding -----------------------------------------------------
 
 
@@ -1271,46 +1013,6 @@ async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
     assert bcss.status == "dropped" and "after 6e-05 days" in bcss.reason and "waiting-drop" in bcss.reason
     assert m.of("comment_plan")[-1][1] == {"bcss": bcss.reason} and "needs-human" not in m.stages
     assert state.ready and dataset(state, "u937").status == "servable"
-
-
-async def test_poll_no_longer_watches_bindings(tmp_path):
-    """Milestone E: a buffer never waits on mia-data, so the poller sends no `dataset_update` for a pre-E round
-    still waiting: a published binding and an ineligible dataset issue both go unsignalled."""
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
-    datasets = PollGH(issues={5: issue(5, "data:ineligible", "licence-excluded")})
-    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
-    waiting.datasets = [
-        workflows.DatasetStatus("u937", "confocal", False, "waiting-dataset", issue=4, folder="lm-u937"),
-        workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-dataset", issue=5, folder="lm-bcss"),
-    ]
-    client = FakeClient({cfg.workflow_id(2): waiting})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [], gh_datasets=datasets)
-    (cfg.paths.storage_root / "lm-u937").mkdir(parents=True)
-    (cfg.paths.storage_root / "lm-u937" / "binding.yaml").write_text("record: u937\n")
-    reindex(cfg.paths.storage_root / "lm-u937", {})
-    assert await run_poll(acts) == [] and client.signals == []
-
-
-async def test_poll_starts_a_prep_workflow_on_prep_go(tmp_path):
-    cfg = make_cfg(tmp_path)
-    at = "2026-10-26T10:00:00Z"
-    gh = PollGH(
-        issues={8: issue(8, "prep:go"), 9: issue(9, "prep:go")},
-        events={(8, "prep:go"): ("alice", "71", at), (9, "prep:go"): ("eve", "72", at)},
-        perms={"alice": "write"},
-    )
-    client = FakeClient({})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-    assert await run_poll(acts) == ["prep:go #8"]
-    ((wf, state, kw),) = client.started  # eve has no write access: her label is removed, nothing starts
-    assert (
-        wf == "MiaPrep"
-        and state == PrepState(8)
-        and kw["id"] == cfg.prep_workflow_id(8) == ("mia-buffers/o/buffers/prep-8")
-    )
-    assert kw["start_signal"] == "go" and kw["start_signal_args"] == [LabelEvent("go", "71", "alice", at)]
-    assert gh.removed == [(8, "prep:go"), (9, "prep:go")] and "does not have write access" in gh.comments[9][0]["body"]
 
 
 async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
@@ -1772,8 +1474,8 @@ async def test_a_lifecycle_label_without_a_ready_buffer_is_refused(env):
         await until(lambda: len(m.of("refuse_label")) == 2, m=m)
         assert (await h.describe()).status.name == "RUNNING"
     assert m.of("refuse_label") == [
-        ("buffer:retire", "this issue has no ready or idle buffer", "21"),
-        ("buffer:keep", "this issue has no ready or idle buffer", "22"),
+        ("buffer:retire", "this spec has no ready or idle buffer", "21"),
+        ("buffer:keep", "this spec has no ready or idle buffer", "22"),
     ]
     assert not m.of("admit") and not m.of("retire_buffer")
 
@@ -2084,7 +1786,7 @@ async def test_a_lifecycle_label_while_sourcing_is_refused_at_once(env):
         m.gate.set()
         await ready(h, m)
     assert m.of("refuse_label") == [
-        ("buffer:keep", "1 datasets still sourcing; add `buffer:keep` again once they settle", "31")
+        ("buffer:keep", "1 datasets still sourcing; ask for `buffer:keep` again once they settle", "31")
     ]
 
 
@@ -2111,7 +1813,7 @@ async def test_replay_buffer_history_d_rebuild(env):
 
 PREP_HISTORY = HISTORY.with_name("prep_history.json")
 PREP_E_HISTORY = HISTORY.with_name("buffer_history_e.json")
-NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
+NOT_PREPARED = "not prepared: prepare it first (Prepare these datasets, on the page)"
 
 
 class PrepMocks:

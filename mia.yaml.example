@@ -181,8 +181,8 @@ services:
       base_branch: main
       protected_paths: [".github/"]
 
-  # mia-data: dataset issue to published crops. `data_repo` is its issue repo; `trusted_bots` are GitHub App slugs
-  # whose data:go counts without write access (the buffers worker, e.g. [mia-autodev]). `crops`: the round's set
+  # mia-data: dataset to published crops. `data_repo` receives one issue per dataset, a read-only log the system
+  # writes (datasets are started and steered from the buffers page). `crops`: the round's set
   # (`per_round`, reviewed and, approved, published), the hand-run `test-pr` command's `test_per_round`, and how
   # many crops per plane and per file. `gallery.branch` receives the crop galleries. `agent` is the match agent:
   # its walltime is limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not
@@ -192,7 +192,6 @@ services:
     temporal: {namespace: mia-data}
     github:
       data_repo: JaneliaSciComp/mia-workflow-data
-      trusted_bots: []
     crops:
       size: 256
       per_round: 16
@@ -207,8 +206,8 @@ services:
       path_prepend: []
     # evaluate: {enabled: false}
 
-  # mia-buffers: training buffers. `buffers_repo` holds one issue per buffer spec (humans add buffer:go and
-  # buffer:approve there); `datasets_repo` is mia-data's issue repo, where a dataset without a binding gets data:go.
+  # mia-buffers: training buffers. `buffers_repo` receives one issue per buffer spec and per preparation request,
+  # a read-only log (they are created and run on the page); `datasets_repo` is mia-data's issue repo.
   # `sourcing`: stage jobs (`parallel`) and fetch jobs (`parallel_fetch`) in flight per buffer, the tensorizer under
   # <harness.dir>/tensorizers/, and the frozen val and test list lengths.
   mia-buffers:

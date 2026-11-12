@@ -59,13 +59,13 @@ with workflow.unsafe.imports_passed_through():
     from .status import render_ready, render_staged
 
 GO, APPROVE = "buffer:go", "buffer:approve"
-BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
-NOT_REVIEW = "`buffer:approve` counts only while the issue is in `buffer:plan-review`, for the plan under review."
+BUSY = "busy, ignored: a round is already running. Cancel it first, or ask again once it has ended."
+NOT_REVIEW = "an approve counts only while the spec is at `plan-review`, for the plan under review."
 # the staged gate (spec §15)
-NOT_GATE = "`buffer:approve` counts only while the issue is in `buffer:plan-review` or `buffer:staged`."
-STAGED_NEXT = "approve with `buffer:approve` to serve it as it is, or edit the spec and add `buffer:go` again"
+NOT_GATE = "an approve counts only while the spec is at `plan-review` or `staged`."
+STAGED_NEXT = "approve to serve it as it is, or edit the spec and run it again"
 NOT_READY_YET = "the buffer is staged, not ready: `{label}` is refused until it serves"
-STALE_STAGED = "it is older than the staged comment; add it again to approve it"
+STALE_STAGED = "it is older than the staged board; approve again"
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 # dataset statuses that wait on a human, on mia-data or on quota: dropped at the timeout, abandoned by a new go
 WAITING = ("waiting-dataset", "waiting-drop", "blocked")
@@ -78,22 +78,21 @@ NO_ROUND = "there is no round in progress to cancel"
 # the stages a `cancel` ends a round at (mia_buffers.config.CANCELLABLE; a ready or idle buffer keeps serving)
 CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")
 RETIRED_WHILE = "abandoned: the buffer was retired"
-NO_BUFFER = "this issue has no ready or idle buffer"
-SOURCING = "{count} datasets still sourcing; add `{label}` again once they settle"
+NO_BUFFER = "this spec has no ready or idle buffer"
+SOURCING = "{count} datasets still sourcing; ask for `{label}` again once they settle"
 NOT_IDLE = "the buffer is ready, not idle"
 AUTO_APPROVE = "plan.auto_approve: sourcing starts without review"
 IDLE = (
-    "No consumer for {hours:g} hours: idle. `buffer:keep` returns it to ready; `buffer:retire` or {days:g} days of "
-    "idleness retires it."
+    "No consumer for {hours:g} hours: idle. Keep returns it to ready; Retire or {days:g} days of idleness retires it."
 )
 RETIRED = "Retired: refs released; draws archived to {path}"
 RAW_GONE = "pyramid missing and raw cache gone"
-NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
+NOT_PREPARED = "not prepared: prepare it first (Prepare these datasets, on the page)"
 PREP_GO = "prep:go"
 REFUSED_ARTIFACT = "staged artifact {artifact} is refused: {why}"
 REVOKE_LABEL = "buffer:revoke"
-NO_REVOKE_LINES = "name the records first: `/revoke <record>` lines in a comment of yours, then the label"
-PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then add the label again"
+NO_REVOKE_LINES = "name the records to revoke: tick them on the spec's page"
+PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then run it again"
 PREP_SETTLED = ("prepared", "needs-human")  # registry states a preparation request stops following (spec §12)
 # nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
 PREP_HUMAN = ("done-unpublished", "unknown")
@@ -496,7 +495,7 @@ class MiaBuffer:
             if event.kind == "plan":
                 await self._stage(
                     "plan-review",
-                    "approve the plan with `buffer:approve`, or edit the spec and add `buffer:plan` again",
+                    "approve the plan, or edit the spec and run it again",
                 )
                 await self._refuse_queued(approves=False)
                 return await self._from_review()
@@ -506,9 +505,7 @@ class MiaBuffer:
             await self._comment(AUTO_APPROVE, f"auto-approve {state.round_id}")
             await self._refuse_queued()  # gos were busy, and an approve has no plan under review
             return await self._serve()
-        await self._stage(
-            "plan-review", "approve the plan with `buffer:approve`, or edit the spec and add `buffer:go` again"
-        )
+        await self._stage("plan-review", "approve the plan, or edit the spec and run it again")
         await self._refuse_queued(approves=False)  # gos that came while planning; approves are judged below
         await self._from_review()
 
@@ -550,7 +547,7 @@ class MiaBuffer:
                     continue
                 if (approved_at := _parse_time(event.at)) and approved_at > planned_at:
                     return True
-                await self._refuse(APPROVE, "it is older than the plan under review; add it again to approve it", event)
+                await self._refuse(APPROVE, "it is older than the plan under review; approve again", event)
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
             if self.go_events:
                 return False
@@ -1828,24 +1825,10 @@ class MiaPrep:
         ]
         waiting = [f"`{record}` ({last.get(record, 'unprepared')})" for record in stuck if record not in state.settled]
         detail = "; ".join(
-            ([f"needs a human on its dataset issue: {', '.join(humans)}"] if humans else [])
+            ([f"needs a human on its dataset's page: {', '.join(humans)}"] if humans else [])
             + ([f"not prepared after {pins.timeout_days:g} days: {', '.join(waiting)}"] if waiting else [])
         )
         await self._stage("needs-human", detail)
-
-
-@workflow.defn(name="MiaBufferPoll")
-class MiaBufferPoll:
-    """Run on a schedule: turn new labels and dropped files into signals for the buffer workflows."""
-
-    @workflow.run
-    async def run(self) -> list[str]:
-        return await workflow.execute_activity(
-            "poll",
-            start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=RetryPolicy(maximum_attempts=1),
-            result_type=list[str],
-        )
 
 
 @workflow.defn(name="MiaCacheKeeper")

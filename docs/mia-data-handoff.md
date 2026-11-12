@@ -1,5 +1,10 @@
 # mia-data handoff: what was built on 2026-10-11/12 and what you need to do to try it
 
+> **Since the webapp-actions change (2026-11):** datasets are started and steered from the buffers page, and
+> the data repo's issues are a read-only log the system writes. Where this document says a `data:*` label is
+> added by a person, read the button of the same name on the dataset's page; `mia-data seed` and
+> `github.trusted_bots` are gone. See "From labels to the page" in [`development.md`](development.md).
+
 Branch `mia-crops-poc` in this repo (26 commits after `42c1c19`), and a new local repo at
 `<harness.dir>` (your mia-snippets checkout) (`main`, 24 commits, **not on GitHub**). Everything follows `docs/mia-crops-spec.md`
 (now v0.9) and `docs/plans/2026-10-11-mia-crops-poc.md`. Nothing was pushed, no GitHub repos were created, and
