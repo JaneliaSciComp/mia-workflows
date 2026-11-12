@@ -339,10 +339,20 @@ charged to.
 A round started by an action reads the registry, not the issue: `admit` takes the record from the subject and the
 root from the action, `read_feedback` returns the reject's note, `refuse_label` marks the action `refused`
 (`PUT /actions/<id>`) with the reason. An event id the registry does not know is a GitHub label event, handled as
-before. `MiaDataDataset` has a `cancel` signal: the round's task is cancelled where it waits, its cluster job is
-killed by id (`kill_job`), its reservation settled and its lock released, and the dataset ends in `cancelled`.
-If the registry says a round is in progress and Temporal has no run for it, the cancel route writes `cancelled`
-itself. The mirror opens the issue of a dataset that has none.
+before. `MiaDataDataset` has a `cancel` signal, and the dataset ends in `cancelled`. If the registry says a
+round is in progress and Temporal has no run for it, the cancel route writes `cancelled` itself. The mirror opens
+the issue of a dataset that has none.
+
+**How a cancel ends a round** (all three workflows; `_guard`, `_cancel_round`, `_act`). The round runs as a task
+beside the workflow's main coroutine. When a cancel arrives, the round starts no new activity: `_act` stops the
+task there. An activity already in flight is left to answer (up to `CANCEL_PATIENCE`), so a job it submitted, a
+lock it took or a reservation it opened is known to the code that undoes it. A task that is waiting (a job, a
+lock, quota, a drop, a verdict, a snippet PR) is cancelled at its wait. The job is killed first (`kill_job`),
+then its reservation is settled and its raw lock released: the one-writer rule holds until the job is dead. A
+job that cannot be killed ends the round in `needs-human` naming it, never in `cancelled`. A round that reached
+its end while the cancel was on its way keeps its stage and the cancel is refused. Clean-up activities pass
+`cleanup=True`; anything a best-effort `except ActivityError` wraps cannot swallow a cancel, because the cancel
+is raised as `asyncio.CancelledError`. A queued cancel is never rolled over (`_roll_due`).
 
 `GET /health` says whether Temporal answers and whether a worker polls each task queue; `GET /run/<kind>/<number>`
 is the Temporal status of a subject's latest run. The page opens `GET /stream` and refetches what an event names.
@@ -396,6 +406,8 @@ day that did not reach Temporal.
   `requested`): its dataset tasks are cancelled, every cluster job it waits on is killed by id, locks are
   released, reservations settled, the round's buffer is retired, and the stage is `cancelled`. A buffer that is
   `ready` or `idle` is being served: the route refuses the cancel, and the workflow refuses one that crossed.
+  A `key` sent again within two minutes of its click is the same action and is not checked twice; later, a
+  Retry of an undelivered action is checked against the stage table like a new click.
   Cancelling a request also cancels the dataset rounds it started (`prep_cancel`: the datasets whose latest go
   this request sent and that are still in a round), no others.
 - `stop` is the force stop for a run that does not answer a cancel: the route terminates the workflow (a
