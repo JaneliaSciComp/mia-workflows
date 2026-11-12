@@ -16,6 +16,7 @@ import re
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,11 +33,14 @@ from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import read_untrusted
 
-from .config import Config
+from mia_data import config as mia_data_config
+
+from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_spec_text, spec_text_hash
+from .stream import Changes
 from .sync import scan_assets, scan_storage
 
 RETRY_AFTER_S = 30
@@ -57,8 +61,13 @@ UI_TYPES = {
 }
 EMPTY_WINDOW_S = 3600  # the usage route's "last hour"
 JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "application/json"})
-# a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers
-Response = tuple[int, dict | bytes | None, dict[str, str]]
+# a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers;
+# an iterator of bytes is streamed chunk by chunk until its reader leaves (`GET /stream`)
+Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
+# kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
+SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
+NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
+ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 
 SERVING = ("approved", "ready", "idle")  # latest events under which consumers draw
 UNAPPROVED = ("created", "planned", "sourcing", "staged")  # a round not yet approved: only picks the 409 message
@@ -158,6 +167,14 @@ class SubjectBody(_Strict):
     kind: str
     ref: str
     source_digest: str = ""
+
+
+class AdoptBody(_Strict):
+    """An existing issue adopted as a subject: its key, the stage its label names, what its body carried."""
+
+    key: str
+    stage: str = "new"
+    data: dict = {}
 
 
 class AssessmentBody(_Strict):
@@ -267,6 +284,11 @@ ROUTES = [
     ("GET", re.compile(r"^/usage/([^/]+)$"), "usage", "read"),
     ("PUT", re.compile(r"^/keeper$"), "put_keeper", "worker"),
     ("GET", re.compile(r"^/keeper$"), "keeper", "read"),
+    ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)$"), "adopt_subject", "worker"),
+    ("GET", re.compile(r"^/subjects/([a-z]+)/(.+)$"), "get_subject", "read"),
+    ("GET", re.compile(r"^/needs$"), "needs", "read"),
+    ("GET", re.compile(r"^/lookup$"), "lookup", "read"),
+    ("GET", re.compile(r"^/stream$"), "stream", "read"),
 ]
 
 
@@ -296,6 +318,7 @@ class BufferService:
         self.archive_dir = archive_dir  # a retire writes the buffer's draws here; None keeps them (a dev service)
         self.meta = meta  # what the page needs from mia.yaml (page_meta); None answers nulls
         self.ui_dir = ui_dir  # the page's files; None serves no page
+        self.changes = Changes()  # every write to a subject is announced here; `GET /stream` follows it
         self._empty: dict[str, deque[float]] = {}  # per buffer, the times of the last hour's 204s
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
@@ -477,6 +500,58 @@ class BufferService:
         if row is None:
             raise HttpError(404, f"no dataset row for {record}")
         return 200, row, {}
+
+    # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
+
+    @staticmethod
+    def _subject_view(row: dict) -> dict:
+        """The row plus its status word and the actions its stage accepts (sorted, for a stable page)."""
+        status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
+        return {**row, "status": status, "actions": sorted(actions)}
+
+    def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        if kind not in SUBJECT_RULES:
+            raise HttpError(404, f"no subjects of kind {kind!r}")
+        parsed = _parse(AdoptBody, body)
+        if parsed.stage not in SUBJECT_RULES[kind]:
+            raise HttpError(422, f"stage must be one of {list(SUBJECT_RULES[kind])}, got {parsed.stage!r}")
+        try:
+            row = self.ledger.adopt_subject(kind, int(number), parsed.key, stage=parsed.stage, data=parsed.data)
+        except ValueError as error:
+            raise HttpError(409, str(error)) from None
+        self.changes.announce(kind, row["number"])
+        return 200, self._subject_view(row), {}
+
+    def _get_subject(self, kind: str, key: str, *, query: dict[str, str], body: bytes) -> Response:
+        row = self.ledger.subject(kind, key) if kind in SUBJECT_RULES else None
+        if row is None:
+            raise HttpError(404, f"no {kind} {key!r}")
+        return 200, self._subject_view(row), {}
+
+    def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
+        views = [self._subject_view(row) for row in self.ledger.find_subjects()]
+        # ponytail: reads every subject; a status column and an index when there are tens of thousands
+        return 200, {"needs": [view for view in views if view["status"] in NEEDS_A_PERSON]}, {}
+
+    def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
+        """From what a person has in hand to the subjects: an issue number (`234`, `#234`) in every kind, an issue
+        URL in the kinds of its repo, and always an exact key."""
+        text = query.get("q", "").strip()
+        if not text:
+            raise HttpError(422, "q is required: an issue number, an issue URL or a subject's key")
+        rows = self.ledger.find_subjects(key=text)
+        url = ISSUE_URL_RE.match(text)
+        if url:
+            meta = self.meta or {}
+            kinds = {meta.get("datasets_repo"): ("dataset",), meta.get("buffers_repo"): ("buffer", "prep")}
+            rows += [row for row in self.ledger.find_subjects(issue=int(url[2])) if row["kind"] in kinds.get(url[1], ())]
+        elif text.removeprefix("#").isdecimal():
+            rows += self.ledger.find_subjects(issue=int(text.removeprefix("#")))
+        unique = {(row["kind"], row["number"]): row for row in rows}  # a key that is also its issue number
+        return 200, {"subjects": [self._subject_view(row) for row in unique.values()]}, {}
+
+    def _stream(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, self.changes.stream(), {"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
 
     # --- assessments and budgets: what the gates decided and what each root request has spent ------
 
@@ -815,6 +890,20 @@ def make_server(service: BufferService, host: str, port: int) -> ThreadingHTTPSe
             status, payload, headers = service.handle(
                 self.command, parts.path, dict(parse_qsl(parts.query)), body, dict(self.headers.items())
             )
+            if payload is not None and not isinstance(payload, (bytes, dict)):
+                # a stream: no Content-Length, one flushed write per chunk, until the reader leaves
+                self.send_response(status)
+                for key, value in headers.items():
+                    self.send_header(key, value)
+                self.end_headers()
+                self.close_connection = True
+                try:
+                    for chunk in payload:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except OSError:
+                    pass  # the reader left; its thread ends here
+                return
             if isinstance(payload, bytes):
                 data = payload  # the handler's headers carry its Content-Type
             else:

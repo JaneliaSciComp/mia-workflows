@@ -1047,3 +1047,82 @@ def test_a_quarantined_volume_is_never_served_nor_counted(tmp_path):
     assert call(s, "GET", "/buffers")[1]["buffers"][0]["servable"] == {"train": 0, "val": 0}
     call(s, "PUT", "/assets/staged/art1", payload={"quarantined": False})  # a repair released it
     assert call(s, "GET", "/buffers/b/next", {"n": "2", "consumer": cid})[0] == 200
+
+
+# --- subjects: what the page acts on (spec webapp-actions §4.1, §8) ---
+
+
+def _subjects(tmp_path):
+    return BufferService(Ledger(tmp_path / "l.sqlite"), meta={"datasets_repo": "o/data", "buffers_repo": "o/buffers"})
+
+
+def test_adopt_then_read_a_subject(tmp_path):
+    s = _subjects(tmp_path)
+    status, row, _ = call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "stage": "review"})
+    assert status == 200 and row["issue"] == 234
+    status, row, _ = call(s, "GET", "/subjects/dataset/rec-a")
+    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "go", "reject"])
+    assert call(s, "GET", "/subjects/dataset/nope")[0] == 404
+    assert call(s, "GET", "/subjects/widget/x")[0] == 404
+    assert call(s, "PUT", "/subjects/dataset/235", payload={"key": "rec-b", "stage": "bogus"})[0] == 422
+    assert call(s, "PUT", "/subjects/dataset/235", payload={"key": "rec-a"})[0] == 409
+
+
+def test_a_subject_key_with_spaces_a_slash_and_an_accent_round_trips(tmp_path):
+    s, key = _subjects(tmp_path), "EM pool / v2 é"
+    call(s, "PUT", "/subjects/buffer/8", payload={"key": key, "stage": "ready", "data": {"spec": "name: x"}})
+    status, row, _ = call(s, "GET", "/subjects/buffer/" + quote(key, safe=""))
+    assert (status, row["key"], row["data"]) == (200, key, {"spec": "name: x"})
+
+
+def test_needs_lists_what_waits_on_a_person(tmp_path):
+    s = _subjects(tmp_path)
+    call(s, "PUT", "/subjects/dataset/1", payload={"key": "rec-a", "stage": "review"})
+    call(s, "PUT", "/subjects/dataset/2", payload={"key": "rec-b", "stage": "testing"})
+    call(s, "PUT", "/subjects/buffer/8", payload={"key": "pool", "stage": "needs-human"})
+    call(s, "PUT", "/subjects/prep/9", payload={"key": "prep-9", "stage": "done"})
+    needs = call(s, "GET", "/needs")[1]["needs"]
+    assert sorted((row["kind"], row["key"], row["status"]) for row in needs) == [
+        ("buffer", "pool", "stuck"),
+        ("dataset", "rec-a", "waiting"),
+    ]
+
+
+def test_lookup_by_number_url_and_key(tmp_path):
+    s = _subjects(tmp_path)
+    call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a"})
+    call(s, "PUT", "/subjects/buffer/234", payload={"key": "pool"})
+    call(s, "PUT", "/subjects/prep/9", payload={"key": "prep-9"})
+
+    def found(text):
+        return sorted((row["kind"], row["key"]) for row in call(s, "GET", "/lookup", {"q": text})[1]["subjects"])
+
+    assert found("#234") == found(" 234 ") == [("buffer", "pool"), ("dataset", "rec-a")]
+    assert found("https://github.com/o/data/issues/234") == [("dataset", "rec-a")]
+    assert found("https://github.com/o/buffers/issues/234#issuecomment-1") == [("buffer", "pool")]
+    assert found("https://github.com/o/buffers/issues/9") == [("prep", "prep-9")]
+    assert found("rec-a") == [("dataset", "rec-a")]
+    assert found("https://github.com/o/other/issues/234") == [] and found("nothing") == []
+    assert call(s, "GET", "/lookup")[0] == 422
+
+
+def test_adopting_needs_the_token_and_reading_does_not(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    assert call(s, "PUT", "/subjects/dataset/1", payload={"key": "rec-a"})[0] == 401
+    assert call(s, "GET", "/needs")[0] == 200 and call(s, "GET", "/lookup", {"q": "1"})[0] == 200
+
+
+def test_stream_over_http_and_a_reader_that_leaves(tmp_path):
+    server = make_server(BufferService(Ledger(tmp_path / "l.sqlite")), "127.0.0.1", 0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with httpx.stream("GET", url + "/stream", timeout=5) as response:
+            assert response.headers["content-type"] == "text/event-stream"
+            assert httpx.put(url + "/subjects/dataset/234", json={"key": "rec-a"}).status_code == 200
+            assert next(response.iter_lines()) == 'data: {"kind": "dataset", "number": 234}'
+        # the reader is gone: the next change must not take the service down
+        assert httpx.put(url + "/subjects/dataset/235", json={"key": "rec-b"}).status_code == 200
+        assert httpx.get(url + "/subjects/dataset/rec-b").json()["number"] == 235
+    finally:
+        server.shutdown()
