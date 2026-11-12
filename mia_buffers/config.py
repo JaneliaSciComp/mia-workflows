@@ -119,12 +119,21 @@ class SourcingCfg(BaseModel):
     test_size: int = Field(default=256, ge=1)
 
 
+class PipelineCfg(BaseModel):
+    """Where another pipeline's workflows run: buffer-api starts and signals them (spec webapp-actions §5)."""
+
+    namespace: str
+    task_queue: str
+
+
 class Config(mia_data_config.Config):
     """The whole mia_buffers.yaml, validated."""
 
     deployment: str = "mia-buffers"
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg(namespace="mia-buffers")
+    # mia-data's namespace and task queue; the mia.yaml loader fills it from the service whose app is mia-data
+    datasets_pipeline: PipelineCfg = PipelineCfg(namespace="mia-data", task_queue="mia-data")
     paths: PathsCfg
     service: ServiceCfg
     quota: QuotaCfg = QuotaCfg()

@@ -152,6 +152,10 @@ def read_manifest(path: Path) -> dict:
     return data
 
 
+def _app_of(block: object) -> str | None:
+    return block.get("app") if isinstance(block, dict) else None
+
+
 def service_config(manifest: dict, name: str) -> dict:
     """Merge the shared sections with service `name`'s block (one level deep); the input is not modified."""
     services = manifest.get("services")
@@ -174,6 +178,15 @@ def service_config(manifest: dict, name: str) -> dict:
             raise ValueError(f"{key}: the shared section must be a mapping")
         result[key] = {**shared, **copy.deepcopy(value)}
     result["deployment"] = name
+    if block["app"] == "mia-buffers":
+        # buffer-api starts and signals mia-data's workflows: tell it their namespace and task queue (the task
+        # queue is the service's name). A manifest without such a service leaves the model's default.
+        data_name = next((key for key, other in services.items() if _app_of(other) == "mia-data"), None)
+        if data_name is not None:
+            temporal = service_config(manifest, data_name).get("temporal")
+            # mia-data's own default namespace when it has no temporal section; pydantic's when it has one
+            namespace = temporal.get("namespace", "default") if isinstance(temporal, dict) else "mia-data"
+            result["datasets_pipeline"] = {"namespace": namespace, "task_queue": data_name}
     paths = result.get("paths")
     if isinstance(paths, dict) and "state_root" in paths:
         state_root = paths.pop("state_root")

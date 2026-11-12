@@ -1079,21 +1079,22 @@ def serve(cfg: Config) -> None:
         raise SystemExit(str(error)) from error
     url = urlparse(cfg.service.url)
     assert url.port is not None  # ServiceCfg requires an explicit port
-    server = make_server(
-        BufferService(
-            ledger,
-            token=token,
-            storage_root=cfg.paths.storage_root,
-            raw_root=cfg.paths.raw_root,
-            staged_root=cfg.paths.staged_root,
-            locks=LockDir(cfg.paths.local_root / "locks"),
-            archive_dir=cfg.paths.state_dir / "archive",
-            meta=page_meta(cfg),
-            ui_dir=Path(__file__).parent / "ui",
-        ),
-        url.hostname or "127.0.0.1",
-        url.port,
+    from .dispatch import dispatcher_for  # here, not at the top: it reaches autodev's CLI helpers
+
+    service = BufferService(
+        ledger,
+        token=token,
+        storage_root=cfg.paths.storage_root,
+        raw_root=cfg.paths.raw_root,
+        staged_root=cfg.paths.staged_root,
+        locks=LockDir(cfg.paths.local_root / "locks"),
+        archive_dir=cfg.paths.state_dir / "archive",
+        meta=page_meta(cfg),
+        ui_dir=Path(__file__).parent / "ui",
+        dispatcher=dispatcher_for(cfg),
     )
+    service.kick_unmirrored()  # what a crash, or Temporal being away, left unposted
+    server = make_server(service, url.hostname or "127.0.0.1", url.port)
     backups = cfg.paths.state_dir / "backups"
     stop = threading.Event()
     threading.Thread(target=backup_forever, args=(ledger, backups, cfg.keeper.minutes, stop), daemon=True).start()

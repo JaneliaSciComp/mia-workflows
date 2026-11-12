@@ -391,7 +391,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     from autodev.jobs import CsubJobs
 
     from .activities import Activities
-    from .workflows import MiaDataDataset, MiaDataPoll
+    from .mirror import Mirror
+    from .workflows import MiaDataDataset, MiaDataPoll, MiaMirror
 
     client = await _client(cfg)
     clients = _github_clients(cfg)
@@ -399,11 +400,14 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     activities = Activities(
         cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=bot, client=client
     )
+    mirror = []  # the dataset issues' mirror (spec webapp-actions §7); without buffer-api there is nothing to copy
+    if activities.registry is not None:
+        mirror = [Mirror(clients[0], activities.registry, bot, {"dataset": (cfg.label, STAGES)}).mirror]
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
-        workflows=[MiaDataDataset, MiaDataPoll],
-        activities=activities.all(),
+        workflows=[MiaDataDataset, MiaDataPoll, MiaMirror],
+        activities=[*activities.all(), *mirror],
         max_concurrent_activities=8,
     )
     await_worker = Worker(

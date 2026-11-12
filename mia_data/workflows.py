@@ -1134,3 +1134,31 @@ class MiaDataPoll:
             retry_policy=RetryPolicy(maximum_attempts=1),
             result_type=list[str],
         )
+
+
+@workflow.defn(name="MiaMirror")
+class MiaMirror:
+    """Copy one subject's timeline and stage to its GitHub issue (spec webapp-actions §7). buffer-api starts it,
+    or signals `kick` when it is already running, each time the subject is written. One pass posts everything
+    that is new; a kick that arrives during a pass asks for one more. The activity is retried without limit, so
+    GitHub being away only delays the issue; no round waits for this workflow."""
+
+    def __init__(self) -> None:
+        self.kicks = 0
+
+    @workflow.signal
+    def kick(self) -> None:
+        self.kicks += 1
+
+    @workflow.run
+    async def run(self, kind: str, number: int) -> None:
+        answered = -1
+        while answered != self.kicks:
+            answered = self.kicks
+            await workflow.execute_activity(
+                "mirror",
+                args=[kind, number],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_interval=timedelta(minutes=10)),
+                result_type=int,
+            )

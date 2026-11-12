@@ -108,6 +108,9 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
 
     from autodev.jobs import CsubJobs
 
+    from mia_data.mirror import Mirror
+    from mia_data.workflows import MiaMirror
+
     from .activities import Activities
     from .workflows import MiaBuffer, MiaBufferPoll, MiaCacheKeeper, MiaPrep
 
@@ -122,11 +125,14 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
         client=client,
         gh_datasets=clients[3],
     )
+    # the buffer and request issues' mirror (spec webapp-actions §7)
+    labels = {"buffer": (cfg.label, STAGES), "prep": (cfg.prep_label, PREP_STAGES)}
+    mirror = Mirror(clients[0], activities.registry, bot, labels)
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
-        workflows=[MiaBuffer, MiaBufferPoll, MiaCacheKeeper, MiaPrep],
-        activities=activities.all(),
+        workflows=[MiaBuffer, MiaBufferPoll, MiaCacheKeeper, MiaPrep, MiaMirror],
+        activities=[*activities.all(), mirror.mirror],
         max_concurrent_activities=8,
     )
     await_worker = Worker(

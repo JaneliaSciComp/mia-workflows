@@ -38,6 +38,17 @@ def test_a_service_does_not_see_another_services_sections():
     assert "agent" not in service_config(SHARED, "snippets")
 
 
+def test_a_buffers_service_learns_where_the_datasets_pipeline_runs():
+    manifest = copy.deepcopy(SHARED)
+    manifest["services"]["mia-data"]["temporal"] = {"namespace": "data-ns"}
+    manifest["services"]["buffers"] = {"app": "mia-buffers", "github": {"buffers_repo": "o/b"}}
+    cfg = service_config(manifest, "buffers")
+    assert cfg["datasets_pipeline"] == {"namespace": "data-ns", "task_queue": "mia-data"}  # the queue is the name
+    assert "datasets_pipeline" not in service_config(manifest, "mia-data")
+    del manifest["services"]["mia-data"]
+    assert "datasets_pipeline" not in service_config(manifest, "buffers")  # no such service: the model's default
+
+
 def test_service_block_keys_are_sections():
     bad = {**SHARED, "services": {"x": {"app": "autodev", "deployment": "y"}}}
     with pytest.raises(ValueError, match=r"services\.x\.deployment"):
