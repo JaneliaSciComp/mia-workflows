@@ -1,11 +1,13 @@
 # Agentic workflows for MIAAI
 
-A prototype for running agentic workflows for MIA on the Janelia cluster, built on Temporal for orchestration, LSF
-for compute, and GitHub issues as the user interface. Three workflows so far: **autodev** turns a labelled GitHub
+A prototype for running agentic workflows for MIA on the Janelia cluster, built on Temporal for orchestration and LSF
+for compute. autodev is driven from GitHub issues and pull requests; mia-data and mia-buffers are driven from a web
+page. Three workflows so far: **autodev** turns a labelled GitHub
 issue into a PR written by Claude Code, revises it on request, and merges it after human approval; **mia-data**
 turns a dataset in the MIA catalog into an approved reader binding and reviewed crops, with a human approving every
 binding; **mia-buffers** turns a training-buffer spec into staged OME-Zarr pyramids and a service that hands
-multi-resolution crops to training jobs. The three meet in **buffer-api**'s registry and its read-only web page.
+multi-resolution crops to training jobs. The three meet in **buffer-api**'s registry and its web page, where a
+person starts, approves and cancels rounds.
 Setup: [`docs/autodev-local-setup.md`](docs/autodev-local-setup.md). Running it under a bot identity:
 [`docs/github-app.md`](docs/github-app.md). Production layout: [`docs/deployment.md`](docs/deployment.md).
 
@@ -24,12 +26,13 @@ known gaps: [`docs/autodev-runbook.md`](docs/autodev-runbook.md). Design rationa
 
 ## mia-data
 
-mia-data is a dataset → binding → test crops → human approval → production crops loop. Each dataset that
+mia-data is a dataset → binding → crops → human approval → published crops loop. Each dataset that
 [mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) has catalogued is started from the buffers
 page (*Prepare*); its issue in [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) is a
-read-only log the system writes. On *Prepare*, a Claude agent in a cluster
+copy of its timeline that the system writes and nothing reads. On *Prepare*, a Claude agent in a cluster
 sandbox matches the dataset to a reader snippet from [mia-snippets](https://github.com/JaneliaSciComp/mia-snippets)
-and writes a binding; plain harness jobs check it, cut the round's crops, verify them and show them in the issue.
+and writes a binding; plain harness jobs check it, cut the round's crops, verify them and show them on the
+dataset's page.
 A human approves on the dataset's page (*Approve*), and those crops are published to shared storage and a
 `galleries` branch; or rejects (*Reject*) with feedback, which goes to the agent fixing the snippet (a new
 snippet's PR, which autodev writes, is merged only when its crops are approved). Every verdict is recorded as an
@@ -37,8 +40,8 @@ assessment, and *Revoke*
 withdraws a published dataset later: nothing is deleted, the buffers that drew from it are degraded. A **judge**
 (a second model, read-only, over the same gallery) can look at every set before the human does: in shadow mode its
 verdict is recorded beside the human's and decides nothing, and the buffers page's Decisions tab shows how often
-they agree; a gate goes active only on those numbers. Every stage is a label
-and a new comment with links to the folders involved. The whole flow, with a diagram and the component for each
+they agree; a gate goes active only on those numbers. Every stage is an entry
+in the dataset's timeline, with links to the folders involved. The whole flow, with a diagram and the component for each
 step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/mia-crops-spec.md`](docs/mia-crops-spec.md).
 
 ## mia-buffers
@@ -46,7 +49,7 @@ step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/m
 mia-buffers is a buffer spec → plan → staged pyramids → served crops loop, with no agent in it. A spec (which
 datasets by catalog fields, patch size and pyramid levels, splits, weighting, how many samples per volume) is
 created and run on the buffers page (*Create buffer*, *Run*); its issue in
-[mia-buffers](https://github.com/JaneliaSciComp/mia-buffers) is a read-only log. On *Run* the worker plans it
+[mia-buffers](https://github.com/JaneliaSciComp/mia-buffers) is a copy of its timeline. On *Run* the worker plans it
 against the catalog at a pinned commit and the registry's **prepared** datasets, then sources every dataset of the
 pool in parallel: the raw files are fetched into a shared raw cache (one writer per record), and a harness job
 stages one **sparse OME-Zarr 0.6 pyramid per volume**, holding only the chunks that cover the planned samples, with
@@ -71,13 +74,14 @@ splits from the planned samples (train with replacement, val and test from froze
 run can be replayed, and keeps the registry: catalog facts at synced commits, each dataset's preparation state,
 what is on disk and which buffers use it. Training code uses `mia_buffers.client.BufferDataset`, a MuViT dataset
 that pulls crop descriptors and tensorises them locally with the mia-snippets harness, so no pixel crosses the
-service. Mutating routes need the worker token; consumers can only name their split; the page is read-only.
+service. Routes that write what a workflow found need the worker token; consumers can only name their split; the
+page's buttons call action routes, which are checked against the stage table and can only ask a workflow to act.
 
 ## Why durable workflows
 
-These workflows mostly wait: for a reviewer, for CI, for an approval, for a cluster job, often for days. Each issue
-gets one long-lived [Temporal](https://temporal.io) workflow that holds its state and receives GitHub events as
-signals. That gives us:
+These workflows mostly wait: for a reviewer, for CI, for an approval, for a cluster job, often for days. Each issue,
+dataset and buffer spec gets one long-lived [Temporal](https://temporal.io) workflow that holds its state and
+receives GitHub events or a person's actions as signals. That gives us:
 
 - **Survival of restarts.** If a worker or host dies mid-run, the workflow resumes where it was. Job submission is
   idempotent and polling reattaches to the same LSF job, so nothing is run twice.
