@@ -20,7 +20,7 @@ class BufferPins:
     catalog_ref: str
     harness_commit: str
     env_digest: str
-    root: str = ""  # the root request charged for this round (`<repo>#<issue>`); "" from before milestone L
+    root: str = ""  # the root request charged for this round (`<repo>#<issue>`); "" in a history that has none
 
 
 @dataclass

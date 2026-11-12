@@ -115,7 +115,7 @@ def test_a_quarantined_asset_is_held_for_the_quarantine_then_free():
     done = {"state": "ready", "bytes": 40, "last_used": 1.0, "quarantined": True, "quarantined_at": now - 5000}
     rows = [{"key": "q", "data": held, "refs": []}, {"key": "old", "data": done, "refs": []}]
     rules = {"hold_s": 3600, "now": now, "in_progress": set(), "kind": "staged"}
-    assert [r["key"] for r in free_assets(rows, **rules)] == ["q", "old"]  # no quarantine window: as before
+    assert [r["key"] for r in free_assets(rows, **rules)] == ["q", "old"]  # no quarantine window
     assert [r["key"] for r in free_assets(rows, quarantine_s=1000, **rules)] == ["old"]
     picked = plan_evictions(rows, quota_bytes=10, headroom_bytes=0, quarantine_s=1000, **rules)
     assert [r["key"] for r in picked] == ["old"]

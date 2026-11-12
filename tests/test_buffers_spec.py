@@ -93,7 +93,7 @@ def test_lifecycle_fields_and_defaults(tmp_path):
         load_spec(path)
 
 
-# -- the preparation request (milestone E)
+# -- the preparation request
 
 PREP_SELECT = {"paths": ["datasets/**"], "where": {"license": {"in": ["CC0-1.0"]}}}
 

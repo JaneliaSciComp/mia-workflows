@@ -76,7 +76,7 @@ def test_the_pages_buttons_call_action_routes_and_it_follows_the_stream() -> Non
         assert ("POST", path) in requested and resolve("POST", path) == "action", path
     for path in ("/needs", "/subjects/buffer", "/subjects/prep"):
         assert ("GET", path) in requested, path
-    assert "issues/new" not in PAGE  # nothing is started by opening a GitHub issue any more
+    assert "issues/new" not in PAGE  # nothing is started by opening a GitHub issue
     for path in ("/subjects/x/x", "/timeline/x/x", "/run/x/x", "/lookup?q=x", "/health"):
         assert ("GET", path) in requested, path
     assert 'new EventSource("/stream")' in PAGE and resolve("GET", "/stream") == "read"

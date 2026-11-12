@@ -715,7 +715,7 @@ async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
     assert len(servable) == 1 and "staged earlier" in servable[0]
 
 
-# --- milestone K: the staged gate (spec §15) ---------------------------------------------------------
+# --- the staged gate (spec §15) ---------------------------------------------------------
 
 TWO_GROUPS = PlanResult(
     True, [], [DatasetPlan("a", "TEM", 0.5, False), DatasetPlan("b", "SEM", 0.5, False)], 1, levels=[1], patch=64
@@ -1003,7 +1003,7 @@ async def test_go_after_ready_with_a_straggler_starts_a_new_round(env):
     assert not m.of("verify_drop")  # the straggler was abandoned, not dropped
 
 
-# --- milestone 4: datasets without a binding -----------------------------------------------------
+# --- datasets without a binding -----------------------------------------------------
 
 
 async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
@@ -1045,7 +1045,7 @@ async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
     assert dataset(state, "u937").status == "servable" and state.ready and m.stages[-1] == "ready"
 
 
-# --- milestone C: the raw-cache lock, the fetch phase, the offline stage ------------------------------
+# --- the raw-cache lock, the fetch phase, the offline stage ------------------------------
 
 ONLY_U937 = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
 U937_URL = "https://zenodo.org/u937.zip"
@@ -1398,7 +1398,7 @@ async def test_cache_keeper_runs_one_keep_pass(env):
     assert report == KeeperReport(scanned=2, evicted=["staged a"], over_quota={"raw": 5}) and passes == [False]
 
 
-# --- milestone D: auto-approve, the status board, the shared ticker, the ready-state loop -----------------------
+# --- auto-approve, the status board, the shared ticker, the ready-state loop -----------------------
 
 TWO = PlanResult(
     True,
@@ -1701,7 +1701,7 @@ async def test_lifecycle_labels_outside_the_ready_loop_are_refused_at_once(env):
     assert not m.of("retire_buffer")
 
 
-# --- final fix pass ------------------------------------------------------------------------------
+# --- edge cases of a rebuild --------------------------------------------------------------------
 
 
 async def test_a_rebuild_another_buffer_finished_while_this_one_waited_is_reused(env):
@@ -1817,7 +1817,7 @@ async def test_replay_buffer_history_d_rebuild(env):
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
 
 
-# --- milestone E: preparation requests, and a buffer no longer waits on mia-data ------------------
+# --- preparation requests: a buffer never waits on mia-data -------------------------
 
 PREP_HISTORY = HISTORY.with_name("prep_history.json")
 PREP_E_HISTORY = HISTORY.with_name("buffer_history_e.json")
@@ -2101,7 +2101,7 @@ async def test_replay_buffer_history_e(env):
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
 
 
-# --- milestone L: budgets and the pause ---------------------------------------------------------
+# --- budgets and the pause ---------------------------------------------------------
 
 
 async def test_stage_and_fetch_jobs_are_reserved_and_settled_with_their_bytes(env):
@@ -2135,7 +2135,7 @@ async def test_paused_stops_a_buffer_round_and_a_prep_round(env):
     assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "plan" not in m.names()
 
 
-# --- milestone L: the gate approve is assessed per artifact ------------------------------------
+# --- the gate approve is assessed per artifact ------------------------------------
 
 
 async def test_the_gate_approve_is_assessed_per_artifact_before_the_approved_event(env):
@@ -2195,7 +2195,7 @@ async def test_a_refused_staged_artifact_is_not_reused(env):
     assert "read_stage" not in m.names() and "submit" not in m.names()
 
 
-# --- milestone L: the keeper's revoked signal ---------------------------------------------------
+# --- the keeper's revoked signal ---------------------------------------------------
 
 
 async def test_a_revoked_signal_unregisters_the_record_and_serves_on_at_the_floor(env):
@@ -2223,7 +2223,7 @@ async def test_a_revoked_signal_below_the_floor_is_needs_human(env):
     assert "revoked" in m.of("set_stage")[-1][1] and m.of("unregister_volumes") == [("i7-e11", "u937")]
 
 
-# --- milestone L: buffer:revoke with /revoke lines ----------------------------------------------
+# --- revoking records of a serving buffer ------------------------------------------
 
 
 async def test_buffer_revoke_label_quarantines_the_named_records_and_degrades_the_buffer(env):
@@ -2260,7 +2260,7 @@ async def test_buffer_revoke_outside_the_ready_loop_is_refused(env):
     assert m.of("refuse_label")[-1][0] == "buffer:revoke" and "revoke_targets" not in m.names()
 
 
-# --- final fix pass (milestone L review) ---------------------------------------------------------
+# --- edge cases of the pause, budgets and revokes ------------------------------------------------
 
 
 async def test_a_pause_mid_round_stops_the_round_without_failing_its_datasets(env):
@@ -2370,8 +2370,8 @@ async def test_a_cancel_that_reaches_a_serving_buffer_is_refused_and_it_keeps_se
 
 async def test_cancel_inside_a_best_effort_step_still_ends_the_round(env):
     """A go at `staged` starts a new round whose first step retires the staged buffer, best effort; the stage
-    still reads `staged`, so a cancel is accepted. It used to be caught there as a failed retire: the new round
-    ran on and no later cancel was heard."""
+    still reads `staged`, so a cancel is accepted. It must not be caught there as a failed retire, which would let
+    the new round run on with no later cancel heard."""
     m = Mocks(plan=ONLY_U937, retire_gate=asyncio.Event())
     async with started(env, m, signal="go") as h:
         await idle(h, m, "staged")

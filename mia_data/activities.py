@@ -506,7 +506,7 @@ class Activities:
     ) -> AssessmentWritten:
         """Write the verdict as an assessment in the registry, then ask `authorized()` over everything written about
         the subject; an approve also names its assessment on the dataset row. No registry: nothing to record, the
-        label alone authorizes as before."""
+        verdict alone authorizes."""
         registry = self.registry
         if registry is None:
             return AssessmentWritten("", True, "no registry")
@@ -718,7 +718,7 @@ class Activities:
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
         """Remove a human label we won't act on and say why, once per event (busy `go`, stray `approve`, ...)."""
-        actions = (*HUMAN_LABELS, "cancel")  # cancel is an action only: it never was a label
+        actions = (*HUMAN_LABELS, "cancel")  # every action a person can send
         if label not in {self.cfg.label(kind) for kind in actions} or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         said = f"Ignoring `{label}`: {self._clean(reason)}"
@@ -877,7 +877,7 @@ class Activities:
         if kind == "needs_snippet":
             draft = _small_dict({key: outcome.get(key) for key in ("draft_binding", "what_fails", "tried")}, 32768)
             return MatchResult("needs_snippet", draft=draft or {"what_fails": "(the agent's draft was too large)"})
-        if kind != "matched":  # `ineligible` was an outcome until spec §12: size is the buffer plan's call, not ours
+        if kind != "matched":  # size is the buffer plan's call, not ours: no outcome says a dataset is too small
             return MatchResult("blocked", f"unknown match outcome {_text(kind, 100)!r}")
         binding, errors = await self._check_binding(
             read_untrusted(path, "binding.yaml", 1 << 20), round_id, pins, pins.snippets_commit
@@ -1277,7 +1277,7 @@ class Activities:
         )
         draft = draft or {}
         # the dataset's page, not its issue: a dataset started from the page may have no issue yet, and its
-        # number is not an issue number (spec webapp-actions §4.1, §9); without buffer-api, the issue as before
+        # number is not an issue number (spec webapp-actions §4.1, §9); without buffer-api, the issue
         if self.cfg.service is not None:
             page = f"{self.cfg.service.url.rstrip('/')}/#datasets/{quote(pins.record, safe='')}"
             data_link = f"[{pins.record}]({page})"

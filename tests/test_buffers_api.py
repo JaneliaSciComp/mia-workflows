@@ -555,7 +555,7 @@ def test_volume_refs_are_keyed_by_artifact(tmp_path):
     call(s, "PUT", "/buffers/b", payload=CFG)
     call(s, "PUT", "/buffers/b/volumes/a", payload={**body(), "artifact": "art1"})
     assert call(s, "GET", "/assets/staged/art1")[1]["refs"] == ["b"]
-    call(s, "PUT", "/buffers/b/volumes/c", payload=body("c"))  # no artifact: the directory, as before
+    call(s, "PUT", "/buffers/b/volumes/c", payload=body("c"))  # no artifact: the directory
     assert call(s, "GET", "/assets/staged/%2Fstaged%2Fc")[1]["refs"] == ["b"]
 
 
@@ -943,7 +943,7 @@ def test_keeper_kv_routes(tmp_path):
     assert worker(s, "PUT", "/keeper", {"at": 5.0})[1] == {"at": 5.0}  # replaced whole; a given `at` kept
 
 
-# --- milestone L: assessments, budgets, volumes routes, revoked datasets -------------------------
+# --- assessments, budgets, volumes routes, revoked datasets -------------------------
 
 
 def test_assessment_routes(tmp_path):

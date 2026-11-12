@@ -1,16 +1,16 @@
-"""The Temporal workflows that take a buffer issue from `buffer:go` to a served buffer (spec §1).
+"""The Temporal workflows that take a buffer spec from its `go` action to a served buffer (spec §1).
 
-`MiaBuffer` lives as long as the issue does. Each `go` starts a round: the spec in the issue body is planned
-against the catalog, a human approves the plan, then every dataset of the pool is sourced in parallel (a stage
-job, or a manual drop first) and registered with buffer-api as it becomes servable; the issue is `ready` once
-every weighting group reaches the spec's `ready.min_fraction`, and the rest keep joining. A dataset with no
-approved binding fails: `MiaPrep` follows a `prep:go` preparation request, which hands its records to
-mia-data (`data:go` on their dataset issues) and polls the registry until each is prepared. The path from before
-`e-prep`, where the buffer itself waited for mia-data, is gone (spec §12); its marker is kept deprecated so a
-history that carries it still replays.
+`MiaBuffer` lives as long as the spec's subject does. Each `go` starts a round: the spec text the action
+carries is planned against the catalog (a `plan` round waits there for an approve), then every dataset of the
+pool is sourced in parallel (a stage job, or a manual drop first) and registered with buffer-api as it becomes
+servable; the round is `staged` when no job is left, a human approves the board, and the buffer is `ready`
+once every weighting group reaches the spec's `ready.min_fraction`, while the rest keep joining. A dataset
+with no approved binding fails: `MiaPrep` follows a preparation request, which sends each of its datasets a
+`go` through buffer-api and polls the registry until each is prepared (spec §12). The `e-prep` patch marker
+is deprecated and kept so that a history carrying it replays.
 
-Workflow code does no I/O: every GitHub, filesystem, cluster and service interaction is an activity called by
-name (see activities.py). The durable state is a `BufferState`, handed to continue_as_new at quiet points.
+Workflow code does no I/O: every registry, GitHub, filesystem, cluster and service interaction is an activity
+called by name (see activities.py). The durable state is a `BufferState`, handed to continue_as_new at quiet points.
 """
 
 from __future__ import annotations
@@ -348,7 +348,7 @@ class MiaBuffer:
                 await self._refuse_cancels()
         except (ActivityError, RoundFailed) as error:
             await self._finish("needs-human", error_message(error))
-        except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up, as before
+        except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up
             round_task.cancel()
             await workflow.wait([round_task])
             raise
@@ -1663,7 +1663,7 @@ class MiaBuffer:
 
     async def _charge(self, key: str, kind: str) -> bool:
         """Before a job: the pause switch, then the root budget (spec autonomous-gates §8). BudgetRefused ends this
-        dataset with the reason. Returns whether the job was reserved (a pre-L history is not)."""
+        dataset with the reason. Returns whether the job was reserved (a history without `l-budget` is not)."""
         if not workflow.patched("l-budget"):
             return False
         assert self.state.pins
@@ -1698,7 +1698,11 @@ class MiaBuffer:
         try:
             return await workflow.execute_activity(
                 "await_job",
-                args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
+                args=[
+                    job_id,
+                    workspace,
+                    *([lock] if lock else []),
+                ],  # the lock is a third argument only when there is one
                 result_type=JobDone,
                 task_queue=workflow.info().task_queue + "-await",
                 start_to_close_timeout=walltime + QUEUE_SLACK,
@@ -1890,7 +1894,7 @@ class MiaPrep:
         state.round_id = f"p{state.issue}-e{event.event_id}"
         state.pins, state.outcomes, state.settled = None, [], {}
         started = workflow.now()
-        # a pre-H registry had a third settled state; a round recorded then (and the fixture) still treats it as one
+        # a history without the patch (the replay fixture is one) treats `ineligible` as a settled state
         legacy = () if workflow.patched("h-no-ineligible") else ("ineligible",)
         if workflow.patched("l-budget") and await self._act("paused", result_type=bool):
             return await self._stage("needs-human", PAUSED)

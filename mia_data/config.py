@@ -30,7 +30,7 @@ _ENV_OVERRIDES = {
 
 # stage -> (label color, description); labels are `data:<stage>`
 STAGES = {
-    "new": ("ededed", "mia-data: dataset issue seen"),
+    "new": ("ededed", "mia-data: nothing has run yet"),
     "matching": ("fbca04", "mia-data: matching the dataset to a snippet"),
     "developing": ("fbca04", "mia-data: agent writing a snippet"),
     "testing": ("fbca04", "mia-data: making the crops to review"),
@@ -40,12 +40,12 @@ STAGES = {
     "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
     "cancelled": ("cccccc", "mia-data: the round was cancelled"),
 }
-HUMAN_LABELS = {  # the actions a person takes; they were labels set by humans
+HUMAN_LABELS = {  # the actions a person takes
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
     "approve": ("0e8a16", "Approve the crops under review: they are published (a snippet PR merges first)"),
     "reject": (
         "d93f0b",
-        "Reject the crops under review: your comments since the review go to the agent fixing the snippet",
+        "Reject the crops under review: your feedback goes to the agent fixing the snippet",
     ),
     "revoke": (
         "b60205",

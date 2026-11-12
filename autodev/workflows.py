@@ -185,7 +185,7 @@ class IssueWorkflow:
     async def _judge_review(self, result: PrRef, workspace: Workspace) -> None:
         """The review judge over the pushed head (spec autonomous-gates §4.1, §9): evidence, a read-only job, the
         assessment and a PR comment. Off: nothing. In shadow nothing here changes the round's course; a failed
-        job is an `escalate` on record, any other failure a comment, and the human reviews as before."""
+        job is an `escalate` on record, any other failure a comment, and the human's review is unaffected."""
         state = self.state
         assert result.head_sha
         subject = JudgeInput(state.issue, state.key, state.round, workspace, result.pr, result.head_sha)
@@ -229,8 +229,8 @@ class IssueWorkflow:
         rolls over with continue_as_new when Temporal suggests it or the poll cap is hit."""
         state = self.state
         assert state.pr is not None  # a round opened the PR before _watch_pr runs
-        # ponytail: by_retry is False only when replaying runs started before this change; drop the old
-        # branches (workflow.deprecate_patch) once those have all rolled over.
+        # ponytail: by_retry is False only when replaying a history without the patch; drop those
+        # branches (workflow.deprecate_patch) once none is left.
         by_retry = workflow.patched("observe-by-retry")
         for _ in range(MAX_POLLS_PER_EXECUTION):
             self.phase = "REVIEW"
@@ -279,7 +279,7 @@ class IssueWorkflow:
         state = self.state
         assert state.pr is not None  # see _watch_pr
         inp = ObserveInput(state.pr, state.handled, state.revisions, state.max_revisions, state.escalated)
-        if not by_retry:  # pre-change runs: same commands as before, but the "nothing to do" retries never expire
+        if not by_retry:  # a history without the patch: the "nothing to do" retries never expire
             return await self._act("observe_pr", inp, budget=None, result_type=PrSnapshot)
         poll = timedelta(minutes=state.poll_minutes)
         return await workflow.execute_activity(

@@ -1,14 +1,14 @@
-"""The Temporal workflows that take a dataset issue from `go` label to published crops.
+"""The Temporal workflows that take a dataset from its `go` action to published crops.
 
-`MiaDataDataset` lives as long as the issue does. Each `go` starts a round: an agent matches the dataset to
-a loader snippet, the worker smoke-tests that match, the round's crops are made and shown on the issue, and a
-human approves them (published) or rejects them with comments (spec §14: autodev gets the comments and a
-superseding snippet's PR is followed). When no snippet fits, the round instead opens an issue in mia-snippets
+`MiaDataDataset` lives as long as the dataset's subject does. Each `go` starts a round: an agent matches the
+dataset to a loader snippet, the worker smoke-tests that match, the round's crops are made and shown in the
+dataset's timeline, and a human approves them (published) or rejects them with feedback (spec §14: autodev
+gets the feedback and a superseding snippet's PR is followed). When no snippet fits, the round instead opens an issue in mia-snippets
 for autodev to write one and follows that PR: every head's crops are reviewed the same way, the approve merges
 the PR, and the approved crops are published.
 
-Workflow code does no I/O: every GitHub, filesystem and cluster interaction is an activity called by name
-(see activities.py). The durable state is a `DatasetState`, handed to continue_as_new at quiet points.
+Workflow code does no I/O: every registry, GitHub, filesystem and cluster interaction is an activity called
+by name (see activities.py). The durable state is a `DatasetState`, handed to continue_as_new at quiet points.
 """
 
 from __future__ import annotations
@@ -238,7 +238,7 @@ class MiaDataDataset:
                 await self._cancel_round(round_task)
         except (ActivityError, RoundFailed) as error:
             await self._finish("needs-human", error_message(error))
-        except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up, as before
+        except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up
             self.unwinding = True
             round_task.cancel()
             await workflow.wait([round_task])
@@ -364,9 +364,9 @@ class MiaDataDataset:
 
         Every stage write is awaited (`stage-write-awaited`; spec webapp-actions §6): the registry's stage is what
         buffer-api checks an action against and what the page shows as waiting on a person, so it may not lag
-        the round. The write is a call to buffer-api, no longer to GitHub. Runs from before that patch keep
-        `stage-write-async`: a stage inside a round ran beside it (GitHub's hourly write budget once held three
-        rounds 25 minutes before their first job) and only a final stage (`wait`) was awaited."""
+        the round. The write is a call to buffer-api. A history without that patch replays
+        `stage-write-async`: a stage inside a round runs beside it and only a final stage (`wait`) is
+        awaited."""
         self.state.stage = stage
         args = [self.state.issue, stage, self.state, detail, extra]
         if not workflow.patched("stage-write-async"):
@@ -482,7 +482,11 @@ class MiaDataDataset:
             )
             done = await workflow.execute_activity(
                 "await_job",
-                args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
+                args=[
+                    job_id,
+                    workspace,
+                    *([lock] if lock else []),
+                ],  # the lock is a third argument only when there is one
                 result_type=JobDone,
                 task_queue=workflow.info().task_queue + "-await",
                 start_to_close_timeout=walltime + QUEUE_SLACK,
@@ -705,7 +709,9 @@ class MiaDataDataset:
         if not job_succeeded(job := await self._job("match", workspace)):
             return await self._finish("needs-human", describe_failure("match", job))
         match = await self._act("read_match", workspace, seconds=300, result_type=MatchResult)
-        no_size_verdict = workflow.patched("h-no-eligibility")  # pre-H histories carry an `ineligible` outcome
+        no_size_verdict = workflow.patched(
+            "h-no-eligibility"
+        )  # a history without the patch carries an `ineligible` outcome
         if match.outcome == "needs_snippet":
             return await self._develop(match.draft or {}, snippet_issue)
         if match.outcome not in (("matched",) if no_size_verdict else ("matched", "ineligible")):
@@ -735,7 +741,7 @@ class MiaDataDataset:
                 f"smoke failed: {why}"
                 + (f" (host not allowed: {smoke.host_not_allowed})" if smoke.host_not_allowed else ""),
             )
-        if not no_size_verdict:  # replay of a pre-H round only; smoke.json no longer says `eligible`
+        if not no_size_verdict:  # only a history without the patch reads smoke's `eligible`
             if smoke.eligible != (match.outcome == "matched"):
                 return await self._finish(
                     "needs-human",
@@ -896,9 +902,8 @@ class MiaDataDataset:
     async def _publish_set(self, test: Test | None = None, sha: str | None = None) -> None:
         """Publish the set that was validated: the round's own crops (spec §13), read back from their workspaces;
         `test` is the approved PR head's on the develop path (spec §14), else the round's last, and `sha` the
-        mia-snippets commit to publish under (the merge commit for a PR head's crops). A run from before
-        `one-crop-set`, or a Test record without workspaces (a round that reached review before I and was
-        approved after), takes the old production path instead."""
+        mia-snippets commit to publish under (the merge commit for a PR head's crops). A history without
+        `one-crop-set`, or a Test record without workspaces, takes the production path instead."""
         state = self.state
         test = test or state.tests[-1]
         if not (workflow.patched("one-crop-set") and test.crop_workspace and test.verify_workspace):

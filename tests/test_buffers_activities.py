@@ -366,7 +366,7 @@ def test_plan_comment_lists_dropped_records():
     assert "**Dropped**" not in render_plan_comment(plan, None)
 
 
-# -- the dataset hand-off (milestone 4)
+# -- the dataset hand-off
 
 
 def with_datasets(acts, issues=None):
@@ -714,7 +714,7 @@ async def test_register_dataset_raises_when_buffer_api_is_down(acts, server):
 
 
 async def test_large_stage_json_with_many_sampled_volumes_is_read_and_registered(acts, server):
-    """Review (milestone 4): 30 three-channel volumes with 4,096-value samples make stage.json ~5 MB, past the
+    """30 three-channel volumes with 4,096-value samples make stage.json ~5 MB, past the
     1 MiB cap the generic job-JSON reader uses; read_stage and register_dataset must still read it."""
     await planned_and_bound(acts)
     staged = write_stage_json(staged_dir(acts, U937))
@@ -1337,7 +1337,7 @@ async def test_keep_marks_a_half_removed_artifact_missing(acts, keeper_server, m
     assert (await acts.keep()).errors == [] and registry.asset("staged", "art")["state"] == "missing"  # not reused
 
 
-# -- milestone D: publish by rename, the status board, events, retire, the keeper's lifecycle signals
+# -- publish by rename, the status board, events, retire, the keeper's lifecycle signals
 
 
 def staged_into(directory: Path, artifact_id: str | None = None, **report) -> Path:
@@ -1381,7 +1381,7 @@ async def test_read_stage_leaves_a_failed_build_for_the_keeper(acts, server):
     assert not result.ok and result.errors == ["boom"]
     assert (building / "stage.json").is_file() and not staged_dir(acts, U937).exists()
     assert acts.registry.asset("staged", staged_dir(acts, U937).name)["state"] == "partial"
-    staged_into(staged_dir(acts, U937), ok=False)  # a failed build where milestone C staged in place
+    staged_into(staged_dir(acts, U937), ok=False)  # a failed build left in the final directory
     (building / "stage.json").unlink()
     staged_into(building, staged_dir(acts, U937).name)
     assert (await acts.read_stage(ROUND, U937)).ok  # the good build replaces it; the failed one is set aside
@@ -1652,7 +1652,7 @@ async def test_keeper_watch_survives_a_pre_d_config_and_a_failing_buffer(acts, k
     assert report.errors == ["buffers: i4-e5: boom"]
 
 
-# -- milestone E: the preparation request
+# -- the preparation request
 
 PREP_ROUND = "p8-e21"
 

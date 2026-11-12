@@ -1,9 +1,8 @@
-"""How a dataset's GitHub issue reads, and the markers of the issues written before the page acted.
+"""How a dataset's GitHub issue reads, and the markers its body carries.
 
 The mirror opens a dataset's issue (`mia_data.mirror.dataset_issue`) with the body built here: it starts with a
 hidden marker naming the record id, so an issue opened just before a crash is found again, and carries the
-record's facts. The module keeps its name from `mia-data seed`, the command that once created these issues in
-bulk; nothing seeds issues now: one appears when its dataset has something to say.
+record's facts. An issue appears when its dataset has something to say; nothing creates issues in bulk.
 """
 
 from __future__ import annotations

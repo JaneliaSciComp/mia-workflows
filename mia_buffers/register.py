@@ -1,6 +1,6 @@
-"""`mia-buffers register`: a plan plus staged volumes → one buffer in buffer-api (spec v0.5 §5, milestone 2).
+"""`mia-buffers register`: a plan plus staged volumes → one buffer in buffer-api (spec v0.5 §5).
 
-The hand-registration path: the worker of milestone 3 will call the same functions after staging.
+The hand-registration path: the worker calls the same functions after staging.
 """
 
 from __future__ import annotations
@@ -191,8 +191,8 @@ def volume_bodies(
     usable sample is refused: it must be staged again with a harness that records one). Each body names the staged
     `artifact` its volume lives in (default: the staged directory's name, the hand-registration layout)."""
     split = row.get("split")
-    if split is None:  # a plan.json written before milestone D: the spec's fractions, as the plan would decide
-        log.warning("%s: plan row has no split policy (planned before D): using the spec's fractions", row["id"])
+    if split is None:  # a plan row without a split policy: the spec's fractions, as the plan would decide
+        log.warning("%s: plan row has no split policy: using the spec's fractions", row["id"])
         split = {"policy": "fractions", "fractions": dict(spec.splits.fractions), "seed": spec.splits.seed}
     if report is None:
         report = json.loads((staged / "stage.json").read_text())

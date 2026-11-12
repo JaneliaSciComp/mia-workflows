@@ -171,8 +171,8 @@ async def delete_schedule(client: Any, schedule_id: str) -> bool:
 
 
 async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> int:
-    """Create or update the Temporal schedule of MiaCacheKeeper (every `keeper.minutes`), and delete the buffers
-    poller's: nothing polls GitHub for a command any more, and its workflow type is no longer registered."""
+    """Create or update the Temporal schedule of MiaCacheKeeper (every `keeper.minutes`), and delete a
+    `mia-buffers-poll` schedule if one exists: nothing polls GitHub for a command, so no workflow type answers it."""
     from temporalio.client import (
         Schedule,
         ScheduleActionStartWorkflow,
@@ -270,7 +270,7 @@ async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
         return f"{commit[:12]} env {digest[:12]} tensorizer {cfg.sourcing.tensorizer}"
 
     async def harness_fetch():
-        """The harness checkout has the `fetch` subcommand the fetch jobs run (milestone C)."""
+        """The harness checkout has the `fetch` subcommand the fetch jobs run."""
         command = [str(harness_env(cfg)), "-c", "import sys; from mia_harness.cli import main; sys.exit(main())"]
         try:
             result = subprocess.run([*command, "fetch", "--help"], capture_output=True, text=True, timeout=120)
@@ -462,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     for name, help_text in (
         ("serve", "run buffer-api, the sampler and ledger for buffers (spec §5)"),
         ("worker", "run the Temporal workers (main and await queues)"),
-        ("schedule", "create or update the keeper Schedule (and delete the old poll Schedule)"),
+        ("schedule", "create or update the keeper Schedule (and delete a stray poll Schedule)"),
         ("init-labels", "create the buffer:* labels on the issue repo"),
         (
             "check",

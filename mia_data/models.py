@@ -43,7 +43,7 @@ class Pins:
     snippets_commit: str
     harness_commit: str
     env_digest: str
-    root: str = ""  # the root request charged for this round (`<repo>#<issue>`); "" from before milestone L
+    root: str = ""  # the root request charged for this round (`<repo>#<issue>`); "" in a history that has none
 
 
 @dataclass
@@ -122,7 +122,7 @@ class MatchResult:
     reason: str = ""
     binding_path: str | None = None  # matched: the checked binding, under state_dir
     binding_hash: str | None = None
-    shapes: dict | None = None  # wire format: the `ineligible` outcome's shapes until spec §12; unused now
+    shapes: dict | None = None  # wire format: recorded histories carry it; unused
     draft: dict | None = None  # needs_snippet: draft_binding, what_fails, tried
     reasons: list[str] = field(default_factory=list)  # matched: the binding's reasons
 
@@ -132,7 +132,7 @@ class SmokeResult:
     """The worker's own quick check of a binding: can the data be opened and read as the record says?"""
 
     ok: bool
-    eligible: bool = True  # wire format: smoke's size verdict until spec §12; smoke.json no longer sends it
+    eligible: bool = True  # wire format: recorded histories carry it; smoke.json does not send it
     shapes: dict | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -163,7 +163,7 @@ class RoundLimits:
     max_pr_revisions: int = 5  # PR heads tested per round (develop path)
     poll_minutes: int = 2  # how long a round waits between tries of a lock someone else holds
     agent_max_budget_usd: float = 5.0  # what a match agent run may cost: reserved against the root before it runs
-    crop_judge: str = "off"  # judge.crops.mode: off | shadow | active (spec autonomous-gates §9); off before M
+    crop_judge: str = "off"  # judge.crops.mode: off | shadow | active (spec autonomous-gates §9)
     judge_max_budget_usd: float = 2.0  # what one judge run may cost: reserved like the match agent's
 
 

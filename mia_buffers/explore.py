@@ -2,7 +2,7 @@
 joins a catalog record with everything the registry knows about its dataset, and the summary of a plan.
 
 A list route called with `limit` answers one page (`page_query`, `paged`); without it the route answers its whole
-list as before, which is what the workers call. Nothing here writes."""
+list, which is what the workers call. Nothing here writes."""
 
 from __future__ import annotations
 

@@ -114,7 +114,8 @@ class Mirror:
         if pending:
             comments = await self.gh.issue_comments(issue)
             ours = [comment for comment in comments if (comment.get("user") or {}).get("login") == self.bot]
-            adopted = issue == number  # an issue people used to label: one the mirror opened says it in its body
+            # a subject numbered by its issue was adopted from GitHub; one the mirror opened says so in its body
+            adopted = issue == number
             if (
                 adopted
                 and kind in self.pages

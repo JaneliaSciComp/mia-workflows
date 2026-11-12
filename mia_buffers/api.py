@@ -524,8 +524,8 @@ class BufferService:
         self.ui_dir = ui_dir  # the page's files; None serves no page
         self.changes = Changes()  # every write to a subject is announced here; `GET /stream` follows it
         # (kind, number) -> (the action sent to its workflow, when): there until the workflow writes anything.
-        # ponytail: in memory, so a restart forgets it and the old stage's buttons are back for the rest of the
-        # minute, as they were before this existed; a column on `actions` if that ever matters.
+        # ponytail: in memory, so a restart forgets it and the page offers the stage's buttons again for the
+        # rest of the minute; a column on `actions` if that ever matters.
         self._asked: dict[tuple[str, int], tuple[dict, float]] = {}
         self._empty: dict[str, deque[float]] = {}  # per buffer, the times of the last hour's 204s
         self._rng: dict[str, random.Random] = {}

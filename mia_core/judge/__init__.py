@@ -1,1 +1,1 @@
-"""The judge: assessments, the acceptance policy; judges themselves arrive with milestone M."""
+"""The judge: assessments, the acceptance policy, the evidence a judge reads, its verdict and its evaluation."""

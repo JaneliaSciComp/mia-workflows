@@ -766,7 +766,7 @@ class Activities:
             return DatasetIssue(number, stage, False, folder=folder), False  # a round began meanwhile
         return DatasetIssue(int(action["number"]), stage, True, folder=folder), subject is None
 
-    # --- preparation requests (milestone E) --------------------------------------------------
+    # --- preparation requests ----------------------------------------------------------------
 
     @activity.defn(name="prep_admit")
     @mia_permanent_errors
@@ -894,7 +894,7 @@ class Activities:
         """Remove a human label we won't act on and say why, once per event."""
         humans = {self.cfg.label(kind) for kind in (*HUMAN_LABELS, "cancel")} | {
             self.cfg.prep_label(kind) for kind in (*PREP_HUMAN_LABELS, "cancel")
-        }  # cancel is an action only: it never was a label
+        }  # every action a person can send to a request
         if label not in humans or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         kind = "prep" if label.startswith(self.cfg.prep_label("")) else "buffer"
@@ -1592,7 +1592,7 @@ class Activities:
         from temporalio.service import RPCError, RPCStatusCode
 
         buffer_id, kind = buffer["id"], latest["kind"]
-        config = BufferConfig.model_validate(buffer["config"])  # a config stored before D gets D's defaults
+        config = BufferConfig.model_validate(buffer["config"])  # a stored config without a newer field gets its default
         signals: list[tuple[str, list[Any], str]] = []
         if kind == "staged":  # unapproved past retire_after_days: retire; a missing pyramid is not yet its problem
             if now - float(latest["at"]) > config.retire_after_days * 86400:
@@ -1699,7 +1699,7 @@ class Activities:
     async def _keeper_evict(
         self, report: KeeperReport, kind: str, roots: tuple[Path, ...], hold_s: float, now: float, dry_run: bool
     ) -> None:
-        """Evict `kind`'s free assets until under quota; when still over, say so on the newest buffer issue."""
+        """Evict `kind`'s free assets until under quota; when still over, the report says by how much."""
         registry, limit = self.registry, getattr(self.cfg.quota, f"{kind}_bytes")
         if limit <= 0:
             return

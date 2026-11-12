@@ -42,7 +42,7 @@ def artifact_id(
 ) -> str:
     """A staged pyramid's id: 16 hex of the sha256 over every input that changes its bytes, so a pyramid on disk is
     an immutable artifact a later round can reuse only when all of them match. The plan digest joins the hashed
-    list only when non-empty, so an empty one reproduces the ids of artifacts staged before plans existed."""
+    list only when non-empty, so an artifact staged without a plan is identified by the other five."""
     voxel = {axis: float(size) for axis, size in sorted((voxel_size_nm or {}).items())}
     parts = [binding_hash, levels_key, voxel, harness_commit, env_digest] + ([plan_digest] if plan_digest else [])
     payload = json.dumps(parts, separators=(",", ":"))

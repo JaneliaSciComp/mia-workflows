@@ -127,7 +127,7 @@ def test_init_labels_creates_buffer_labels(tmp_path, monkeypatch, capsys):
     assert main(["init-labels"]) == 0
     names = [name for _, name, _ in created]
     assert len(names) == 14 and {"buffer:new", "buffer:ready", "prep:requested"} <= set(names)
-    assert not {"buffer:go", "buffer:revoke", "prep:go"} & set(names)  # no label is a command any more
+    assert not {"buffer:go", "buffer:revoke", "prep:go"} & set(names)  # no label is a command
     assert {"buffer:cancelled", "prep:cancelled"} <= set(names)  # the stage a cancelled round ends in
     assert not {"buffer:keep", "buffer:retire", "buffer:plan"} & set(names) and "buffer:staged" in names
     assert {"prep:requested", "prep:done", "prep:needs-human"} <= set(names) and "prep:new" not in names
@@ -293,7 +293,7 @@ def test_schedule_applies_the_keeper_and_deletes_the_old_poll_schedule(tmp_path,
     assert [(name, every.total_seconds(), overlap) for name, every, overlap in applied] == [
         ("mia-buffers-keeper", 1800.0, "SKIP"),
     ]
-    assert deleted == ["mia-buffers-poll"]  # nothing polls GitHub for a command: the old schedule must not linger
+    assert deleted == ["mia-buffers-poll"]  # nothing polls GitHub for a command: a poll schedule must not linger
     assert capsys.readouterr().out.splitlines() == [
         "deleted schedule mia-buffers-poll",
         "created schedule mia-buffers-keeper",

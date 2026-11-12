@@ -20,29 +20,29 @@ from mia_data import config as mia_data_config
 
 # stage -> (label color, description); labels are `buffer:<stage>` (spec §1)
 STAGES = {
-    "new": ("ededed", "mia-buffers: buffer issue seen"),
+    "new": ("ededed", "mia-buffers: spec saved, nothing has run yet"),
     "planning": ("fbca04", "mia-buffers: resolving the spec against the catalog"),
-    "plan-review": ("1d76db", "mia-buffers: plan posted, waiting for buffer:approve"),
+    "plan-review": ("1d76db", "mia-buffers: plan posted, waiting for Run on the page"),
     "sourcing": ("fbca04", "mia-buffers: staging datasets"),
-    "staged": ("1d76db", "mia-buffers: staged, waiting for buffer:approve"),
+    "staged": ("1d76db", "mia-buffers: staged, waiting for Approve on the page"),
     "ready": ("5319e7", "mia-buffers: the service is serving this buffer"),
     "idle": ("cccccc", "mia-buffers: no consumer for a while"),
     "retired": ("cccccc", "mia-buffers: staged data released"),
     "needs-human": ("d93f0b", "mia-buffers: stopped, needs a human"),
     "cancelled": ("cccccc", "mia-buffers: the round was cancelled"),
 }
-HUMAN_LABELS = {  # the actions a person takes, each the workflow signal of the same name; they were labels
+HUMAN_LABELS = {  # the actions a person takes, each the workflow signal of the same name
     "go": (
         "0e8a16",
-        "Plan and stage this buffer, then wait for buffer:approve (or run it again after editing the spec)",
+        "Plan and stage this buffer, then wait for an approve (or run it again after editing the spec)",
     ),
     "plan": ("0e8a16", "Plan this buffer and wait for approval before staging"),
     "approve": ("0e8a16", "Approve the plan; start sourcing"),
     "keep": ("0e8a16", "Keep this idle buffer; back to ready"),
     "retire": ("b60205", "Retire this buffer: release its staged data"),
-    "revoke": ("b60205", "Revoke the records named in your `/revoke <record>` comment lines: their volumes leave"),
+    "revoke": ("b60205", "Revoke the records the action names: their volumes leave"),
 }
-# a preparation request's stages and human label: `prep:<stage>` on an issue of the same repo (milestone E)
+# a preparation request's stages and its one action; its issue's stage label is `prep:<stage>`
 PREP_STAGES = {
     "requested": ("fbca04", "mia-buffers: the request's datasets are handed to mia-data"),
     "done": ("5319e7", "mia-buffers: every requested dataset is settled"),

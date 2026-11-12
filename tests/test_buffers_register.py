@@ -279,7 +279,7 @@ def test_volume_bodies_accepts_a_report(tmp_path, spec_2d):  # noqa: F811
     assert volume_bodies(row, staged, spec_2d, report=report) == from_file
 
 
-# --- normalisation statistics (milestone 4) ---------------------------------------------------
+# --- normalisation statistics ---------------------------------------------------
 
 SAMPLE_V0 = [[float(v) for v in range(0, 1010, 10)]]  # one channel, 101 values 0..1000
 SAMPLE_V1 = [[float(v) for v in range(500, 1510, 10)]]
@@ -357,7 +357,7 @@ def test_buffer_config_carries_scope(spec_2d):  # noqa: F811
 
 
 def test_dataset_scope_refuses_volumes_with_other_channel_counts(tmp_path, spec_2d):  # noqa: F811
-    """Review (milestone 4): pooling across volumes needs one channel count; a volume with another count is refused
+    """pooling across volumes needs one channel count; a volume with another count is refused
     with a reason, not an IndexError that fails the activity."""
     staged = write_two_volumes(tmp_path / "u937", {"v0.zarr": SAMPLE_V0, "v1.zarr": SAMPLE_V1})
     report = json.loads((staged / "stage.json").read_text())
@@ -392,8 +392,8 @@ def test_split_seed_comes_from_the_row_not_the_spec(tmp_path, spec_2d):  # noqa:
     assert planes(ROW, spec_2d) == planes(ROW, spec_with(spec_2d, **{"sampling.seed": 99}))
 
 
-def test_a_row_planned_before_d_falls_back_to_the_spec_fractions(tmp_path, spec_2d, caplog):  # noqa: F811
-    """A plan.json written before milestone D has no `split` on its rows: registration uses the spec's fractions
+def test_a_row_without_a_split_policy_falls_back_to_the_spec_fractions(tmp_path, spec_2d, caplog):  # noqa: F811
+    """A plan.json whose rows have no `split`: registration uses the spec's fractions
     and seed, and says so once, rather than failing a live round."""
     staged = write_stage_json(tmp_path / "u937")
     fallback = {"policy": "fractions", "fractions": dict(spec_2d.splits.fractions), "seed": spec_2d.splits.seed}
@@ -402,7 +402,7 @@ def test_a_row_planned_before_d_falls_back_to_the_spec_fractions(tmp_path, spec_
     [(_, new)] = volume_bodies({**ROW, "split": fallback}, staged, spec_2d)
     assert old["split_planes"] == new["split_planes"]
     assert [record.getMessage() for record in caplog.records] == [
-        "u937: plan row has no split policy (planned before D): using the spec's fractions"
+        "u937: plan row has no split policy: using the spec's fractions"
     ]
 
 

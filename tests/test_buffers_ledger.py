@@ -374,7 +374,7 @@ def test_sync_assets_drops_a_raw_row_with_nothing_cached_that_the_scan_skipped(t
     assert counts == {"scanned": 0, "new": 0, "missing": 1, "dropped": 1}
 
 
-# --- milestone L: assessments, budgets, revoked rows, quarantined volumes ------------------------
+# --- assessments, budgets, revoked rows, quarantined volumes ------------------------
 
 
 def test_assessments_are_append_only_and_filterable(tmp_path):

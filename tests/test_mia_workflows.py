@@ -1248,9 +1248,9 @@ async def test_a_cancel_with_no_round_running_is_refused(env):
 
 
 async def test_cancel_while_the_shadow_judge_job_runs_ends_the_round_and_publishes_nothing(env):
-    """The stage is `review` and the crop judge's job still runs: a cancel landing in that wait used to be caught
-    by the judge's best-effort handler, the round went on, and a later approve published a set that then read
-    `cancelled`."""
+    """The stage is `review` and the crop judge's job still runs: a cancel landing in that wait must not be caught
+    by the judge's best-effort handler, or the round would go on and a later approve would publish a set that
+    then reads `cancelled`."""
     m = Mocks(crop_judge="shadow", gate=asyncio.Event(), gate_on="judge")
     async with started(env, m) as h:
         await until(lambda: any("judge" in call[1] for call in m.of("await")))
@@ -1377,7 +1377,7 @@ async def test_a_paused_operator_stops_the_round_before_its_first_job(env):
     assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
 
 
-# --- milestone L: human verdicts are assessments -------------------------------------------------
+# --- human verdicts are assessments -------------------------------------------------
 
 
 async def test_an_approve_is_written_as_an_assessment_before_the_crops_are_published(env):
@@ -1418,7 +1418,7 @@ async def test_pr_head_verdicts_are_assessed_on_the_head_sha(env):
     assert m.names().index("assess") < m.names().index("comment", m.names().index("assess"))  # before `/approve`
 
 
-# --- milestone L: data:revoke ---------------------------------------------------------------------
+# --- revoking a published dataset ----------------------------------------------------
 
 REVOKE_AT = "2030-01-01T00:00:00Z"
 
