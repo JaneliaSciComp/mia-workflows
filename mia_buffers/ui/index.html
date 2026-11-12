@@ -65,6 +65,12 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
 .actions textarea{flex:1 1 100%;max-width:80ch;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .btn.danger{border-color:var(--warn);color:var(--warn)}
+.btn.danger:disabled{border-color:var(--axis);color:var(--muted)}
+dialog.ask{width:min(560px,calc(100vw - 32px));border:1px solid var(--ring);border-radius:8px;background:var(--surface);color:var(--fg);padding:16px 16px 6px}
+dialog.ask::backdrop{background:rgba(11,11,11,.4)}
+dialog.ask h2{margin:0 0 4px;font-size:16px;font-weight:600}
+dialog.ask .mono{overflow-wrap:anywhere;margin-bottom:8px}
+dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0 0;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .specbox{width:100%;max-width:100ch;min-height:16em;font-family:var(--mono);font-size:12.5px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .ticks{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0;font-size:13px}
 .entry{border-top:1px solid var(--grid);padding:8px 0}
@@ -1992,7 +1998,7 @@ const SUBJECT_VIEWS = { datasets: "dataset", specs: "buffer", requests: "prep" }
 const SUBJECT_TAB = { datasets: "datasets", specs: "buffers", requests: "preparation" };
 const SUBJECT_HASH = { dataset: key => "#datasets/" + encodeURIComponent(key), buffer: key => "#specs/" + encodeURIComponent(key), prep: key => "#requests/" + encodeURIComponent(key) };
 const ACTION_ORDER = ["approve", "reject", "keep", "go", "revoke", "retire", "cancel", "stop"];
-const ACTION_WORDS = { approve: "Approve", reject: "Reject", keep: "Keep", go: "Run again", revoke: "Revoke", retire: "Retire", cancel: "Cancel the round", stop: "Force stop" };
+const ACTION_WORDS = { approve: "Approve", reject: "Reject…", keep: "Keep", go: "Run again", revoke: "Revoke", retire: "Retire", cancel: "Cancel the round", stop: "Force stop" };
 const ACTION_CONFIRM = {
   revoke: "Revoke what this published? Buffers that drew from it are degraded; nothing is deleted.",
   retire: "Retire this buffer? Training jobs reading it are refused and its staged data is released.",
@@ -2073,9 +2079,23 @@ function markdown(text) {  // paragraphs, headings, fenced code, pipe tables, li
   }
   return out;
 }
+// Reject has more to enter: a dialog takes the feedback, and a rejection with none cannot be sent. The dialog hangs
+// off the body, so a redraw of the view behind it (the stream's) does not take what was typed.
+function askReject(subject, send) {
+  const note = el("textarea", { rows: 7, placeholder: "What is wrong with these crops?", "aria-label": "what is wrong with these crops" });
+  const sendButton = el("button", { type: "submit", class: "btn danger", value: "send", disabled: true }, "Send rejection");
+  note.addEventListener("input", () => { sendButton.disabled = !note.value.trim(); });
+  const box = el("dialog", { class: "ask", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
+    el("h2", { id: "askTitle" }, "Reject these crops"), el("div", { class: "mono small" }, subject.key),
+    el("p", { class: "small" }, "What you write goes to the agent that fixes the dataset's reader. It then makes new crops, which come back for review."),
+    note,
+    el("div", { class: "actions" }, sendButton, el("button", { type: "submit", class: "btn", value: "cancel" }, "Cancel"))));
+  box.addEventListener("close", () => { if (box.returnValue === "send" && note.value.trim()) send(note.value.trim()); box.remove(); });
+  document.body.append(box);
+  box.showModal();
+}
 function actionBar(subject, after, skip) {  // `skip`: actions that have their own control on the page (a spec's go, revoke)
   const bar = el("div", { class: "actions" });
-  const note = el("textarea", { rows: 3, placeholder: "What is wrong with these crops? This goes to the agent that fixes the reader.", "aria-label": "feedback sent with Reject" });
   const offered = ACTION_ORDER.filter(a => subject.actions.includes(a) && !(skip || []).includes(a));
   // an action was sent and its workflow has not answered: the stage, and so these buttons, are still the old
   // ones, so none can be pressed until the answer (or the end of the wait) reloads this
@@ -2084,16 +2104,20 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
   for (const action of offered) {
     const word = action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
       : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Prepare again" : "Prepare") : "Run") : ACTION_WORDS[action] || action;
+    const sending = action === "reject" ? "Rejecting…" : word + "…";  // Reject… already ends in the dots of "more to enter"
+    // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
+    const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
     bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), disabled: !!subject.asked, onclick: e => {
+      const send = more => {
+        bar.querySelectorAll("button").forEach(b => { b.disabled = true; });
+        e.target.textContent = sending;
+        sendAction(subject, { action, key: newKey(), ...verdict, ...more }, after);
+      };
+      if (action === "reject") return askReject(subject, note => send({ note }));
       if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
-      bar.querySelectorAll("button").forEach(b => { b.disabled = true; });
-      e.target.textContent = word + "…";
-      // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
-      const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
-      sendAction(subject, { action, key: newKey(), ...verdict, ...(action === "reject" ? { note: note.value } : {}) }, after);
-    } }, asked && asked.action === action ? word + "…" : word));
+      send({});
+    } }, asked && asked.action === action ? sending : word));
   }
-  if (offered.includes("reject")) bar.append(note);
   if (asked) bar.append(el("span", { class: "small" }, "Sent: waiting for its workflow to answer."));
   if (!subject.actions.length) bar.append(el("span", { class: "small" }, "Nothing can be asked of it at this stage."));
   return bar;

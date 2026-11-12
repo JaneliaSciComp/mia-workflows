@@ -224,3 +224,11 @@ def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     assert PAGE.count("disabled: !!subject.asked") == 4 and "disabled: !!x.asked" in PAGE
     assert "waiting for its workflow to answer" in PAGE
     assert "turn !== subjectTurn" in PAGE
+
+
+def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
+    """Reject has more to enter: its button ends in an ellipsis and opens a dialog for the feedback. No feedback box
+    sits beside the buttons, and a rejection with nothing typed cannot be sent."""
+    assert 'reject: "Reject…"' in PAGE and "showModal()" in PAGE
+    assert "bar.append(note)" not in PAGE
+    assert "Send rejection" in PAGE and "sendButton.disabled = !note.value.trim()" in PAGE

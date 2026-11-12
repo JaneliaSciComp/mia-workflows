@@ -373,7 +373,7 @@ written before that change still name the labels; each is now the action of the 
 
 | was | is |
 |---|---|
-| `data:go`, `data:approve`, `data:reject` (+ comments), `data:revoke` | *Prepare* / *Run again*, *Approve*, *Reject* with the feedback box, *Revoke* on `#datasets/<record>` |
+| `data:go`, `data:approve`, `data:reject` (+ comments), `data:revoke` | *Prepare* / *Run again*, *Approve*, *Reject…* (a dialog takes the feedback), *Revoke* on `#datasets/<record>` |
 | a buffer issue with a YAML block, `buffer:go` / `buffer:plan` | *Create buffer* under Buffers, *New buffer* (`#buffers/new`): *Plan*, then *Run* on the spec's page |
 | `buffer:approve`, `buffer:keep`, `buffer:retire`, `buffer:revoke` + `/revoke <record>` lines | the buttons on `#specs/<name>`; *Revoke the ticked* |
 | files in `incoming/` noticed by the poller | *Files are in place* on the spec's page |
