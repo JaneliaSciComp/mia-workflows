@@ -69,7 +69,16 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .ticks{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0;font-size:13px}
 .entry{border-top:1px solid var(--grid);padding:8px 0}
 .entry .at{font-size:12px;color:var(--muted);margin-bottom:2px}
-.entry pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px;margin:0}
+.md{font-size:13.5px;overflow-wrap:anywhere}
+.md>*{margin:0 0 6px}
+.md>:last-child{margin-bottom:0}
+.md pre{white-space:pre-wrap;font-family:var(--mono);font-size:12.5px;padding:8px 10px;border:1px solid var(--grid);border-radius:6px;background:var(--surface);max-height:320px;overflow:auto}
+.md :not(pre)>code{background:var(--grid);padding:0 3px;border-radius:3px}
+.md ul,.md ol{padding-left:20px}
+.md blockquote{padding-left:10px;border-left:3px solid var(--grid);color:var(--fg2)}
+.md blockquote>*{margin:0 0 4px}
+.md h3,.md h4,.md h5,.md h6{font-size:13.5px;margin-top:6px}
+.md .tablewrap{width:max-content;max-width:100%}
 
 /* filters: one row above everything, wraps on narrow screens; a <details> so the row folds to its summary line.
    It sticks at the offset it already has at the top of the page (topbar plus the 14px gap), so scrolling never moves it;
@@ -1869,11 +1878,63 @@ async function sendAction(subject, body, after) {  // the answer is shown by the
   } catch (e) { banner(e.status === 409 ? `Not sent. ${e.message}` : `${body.action}: not delivered (${e.status || "network error"}): ${e.message}`); }
   (after || (() => viewSubject(subject.kind, subject.key, true)))();
 }
-function linkified(text) {  // text with its URLs as links, built as DOM nodes: nothing here is ever parsed as HTML
-  const parts = [], url = /https?:\/\/[^\s)>\]"'`]+/g; let last = 0, m;
-  while ((m = url.exec(text))) { parts.push(text.slice(last, m.index), link(m[0], m[0])); last = m.index + m[0].length; }
-  parts.push(text.slice(last));
-  return parts;
+// ---- a timeline entry's markdown: the subset a round writes, built as DOM nodes. Nothing here is ever parsed as
+// HTML (a body can carry text from a sandboxed job), and only an http(s) URL becomes a link.
+function mdInline(text) {  // `code`, **bold**, *italic*, [text](url) and bare URLs
+  const out = [], token = /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]+/g;
+  let last = 0, m;
+  while ((m = token.exec(text))) {
+    out.push(text.slice(last, m.index)); last = m.index + m[0].length;
+    if (m[1]) out.push(el("code", {}, m[2].trim()));
+    else if (m[3] != null) out.push(el("strong", {}, ...mdInline(m[3])));
+    else if (m[4] != null) out.push(el("em", {}, ...mdInline(m[4])));
+    else if (m[5] != null) out.push(el("a", { href: m[6], target: "_blank", rel: "noopener" }, ...(m[5].includes("://") ? [m[5]] : mdInline(m[5]))));
+    else out.push(link(m[0], m[0]));
+  }
+  out.push(text.slice(last));
+  return out.filter(part => part !== "");
+}
+function markdown(text) {  // paragraphs, headings, fenced code, pipe tables, lists and quotes; comments (markers) are dropped
+  // ponytail: a nested list is flattened into its parent and `---` is a paragraph; a real parser when a round writes more
+  const lines = text.replace(/<!--[\s\S]*?-->/g, "").split("\n"), out = [];
+  const fence = /^\s*(`{3,}|~{3,})/, heading = /^(#{1,6})\s+(.*)$/, item = /^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/, rule = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  const tableAt = i => lines[i].includes("|") && (lines[i + 1] || "").includes("|") && rule.test(lines[i + 1]);
+  const starts = i => !lines[i].trim() || fence.test(lines[i]) || heading.test(lines[i]) || lines[i].startsWith(">") || item.test(lines[i]) || tableAt(i);
+  const cells = row => row.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map(cell => mdInline(cell.trim().replace(/\\\|/g, "|")));
+  const broken = rows => rows.flatMap((row, n) => n ? [el("br"), ...mdInline(row)] : mdInline(row));  // a newline is a line break, as in an issue comment
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i]; let m;
+    if (!line.trim()) i++;
+    else if ((m = fence.exec(line))) {
+      const code = [], closes = row => row.trim().startsWith(m[1]) && /^[`~]+$/.test(row.trim());
+      for (i++; i < lines.length && !closes(lines[i]); i++) code.push(lines[i]);
+      i++; out.push(el("pre", {}, el("code", {}, code.join("\n"))));
+    } else if ((m = heading.exec(line))) { out.push(el("h" + Math.min(6, m[1].length + 2), {}, ...mdInline(m[2]))); i++; }
+    else if (tableAt(i)) {
+      const head = cells(line), body = [];
+      for (i += 2; i < lines.length && lines[i].includes("|"); i++) body.push(cells(lines[i]));
+      out.push(el("div", { class: "tablewrap" }, el("table", { class: "plain" },
+        el("thead", {}, el("tr", {}, ...head.map(cell => el("th", {}, ...cell)))),
+        el("tbody", {}, ...body.map(row => el("tr", {}, ...row.map(cell => el("td", {}, ...cell))))))));
+    } else if (line.startsWith(">")) {
+      const quoted = [];
+      for (; i < lines.length && lines[i].startsWith(">"); i++) quoted.push(lines[i].replace(/^> ?/, ""));
+      out.push(el("blockquote", {}, ...markdown(quoted.join("\n"))));
+    } else if ((m = item.exec(line))) {
+      const list = el(m[1] ? "ol" : "ul", {}), items = [];
+      for (; i < lines.length && lines[i].trim(); i++) {
+        if ((m = item.exec(lines[i]))) items.push([m[2]]);
+        else if (/^\s/.test(lines[i])) items.at(-1).push(lines[i].trim());  // an indented line continues its item
+        else break;
+      }
+      list.append(...items.map(rows => el("li", {}, ...broken(rows)))); out.push(list);
+    } else {
+      const rows = [line];
+      for (i++; i < lines.length && !starts(i); i++) rows.push(lines[i]);
+      out.push(el("p", {}, ...broken(rows)));
+    }
+  }
+  return out;
 }
 function actionBar(subject, after, skip) {  // `skip`: actions that have their own control on the page (a spec's go, revoke)
   const bar = el("div", { class: "actions" });
@@ -1984,7 +2045,7 @@ async function viewSubject(kind, key, refresh) {
   if (extras) parts.push(extras);
   if (kind === "prep" && subject.data?.spec) parts.push(card("The request", "As it was filed.", el("pre", { class: "err" }, subject.data.spec)));
   const log = el("div", { class: "card" }, el("h2", {}, "Timeline"), el("div", { class: "sub" }, "What was asked and what each round did, newest first. The issue on GitHub is a copy of this."));
-  for (const e of [...entries].reverse()) log.append(el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("pre", {}, ...linkified(e.body.replace(/\n*<!--[^>]*-->\s*$/, "")))));
+  for (const e of [...entries].reverse()) log.append(el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("div", { class: "md" }, ...markdown(e.body))));
   if (!entries.length) log.append(el("div", { class: "empty" }, "nothing yet"));
   parts.push(log);
   root.replaceChildren(...parts);

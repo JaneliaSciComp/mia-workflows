@@ -1,8 +1,13 @@
 """The page only requests routes that exist and take no token (read, consumer, or an action), holds no token
 itself, and calls no stray host."""
 
+import json
 import re
+import shutil
+import subprocess
 from importlib import resources
+
+import pytest
 
 from mia_buffers.api import ROUTES
 
@@ -95,3 +100,72 @@ def test_page_has_a_decisions_tab() -> None:
     assert "decisions: viewDecisions" in PAGE
     for needle in ("Shadow", "agree", "awaiting a human", "load older"):
         assert needle in PAGE, needle
+
+
+FAKE_DOM = """
+class FakeNode {
+  constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; }
+  setAttribute(name, value) { this.attrs[name] = value; }
+  set className(value) { this.attrs.class = value; }
+  addEventListener() {}
+  append(...kids) { this.kids.push(...kids); }
+}
+const document = { createElement: tag => new FakeNode(tag) };
+const escaped = text => text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+const html = node => typeof node === "string" ? escaped(node)
+  : `<${node.tag}${Object.entries(node.attrs).map(([k, v]) => ` ${k}="${v}"`).join("")}>${node.kids.map(html).join("")}</${node.tag}>`;
+"""
+
+
+def rendered(*bodies: str) -> list[str]:
+    """What the page's `markdown()` builds for each timeline body, as HTML text (a string child is a text node)."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith(("const el = ", "const link = ")))
+    renderer = PAGE[PAGE.index("// ---- a timeline entry's markdown") : PAGE.index("function actionBar(")]
+    script = (
+        f"{FAKE_DOM}\n{helpers}\n{renderer}\n"
+        'const bodies = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
+        'console.log(JSON.stringify(bodies.map(body => markdown(body).map(html).join(""))));\n'
+    )
+    done = subprocess.run([node, "-e", script], input=json.dumps(bodies), capture_output=True, text=True, check=True)
+    return json.loads(done.stdout)
+
+
+def test_a_timeline_entry_is_rendered_as_markdown() -> None:
+    stage, spec, plan, notes = rendered(
+        "**Stage:** `buffer:planning`\n\n**Folders:** [Workspace](https://files.example/w) · [Staged](https://files.example/s)\n\n"
+        "<!-- mia-buffers: stage i1-e2 planning -->",
+        "**Action:** `go` by `page`\n\n````yaml\nname: x\nselect:\n  paths: [datasets/**]\n```\n**not bold**\n````\n",
+        "1 in the pool.\n\n| id | weight |\n|---|---|\n| `rec-a` | 1.000 |\n| `rec-b` |  |\n\nafter",
+        "## Why\nfirst line\nsecond *line*\n- one\n- two https://example.org/x\n\n> the masks\n> are shifted",
+    )
+    assert stage == (
+        "<p><strong>Stage:</strong> <code>buffer:planning</code></p>"
+        '<p><strong>Folders:</strong> <a href="https://files.example/w" target="_blank" rel="noopener">Workspace</a>'
+        ' · <a href="https://files.example/s" target="_blank" rel="noopener">Staged</a></p>'
+    )  # the marker comment is not shown
+    assert spec == (
+        "<p><strong>Action:</strong> <code>go</code> by <code>page</code></p>"
+        "<pre><code>name: x\nselect:\n  paths: [datasets/**]\n```\n**not bold**</code></pre>"
+    )  # a fence closes only on one as long as it opened; nothing inside it is markdown
+    assert plan == (
+        '<p>1 in the pool.</p><div class="tablewrap"><table class="plain">'
+        "<thead><tr><th>id</th><th>weight</th></tr></thead>"
+        "<tbody><tr><td><code>rec-a</code></td><td>1.000</td></tr><tr><td><code>rec-b</code></td><td></td></tr></tbody>"
+        "</table></div><p>after</p>"
+    )
+    assert notes == (
+        "<h4>Why</h4><p>first line<br></br>second <em>line</em></p>"
+        '<ul><li>one</li><li>two <a href="https://example.org/x" target="_blank" rel="noopener">https://example.org/x</a></li></ul>'
+        "<blockquote><p>the masks<br></br>are shifted</p></blockquote>"
+    )
+
+
+def test_markdown_never_becomes_html_or_a_script_link() -> None:
+    """A timeline body can carry text from a sandboxed job: tags stay text, and only http(s) links are links."""
+    (unsafe,) = rendered("<img src=x onerror=alert(1)> [click](javascript:alert(1)) <script>alert(2)</script>")
+    assert (
+        unsafe == "<p>&lt;img src=x onerror=alert(1)> [click](javascript:alert(1)) &lt;script>alert(2)&lt;/script></p>"
+    )
