@@ -59,6 +59,15 @@ td.pills{white-space:nowrap}
 .notice{border-left:3px solid var(--warn);padding:4px 10px;margin:6px 0;font-size:13px;color:var(--fg2);max-width:80ch}
 pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;background:var(--surface);max-height:240px;overflow:auto}
 .empty{color:var(--muted);padding:10px 2px;font-size:13.5px}
+.lookup{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg);width:24ch}
+.subject h2{margin:0 0 6px;font-size:18px;overflow-wrap:anywhere}
+.subject .facts{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;font-size:13px;color:var(--fg2);margin-bottom:10px}
+.actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
+.actions textarea{flex:1 1 100%;max-width:80ch;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
+.btn.danger{border-color:var(--warn);color:var(--warn)}
+.entry{border-top:1px solid var(--grid);padding:8px 0}
+.entry .at{font-size:12px;color:var(--muted);margin-bottom:2px}
+.entry pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px;margin:0}
 
 /* filters: one row above everything, wraps on narrow screens; a <details> so the row folds to its summary line.
    It sticks at the offset it already has at the top of the page (topbar plus the 14px gap), so scrolling never moves it;
@@ -214,6 +223,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
     <a href="#docs" data-tab="docs">Docs</a>
   </nav>
   <span class="catref" id="catref">no catalog synced</span>
+  <input type="search" class="lookup" id="lookup" placeholder="#234, issue URL, record, spec" aria-label="Find a dataset, buffer spec or request by issue number, issue URL or name">
   <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme">theme</button>
 </header>
 <div class="banner" id="banner" role="alert"></div>
@@ -279,6 +289,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
   </div>
 </section>
 
+<section data-view="subject" class="subject" hidden><div id="subjectBody"></div></section>
 <section data-view="buffers" hidden><div id="buffersBody"></div></section>
 <section data-view="cache" hidden><div id="cacheBody"></div></section>
 <section data-view="preparation" hidden><div id="prepBody"></div></section>
@@ -1414,7 +1425,7 @@ const COLS = [
     cell: x => { const td = el("td", { class: "pills" }, statePill(x.prepared));
       if (x.raw?.data) td.append(" ", assetPill(x.raw.data.state)); if (x.staged.some(stagedUsable)) td.append(" ", pill("staged", "pool"));
       if (x.staged.some(a => a.data?.quarantined)) td.append(" ", assetPill("quarantined")); return td; } },
-  { key: "issue", label: "issue", num: true, get: x => x.ds?.issue || 0, cell: x => el("td", { class: "num" }, x.ds?.issue ? ghIssue(S.meta.datasets_repo, x.ds.issue) : "") },
+  { key: "issue", label: "page", get: x => x.ds?.issue ? 0 : 1, cell: x => el("td", {}, el("a", { href: "#datasets/" + encodeURIComponent(x.id), title: "state, timeline and actions of this dataset" }, x.ds?.issue ? "open" : "prepare")) },
   { key: "raw", label: "raw cache", num: true, get: x => x.raw?.data?.bytes || 0, cell: x => el("td", { class: "num" }, x.raw?.data?.bytes ? fmtBytes(x.raw.data.bytes) : "") },
   { key: "buffers", label: "buffers", get: x => (x.raw?.refs || []).length, cell: x => { const td = el("td"); (x.raw?.refs || []).forEach((b, i) => td.append(i ? " " : "", bufferLink(b))); return td; } },
   { key: "bytes", label: "size", num: true, get: x => x.bytes || 0, cell: x => el("td", { class: "num" }, x.bytes ? fmtBytes(x.bytes) : "") },
@@ -1807,18 +1818,143 @@ function viewDocs(arg) {  // static: show one of the two documents and mark its 
   document.querySelectorAll("[data-doc]").forEach(a => { a.hidden = a.dataset.doc !== doc; });
   document.querySelectorAll("[data-doc-tab]").forEach(a => { if (a.dataset.docTab === doc) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
 }
+// ---- a subject's page: its state, the actions its stage accepts, its timeline (spec webapp-actions §8)
+// The server decides what a stage accepts (`subject.actions`) and refuses anything else; the page only offers it.
+const SUBJECT_VIEWS = { datasets: "dataset" };  // #datasets/<record> is that dataset's page
+const SUBJECT_HASH = { dataset: key => "#datasets/" + encodeURIComponent(key), buffer: () => "#buffers", prep: () => "#preparation" };
+const ACTION_ORDER = ["approve", "reject", "keep", "go", "dropped", "revoke", "retire", "cancel", "stop"];
+const ACTION_WORDS = { approve: "Approve", reject: "Reject", keep: "Keep", go: "Run again", revoke: "Revoke", retire: "Retire", cancel: "Cancel the round", stop: "Force stop" };
+const ACTION_CONFIRM = {
+  revoke: "Revoke what this published? Buffers that drew from it are degraded; nothing is deleted.",
+  cancel: "Cancel the round in progress? Its cluster job is killed and the work so far is not kept.",
+};
+const UNDELIVERED_AFTER_S = 10;  // an action still pending this long was not delivered: the service died, or the answer was lost
+let shownSubject = null;  // {kind, key, number} of the subject page on screen: what the stream refetches
+const newKey = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);  // one per click; Retry sends it again
+async function sendAction(subject, body) {  // the answer is shown by the reload that follows, a refusal by the banner
+  try {
+    if (subject.kind === "dataset") await api(`/datasets/${encodeURIComponent(subject.key)}/actions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } catch (e) { banner(e.status === 409 ? `Not sent. ${e.message}` : `${body.action}: not delivered (${e.status || "network error"}): ${e.message}`); }
+  viewSubject(subject.kind, subject.key, true);
+}
+function linkified(text) {  // text with its URLs as links, built as DOM nodes: nothing here is ever parsed as HTML
+  const parts = [], url = /https?:\/\/[^\s)>\]"'`]+/g; let last = 0, m;
+  while ((m = url.exec(text))) { parts.push(text.slice(last, m.index), link(m[0], m[0])); last = m.index + m[0].length; }
+  parts.push(text.slice(last));
+  return parts;
+}
+function actionBar(subject) {
+  const bar = el("div", { class: "actions" });
+  const note = el("textarea", { rows: 3, placeholder: "What is wrong with these crops? This goes to the agent that fixes the reader.", "aria-label": "feedback sent with Reject" });
+  for (const action of ACTION_ORDER.filter(a => subject.actions.includes(a))) {
+    const word = action === "go" && subject.stage === "new" ? "Prepare" : ACTION_WORDS[action] || action;
+    bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), onclick: e => {
+      if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
+      bar.querySelectorAll("button").forEach(b => { b.disabled = true; });
+      e.target.textContent = word + "…";
+      // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
+      const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
+      sendAction(subject, { action, key: newKey(), ...verdict, ...(action === "reject" ? { note: note.value } : {}) });
+    } }, word));
+  }
+  if (subject.actions.includes("reject")) bar.append(note);
+  if (!subject.actions.length) bar.append(el("span", { class: "small" }, "Nothing can be asked of it at this stage."));
+  return bar;
+}
+function undelivered(subject, actions) {  // an action that did not reach its workflow, with a Retry that sends the same one
+  const box = el("div"), now = Date.now() / 1000;
+  for (const a of actions) {
+    const lost = a.state === "failed" || (a.state === "pending" && now - (toEpoch(a.at) || now) > UNDELIVERED_AFTER_S);
+    if (!lost) continue;
+    const line = el("div", { class: "notice" }, el("b", {}, a.action), ` was not delivered${a.detail ? ": " + a.detail : ""}. `);
+    if (a.key) line.append(el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, { action: a.action, key: a.key, ...(a.payload?.note ? { note: a.payload.note } : {}) }); } }, "Retry"));
+    box.append(line);
+  }
+  return box;
+}
+function subjectFacts(subject, run, entries) {
+  const facts = el("div", { class: "facts" }, statePill(subject.status), el("span", {}, "stage ", el("b", {}, subject.stage)));
+  const wants = subject.actions.filter(a => a !== "cancel" && a !== "stop");
+  if (subject.status === "waiting" && wants.length) facts.append(el("span", {}, "waiting on you: " + wants.join(", ")));
+  if (run) facts.append(el("span", {}, "workflow " + (run.status || "never ran").toLowerCase()));
+  const repo = subject.kind === "dataset" ? S.meta.datasets_repo : S.meta.buffers_repo;
+  if (subject.issue) facts.append(el("span", {}, "log on GitHub ", ghIssue(repo, subject.issue)));
+  if (subject.kind === "dataset" && S.meta.datasets_workflow_url) facts.append(link(S.meta.datasets_workflow_url + subject.number, "temporal"));
+  const round = [...entries].reverse().find(e => e.round)?.round;
+  if (subject.kind === "dataset" && round && repo && S.meta.gallery_branch) facts.append(link(`https://github.com/${repo}/tree/${S.meta.gallery_branch}/galleries/${subject.key}/${round}`, "crops of this round"));
+  return facts;
+}
+async function viewSubject(kind, key, refresh) {
+  const root = $("subjectBody"), hash = location.hash;
+  if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  shownSubject = { kind, key, number: shownSubject && shownSubject.kind === kind && shownSubject.key === key ? shownSubject.number : null };
+  const subject = await load(`/subjects/${kind}/${encodeURIComponent(key)}`, true);
+  if (location.hash !== hash) return;  // the reader moved on while this loaded
+  if (!subject) {  // nothing was ever asked of it: the first Prepare creates it
+    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [] };
+    root.replaceChildren(el("h2", {}, key), el("div", { class: "facts" }, statePill("not started")), actionBar(fresh));
+    return;
+  }
+  shownSubject.number = subject.number;
+  const [timeline, run] = await Promise.all([load(`/timeline/${kind}/${subject.number}`), api(`/run/${kind}/${subject.number}`).catch(() => null)]);
+  if (location.hash !== hash) return;
+  const entries = timeline?.entries || [];
+  const parts = [el("h2", {}, key), subjectFacts(subject, run, entries)];
+  // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
+  if (subject.status === "working" && run && run.status !== "RUNNING") parts.push(el("div", { class: "notice" }, `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`));
+  parts.push(actionBar(subject), undelivered(subject, timeline?.actions || []));
+  const log = el("div", { class: "card" }, el("h2", {}, "Timeline"), el("div", { class: "sub" }, "What was asked and what each round did, newest first. The issue on GitHub is a copy of this."));
+  for (const e of [...entries].reverse()) log.append(el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("pre", {}, ...linkified(e.body.replace(/\n*<!--[^>]*-->\s*$/, "")))));
+  if (!entries.length) log.append(el("div", { class: "empty" }, "nothing yet"));
+  parts.push(log);
+  root.replaceChildren(...parts);
+}
+async function viewFind(text) {  // the lookup box: an issue number, an issue URL, a record id or a spec name
+  const root = $("subjectBody"), hash = location.hash;
+  root.replaceChildren(el("div", { class: "empty" }, "looking…"));
+  const found = (await load(`/lookup?q=${encodeURIComponent(text)}`))?.subjects || [];
+  if (location.hash !== hash) return;
+  if (found.length === 1) { location.replace(SUBJECT_HASH[found[0].kind](found[0].key)); return; }
+  const list = el("ul");
+  for (const s of found) list.append(el("li", {}, `${s.kind} `, el("a", { href: SUBJECT_HASH[s.kind](s.key) }, s.key), ` · ${s.stage}`));
+  // issue numbers repeat across the two repos, so a bare number can be a dataset and a buffer spec
+  root.replaceChildren(el("h2", {}, `“${text}”`), found.length ? list : el("div", { class: "empty" }, "Nothing matches. Try an issue number (#234), a pasted issue URL, a record id or a spec name."));
+}
+async function checkHealth() {  // so that "working" is true: say when nothing can start, or nothing is being worked on
+  const health = await load("/health");
+  if (!health) return;
+  if (!health.temporal) banner("Temporal does not answer: nothing can be started or cancelled from this page right now.");
+  for (const [queue, polled] of Object.entries(health.queues || {})) if (!polled) banner(`No worker is polling “${queue}”: its rounds are not moving.`);
+}
+function followStream() {  // told what changed, the page refetches it; a lost stream reconnects by itself
+  const stream = new EventSource("/stream");
+  let timer = 0;
+  stream.onopen = () => { checkHealth(); if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, true); };
+  stream.onmessage = e => {
+    let change; try { change = JSON.parse(e.data); } catch { return; }
+    if (!shownSubject || change.kind !== shownSubject.kind) return;
+    if (shownSubject.number != null && change.number !== shownSubject.number) return;
+    clearTimeout(timer); timer = setTimeout(() => { if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, true); }, 150);
+  };
+}
+
 const VIEWS = { datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation, decisions: viewDecisions, docs: viewDocs };
 const REFRESH_MS = 30000;  // the buffer views poll; the others reload when their tab is clicked
 let refreshTimer = 0;
 function route() {
   const [name, ...rest] = location.hash.slice(1).split("/");
-  const view = VIEWS[name] ? name : "datasets";
   let arg = rest.join("/");
   try { arg = decodeURIComponent(arg); } catch { /* a malformed escape: use the raw text */ }
+  const kind = arg ? SUBJECT_VIEWS[name] : null;  // #datasets/<record>: that dataset's own page
+  const view = kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "datasets";
+  const tab = kind ? name : view;
   document.querySelectorAll("[data-view]").forEach(s => { s.hidden = s.dataset.view !== view; });
-  document.querySelectorAll("[data-tab]").forEach(a => { if (a.dataset.tab === view) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  document.querySelectorAll("[data-tab]").forEach(a => { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
   hideTip();
   clearInterval(refreshTimer);
+  shownSubject = null;
+  if (kind) return viewSubject(kind, arg);
+  if (view === "subject") return viewFind(arg);
   if (view === "buffers") refreshTimer = setInterval(() => { hideTip(); VIEWS.buffers(arg, true); }, REFRESH_MS);
   VIEWS[view](arg);
 }
@@ -1851,7 +1987,9 @@ async function boot() {
   window.addEventListener("hashchange", route);
   // a click on the current tab changes no hash: reload the view by hand
   document.querySelectorAll("[data-tab]").forEach(a => a.addEventListener("click", () => { if (a.getAttribute("href") === location.hash) route(); }));
+  $("lookup").addEventListener("keydown", e => { const text = e.target.value.trim(); if (e.key === "Enter" && text) { location.hash = "#find/" + encodeURIComponent(text); e.target.value = ""; } });
   route();
+  followStream();  // its first open also reads /health
 }
 boot();
 })();

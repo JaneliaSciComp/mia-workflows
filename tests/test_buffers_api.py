@@ -866,6 +866,7 @@ def test_meta_route(tmp_path):
         "catalog_repo": None,
         "service_url": None,
         "datasets_workflow_url": None,
+        "gallery_branch": None,
         "roots": {},
         "quota": {},
         "keeper": {},

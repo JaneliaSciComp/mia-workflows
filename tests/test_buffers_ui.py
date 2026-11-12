@@ -1,4 +1,5 @@
-"""The page only requests routes that exist and are open (read or consumer), holds no token, and calls no stray host."""
+"""The page only requests routes that exist and take no token (read, consumer, or an action), holds no token
+itself, and calls no stray host."""
 
 import re
 from importlib import resources
@@ -10,10 +11,16 @@ PAGE = (resources.files("mia_buffers") / "ui" / "index.html").read_text()
 
 def resolve(method: str, path: str) -> str | None:
     """The capability of the route that serves `method path`, or None when no route does."""
-    path = path.split("?")[0]
-    for route_method, pattern, _name, capability in ROUTES:
-        if route_method == method and pattern.match(path):
-            return capability
+    segments = path.split("?")[0].split("/")
+    filled = [index for index, segment in enumerate(segments) if segment == "x"]
+    for numbers in range(1 << len(filled)):  # a `${…}` stands for a name or for a number: try both in each place
+        candidate = list(segments)
+        for bit, index in enumerate(filled):
+            if numbers >> bit & 1:
+                candidate[index] = "1"
+        for route_method, pattern, _name, capability in ROUTES:
+            if route_method == method and pattern.match("/".join(candidate)):
+                return capability
     return None
 
 
@@ -49,7 +56,20 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
     assert ("POST", "/plan") in requested
     assert resolve("GET", "/crops/folder/crop/overlay.png") == "read"  # the thumbnails' <img src>, not an api() call
     for method, path in requested:
-        assert resolve(method, path) in {"read", "consumer"}, (method, path)
+        assert resolve(method, path) in {"read", "consumer", "action"}, (method, path)
+
+
+def test_the_pages_buttons_call_action_routes_and_it_follows_the_stream() -> None:
+    """spec webapp-actions §8: a button is a POST to an action route; the page is told what changed."""
+    requested = requested_paths()
+    assert ("POST", "/datasets/x/actions") in requested and resolve("POST", "/datasets/x/actions") == "action"
+    for path in ("/subjects/x/x", "/timeline/x/x", "/run/x/x", "/lookup?q=x", "/health"):
+        assert ("GET", path) in requested, path
+    assert 'new EventSource("/stream")' in PAGE and resolve("GET", "/stream") == "read"
+    # a click is one key (Retry sends it again) and a verdict names the revision the page is showing
+    assert "key: newKey()" in PAGE and "revision: subject.revision" in PAGE and "key: a.key" in PAGE
+    assert '"Content-Type": "application/json"' in PAGE  # the action routes take nothing else
+    assert "innerHTML" not in PAGE  # timeline text is inserted as text, never parsed
 
 
 def test_page_holds_no_token_and_calls_only_known_hosts() -> None:

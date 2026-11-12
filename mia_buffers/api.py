@@ -1053,7 +1053,14 @@ class BufferService:
     def _meta(self, *, query: dict[str, str], body: bytes) -> Response:
         if self.meta is not None:
             return 200, self.meta, {}
-        names = ("buffers_repo", "datasets_repo", "catalog_repo", "service_url", "datasets_workflow_url")
+        names = (
+            "buffers_repo",
+            "datasets_repo",
+            "catalog_repo",
+            "service_url",
+            "datasets_workflow_url",
+            "gallery_branch",
+        )
         return 200, {**dict.fromkeys(names), "roots": {}, "quota": {}, "keeper": {}}, {}
 
     def _usage(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
@@ -1220,6 +1227,9 @@ def page_meta(cfg: Config) -> dict:
         "datasets_workflow_url": f"{ui_url.rstrip('/')}/namespaces/mia-data/workflows/{workflow_prefix}"
         if ui_url
         else None,
+        # ponytail: mia-data's gallery branch as this service's own config reads it (the default unless the
+        # shared section sets it); read services.<mia-data>.gallery.branch when a deployment renames it there
+        "gallery_branch": cfg.gallery.branch,
         "roots": {root: getattr(paths, f"{root}_url") for root in paths.ROOTS},
         "quota": cfg.quota.model_dump(),
         "keeper": cfg.keeper.model_dump(),
