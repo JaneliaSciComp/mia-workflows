@@ -324,6 +324,44 @@ LOCK_SORTS = {
 }
 
 
+def _field(name: str) -> Any:
+    """A sort key: the named field of a row."""
+    return lambda row: row.get(name)
+
+
+SUBJECT_SORTS = {name: _field(name) for name in ("key", "kind", "stage", "status", "updated", "number")}
+BUFFER_SORTS = {
+    "buffer": _field("id"),
+    "spec": _field("spec"),
+    "updated": lambda row: (row.get("latest_event") or {}).get("at"),
+    "volumes": _field("volumes"),
+    "missing": _field("missing"),
+    "consumers_seen": _field("consumers_seen"),
+    "draws_today": _field("draws_today"),
+}
+BOARD_SORTS = {
+    "dataset": _field("record"),
+    "status": _field("status"),
+    "job": _field("job"),
+    "updated": _field("updated_at"),
+}
+EVENT_SORTS = {name: _field(name) for name in ("seq", "kind", "at")}
+VOLUME_SORTS = {"volume": _field("id"), "draws": _field("draws"), "missing": _field("missing")}
+CONSUMER_SORTS = {name: _field(name) for name in ("name", "host", "split", "rank", "last_seen")}
+USAGE_SORTS = {name: _field(name) for name in ("day", "draws", "consumers", "empty")}
+ROUND_ID_RE = re.compile(r"^i(\d+)-e(\d+)$")  # a buffer's id: i<its spec's number>-e<the go that started the round>
+
+
+def _round_of(buffer: str) -> tuple[int, int]:
+    """(the spec's number, the round's event) of a buffer id; (0, 0) for an id that is not a round's."""
+    found = ROUND_ID_RE.match(buffer)
+    return (int(found.group(1)), int(found.group(2))) if found else (0, 0)
+
+
+def _subject_haystack(row: dict) -> tuple:
+    return (row["key"], row["stage"], row["status"])
+
+
 def _asset_haystack(row: dict) -> tuple:
     data = row.get("data") or {}
     return (row["key"], row.get("record"), data.get("state"), data.get("job"), data.get("levels_key"))
@@ -417,6 +455,7 @@ ROUTES = [
     ("GET", re.compile(r"^/budgets$"), "list_budgets", "read"),
     ("DELETE", re.compile(r"^/buffers/([^/]+)/volumes/([^/]+)$"), "delete_volume", "worker"),
     ("GET", re.compile(r"^/buffers/([^/]+)/volumes$"), "volumes", "read"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/consumers$"), "consumers", "read"),
     ("GET", re.compile(r"^/$"), "page", "read"),
     ("GET", re.compile(r"^/ui/([^/]+)$"), "ui", "read"),
     ("GET", re.compile(r"^/meta$"), "meta", "read"),
@@ -744,14 +783,13 @@ class BufferService:
 
     def _catalog_dataset(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
         """Everything known about one dataset: its row, its catalog record, its preparation row, its raw download,
-        its staged artifacts, the buffers whose pool holds it, the requests that name it, and its subject."""
+        its staged artifacts, the requests that name it, and its subject. The buffers whose pool holds it are
+        `GET /buffers?record=`."""
         ref, rows = self._dataset_rows()
         row = next((row for row in rows if row["id"] == record), None)
         if row is None:
             raise HttpError(404, f"no dataset {record}")
         found = self.ledger.record(ref, record)
-        specs = {buffer["id"]: (buffer.get("config") or {}).get("spec_name") for buffer in self.ledger.buffers()}
-        boards = [{**board, "spec": specs.get(board["buffer"])} for board in self.ledger.boards_of(record)]
         requests = [
             {name: request[name] for name in ("key", "number", "stage", "status", "updated")}
             for request in map(self._subject_view, self.ledger.find_subjects(kind="prep"))
@@ -769,7 +807,6 @@ class BufferService:
                 "dataset": self.ledger.dataset(record),
                 "raw_asset": next((asset for asset in raw if asset["key"] == record and asset["data"]), None),
                 "staged_assets": self.ledger.assets("staged", record=record),
-                "boards": boards,
                 "requests": requests,
                 "subject": self._subject_view(subject) if subject else None,
             },
@@ -806,7 +843,12 @@ class BufferService:
     def _list_subjects(self, kind: str, *, query: dict[str, str], body: bytes) -> Response:
         if kind not in SUBJECT_RULES:
             raise HttpError(404, f"no subjects of kind {kind!r}")
-        return 200, {"subjects": [self._subject_view(row) for row in self.ledger.find_subjects(kind=kind)]}, {}
+        page = self._page_of(query, SUBJECT_SORTS)
+        subjects = [self._subject_view(row) for row in self.ledger.find_subjects(kind=kind)]
+        if page is None:
+            return 200, {"subjects": subjects}, {}
+        rows, total = paged(subjects, page, SUBJECT_SORTS, _subject_haystack)
+        return 200, {"subjects": rows, "total": total}, {}
 
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
         """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
@@ -826,7 +868,11 @@ class BufferService:
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
             failed.append({**action, "subject": self._subject_view(found[0]) if found else None})
         needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
-        return 200, {"needs": needs, "failed": failed}, {}
+        page = self._page_of(query, SUBJECT_SORTS)
+        if page is None:
+            return 200, {"needs": needs, "failed": failed}, {}
+        rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
+        return 200, {"needs": rows, "total": total, "failed": failed}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
@@ -1238,9 +1284,16 @@ class BufferService:
             for asset in self.ledger.assets("staged")
             if asset["data"]
         }
+        rejected: set[tuple] = set()  # subjects with a reject among the rows seen so far, which are the newer ones
         for row in rows:
-            if record := _assessed_record(row.get("subject") or {}, numbers, artifacts):
+            subject = row.get("subject") or {}
+            if record := _assessed_record(subject, numbers, artifacts):
                 row["record"] = record
+            about = (subject.get("kind"), subject.get("ref"))
+            if row.get("verdict") == "approve" and about in rejected:
+                row["overruled"] = True  # a later reject (a revocation, or a person disagreeing) stands instead
+            elif row.get("verdict") == "reject":
+                rejected.add(about)
         if "record" in query:
             rows = [row for row in rows if row.get("record") == query["record"]]
         found, total = paged(rows, page, {})
@@ -1280,7 +1333,24 @@ class BufferService:
 
     def _volumes(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)
-        return 200, {"volumes": self.ledger.volume_rows(buffer)}, {}
+        page = self._page_of(query, VOLUME_SORTS)
+        volumes = self.ledger.volume_rows(buffer)
+        if page is None:
+            return 200, {"volumes": volumes}, {}
+        draws = self.ledger.draws_per_volume(buffer)
+        for volume in volumes:
+            volume["draws"] = draws.get(volume["id"], 0)
+        rows, total = paged(volumes, page, VOLUME_SORTS, lambda row: (row["id"], row["artifact"]))
+        return 200, {"volumes": rows, "total": total}, {}
+
+    def _consumers(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        """The training jobs registered with the buffer: one page of them."""
+        self._config(buffer)
+        page = self._page_of({"limit": "50", **query}, CONSUMER_SORTS)
+        assert page is not None
+        consumers = self.ledger.consumers(buffer, self.stale_s)
+        rows, total = paged(consumers, page, CONSUMER_SORTS, lambda row: (row.get("name"), row.get("host")))
+        return 200, {"consumers": rows, "total": total}, {}
 
     def _crop_png(self, folder: str, crop_id: str, name: str, *, query: dict[str, str], body: bytes) -> Response:
         """A published crop's raw.png or overlay.png from storage_root: the page's previews."""
@@ -1354,7 +1424,30 @@ class BufferService:
     # --- a buffer's status board, events, summary and retire: the page and the lifecycle -----------
 
     def _list_buffers(self, *, query: dict[str, str], body: bytes) -> Response:
-        return 200, {"buffers": self.ledger.buffers()}, {}
+        """Every buffer's summary. Paged, each also names its spec and, when its spec has a newer round, that
+        round (`superseded_by`); filters: `spec` (a spec's number), `record` (a dataset on the buffer's board, whose
+        row is added as `board`). Without a sort: the newest spec first, its newest round first."""
+        page = self._page_of(query, BUFFER_SORTS)
+        buffers = self.ledger.buffers()
+        if page is None:
+            return 200, {"buffers": buffers}, {}
+        specs = {row["number"]: row["key"] for row in self.ledger.find_subjects(kind="buffer")}
+        buffers.sort(key=lambda row: _round_of(row["id"]), reverse=True)
+        newest: dict[int, str] = {}
+        for buffer in buffers:
+            number = _round_of(buffer["id"])[0]
+            newest.setdefault(number, buffer["id"])
+            buffer["spec"] = specs.get(number) or (buffer["config"] or {}).get("spec_name")
+            buffer["superseded_by"] = newest[number] if number and newest[number] != buffer["id"] else None
+        if "spec" in query:
+            if not query["spec"].isdigit():
+                raise HttpError(422, "query spec must be a spec's number")
+            buffers = [buffer for buffer in buffers if _round_of(buffer["id"])[0] == int(query["spec"])]
+        if "record" in query:
+            boards = {board["buffer"]: board for board in self.ledger.boards_of(query["record"])}
+            buffers = [{**buffer, "board": boards[buffer["id"]]} for buffer in buffers if buffer["id"] in boards]
+        rows, total = paged(buffers, page, BUFFER_SORTS, lambda row: (row["id"], row["spec"]))
+        return 200, {"buffers": rows, "total": total}, {}
 
     def _put_board(self, buffer: str, record: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)
@@ -1365,7 +1458,27 @@ class BufferService:
 
     def _board(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)
-        return 200, {"buffer": buffer, "datasets": self.ledger.buffer_datasets(buffer)}, {}
+        page = self._page_of(query, BOARD_SORTS)
+        board = self.ledger.buffer_datasets(buffer)
+        if page is None:
+            return 200, {"buffer": buffer, "datasets": board}, {}
+        # the page's row names its dataset: its issue, its crops, and the staged artifact this buffer draws from
+        datasets = {row["id"]: row for row in self.ledger.datasets()}
+        staged = {
+            asset["data"].get(
+                "record"
+            ): f"{asset['data'].get('levels_key')}/{asset['data'].get('record')}/{asset['key']}"
+            for asset in self.ledger.assets("staged")
+            if asset["data"] and buffer in asset["refs"] and asset["data"].get("levels_key")
+        }
+        for row in board:
+            known = datasets.get(row["record"]) or {}
+            row.update({name: known.get(name) for name in ("issue", "folder", "previews", "crops")})
+            row["staged"] = staged.get(row["record"])
+        rows, total = paged(
+            board, page, BOARD_SORTS, lambda row: (row["record"], row["status"], row["reason"], row["job"])
+        )
+        return 200, {"buffer": buffer, "datasets": rows, "total": total}, {}
 
     def _add_event(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         # no config check: `created` and `planned` precede the buffer's config (create_buffer runs at sourcing)
@@ -1378,7 +1491,13 @@ class BufferService:
         return 200, added, {}
 
     def _events(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
-        return 200, {"buffer": buffer, "events": self.ledger.events(buffer)}, {}
+        page = self._page_of(query, EVENT_SORTS)
+        events = self.ledger.events(buffer)
+        if page is None:
+            return 200, {"buffer": buffer, "events": events}, {}
+        events.reverse()  # the page reads the newest first
+        rows, total = paged(events, page, EVENT_SORTS, lambda row: (row["kind"], row["detail"]))
+        return 200, {"buffer": buffer, "events": rows, "total": total}, {}
 
     def _retire(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)
@@ -1512,11 +1631,13 @@ class BufferService:
             empty = len(self._empty_window(buffer, time.time()))
         last_hour = {**self.ledger.last_hour(buffer), "empty": empty}
         days = self.ledger.usage(buffer)
-        return (
-            200,
-            {"buffer": buffer, "days": days, "last_hour": last_hour, "max_empty_fraction": config.max_empty_fraction},
-            {},
-        )
+        out = {"buffer": buffer, "last_hour": last_hour, "max_empty_fraction": config.max_empty_fraction}
+        page = self._page_of(query, USAGE_SORTS)
+        if page is None:
+            return 200, {**out, "days": days}, {}
+        days.sort(key=lambda day: day["day"], reverse=True)  # the page's table reads the newest day first
+        rows, total = paged(days, page, USAGE_SORTS)
+        return 200, {**out, "days": rows, "total": total}, {}
 
     def _put_keeper(self, *, query: dict[str, str], body: bytes) -> Response:
         try:

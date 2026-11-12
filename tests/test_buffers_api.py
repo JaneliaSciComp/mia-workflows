@@ -1698,8 +1698,8 @@ def test_one_dataset_with_everything_known_about_it(tmp_path):
     status, out, _ = call(s, "GET", path)
     assert status == 200 and out["row"]["state"] == "unprepared" and out["record"]["id"] == U937
     assert out["path"].endswith(".yaml") and out["ref"] == REF_A
-    assert (out["dataset"], out["raw_asset"], out["staged_assets"], out["boards"], out["requests"], out["subject"]) == (
-        None, None, [], [], [], None
+    assert (out["dataset"], out["raw_asset"], out["staged_assets"], out["requests"], out["subject"]) == (
+        None, None, [], [], None
     )  # fmt: skip
     call(s, "PUT", f"/datasets/{U937}", payload={"state": "prepared", "issue": 9, "binding_hash": "b" * 64})
     call(s, "PUT", f"/assets/raw/{U937}", payload={"state": "ready", "bytes": 10})
@@ -1714,9 +1714,8 @@ def test_one_dataset_with_everything_known_about_it(tmp_path):
     out = call(s, "GET", path)[1]
     assert out["dataset"]["binding_hash"] == "b" * 64 and out["raw_asset"]["data"]["bytes"] == 10
     assert [asset["key"] for asset in out["staged_assets"]] == ["a1"]
-    assert [(board["buffer"], board["spec"], board["status"]) for board in out["boards"]] == [
-        ("i5-e6", "s", "servable")
-    ]
+    held = call(s, "GET", "/buffers", {"limit": "5", "record": U937})[1]["buffers"]  # the buffers whose pool holds it
+    assert [(b["id"], b["spec"], b["board"]["status"]) for b in held] == [("i5-e6", "s", "servable")]
     assert [(r["key"], r["number"]) for r in out["requests"]] == [(request["key"], request["number"])]
     assert out["subject"]["stage"] == "review" and "approve" in out["subject"]["actions"]
     assert call(s, "GET", "/catalog/datasets/no-such-record")[0] == 404
@@ -1751,6 +1750,14 @@ def test_decisions_are_paged_and_name_their_dataset(tmp_path):
     status, out, _ = call(s, "GET", "/decisions")
     assert status == 200 and out["total"] == 4
     assert [row.get("record") for row in out["assessments"]] == [None, HEMIBRAIN, ONE_CH, U937]  # newest first
+    later = new_assessment(
+        gate="crops", subject_kind="crop_set", subject_ref="i7-e11:s", verdict="reject", by="human:a", at=14.0
+    )
+    s.ledger.put_assessment(later)
+    marked = call(s, "GET", "/decisions", {"record": U937})[1]["assessments"]
+    assert [(row["verdict"], row.get("overruled")) for row in marked] == [("reject", None), ("approve", True)]
+    with s.ledger._transaction() as db:
+        db.execute("DELETE FROM assessments WHERE id = ?", (later["id"],))
     out = call(s, "GET", "/decisions", {"limit": "2", "offset": "2"})[1]
     assert [row["subject"]["ref"] for row in out["assessments"]] == ["i31-e2:s", "i7-e11:s"] and out["total"] == 4
     out = call(s, "GET", "/decisions", {"record": U937})[1]
@@ -1800,3 +1807,97 @@ def test_a_kept_plan_is_rebuilt_when_a_dataset_changes_state(tmp_path):
     after = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]["summary"]
     assert after["pool"] == 1 and first["to_prepare"][0] not in after["to_prepare"]
     assert call(s, "POST", "/plan", payload={"spec": text.replace(REF_A, "c" * 40), "page": {}})[0] == 409  # not synced
+
+
+def test_subjects_and_needs_paged(tmp_path):
+    s = _subjects(tmp_path)
+    for number, key, stage in ((1, "rec-b", "review"), (2, "rec-a", "testing"), (3, "rec-c", "needs-human")):
+        call(s, "PUT", f"/subjects/dataset/{number}", payload={"key": key, "stage": stage})
+    whole = call(s, "GET", "/subjects/dataset")[1]
+    assert len(whole["subjects"]) == 3 and "total" not in whole
+    out = call(s, "GET", "/subjects/dataset", {"limit": "2", "sort": "key"})[1]
+    assert [row["key"] for row in out["subjects"]] == ["rec-a", "rec-b"] and out["total"] == 3
+    assert [row["key"] for row in call(s, "GET", "/subjects/dataset", {"limit": "5", "q": "stuck"})[1]["subjects"]] == [
+        "rec-c"
+    ]
+    out = call(s, "GET", "/needs", {"limit": "1", "sort": "key"})[1]
+    assert [row["key"] for row in out["needs"]] == ["rec-b"] and out["total"] == 2 and out["failed"] == []
+    assert "total" not in call(s, "GET", "/needs")[1]
+
+
+def test_buffers_paged_name_their_spec_and_which_round_is_newest(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/subjects/buffer/5", payload={"key": "alpha"})
+    for buffer in ("i5-e6", "i5-e9", "i7-e1"):
+        call(s, "PUT", f"/buffers/{buffer}", payload=CFG)
+    call(s, "PUT", "/buffers/i5-e6/datasets/rec-a", payload={"status": "servable"})
+    whole = call(s, "GET", "/buffers")[1]
+    assert "total" not in whole and "spec" not in whole["buffers"][0]
+    out = call(s, "GET", "/buffers", {"limit": "5"})[1]
+    assert out["total"] == 3  # the newest spec first, its newest round first
+    assert [(b["id"], b["spec"], b["superseded_by"]) for b in out["buffers"]] == [
+        ("i7-e1", "s", None), ("i5-e9", "alpha", None), ("i5-e6", "alpha", "i5-e9")
+    ]  # fmt: skip
+    assert [b["id"] for b in call(s, "GET", "/buffers", {"limit": "5", "spec": "5"})[1]["buffers"]] == [
+        "i5-e9",
+        "i5-e6",
+    ]
+    held = call(s, "GET", "/buffers", {"limit": "5", "record": "rec-a"})[1]
+    assert [(b["id"], b["board"]["status"]) for b in held["buffers"]] == [("i5-e6", "servable")] and held["total"] == 1
+    assert [b["id"] for b in call(s, "GET", "/buffers", {"limit": "5", "sort": "buffer"})[1]["buffers"]][0] == "i5-e6"
+    assert call(s, "GET", "/buffers", {"limit": "5", "spec": "x"})[0] == 422
+
+
+def test_a_buffers_events_pool_volumes_and_consumers_paged(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    for kind in ("created", "sourcing", "approved"):
+        call(s, "POST", "/buffers/b/events", payload={"kind": kind})
+    assert [e["kind"] for e in call(s, "GET", "/buffers/b/events")[1]["events"]] == ["created", "sourcing", "approved"]
+    out = call(s, "GET", "/buffers/b/events", {"limit": "2"})[1]
+    assert [e["kind"] for e in out["events"]] == ["approved", "sourcing"] and out["total"] == 3  # newest first
+    call(s, "PUT", "/datasets/rec", payload={"state": "prepared", "issue": 4, "folder": "f", "previews": ["c0"]})
+    call(s, "PUT", "/buffers/b/datasets/rec", payload={"status": "servable"})
+    call(s, "PUT", "/buffers/b/datasets/other", payload={"status": "failed", "reason": "no data"})
+    assert set(call(s, "GET", "/buffers/b/datasets")[1]["datasets"][0]) == {
+        "record",
+        "status",
+        "reason",
+        "job",
+        "updated_at",
+    }
+    out = call(s, "GET", "/buffers/b/datasets", {"limit": "5", "sort": "dataset"})[1]
+    assert [(row["record"], row["issue"], row["folder"]) for row in out["datasets"]] == [
+        ("other", None, None),
+        ("rec", 4, "f"),
+    ]
+    assert out["total"] == 2 and out["datasets"][1]["previews"] == ["c0"]
+    assert [
+        row["record"] for row in call(s, "GET", "/buffers/b/datasets", {"limit": "5", "q": "no data"})[1]["datasets"]
+    ] == ["other"]
+    assert call(s, "PUT", "/buffers/b/volumes/va", payload=body("va"))[0] == 200
+    assert call(s, "PUT", "/buffers/b/volumes/vb", payload=body("vb"))[0] == 200
+    cid = call(s, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    call(s, "GET", "/buffers/b/next", {"n": "3", "consumer": cid})
+    out = call(s, "GET", "/buffers/b/volumes", {"limit": "1", "sort": "draws", "dir": "desc"})[1]
+    assert out["total"] == 2 and out["volumes"][0]["draws"] >= 2 and out["volumes"][0]["missing"] is False
+    assert "draws" not in call(s, "GET", "/buffers/b/volumes")[1]["volumes"][0]
+    out = call(s, "GET", "/buffers/b/consumers", {"limit": "5"})[1]
+    assert [(c["name"], c["split"], c["stale"]) for c in out["consumers"]] == [("n", "train", False)] and out[
+        "total"
+    ] == 1
+    assert call(s, "GET", "/buffers/zz/consumers")[0] == 404
+
+
+def test_usage_days_paged(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    with s.ledger._transaction() as db:
+        db.executemany(
+            "INSERT INTO usage VALUES ('b', ?, ?, 1, 0)", [(f"2026-01-0{day}", day * 10) for day in (1, 2, 3)]
+        )
+    whole = call(s, "GET", "/usage/b")[1]
+    assert [day["day"] for day in whole["days"]] == ["2026-01-01", "2026-01-02", "2026-01-03"] and "total" not in whole
+    out = call(s, "GET", "/usage/b", {"limit": "2"})[1]
+    assert [day["day"] for day in out["days"]] == ["2026-01-03", "2026-01-02"] and out["total"] == 3  # newest first
+    assert [d["draws"] for d in call(s, "GET", "/usage/b", {"limit": "1", "sort": "draws"})[1]["days"]] == [10]

@@ -52,7 +52,12 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
         "/plan",
         "/meta",
         "/catalogs",
-        "/datasets",
+        "/catalog/datasets",
+        "/subjects/buffer",
+        "/subjects/prep",
+        "/assets/raw",
+        "/assets/staged",
+        "/needs",
         "/buffers",
         "/keeper",
         "/locks",
@@ -103,7 +108,7 @@ def test_page_names_the_new_states_and_labels() -> None:
 def test_page_has_a_decisions_tab() -> None:
     assert 'data-tab="decisions"' in PAGE and 'data-view="decisions"' in PAGE
     assert "decisions: viewDecisions" in PAGE
-    for needle in ("Shadow", "agree", "awaiting a human", "load older"):
+    for needle in ("Shadow", "agree", "awaiting a human", "overruled", 'pageOf("/decisions"'):
         assert needle in PAGE, needle
 
 
