@@ -427,28 +427,16 @@ async def reject_review(h, m, eid="12", dt=1):
     await approve_review(h, m, eid, dt, kind="reject")
 
 
-async def test_a_stage_write_does_not_hold_the_round(env):
-    """stage-write-async: the match job is submitted while GitHub still owes the `matching` label; a final stage
-    (needs-human here, from the failed match) waits for its write."""
+async def test_a_round_waits_for_its_stage_write(env):
+    """stage-write-awaited: buffer-api checks an action against the registry's stage, so the stage may not lag
+    the round: the match job is not submitted until the `matching` write has landed (spec webapp-actions §6)."""
     m = Mocks(outcome="blocked", slow_stages={"matching"})
     async with started(env, m) as h:
-        await until(lambda: m.of("submit"))
-        assert m.stages == [] and m.of("submit")[0][1] == "match"
-        # stage-write-wait: the final write starts only once the cancelled `matching` write has finished, so the
-        # two can never swap labels at once; open the gate after the cancel was requested
-        cancel = EventType.EVENT_TYPE_ACTIVITY_TASK_CANCEL_REQUESTED
-
-        async def cancel_requested():
-            return any(e.event_type == cancel for e in (await h.fetch_history()).events)
-
-        for _ in range(500):
-            if await cancel_requested():
-                break
-            await asyncio.sleep(0.02)
-        assert m.of("set_stage") == []
+        await until(lambda: ("matching",) in m.of("stage_waits"))
+        assert "submit" not in m.names() and m.stages == []
         m.stage_gate.set()
         await idle(h, m, "needs-human")
-    assert m.stages == ["matching", "needs-human"]
+    assert m.stages == ["matching", "needs-human"] and m.of("submit")[0][1] == "match"
 
 
 async def test_match_crops_review_approve_publishes_that_set(env):
@@ -1152,6 +1140,7 @@ async def test_poll_signals_a_pr_only_when_it_changes(tmp_path):
 HISTORY = Path(__file__).parent / "fixtures" / "mia" / "dataset_history.json"
 DEVELOP_HISTORY = HISTORY.with_name("develop_history.json")
 LOCK_HISTORY = HISTORY.with_name("dataset_history_c.json")
+AWAITED_HISTORY = HISTORY.with_name("dataset_history_b.json")
 
 
 def _scrub(obj):
@@ -1200,6 +1189,20 @@ async def test_replay_dataset_history_c(env):
             await idle(h, m, "done")
             LOCK_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("mia-raw-lock", LOCK_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def test_replay_dataset_history_b(env):
+    """The match → done run under the `stage-write-awaited` patch (every stage write is awaited), as
+    test_replay_dataset_history. Re-record this one alone, so the older fixtures keep their paths:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_b"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks()
+        async with started(env, m) as h:
+            await approve_review(h, m)
+            await idle(h, m, "done")
+            AWAITED_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-stage-awaited", AWAITED_HISTORY.read_text())
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 

@@ -243,16 +243,19 @@ class MiaDataDataset:
     async def _stage(
         self, stage: str, detail: str = "", budget: timedelta = timedelta(hours=6), extra: str = "", wait: bool = False
     ) -> None:
-        """Move the issue to `stage`: `set_stage` writes the registry row, swaps the label and posts the comment.
-        Behind `stage-write-async`, a stage inside a round does not wait for GitHub (its hourly write budget once
-        held three rounds 25 minutes before their first job): the write runs beside the round, and the next stage
-        write or the round's end cancels what is still pending. A final stage (`wait`) is awaited as before."""
+        """Move the dataset to `stage`: `set_stage` writes the registry row, the subject's stage and its entry.
+
+        Every stage write is awaited (`stage-write-awaited`; spec webapp-actions §6): the registry's stage is what
+        buffer-api checks an action against and what the page shows as waiting on a person, so it may not lag
+        the round. The write is a call to buffer-api, no longer to GitHub. Runs from before that patch keep
+        `stage-write-async`: a stage inside a round ran beside it (GitHub's hourly write budget once held three
+        rounds 25 minutes before their first job) and only a final stage (`wait`) was awaited."""
         self.state.stage = stage
         args = [self.state.issue, stage, self.state, detail, extra]
         if not workflow.patched("stage-write-async"):
             return await self._act("set_stage", *args, budget=budget)
         await self._drop_stage_write()
-        if wait:
+        if wait or workflow.patched("stage-write-awaited"):
             return await self._act("set_stage", *args, budget=budget)
         self.stage_write = workflow.start_activity(
             "set_stage",
