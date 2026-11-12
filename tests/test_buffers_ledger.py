@@ -634,3 +634,61 @@ def test_mark_mirrored_and_the_subjects_still_to_mirror(tmp_path):
     row = ledger.timeline("buffer", 8)[0]
     assert row["comment_url"] == "https://x/c1" and row["mirrored_at"]
     assert [row["number"] for row in ledger.find_subjects(kind="buffer", number=8)] == [8]
+
+
+# --- actions and the ids the registry issues (spec webapp-actions §4.1, §4.2) ---
+
+
+def test_new_subjects_get_numbers_from_the_clock_that_never_repeat(tmp_path, monkeypatch):
+    from mia_buffers import ledger as ledger_module
+
+    now = [ledger_module.NUMBER_EPOCH + 1000.5]
+    monkeypatch.setattr(ledger_module.time, "time", lambda: now[0])
+    ledger = Ledger(tmp_path / "l.sqlite")
+    first = ledger.create_subject("dataset", "rec-a", data={"x": 1})
+    assert (first["number"], first["issue"], first["stage"], first["data"]) == (1000, None, "new", {"x": 1})
+    assert ledger.create_subject("dataset", "rec-a")["number"] == 1000  # the key exists: the same subject
+    assert ledger.create_subject("buffer", "pool")["number"] == 1001  # one sequence for every kind, bumped
+    ledger.backup(tmp_path / "backup.sqlite")
+    assert ledger.create_subject("prep", "prep-x")["number"] == 1002
+    now[0] += 60  # the backup is restored a minute later: its counter is old, the clock is not
+    restored = Ledger(tmp_path / "backup.sqlite")
+    assert restored.create_subject("prep", "prep-y")["number"] == 1060
+    adopted = ledger.create_subject("dataset", "rec-b", number=234)  # a dataset whose GitHub issue is known
+    assert (adopted["number"], adopted["issue"]) == (234, 234)
+
+
+def test_an_action_is_recorded_once_per_key_and_settled_with_its_entry(tmp_path, monkeypatch):
+    from mia_buffers import ledger as ledger_module
+
+    now = [1_800_000_000.25]
+    monkeypatch.setattr(ledger_module.time, "time", lambda: now[0])
+    ledger = Ledger(tmp_path / "l.sqlite")
+    number = ledger.create_subject("dataset", "rec-a")["number"]
+    action, created = ledger.add_action("dataset", number, "go", "page", key="k1", payload={"root": "o/b#8"})
+    assert created and action["id"] == 1_800_000_000_250 and action["state"] == "pending"
+    assert (action["kind"], action["number"], action["action"], action["actor"]) == ("dataset", number, "go", "page")
+    assert action["payload"] == {"root": "o/b#8"} and action["at"].startswith("2027-01-15T08:00:00")
+    again, created = ledger.add_action("dataset", number, "go", "page", key="k1")
+    assert not created and again["id"] == action["id"]  # a repeat of the key is the same action
+    with pytest.raises(ValueError, match="k1"):
+        ledger.add_action("dataset", number, "approve", "page", key="k1")  # the key names another request
+    second, _ = ledger.add_action("dataset", number, "cancel", "page")  # the same millisecond: bumped
+    assert second["id"] == action["id"] + 1 and second["key"] is None
+    sent = ledger.settle_action(action["id"], "sent", entry=("**Action:** `go`", "<!-- action -->"))
+    assert sent["state"] == "sent" and [row["body"] for row in ledger.timeline("dataset", number)] == [
+        "**Action:** `go`"
+    ]
+    failed = ledger.settle_action(second["id"], "failed", "Temporal is away")
+    assert (failed["state"], failed["detail"]) == ("failed", "Temporal is away")
+    assert [row["id"] for row in ledger.actions("dataset", number)] == [action["id"], second["id"]]
+    assert ledger.action(action["id"])["state"] == "sent" and ledger.action(1) is None
+    assert ledger.settle_action(1, "sent") is None
+
+
+def test_subject_data_and_issue_can_be_written(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    number = ledger.create_subject("buffer", "pool", data={"spec": "a"})["number"]
+    assert ledger.set_subject_data("buffer", number, {"spec": "b"})["data"] == {"spec": "b"}
+    assert ledger.set_subject_issue("buffer", number, 77)["issue"] == 77
+    assert ledger.find_subjects(issue=77)[0]["key"] == "pool" and ledger.set_subject_issue("buffer", 1, 2) is None

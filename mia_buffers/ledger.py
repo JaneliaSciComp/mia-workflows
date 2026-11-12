@@ -81,7 +81,13 @@ CREATE TABLE IF NOT EXISTS subjects (kind TEXT, number INTEGER, key TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS timeline (kind TEXT, number INTEGER, seq INTEGER, at TEXT, round TEXT, stage TEXT,
     body TEXT NOT NULL, marker TEXT NOT NULL, mirrored_at TEXT, comment_url TEXT,
     PRIMARY KEY (kind, number, seq), UNIQUE (kind, number, marker));
+CREATE TABLE IF NOT EXISTS actions (id INTEGER PRIMARY KEY, kind TEXT, number INTEGER, action TEXT, actor TEXT,
+    at TEXT, key TEXT UNIQUE, payload TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS actions_subject ON actions (kind, number);
 """
+
+ACTION_COLUMNS = ("id", "kind", "number", "action", "actor", "at", "key", "payload", "state", "detail")
+NUMBER_EPOCH = 1767225600  # 2026-01-01T00:00:00Z: a new subject's number is the whole seconds since then
 
 TIMELINE_COLUMNS = ("seq", "at", "round", "stage", "body", "marker", "mirrored_at", "comment_url")
 
@@ -578,6 +584,105 @@ class Ledger:
                 "SELECT DISTINCT kind, number FROM timeline WHERE mirrored_at IS NULL ORDER BY kind, number"
             )
             return [(kind, number) for kind, number in rows]
+
+    # --- new subjects and actions: the ids the registry issues (spec webapp-actions §4.1, §4.2) ---
+
+    @staticmethod
+    def _issue(db: sqlite3.Connection, name: str, clock: int) -> int:
+        """The next id of sequence `name`: the clock's value, or one past the last issued when the clock has not
+        moved on. Taken from the clock so a ledger restored from an older backup cannot hand out an id again."""
+        row = db.execute("SELECT value FROM kv WHERE key = ?", (f"last_{name}",)).fetchone()
+        issued = max(clock, (json.loads(row[0])["last"] if row else 0) + 1)
+        db.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (f"last_{name}", json.dumps({"last": issued})))
+        return issued
+
+    def create_subject(self, kind: str, key: str, *, data: dict | None = None, number: int | None = None) -> dict:
+        """The subject with this key, created when there is none: stage `new`, a number from the clock and no
+        issue yet, or the given `number` as both (a dataset whose GitHub issue is known but was never adopted)."""
+        with self._transaction() as db:
+            found = self._subjects(db, "WHERE kind = ? AND key = ?", (kind, key))
+            if found:
+                return found[0]
+            issue = number
+            if number is None:
+                number = self._issue(db, "number", int(time.time() - NUMBER_EPOCH))
+            db.execute(
+                "INSERT INTO subjects VALUES (?, ?, ?, 'new', 0, ?, ?, ?)",
+                (kind, number, key, issue, json.dumps(data or {}), time.time()),
+            )
+            return self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))[0]
+
+    def _set_subject(self, kind: str, number: int, column: str, value: object) -> dict | None:
+        with self._transaction() as db:
+            db.execute(
+                f"UPDATE subjects SET {column} = ?, updated = ? WHERE kind = ? AND number = ?",
+                (value, time.time(), kind, number),
+            )
+            found = self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))
+        return found[0] if found else None
+
+    def set_subject_data(self, kind: str, number: int, data: dict) -> dict | None:
+        """Replace what the subject carries (a buffer spec's text); None when there is no such subject."""
+        return self._set_subject(kind, number, "data", json.dumps(data))
+
+    def set_subject_issue(self, kind: str, number: int, issue: int) -> dict | None:
+        """The mirror's write-back: the GitHub issue it opened for the subject."""
+        return self._set_subject(kind, number, "issue", issue)
+
+    @staticmethod
+    def _actions(db: sqlite3.Connection, where: str, values: tuple) -> list[dict]:
+        rows = db.execute(f"SELECT {', '.join(ACTION_COLUMNS)} FROM actions {where} ORDER BY id", values)
+        return [{**dict(zip(ACTION_COLUMNS, row, strict=True)), "payload": json.loads(row[7])} for row in rows]
+
+    def add_action(
+        self, kind: str, number: int, action: str, actor: str, *, key: str | None = None, payload: dict | None = None
+    ) -> tuple[dict, bool]:
+        """Record one thing somebody asked for, `pending` until Temporal has it: (the action, whether it is
+        new). Its id is the workflow's event id. A `key` seen before is that same action and adds nothing
+        (ValueError when it was used for another subject or action)."""
+        with self._transaction() as db:
+            if key is not None and (seen := self._actions(db, "WHERE key = ?", (key,))):
+                if (seen[0]["kind"], seen[0]["number"], seen[0]["action"]) != (kind, number, action):
+                    raise ValueError(f"the key {key!r} was used for another action")
+                return seen[0], False
+            now = time.time()
+            action_id = self._issue(db, "action", int(now * 1000))
+            at = datetime.fromtimestamp(now, UTC).isoformat()
+            db.execute(
+                "INSERT INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', '')",
+                (action_id, kind, number, action, actor, at, key, json.dumps(payload or {})),
+            )
+            return self._actions(db, "WHERE id = ?", (action_id,))[0], True
+
+    def settle_action(
+        self, action_id: int, state: str, detail: str = "", *, entry: tuple[str, str] | None = None
+    ) -> dict | None:
+        """Set an action's state (`sent`, `failed`, `refused`) and why; with `entry` (body, marker) the same
+        transaction appends it to the subject's timeline, so a sent action is never missing from it. None when
+        there is no such action."""
+        with self._transaction() as db:
+            found = self._actions(db, "WHERE id = ?", (action_id,))
+            if not found:
+                return None
+            db.execute("UPDATE actions SET state = ?, detail = ? WHERE id = ?", (state, detail, action_id))
+            if entry is not None:
+                key = (found[0]["kind"], found[0]["number"])
+                seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM timeline WHERE kind = ? AND number = ?", key)
+                db.execute(
+                    "INSERT OR IGNORE INTO timeline (kind, number, seq, at, round, stage, body, marker) "
+                    "VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
+                    (*key, seq.fetchone()[0], datetime.now(UTC).isoformat(), *entry),
+                )
+            return self._actions(db, "WHERE id = ?", (action_id,))[0]
+
+    def action(self, action_id: int) -> dict | None:
+        with self._lock:
+            found = self._actions(self._db, "WHERE id = ?", (action_id,))
+        return found[0] if found else None
+
+    def actions(self, kind: str, number: int) -> list[dict]:
+        with self._lock:
+            return self._actions(self._db, "WHERE kind = ? AND number = ?", (kind, number))
 
     # --- assessments: the append-only record every gate decision leaves (spec autonomous-gates §5) ----
 
