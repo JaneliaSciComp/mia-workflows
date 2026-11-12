@@ -158,3 +158,14 @@ def test_the_registry_toggles_narrow_the_rows_and_the_numbers_but_not_the_funnel
     assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", ALL, raw_cached=True)["rows"]] == ["a"]
     assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", ALL, staged_geom=True)["rows"]] == ["a"]
     assert plan_view(PLAN, DATASETS, "p512-l1", ALL, staged_geom=True)["rows"] == []
+
+
+def test_the_datasets_to_prepare_follow_the_search() -> None:
+    """A request takes a bounded number of datasets: the search box is how a person prepares a large plan in parts."""
+    assert plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "zzz"))["summary"]["to_prepare"] == []
+    assert plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "not prepared"))["summary"][
+        "to_prepare"
+    ] == ["c"]
+    assert (
+        plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "zzz"))["summary"]["fitting"] == 3
+    )  # numbers stay

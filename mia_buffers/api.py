@@ -332,7 +332,7 @@ def _field(name: str) -> Any:
 SUBJECT_SORTS = {name: _field(name) for name in ("key", "kind", "stage", "status", "updated", "number")}
 BUFFER_SORTS = {
     "buffer": _field("id"),
-    "spec": _field("spec"),
+    "spec": lambda row: _spec_name(row),
     "updated": lambda row: (row.get("latest_event") or {}).get("at"),
     "volumes": _field("volumes"),
     "missing": _field("missing"),
@@ -356,6 +356,11 @@ def _round_of(buffer: str) -> tuple[int, int]:
     """(the spec's number, the round's event) of a buffer id; (0, 0) for an id that is not a round's."""
     found = ROUND_ID_RE.match(buffer)
     return (int(found.group(1)), int(found.group(2))) if found else (0, 0)
+
+
+def _spec_name(buffer: dict) -> str | None:
+    """What a buffer's spec is called: its spec's key, else the name its config recorded."""
+    return buffer.get("spec") or (buffer.get("config") or {}).get("spec_name")
 
 
 def _subject_haystack(row: dict) -> tuple:
@@ -656,7 +661,7 @@ class BufferService:
         if page is None:
             return 200, {**out, "assets": assets}, {}
         # the page's row names its dataset: a raw download is keyed by it, a staged artifact carries it
-        issues = {row["id"]: row.get("issue") for row in self.ledger.datasets()}
+        issues = self._dataset_issues()
         for asset in assets:
             asset["record"] = asset["key"] if kind == "raw" else (asset["data"] or {}).get("record")
             asset["issue"] = issues.get(asset["record"])
@@ -747,7 +752,17 @@ class BufferService:
             dataset_row(static, datasets.get(static["id"]), raw.get(static["id"]), staged.get(static["id"], []))
             for static in statics
         ]
+        issues = self._dataset_issues()
+        for row in rows:
+            row["issue"] = issues.get(row["id"])
         return ref, rows
+
+    def _dataset_issues(self) -> dict[str, int | None]:
+        """Each dataset's GitHub issue. A dataset row's `issue` is the number of the workflow that prepares it:
+        for a dataset a label started that is its issue, but for one started from the page it is the subject's
+        number, and the issue is the one the mirror opened for the subject (none until it has)."""
+        issues = {row["id"]: row.get("issue") for row in self.ledger.datasets()}
+        return issues | {row["key"]: row["issue"] for row in self.ledger.find_subjects(kind="dataset")}
 
     def _request_records(self, number: str) -> list[str]:
         """The records a preparation request names. One that selects by rule names none here: the round's first
@@ -1378,14 +1393,14 @@ class BufferService:
         # the designer asks for the same plan once per page turn and sort: keep the last one while nothing it
         # depends on has changed (the spec's text, which names the ref, and every dataset's state)
         key = (text, frozenset(states.items()))
-        if self._last_plan[0] != key:
+        kept_for, plan = self._last_plan  # read once: another request may replace it meanwhile
+        if kept_for != key:
             records = self.ledger.records(ref)
             if not records:
                 raise HttpError(409, f"catalog ref {ref} is not synced; run: mia-buffers catalog sync --ref {ref}")
             prepared = {record for record, state in states.items() if state == "prepared"}
-            built = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared)
-            self._last_plan = (key, built.to_dict(states))
-        plan = self._last_plan[1]
+            plan = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared).to_dict(states)
+            self._last_plan = (key, plan)
         if parsed.page is None:
             return 200, plan, {}
         asked = parsed.page
@@ -1437,7 +1452,7 @@ class BufferService:
         for buffer in buffers:
             number = _round_of(buffer["id"])[0]
             newest.setdefault(number, buffer["id"])
-            buffer["spec"] = specs.get(number) or (buffer["config"] or {}).get("spec_name")
+            buffer["spec"] = specs.get(number)  # its spec's page; a buffer of a spec never adopted has none
             buffer["superseded_by"] = newest[number] if number and newest[number] != buffer["id"] else None
         if "spec" in query:
             if not query["spec"].isdigit():
@@ -1446,7 +1461,7 @@ class BufferService:
         if "record" in query:
             boards = {board["buffer"]: board for board in self.ledger.boards_of(query["record"])}
             buffers = [{**buffer, "board": boards[buffer["id"]]} for buffer in buffers if buffer["id"] in boards]
-        rows, total = paged(buffers, page, BUFFER_SORTS, lambda row: (row["id"], row["spec"]))
+        rows, total = paged(buffers, page, BUFFER_SORTS, lambda row: (row["id"], _spec_name(row)))
         return 200, {"buffers": rows, "total": total}, {}
 
     def _put_board(self, buffer: str, record: str, *, query: dict[str, str], body: bytes) -> Response:
@@ -1471,9 +1486,11 @@ class BufferService:
             for asset in self.ledger.assets("staged")
             if asset["data"] and buffer in asset["refs"] and asset["data"].get("levels_key")
         }
+        issues = self._dataset_issues()
         for row in board:
             known = datasets.get(row["record"]) or {}
-            row.update({name: known.get(name) for name in ("issue", "folder", "previews", "crops")})
+            row.update({name: known.get(name) for name in ("folder", "previews", "crops")})
+            row["issue"] = issues.get(row["record"])
             row["staged"] = staged.get(row["record"])
         rows, total = paged(
             board, page, BOARD_SORTS, lambda row: (row["record"], row["status"], row["reason"], row["job"])

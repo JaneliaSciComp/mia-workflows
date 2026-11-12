@@ -1715,7 +1715,7 @@ def test_one_dataset_with_everything_known_about_it(tmp_path):
     assert out["dataset"]["binding_hash"] == "b" * 64 and out["raw_asset"]["data"]["bytes"] == 10
     assert [asset["key"] for asset in out["staged_assets"]] == ["a1"]
     held = call(s, "GET", "/buffers", {"limit": "5", "record": U937})[1]["buffers"]  # the buffers whose pool holds it
-    assert [(b["id"], b["spec"], b["board"]["status"]) for b in held] == [("i5-e6", "s", "servable")]
+    assert [(b["id"], b["spec"], b["board"]["status"]) for b in held] == [("i5-e6", None, "servable")]
     assert [(r["key"], r["number"]) for r in out["requests"]] == [(request["key"], request["number"])]
     assert out["subject"]["stage"] == "review" and "approve" in out["subject"]["actions"]
     assert call(s, "GET", "/catalog/datasets/no-such-record")[0] == 404
@@ -1836,8 +1836,9 @@ def test_buffers_paged_name_their_spec_and_which_round_is_newest(tmp_path):
     out = call(s, "GET", "/buffers", {"limit": "5"})[1]
     assert out["total"] == 3  # the newest spec first, its newest round first
     assert [(b["id"], b["spec"], b["superseded_by"]) for b in out["buffers"]] == [
-        ("i7-e1", "s", None), ("i5-e9", "alpha", None), ("i5-e6", "alpha", "i5-e9")
+        ("i7-e1", None, None), ("i5-e9", "alpha", None), ("i5-e6", "alpha", "i5-e9")
     ]  # fmt: skip
+    assert out["buffers"][0]["config"]["spec_name"] == "s"  # no spec page to link: the name it ran under is text
     assert [b["id"] for b in call(s, "GET", "/buffers", {"limit": "5", "spec": "5"})[1]["buffers"]] == [
         "i5-e9",
         "i5-e6",
@@ -1901,3 +1902,30 @@ def test_usage_days_paged(tmp_path):
     out = call(s, "GET", "/usage/b", {"limit": "2"})[1]
     assert [day["day"] for day in out["days"]] == ["2026-01-03", "2026-01-02"] and out["total"] == 3  # newest first
     assert [d["draws"] for d in call(s, "GET", "/usage/b", {"limit": "1", "sort": "draws"})[1]["days"]] == [10]
+
+
+def test_a_dataset_started_from_the_page_names_the_issue_the_mirror_opened(tmp_path):
+    """The worker writes the workflow's number into the dataset row's `issue`; for a dataset started from the page
+    that number is the subject's, not a GitHub issue's. The GitHub issue is the subject's."""
+    s = catalog_service(tmp_path)
+    number = s.ledger.create_subject("dataset", U937)["number"]
+    call(s, "PUT", f"/datasets/{U937}", payload={"state": "in-progress", "issue": number})
+    call(s, "PUT", f"/assets/raw/{U937}", payload={"state": "ready", "bytes": 10})
+    call(s, "PUT", "/buffers/b", payload=CFG)
+    call(s, "PUT", f"/buffers/b/datasets/{U937}", payload={"status": "fetching"})
+    text = re.sub(r"ref: [0-9a-f]{40}", f"ref: {REF_A}", SPEC_2D_TEXT)
+
+    def issues():
+        return (
+            call(s, "GET", "/catalog/datasets", {"q": U937})[1]["rows"][0]["issue"],
+            call(s, "GET", f"/catalog/datasets/{U937}")[1]["row"]["issue"],
+            call(s, "GET", "/assets/raw", {"limit": "5"})[1]["assets"][0]["issue"],
+            call(s, "GET", "/buffers/b/datasets", {"limit": "5"})[1]["datasets"][0]["issue"],
+            call(s, "POST", "/plan", payload={"spec": text, "page": {"q": U937}})[1]["rows"][0]["issue"],
+        )
+
+    assert issues() == (None, None, None, None, None)  # the mirror has opened none yet: no link, never the number
+    s.ledger.set_subject_issue("dataset", number, 301)
+    assert issues() == (301, 301, 301, 301, 301)
+    call(s, "PUT", f"/datasets/{ONE_CH}", payload={"state": "prepared", "issue": 12})  # a label's dataset, not adopted
+    assert call(s, "GET", "/catalog/datasets", {"q": ONE_CH})[1]["rows"][0]["issue"] == 12

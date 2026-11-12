@@ -156,7 +156,7 @@ def test_assessment_budget_and_volume_paths():
     reg.put_assessment({"id": "a1", "gate": "crops"})
     reg.assessments(subject_kind="artifact", subject_ref="art1")
     reg.assessments(by="judge", before="a0", limit=5)
-    reg.decisions("crops", before="a0")
+    reg.decisions("crops", offset=50)
     reg.reserve("o/r#7", "job-1", "match", 5.0, {"max_usd": 10})
     reg.settle("o/r#7", "job-1", usd=1.0, fetched_bytes=3)
     reg.delete_volume("b", "rec/v0.zarr")
@@ -165,7 +165,7 @@ def test_assessment_budget_and_volume_paths():
         ("PUT", "/assessments/a1"),
         ("GET", "/assessments?subject_kind=artifact&subject_ref=art1"),
         ("GET", "/assessments?by=judge&before=a0&limit=5"),
-        ("GET", "/decisions?gate=crops&before=a0"),
+        ("GET", "/decisions?gate=crops&offset=50"),
         ("POST", "/budgets/o%2Fr%237/reserve"),
         ("POST", "/budgets/o%2Fr%237/settle"),
         ("DELETE", "/buffers/b/volumes/rec%2Fv0.zarr"),

@@ -65,6 +65,11 @@ def _rank(value: Any) -> tuple[int, Any]:
     return (1, str(value).lower())
 
 
+def matches(text: str, values: Iterable[Any]) -> bool:
+    """Whether a search (lower-cased) is in any of a row's values."""
+    return any(text in str(value).lower() for value in values if value)
+
+
 def paged(
     rows: Iterable[dict],
     page: Page,
@@ -76,7 +81,7 @@ def paged(
     # ponytail: sorts and cuts the whole list in Python; SQL LIMIT/OFFSET when a list reaches tens of thousands
     found = list(rows)
     if page.text and haystack is not None:
-        found = [row for row in found if any(page.text in str(value).lower() for value in haystack(row) if value)]
+        found = [row for row in found if matches(page.text, haystack(row))]
     if page.sort is not None:
         value_of = keys[page.sort]
         present = [row for row in found if value_of(row) is not None]
@@ -276,7 +281,8 @@ def plan_view(
 ) -> dict:
     """{rows, total, summary} of a plan (`Plan.to_dict` with states). `datasets` maps a record to its dataset_row.
     The three registry toggles narrow the rows and the summary's numbers; the funnel is the plan's own and
-    ignores them. `fit_only` and the page's search narrow only the rows."""
+    ignores them. `fit_only` and the page's search narrow only the rows and, the search, the datasets to prepare:
+    a request takes a bounded number, and the search is how a person prepares a large plan in parts."""
     rows = []
     for row in sorted(plan["rows"], key=lambda row: row["path"]):
         known = datasets.get(row["id"]) or {}
@@ -343,7 +349,12 @@ def plan_view(
             {name: row.get(name) for name in ("id", "modality_group", "positions", "channels", "weight")}
             for row in heaviest
         ],
-        "to_prepare": sorted(row["id"] for row in fitting if row.get("prepared") not in ("prepared", "in-progress")),
+        "to_prepare": sorted(
+            row["id"]
+            for row in fitting
+            if row.get("prepared") not in ("prepared", "in-progress")
+            and (not page.text or matches(page.text, _plan_haystack(row)))
+        ),
     }
     shown = [row for row in rows if row["fits"]] if fit_only else rows
     found, matched = paged(shown, page, PLAN_SORTS, _plan_haystack)
