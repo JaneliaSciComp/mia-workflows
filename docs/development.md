@@ -366,7 +366,7 @@ written before that change still name the labels; each is now the action of the 
 | was | is |
 |---|---|
 | `data:go`, `data:approve`, `data:reject` (+ comments), `data:revoke` | *Prepare* / *Run again*, *Approve*, *Reject* with the feedback box, *Revoke* on `#datasets/<record>` |
-| a buffer issue with a YAML block, `buffer:go` / `buffer:plan` | *Create buffer* under Buffers, *New buffer* (`#buffers/new`); *Run*, with *Show me the plan first* |
+| a buffer issue with a YAML block, `buffer:go` / `buffer:plan` | *Create buffer* under Buffers, *New buffer* (`#buffers/new`): *Plan*, then *Run* on the spec's page |
 | `buffer:approve`, `buffer:keep`, `buffer:retire`, `buffer:revoke` + `/revoke <record>` lines | the buttons on `#specs/<name>`; *Revoke the ticked* |
 | files in `incoming/` noticed by the poller | *Files are in place* on the spec's page |
 | closing a buffer or request issue | *Cancel the round*; *Force stop* when a run does not answer |
@@ -394,7 +394,8 @@ human labels in `init-labels` (it creates stage labels only: they are output the
 
 **Buffer specs and preparation requests from the page.** `POST /specs` with `{spec}` saves a buffer spec under
 its `name` (a name that exists is an edit of that subject, never a second one); with `action: go` it also runs
-it, and `plan_first: true` makes it a round that waits at the plan (the workflow's `plan` signal). The go's
+it, and `plan_first: true` makes it a round that waits at the plan (the workflow's `plan` signal); the page always
+sends it, so a round a person starts stops at its plan and the approve there is the button *Run*. The go's
 payload is the spec text, the round runs exactly that (`admit` reads the action), and its timeline entry shows
 it. `POST /specs/<name>/actions` takes `go` (the stored spec, or a `spec` to store and run), `approve`, `keep`,
 `retire`, `revoke` (`records`), `dropped` (`record`), `cancel`, `stop`. `POST /prep` with `{spec}` files a

@@ -52,8 +52,8 @@ pool in parallel: the raw files are fetched into a shared raw cache (one writer 
 stages one **sparse OME-Zarr 0.6 pyramid per volume**, holding only the chunks that cover the planned samples, with
 the derivation (source bytes, code commits, plan, voxel size, verification) recorded in the Zarr itself and
 checked against the 0.6 schemas before publication. Each volume is registered with buffer-api as it becomes
-servable; the round is staged before a human approves it (*Approve*; *Show me the plan first* adds a gate after
-the plan), and the buffer is `ready` once every weighting group reaches the spec's minimum. A staged artifact is
+servable; a round started from the page stops at its plan (*Plan*, then *Run*) and is staged before a human approves
+it (*Approve*), and the buffer is `ready` once every weighting group reaches the spec's minimum. A staged artifact is
 addressed by its recipe, so a later buffer with the same binding, levels and plan reuses it instead of staging
 again. After that the buffer lives until it is retired: idle when no consumer has drawn for a while, *Keep* to
 hold it, *Retire* to release what it references, *Revoke* to withdraw single records; a round in progress takes

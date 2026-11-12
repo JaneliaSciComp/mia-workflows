@@ -200,3 +200,10 @@ def test_markdown_never_becomes_html_or_a_script_link() -> None:
     assert (
         unsafe == "<p>&lt;img src=x onerror=alert(1)> [click](javascript:alert(1)) &lt;script>alert(2)&lt;/script></p>"
     )
+
+
+def test_a_buffer_is_always_planned_first() -> None:
+    """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
+    assert "Show me the plan first" not in PAGE and "first.checked" not in PAGE
+    assert PAGE.count("plan_first: true") == 2  # New buffer, and a spec's own page
+    assert 'subject.stage === "plan-review" ? "Run"' in PAGE

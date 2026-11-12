@@ -321,7 +321,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
   </nav>
   <!-- guide: the loop from spec to training, for the person training a model -->
   <article data-doc="guide">
-<div class="notice"><b>Labels are no longer commands.</b> Everything this guide calls a label you add is now a button on this page, and GitHub issues are a read-only log that the system writes: labelling, commenting on or closing an issue changes nothing. Where the text or a figure below still says a label, read it so: <code>buffer:go</code> is <i>Run</i> (Create buffer under Buffers, New buffer, or <i>Edit and run again</i> on the spec's page); <code>buffer:plan</code> is <i>Run</i> with <i>Show me the plan first</i> ticked; <code>buffer:approve</code>, <code>buffer:keep</code>, <code>buffer:retire</code> are <i>Approve</i>, <i>Keep</i>, <i>Retire</i> on the spec's page; <code>buffer:revoke</code> is <i>Revoke the ticked</i> there; <code>prep:go</code> is <i>Prepare these datasets</i>, for the datasets ticked on the Datasets tab or the ones a new buffer's plan needs; <code>data:go</code>, <code>data:approve</code>, <code>data:reject</code>, <code>data:revoke</code> are <i>Prepare</i> or <i>Run again</i>, <i>Approve</i>, <i>Reject</i> (with your feedback in the box) and <i>Revoke</i> on the dataset's page. A round in progress takes only <i>Cancel the round</i>; cancel it before asking for anything else. <i>Needs you</i> lists everything that waits on a person.</div>
+<div class="notice"><b>Labels are no longer commands.</b> Everything this guide calls a label you add is now a button on this page, and GitHub issues are a read-only log that the system writes: labelling, commenting on or closing an issue changes nothing. Where the text or a figure below still says a label, read it so: <code>buffer:go</code> and <code>buffer:plan</code> are both <i>Plan</i> (Create buffer under Buffers, New buffer, or <i>Edit and plan again</i> on the spec's page), then <i>Run</i> on the spec's page once the plan is posted: a round always stops at its plan; <code>buffer:approve</code>, <code>buffer:keep</code>, <code>buffer:retire</code> are <i>Approve</i>, <i>Keep</i>, <i>Retire</i> on the spec's page; <code>buffer:revoke</code> is <i>Revoke the ticked</i> there; <code>prep:go</code> is <i>Prepare these datasets</i>, for the datasets ticked on the Datasets tab or the ones a new buffer's plan needs; <code>data:go</code>, <code>data:approve</code>, <code>data:reject</code>, <code>data:revoke</code> are <i>Prepare</i> or <i>Run again</i>, <i>Approve</i>, <i>Reject</i> (with your feedback in the box) and <i>Revoke</i> on the dataset's page. A round in progress takes only <i>Cancel the round</i>; cancel it before asking for anything else. <i>Needs you</i> lists everything that waits on a person.</div>
 <header>
   <div class="eyebrow">user guide · training on a buffer</div>
   <h1>Training on a MIA buffer</h1>
@@ -380,7 +380,7 @@ ready:
   min_fraction: 0.5                     <span class="c"># how much of each weighting group must be servable before the board says "ready"</span></pre>
 
 <h2>Step 2. Start the buffer</h2>
-<p><b>Create buffer</b>, below the filters, shows the spec as YAML, with the catalog commit pinned; edit it there if the controls do not offer what you need. <b>Run</b> saves the spec under its name and starts the buffer at once; tick <b>Show me the plan first</b> to stop after the plan, before any job runs.</p>
+<p><b>Create buffer</b>, below the filters, shows the spec as YAML, with the catalog commit pinned; edit it there if the controls do not offer what you need. <b>Plan</b> saves the spec under its name and starts a round that stops at its plan, before any job runs; <b>Run</b> on the spec's page then starts the jobs.</p>
 <p>The page then shows the spec's own page: its stage, what it is waiting for, and a timeline of every step. Each stage change appears there as it happens, and a copy is written to an issue in the buffers repository, which is a log and takes no input.</p>
 <div class="tw"><table>
 <tr><th>label a human adds</th><th>what it does</th></tr>
@@ -1166,7 +1166,7 @@ const PILL_HELP = {
   // a buffer's stage
   "new": "Nothing has run yet.",
   "planning": "Resolving the spec against the catalog.",
-  "plan-review": "The plan is in the timeline; a run that shows its plan first waits here for Approve.",
+  "plan-review": "The plan is in the timeline; the round waits here for Run, and no job has run yet.",
   "sourcing": "Fetching and converting the pool's datasets, several at a time.",
   "ready": "Serving: consumers can draw crops.",
   "idle": "No consumer has drawn for a while; Keep returns it to ready, otherwise the keeper retires it later.",
@@ -1423,20 +1423,20 @@ function createBuffer(container, yaml, blocker) {
   // built once and kept: what a person typed into the box survives the page's re-renders
   let area = container.querySelector("textarea");
   if (!area) {
-    area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML", oninput: () => { area.dataset.edited = "1"; renderActions(); } });  // an edited spec enables Run
-    const first = el("input", { type: "checkbox" }), status = el("span", { class: "small" });
+    area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML", oninput: () => { area.dataset.edited = "1"; renderActions(); } });  // an edited spec enables Plan
+    const status = el("span", { class: "small" });
     const run = el("button", { type: "button", class: "btn", onclick: async () => {
-      run.disabled = true; status.textContent = "starting…";
+      run.disabled = true; status.textContent = "planning…";
       try {
-        const action = await api("/specs", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: area.value, action: "go", plan_first: first.checked, key: newKey() }) });
+        const action = await api("/specs", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: area.value, action: "go", plan_first: true, key: newKey() }) });
         location.hash = "#find/" + action.number;
       } catch (e) { status.textContent = ""; banner(e.status === 422 ? `The spec was refused: ${e.message}` : e.status === 409 ? `Not started. ${e.message}` : `Not started (${e.status || "network error"}): ${e.message}`); }
       run.disabled = false;
-    } }, "Run");
+    } }, "Plan");
     const reset = el("button", { type: "button", class: "btn", title: "replace the text with the spec the controls above describe", onclick: () => { delete area.dataset.edited; renderActions(); } }, "Reset to the controls");
     container.replaceChildren(el("details", {}, el("summary", {}, "Create buffer"),
-      el("div", { class: "small" }, "The spec the controls describe; edit it here if you need what they do not offer. Run saves it under its name and starts a round."),
-      area, el("div", { class: "actions" }, run, el("label", { class: "inline" }, first, " Show me the plan first"), reset, status)));
+      el("div", { class: "small" }, "The spec the controls describe; edit it here if you need what they do not offer. Plan saves it under its name and starts a round, which stops at its plan: Run on the spec's page starts the jobs."),
+      area, el("div", { class: "actions" }, run, reset, status)));
   }
   if (!area.dataset.edited) area.value = yaml;
   const run = container.querySelector("button"), status = container.querySelector(".actions .small");
@@ -1710,7 +1710,7 @@ function viewBuffers(id, refresh) {
   const root = $("buffersBody");
   if (id) return viewBuffer(root, id, refresh);
   if (refresh) return reloadTables(root);
-  root.replaceChildren(card("Buffer specs", "A spec is what you run; each run builds a buffer. Open one to approve, run again, revoke, retire or cancel.", el("p", {}, el("a", { class: "btn", href: "#buffers/new" }, "New buffer")),
+  root.replaceChildren(card("Buffer specs", "A spec is what you run; each run builds a buffer. Open one to run its plan, approve, plan again, revoke, retire or cancel.", el("p", {}, el("a", { class: "btn", href: "#buffers/new" }, "New buffer")),
     pagedTable("specs", { source: pageOf("/subjects/buffer", "subjects"), sort: "updated", dir: "desc", empty: "No spec yet: start with New buffer.", cols: [
       { key: "key", label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.key) },
       { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
@@ -1781,7 +1781,7 @@ async function viewBuffer(root, id, refresh) {
       ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),
     retired ? el("div", { class: "notice" }, `Retired ${ago(retired.at)}; the draws are archived at `, el("code", {}, archive || "none"), ".") : null,
     status && evs[0]?.kind === "staged" ? el("div", { class: "notice" }, "Staged, waiting for ", el("b", {}, "Approve"), " on its spec's page: the approve serves what the pool shows as servable, partial or not; consumers are refused until then.") : null,
-    !status && evs.length ? el("div", { class: "notice" }, "Not sourced yet: a buffer is registered when sourcing starts, at once for a run, and after ", el("b", {}, "Approve"), " for a run that shows its plan first. Until then it has only its events.") : null,
+    !status && evs.length ? el("div", { class: "notice" }, "Not sourced yet: a buffer is registered when sourcing starts, after ", el("b", {}, "Run"), " on its spec's page. Until then it has only its events.") : null,
     !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
     el("section", { class: "grid2" },
       card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", healthLine(usage), sparkline(days.slice(-60)),
@@ -2017,7 +2017,8 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
   const note = el("textarea", { rows: 3, placeholder: "What is wrong with these crops? This goes to the agent that fixes the reader.", "aria-label": "feedback sent with Reject" });
   const offered = ACTION_ORDER.filter(a => subject.actions.includes(a) && !(skip || []).includes(a));
   for (const action of offered) {
-    const word = action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Prepare again" : "Prepare") : "Run") : ACTION_WORDS[action] || action;
+    const word = action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
+      : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Prepare again" : "Prepare") : "Run") : ACTION_WORDS[action] || action;
     bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), onclick: e => {
       if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
       bar.querySelectorAll("button").forEach(b => { b.disabled = true; });
@@ -2077,10 +2078,8 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   }
   if (subject.actions.includes("go")) {
     const area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML" }); area.value = subject.data?.spec || "";
-    const first = el("input", { type: "checkbox" });
-    box.append(card(subject.stage === "new" ? "Run" : "Edit and run again", "The spec as it was last saved. Run starts a new round with this text; the buffer it builds gets a new id, and training jobs keep the buffer they connected to.", area,
-      el("div", { class: "actions" }, el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, { action: "go", spec: area.value, plan_first: first.checked, key: newKey() }, again); } }, "Run"),
-        el("label", { class: "inline" }, first, " Show me the plan first"))));
+    box.append(card(subject.stage === "new" ? "Plan" : "Edit and plan again", "The spec as it was last saved. Plan starts a new round with this text, which stops at its plan until you press Run; the buffer it builds gets a new id, and training jobs keep the buffer they connected to.", area,
+      el("div", { class: "actions" }, el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, { action: "go", spec: area.value, plan_first: true, key: newKey() }, again); } }, "Plan"))));
   }
   box.append(card("Buffers of this spec", "Newest first; each run builds a new one.", pagedTable("spec-buffers:" + subject.key, { source: pageOf("/buffers", "buffers", () => ({ spec: subject.number })), search: false, empty: "No buffer yet.", cols: [
     { key: "buffer", label: "buffer", cell: b => bufferLink(b.id) },
