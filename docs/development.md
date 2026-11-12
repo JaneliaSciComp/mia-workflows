@@ -366,11 +366,11 @@ written before that change still name the labels; each is now the action of the 
 | was | is |
 |---|---|
 | `data:go`, `data:approve`, `data:reject` (+ comments), `data:revoke` | *Prepare* / *Run again*, *Approve*, *Reject* with the feedback box, *Revoke* on `#datasets/<record>` |
-| a buffer issue with a YAML block, `buffer:go` / `buffer:plan` | *Create buffer* on the Datasets view; *Run*, with *Show me the plan first* |
+| a buffer issue with a YAML block, `buffer:go` / `buffer:plan` | *Create buffer* under Buffers, *New buffer* (`#buffers/new`); *Run*, with *Show me the plan first* |
 | `buffer:approve`, `buffer:keep`, `buffer:retire`, `buffer:revoke` + `/revoke <record>` lines | the buttons on `#specs/<name>`; *Revoke the ticked* |
 | files in `incoming/` noticed by the poller | *Files are in place* on the spec's page |
 | closing a buffer or request issue | *Cancel the round*; *Force stop* when a run does not answer |
-| a `prep:go` issue | *Prepare these datasets* on the Datasets view; `#requests/<key>` |
+| a `prep:go` issue | *Prepare these datasets*, for the datasets ticked on the Datasets list or the ones a new buffer's plan needs; `#requests/<key>` |
 | nothing | *Needs you*: everything that waits on a person |
 
 Gone: mia-buffers' poller (`MiaBufferPoll`, `mia_buffers/poll.py`) and its schedule, label delivery in mia-data's
@@ -682,32 +682,42 @@ routes, which take no token (see "Actions" above). `tests/test_buffers_ui.py` fa
 that does not exist or is a worker route, uses an `Authorization` header, or calls a host other than github.com
 and Google Fonts.
 
-- **Datasets** reads `/meta`, `/catalogs`, `/records?ref=`, `/datasets`, `/assets/raw|staged` and runs the controls'
-  spec through `POST /plan` (debounced 300 ms): fit funnel, charts, records table.
-- **Buffers** reads `/buffers`, then per buffer `/buffers/<id>/status`, `/events`, `/datasets`, `/usage/<id>` and
-  the registry's `/datasets` (config, health line, daily draws, the data set pool with each dataset's issue, Temporal
-  workflow from `temporal.ui_url`, crops and stage folders, consumers). The list shows each buffer's issue (from its id) and its
-  stage: the latest lifecycle event read back as the stage label; a buffer registered before those events shows
-  "no events".
-- **Cache** reads `/assets/*`, `/locks`, `/keeper` and the quotas from `/meta`: meters, tables, the keeper card
-  (the last pass the worker stored with `PUT /keeper`, or "has not reported a pass yet").
-- **Preparation** reads `/datasets`: in-progress and needs-human rows with issue links, plus a GitHub search for
-  `prep:` labels (the service cannot list issues).
-- **Decisions** reads `/decisions` (every assessment newest first, a `before=<id>` cursor to load older, and the
-  judge/human agreement per gate): the audit trail of spec autonomous-gates §10, with a human approve that a later
-  reject overrules marked.
-- **Docs** is static: the user guide (`#docs`, the loop from spec to training as the person training a model sees
-  it) and the architecture overview (`#docs/architecture`). Both live in `index.html` under `data-view="docs"`;
-  the overview is the same text as the published explainer, and the page is the copy to edit first.
+Each tab is one kind of thing, and each thing has one page (`docs/plans/2026-11-12-ui-domain-flow.md`):
 
-Actions: Download spec YAML (a file), Open buffer issue and Request preparation (prefilled
-`https://github.com/<buffers_repo>/issues/new?title=&body=` links). The links set no label: nothing runs until the
-human adds `buffer:go` / `prep:go`, and the body says so (a prefilled label once started a 186-record preparation
-request its author thought was still a draft). Open buffer issue is disabled
-while the plan has errors (with them as the reason; "request preparation first" when only unprepared records fit),
-and a record's landing link is shown only for an `http(s)` URL. A link
-over 8 KB falls back to a "copy YAML" button. With an empty registry the views say so ("No catalog
-synced; run `mia-buffers catalog sync`.").
+- **Needs you** reads `/needs`: everything that waits on a person, with the buttons that answer it.
+- **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
+  download, staged artifacts and buffers; filters by state, modality, dims and licence; a tick per dataset and
+  "Prepare these" (one `POST /prep`). `#datasets?state=<state>` opens the list with a filter set.
+- **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`, its
+  timeline, `/decisions?record=`, `/assets/staged?record=` and `/buffers?record=`: its record, preparation, crops,
+  decisions, cache, buffers, buttons and timeline.
+- **Preparation** reads `/subjects/prep`: the requests. A request's page lists its datasets
+  (`/catalog/datasets?request=<number>`: the records its stored spec names).
+- **Buffers** reads `/subjects/buffer` (specs) and `/buffers`. **New buffer** (`#buffers/new`) is the designer: its
+  controls are a spec, run through `POST /plan` with `page` (debounced 300 ms) for the funnel, the charts and one
+  page of the plan's rows. A buffer's page reads `/buffers/<id>/status`, `/events`, `/datasets`, `/volumes`,
+  `/consumers` and `/usage/<id>`.
+- **Cache** reads `/assets/raw|staged`, `/locks`, `/keeper` and the quotas from `/meta`.
+- **Decisions** reads `/decisions` (newest first, by gate, with the judge/human agreement): the audit trail of spec
+  autonomous-gates §10; a human approve that a later reject overrules is marked by the server.
+- **Docs** is static: the user guide (`#docs`) and the architecture overview (`#docs/architecture`). Both live in
+  `index.html` under `data-view="docs"`.
+
+**Every table is paged by the server.** A list route called with `limit` answers one page: `limit` (1–200),
+`offset`, `sort` (a column the route names; an unknown one is a 422), `dir` (`asc`|`desc`), `q` (searched in the
+row's text), plus the route's own filters; the answer is the route's usual envelope with its list cut to the page,
+and `total`. Without `limit` the route answers its whole list as it always did, which is what the workers call:
+keep it so. `mia_buffers/explore.py` holds the paging (`page_query`, `paged`), the dataset join (`dataset_row`) and
+the plan's summary (`plan_view`); a new list gets a `*_SORTS` table in `api.py` and one `paged(...)` call. The
+page's one component is `pagedTable` (sort on a header click, a search box, a pager; its state lasts the session,
+per table id), fed by `pageOf(path, rowsKey, filters)`.
+
+**How a table names a dataset.** The dataset is the first column: its id links to its page and is the default
+sort. Then `issue` (a GitHub mark linking the issue, a read-only log; empty without one), then `artifact` where
+there is one, then `files`. A registry number is never shown as `#<number>`: the thing's name links to its page.
+
+With an empty registry the views say so ("No catalog synced; run `mia-buffers catalog sync`."). A record's landing
+link is shown only for an `http(s)` URL.
 
 **Health line.** `empty / (requests + empty)` over the last hour (`requests` counts `next` calls that served draws,
 one `ts` each; a successful `split` call is not counted), against the buffer's `health.max_empty_fraction`;
