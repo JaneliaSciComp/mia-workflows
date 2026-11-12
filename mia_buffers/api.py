@@ -702,7 +702,9 @@ class BufferService:
             status, accepted = SUBJECT_RULES[kind][stage]
             if parsed.action not in accepted:
                 takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
-                raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
+                raise HttpError(
+                    409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`"
+                )
             if parsed.action in ("approve", "reject"):
                 if parsed.revision is None:
                     raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")

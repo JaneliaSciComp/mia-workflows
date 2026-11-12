@@ -391,7 +391,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     from autodev.jobs import CsubJobs
 
     from .activities import Activities
-    from .mirror import Mirror
+    from .mirror import Mirror, dataset_issue
     from .workflows import MiaDataDataset, MiaDataPoll, MiaMirror
 
     client = await _client(cfg)
@@ -402,7 +402,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     )
     mirror = []  # the dataset issues' mirror (spec webapp-actions §7); without buffer-api there is nothing to copy
     if activities.registry is not None:
-        mirror = [Mirror(clients[0], activities.registry, bot, {"dataset": (cfg.label, STAGES)}).mirror]
+        labels, openers = {"dataset": (cfg.label, STAGES)}, {"dataset": dataset_issue(cfg, clients[2])}
+        mirror = [Mirror(clients[0], activities.registry, bot, labels, openers).mirror]
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,

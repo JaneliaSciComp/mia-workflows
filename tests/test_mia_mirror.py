@@ -111,3 +111,67 @@ async def test_a_kick_during_a_pass_runs_another_pass():
     finally:
         await env.shutdown()
     assert passes == [("dataset", 7)] * 2
+
+
+# --- a subject started from the page has no issue: the mirror opens one (spec webapp-actions §7 step 1) ---
+
+
+async def describe_rec_a(subject):
+    assert subject["key"] == "rec-a"
+    return "rec-a: a dataset", "<!-- mia-data:record=rec-a -->\nA read-only log.\n\n- Record: x\n", ["data:new"]
+
+
+async def test_the_mirror_opens_the_issue_of_a_subject_that_has_none_and_writes_its_number_back(tmp_path):
+    t = Setup(tmp_path)
+    t.mirror = Mirror(t.gh, t.registry, "bot", {"dataset": (data_label, STAGES)}, {"dataset": describe_rec_a})
+    t.ledger._db.execute("DELETE FROM subjects WHERE number = 1")  # rec-a was never adopted from an issue:
+    number = t.ledger.create_subject("dataset", "rec-a")["number"]  # it was started from the page
+    t.registry.append_entry("dataset", number, body="**Action:** `go` by `page`", marker="<!-- a1 -->")
+    t.registry.append_entry("dataset", number, body="matching\n<!-- m1 -->", marker="<!-- m1 -->", stage="matching")
+    assert await t.mirror.mirror("dataset", number) == 2
+    (title, body, labels) = t.gh.created[0]
+    assert title == "rec-a: a dataset" and body.startswith("<!-- mia-data:record=rec-a -->") and labels == ["data:new"]
+    opened = t.ledger.subject("dataset", "rec-a")["issue"]
+    assert opened == 101 and [comment["body"] for comment in t.gh.comments[opened]] == [
+        "**Action:** `go` by `page`\n\n<!-- a1 -->",
+        "matching\n<!-- m1 -->",
+    ]
+    assert [label["name"] for label in t.gh.issues[opened]["labels"]] == ["data:matching"]
+    assert await t.mirror.mirror("dataset", number) == 0 and len(t.gh.created) == 1
+
+
+async def test_an_issue_opened_before_a_crash_is_found_by_its_marker_and_not_opened_twice(tmp_path):
+    t = Setup(tmp_path)
+    t.mirror = Mirror(t.gh, t.registry, "bot", {"dataset": (data_label, STAGES)}, {"dataset": describe_rec_a})
+    t.ledger._db.execute("UPDATE subjects SET issue = NULL WHERE number = 1")  # the write-back never happened
+    t.gh.issues[50] = {"number": 50, "body": "<!-- mia-data:record=rec-a -->", "labels": [], "user": {"login": "eve"}}
+    body = "<!-- mia-data:record=rec-a -->\nA read-only log.\n"
+    ours = (await t.gh.create_issue("rec-a: a dataset", body, ["data:new"]))["number"]
+    t.gh.created.clear()
+    assert await t.mirror.mirror("dataset", 1) == 2
+    assert t.gh.created == [] and t.ledger.subject("dataset", "rec-a")["issue"] == ours  # ours, not eve's copy
+
+
+async def test_a_kind_this_worker_cannot_describe_is_not_retried(tmp_path):
+    t = Setup(tmp_path)
+    t.ledger._db.execute("UPDATE subjects SET issue = NULL WHERE number = 1")
+    with pytest.raises(ApplicationError) as refused:
+        await t.mirror.mirror("dataset", 1)  # this mirror was given no way to open a dataset's issue
+    assert refused.value.non_retryable
+
+
+async def test_a_dataset_issue_is_the_record_facts_under_a_line_that_sends_people_to_the_page(tmp_path):
+    from mia_core.config import ServiceCfg
+    from mia_data.mirror import dataset_issue
+    from tests.test_mia_activities import _setup
+
+    t = _setup(tmp_path)
+    t.cfg.service = ServiceCfg(url="http://svc.example.org:8765")
+    title, body, labels = await dataset_issue(t.cfg, t.cat)({"kind": "dataset", "key": "rec-1", "number": 28000000})
+    lines = body.splitlines()
+    assert lines[0] == "<!-- mia-data:record=rec-1 -->" and title.startswith("rec-1: ")
+    assert "read-only log" in lines[1] and "http://svc.example.org:8765/#datasets/rec-1" in lines[1]
+    assert any(line.startswith("- Record: [main](https://github.com/o/catalog/blob/main/") for line in lines)
+    assert "data:new" in labels
+    with pytest.raises(ApplicationError, match="no record"):
+        await dataset_issue(t.cfg, t.cat)({"kind": "dataset", "key": "nope", "number": 1})

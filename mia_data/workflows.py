@@ -231,7 +231,9 @@ class MiaDataDataset:
             try:
                 await self._act("kill_job", job_id, budget=timedelta(minutes=30))
             except ActivityError as error:  # the job may be gone already; the dataset is cancelled either way
-                workflow.logger.warning("issue #%d: could not kill %s: %s", self.state.issue, job_id, error_message(error))
+                workflow.logger.warning(
+                    "issue #%d: could not kill %s: %s", self.state.issue, job_id, error_message(error)
+                )
         await self._finish("cancelled", f"cancelled by {events[-1].actor}")
 
     async def _refuse_cancels(self) -> None:
