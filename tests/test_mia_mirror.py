@@ -175,3 +175,17 @@ async def test_a_dataset_issue_is_the_record_facts_under_a_line_that_sends_peopl
     assert "data:new" in labels
     with pytest.raises(ApplicationError, match="no record"):
         await dataset_issue(t.cfg, t.cat)({"kind": "dataset", "key": "nope", "number": 1})
+
+
+async def test_an_adopted_issue_is_told_once_that_it_became_a_read_only_log(tmp_path):
+    """People's habit on an existing issue is to add a label: the first thing the mirror writes there says that
+    labels do nothing now and where to act."""
+    t = Setup(tmp_path)
+    t.mirror = Mirror(
+        t.gh, t.registry, "bot", {"dataset": (data_label, STAGES)}, pages={"dataset": lambda subject: "http://svc/#x"}
+    )
+    assert await t.mirror.mirror("dataset", 1) == 2
+    bodies = t.bodies()
+    assert len(bodies) == 3 and "read-only log" in bodies[0] and "http://svc/#x" in bodies[0]
+    t.registry.append_entry("dataset", 1, body="more", marker="<!-- m3 -->")
+    assert await t.mirror.mirror("dataset", 1) == 1 and len(t.bodies()) == 4  # said once

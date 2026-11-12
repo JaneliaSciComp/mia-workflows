@@ -35,6 +35,15 @@ def read_only_line(page_url: str) -> str:
     )
 
 
+READ_ONLY_MARKER = "<!-- mia: read-only log -->"  # on the one comment that tells an adopted issue what it now is
+
+
+def dataset_page(cfg: Config) -> Callable[[dict], str]:
+    """A dataset subject -> the URL of its page."""
+    base = cfg.service.url.rstrip("/") if cfg.service else ""
+    return lambda subject: f"{base}/#datasets/{quote(subject['key'], safe='')}"
+
+
 def dataset_issue(cfg: Config, gh_catalog: GitHub) -> Describe:
     """How a dataset's issue reads: the record's facts as `mia-data seed` wrote them, under the record marker and
     the line that sends people to the dataset's page."""
@@ -50,17 +59,16 @@ def dataset_issue(cfg: Config, gh_catalog: GitHub) -> Describe:
         record = await catalog.record(gh_catalog, path, entry["record_commit"])
         title, body, labels = render_issue(record, entry, gh_catalog.repo, path, record_id)
         marker, _, facts = body.partition("\n")
-        base = cfg.service.url.rstrip("/") if cfg.service else ""
-        page = f"{base}/#datasets/{quote(record_id, safe='')}"
-        return title, f"{marker}\n{read_only_line(page)}\n{facts}", labels
+        return title, f"{marker}\n{read_only_line(dataset_page(cfg)(subject))}\n{facts}", labels
 
     return describe
 
 
 class Mirror:
     """`labels` maps a subject kind to (stage -> label name, the stages that have a label); `openers` maps a kind
-    to what its issue says when the mirror has to open one; `bot` is the login whose issues and comments count as
-    ours."""
+    to what its issue says when the mirror has to open one; `pages` maps a kind to the URL of a subject's page,
+    for the one comment that tells an issue opened before the page acted that it is a log now; `bot` is the
+    login whose issues and comments count as ours."""
 
     def __init__(
         self,
@@ -69,8 +77,10 @@ class Mirror:
         bot: str,
         labels: Mapping[str, tuple[Callable[[str], str], Iterable[str]]],
         openers: Mapping[str, Describe] | None = None,
+        pages: Mapping[str, Callable[[dict], str]] | None = None,
     ) -> None:
-        self.gh, self.registry, self.bot, self.labels, self.openers = gh, registry, bot, labels, openers or {}
+        self.gh, self.registry, self.bot, self.labels = gh, registry, bot, labels
+        self.openers, self.pages = openers or {}, pages or {}
 
     async def _open_issue(self, kind: str, number: int, subject: dict) -> int:
         """The subject's issue: ours that already carries its marker (opened before a crash), else a new one;
@@ -104,6 +114,14 @@ class Mirror:
         if pending:
             comments = await self.gh.issue_comments(issue)
             ours = [comment for comment in comments if (comment.get("user") or {}).get("login") == self.bot]
+            adopted = issue == number  # an issue people used to label: one the mirror opened says it in its body
+            if (
+                adopted
+                and kind in self.pages
+                and not any(READ_ONLY_MARKER in (mine.get("body") or "") for mine in ours)
+            ):
+                # once, before the first thing the mirror writes there: labels do nothing now, act on the page
+                await self.gh.comment(issue, f"{read_only_line(self.pages[kind](subject))}\n\n{READ_ONLY_MARKER}")
             for entry in pending:
                 marker = entry["marker"]
                 comment = next((mine for mine in ours if marker in (mine.get("body") or "")), None)

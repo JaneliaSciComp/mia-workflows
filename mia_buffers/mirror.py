@@ -5,6 +5,7 @@ is `mia_data.mirror.Mirror`; the buffers worker registers it with these two desc
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from urllib.parse import quote
 
 from mia_data.mirror import Describe, read_only_line
@@ -13,13 +14,22 @@ from .config import Config
 from .spec import SpecError, load_prep_text
 
 
+def spec_page(cfg: Config) -> Callable[[dict], str]:
+    """A buffer spec subject -> the URL of its page."""
+    return lambda subject: f"{cfg.service.url.rstrip('/')}/#specs/{quote(subject['key'], safe='')}"
+
+
+def request_page(cfg: Config) -> Callable[[dict], str]:
+    """A preparation request subject -> the URL of its page."""
+    return lambda subject: f"{cfg.service.url.rstrip('/')}/#requests/{quote(subject['key'], safe='')}"
+
+
 def buffer_issue(cfg: Config) -> Describe:
     """A buffer spec's issue: titled by the spec's name, as the issues opened by hand were. The spec itself is in
     the comment of each `go`, since every run may carry an edited one."""
 
     async def describe(subject: dict) -> tuple[str, str, list[str]]:
-        name = subject["key"]
-        page = f"{cfg.service.url.rstrip('/')}/#specs/{quote(name, safe='')}"
+        name, page = subject["key"], spec_page(cfg)(subject)
         body = "\n".join(
             [
                 cfg.marker(f"subject buffer {subject['number']}"),
@@ -44,7 +54,7 @@ def prep_issue(cfg: Config) -> Describe:
             what = f"{len(spec.records)} records" if spec.records else "the records a selection admits"
         except SpecError:  # stored as it was sent; the round says what is wrong with it
             what = "records"
-        page = f"{cfg.service.url.rstrip('/')}/#requests/{quote(key, safe='')}"
+        page = request_page(cfg)(subject)
         fenced = text.replace("```", "` ` `")
         body = "\n".join(
             [

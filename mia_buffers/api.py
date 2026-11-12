@@ -71,6 +71,9 @@ NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
 DROP_QUIET_S = 60  # `dropped` is refused while a file under incoming/ changed this recently
+# a key sent again this soon is the same click again (a retry after a lost answer) and is not checked a second
+# time; later it is a new decision about an old notice, and the stage table applies to it like to any click
+RETRY_WINDOW_S = 120
 
 SERVING = ("approved", "ready", "idle")  # latest events under which consumers draw
 UNAPPROVED = ("created", "planned", "sourcing", "staged")  # a round not yet approved: only picks the 409 message
@@ -612,15 +615,24 @@ class BufferService:
         return 200, {"subjects": [self._subject_view(row) for row in self.ledger.find_subjects(kind=kind)]}, {}
 
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
-        """Everything that waits on a person: the subjects waiting or stuck, and the actions of the last day that
-        did not reach Temporal (each with its subject, for the Retry)."""
+        """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
+        for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
+        last day that did not reach Temporal (each with its subject, for the Retry)."""
         views = [self._subject_view(row) for row in self.ledger.find_subjects()]
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
+        for index, view in enumerate(views):
+            if view["kind"] == "buffer" and "dropped" in view["actions"]:
+                # the round's buffer has the id of the go that started it (a label's round is not found here)
+                gos = [a for a in self.ledger.actions("buffer", view["number"]) if a["action"] == "go"]
+                board = self.ledger.buffer_datasets(f"i{view['number']}-e{gos[-1]['id']}") if gos else []
+                if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
+                    views[index] = {**view, "drops": drops}
         failed = []
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
             failed.append({**action, "subject": self._subject_view(found[0]) if found else None})
-        return 200, {"needs": [view for view in views if view["status"] in NEEDS_A_PERSON], "failed": failed}, {}
+        needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+        return 200, {"needs": needs, "failed": failed}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
@@ -861,9 +873,13 @@ class BufferService:
     def _accepts(self, subject: dict, parsed: ActionBody) -> None:
         """Steps 1 and 2 of spec §5: the subject's stage accepts the action (409 with what it does take), and a
         verdict names the revision that was looked at (409 when the subject has moved on). A key seen before is
-        the same action sent again and is not checked: the workflow drops an event id it has handled."""
-        if parsed.key and self.ledger.action_by_key(parsed.key) is not None:
-            return
+        the same action: one already sent, or sent again within RETRY_WINDOW_S of the click, is not checked
+        (the first try may have arrived and moved the stage; the workflow drops an event id it has handled).
+        An older undelivered one is checked like a new click, so a stale Retry cannot pass the stage table."""
+        if parsed.key and (seen := self.ledger.action_by_key(parsed.key)) is not None:
+            age = time.time() - datetime.fromisoformat(seen["at"]).timestamp()
+            if seen["state"] == "sent" or age < RETRY_WINDOW_S:
+                return
         kind, key, stage = subject["kind"], subject["key"], subject["stage"]
         status, accepted = SUBJECT_RULES[kind][stage]
         if parsed.action not in accepted:
@@ -917,7 +933,9 @@ class BufferService:
         if payload.get("record"):
             text += f": `{neutralize(payload['record'])}`"
         if note := payload.get("note"):
-            text += "\n\n" + "\n".join(f"> {line}" for line in neutralize(note)[:16000].splitlines())
+            # the mirror posts this under the bot's name: it must ping nobody (no mentions; spec §2 non-goals)
+            quiet = neutralize(note)[:16000].replace("@", "@\u200b")
+            text += "\n\n" + "\n".join(f"> {line}" for line in quiet.splitlines())
         if spec := payload.get("spec"):  # the timeline, and so the issue, says exactly what ran
             fenced = neutralize(spec).replace("```", "` ` `")
             text += f"\n\n```yaml\n{fenced}{'' if fenced.endswith(chr(10)) else chr(10)}```"

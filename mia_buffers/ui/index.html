@@ -1953,8 +1953,17 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   ], mine, "No buffer yet.")));
   return box;
 }
+// A view a person is typing into (feedback for a reject, an edited spec, ticked records) is not rebuilt under
+// them when the stream says something changed: it says so, and waits for them.
+function keepTyping(root, refresh, reload) {
+  if (refresh !== "stream" || !root.dataset.dirty) return false;
+  if (!root.querySelector(".stale")) root.prepend(el("div", { class: "notice stale" }, "This changed while you were typing; what you typed is kept. ", el("button", { type: "button", class: "btn", onclick: reload }, "Show the change")));
+  return true;
+}
 async function viewSubject(kind, key, refresh) {
   const root = $("subjectBody"), hash = location.hash;
+  if (keepTyping(root, refresh, () => viewSubject(kind, key, true))) return;
+  delete root.dataset.dirty;
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   shownSubject = { kind, key, number: shownSubject && shownSubject.kind === kind && shownSubject.key === key ? shownSubject.number : null };
   const subject = await load(`/subjects/${kind}/${encodeURIComponent(key)}`, true);
@@ -1995,6 +2004,8 @@ async function viewFind(text) {  // the lookup box: an issue number, an issue UR
 const KIND_WORDS = { dataset: "dataset", buffer: "buffer spec", prep: "request" };
 async function viewNeeds(arg, refresh) {
   const root = $("needsBody"), hash = location.hash;
+  if (keepTyping(root, refresh, () => viewNeeds("", true))) return;
+  delete root.dataset.dirty;
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   const out = await load("/needs");
   if (location.hash !== hash) return;
@@ -2007,7 +2018,9 @@ async function viewNeeds(arg, refresh) {
     { label: "name", cell: s => el("a", { href: SUBJECT_HASH[s.kind](s.key) }, s.key) },
     { label: "state", cell: s => el("span", {}, statePill(s.status), " ", s.stage) },
     { label: "since", cell: s => when(s.updated) },
-    { label: "answer", wrap: true, cell: s => actionBar(s, again, s.kind === "buffer" ? ["go", "revoke"] : []) },
+    { label: "answer", wrap: true, cell: s => el("div", {}, actionBar(s, again, s.kind === "buffer" ? ["go", "revoke"] : []),
+      ...(s.drops || []).map(record => el("div", { class: "notice" }, el("b", {}, record), " waits for its files in its incoming/ folder. ",
+        el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(s, { action: "dropped", record, key: newKey() }, again); } }, "Files are in place")))) },
   ], needs, out ? "Nothing waits on you." : "The list did not load."));
   root.replaceChildren(...parts);
 }
@@ -2020,7 +2033,7 @@ async function checkHealth() {  // so that "working" is true: say when nothing c
 function followStream() {  // told what changed, the page refetches it; a lost stream reconnects by itself
   const stream = new EventSource("/stream");
   let timer = 0;
-  const refresh = () => { if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, true); else if (shownView === "needs") viewNeeds("", true); };
+  const refresh = () => { if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, "stream"); else if (shownView === "needs") viewNeeds("", "stream"); };
   stream.onopen = () => { checkHealth(); refresh(); };
   stream.onmessage = e => {
     let change; try { change = JSON.parse(e.data); } catch { return; }
@@ -2081,6 +2094,7 @@ async function boot() {
   window.addEventListener("hashchange", route);
   // a click on the current tab changes no hash: reload the view by hand
   document.querySelectorAll("[data-tab]").forEach(a => a.addEventListener("click", () => { if (a.getAttribute("href") === location.hash) route(); }));
+  for (const id of ["subjectBody", "needsBody"]) $(id).addEventListener("input", () => { $(id).dataset.dirty = "1"; });
   $("lookup").addEventListener("keydown", e => { const text = e.target.value.trim(); if (e.key === "Enter" && text) { location.hash = "#find/" + encodeURIComponent(text); e.target.value = ""; } });
   route();
   followStream();  // its first open also reads /health

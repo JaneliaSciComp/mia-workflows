@@ -1511,3 +1511,58 @@ def test_a_kinds_subjects_are_listed_and_a_number_finds_its_subject(tmp_path):
     assert call(s, "GET", "/subjects/widget")[0] == 404
     found = call(s, "GET", "/lookup", {"q": str(number)})[1]["subjects"]  # a round id shows the number, not an issue
     assert [row["key"] for row in found] == [f"prep-{number}"]
+
+
+# --- found by the whole-branch review ---
+
+
+def test_a_retry_long_after_the_failure_is_checked_against_the_stage_again(tmp_path, monkeypatch):
+    """A Retry sends the same key so an action that did arrive is not run twice; it must not carry an old click
+    past the stage table for ever. A revoke that failed, retried after a new round began, is refused."""
+    from mia_buffers import ledger as ledger_module
+
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(ledger_module.time, "time", lambda: now[0])
+    monkeypatch.setattr("mia_buffers.api.time.time", lambda: now[0])
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "done"})
+    gateway.fail = "Temporal is away"
+    assert act(s, "/datasets/rec-a/actions", {"action": "revoke", "key": "r1"})[0] == 503
+    gateway.fail = None
+    now[0] += 30  # soon after: the same click, sent again (the first may have arrived after all)
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "matching"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "revoke", "key": "r1"})[0] == 202
+    gateway.fail = "Temporal is away"
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "done"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "revoke", "key": "r2"})[0] == 503
+    gateway.fail = None
+    now[0] += 3600  # an hour later a new round is running: the stale notice's Retry is a new decision
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "matching"})
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "revoke", "key": "r2"})
+    assert status == 409 and "`matching`" in out["error"] and len(gateway.sent) == 1
+
+
+def test_a_note_cannot_mention_anyone_from_the_bots_account(tmp_path):
+    s, _ = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
+    revision = _stage(s, "dataset", 7, "review")
+    note = "ask @octocat or @org/team about the shift"
+    assert act(s, "/datasets/rec-a/actions", {"action": "reject", "revision": revision, "note": note})[0] == 202
+    body = call(s, "GET", "/timeline/dataset/7")[1]["entries"][-1]["body"]
+    assert "@octocat" not in body and "@org/team" not in body and "octocat" in body  # mirrored text pings nobody
+    assert s.ledger.actions("dataset", 7)[-1]["payload"]["note"] == note  # the agent still reads it as written
+
+
+def test_needs_lists_a_buffer_whose_dataset_waits_for_its_files(tmp_path):
+    s, _ = _acting(tmp_path)
+    go = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go"})[1]
+    number, buffer = go["number"], f"i{go['number']}-e{go['id']}"
+    _stage(s, "buffer", number, "sourcing")
+    assert call(s, "GET", "/needs")[1]["needs"] == []  # working, and nothing waits on a person
+    worker(s, "PUT", f"/buffers/{buffer}", CFG)
+    worker(s, "PUT", f"/buffers/{buffer}/datasets/rec-a", {"status": "waiting-drop", "reason": "", "job": None})
+    worker(s, "PUT", f"/buffers/{buffer}/datasets/rec-b", {"status": "staging", "reason": "", "job": None})
+    (waiting,) = call(s, "GET", "/needs")[1]["needs"]
+    assert (waiting["key"], waiting["status"], waiting["drops"]) == (SPEC_NAME, "working", ["rec-a"])
+    _stage(s, "buffer", number, "ready")
+    assert call(s, "GET", "/needs")[1]["needs"] == []  # the round is over: a waiting row of it asks for nothing

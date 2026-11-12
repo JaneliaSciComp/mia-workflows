@@ -111,7 +111,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     from mia_data.workflows import MiaMirror
 
     from .activities import Activities
-    from .mirror import buffer_issue, prep_issue
+    from .mirror import buffer_issue, prep_issue, request_page, spec_page
     from .workflows import MiaBuffer, MiaCacheKeeper, MiaPrep
 
     client = await _client(cfg)
@@ -128,7 +128,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     # the buffer and request issues' mirror (spec webapp-actions §7)
     labels = {"buffer": (cfg.label, STAGES), "prep": (cfg.prep_label, PREP_STAGES)}
     openers = {"buffer": buffer_issue(cfg), "prep": prep_issue(cfg)}  # a subject created on the page has no issue
-    mirror = Mirror(clients[0], activities.registry, bot, labels, openers)
+    pages = {"buffer": spec_page(cfg), "prep": request_page(cfg)}
+    mirror = Mirror(clients[0], activities.registry, bot, labels, openers, pages)
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
