@@ -30,9 +30,9 @@ def resolve(method: str, path: str) -> str | None:
 
 
 def requested_paths() -> set[tuple[str, str]]:
-    """Every path the page passes to api()/load(), as (method, path) with `${…}` replaced by x."""
+    """Every path the page passes to api()/load()/pageOf(), as (method, path) with `${…}` replaced by x."""
     found = set()
-    for call in re.finditer(r"\b(?:api|load)\(\s*([\"'`])(/[^\"'`]*)\1", PAGE):
+    for call in re.finditer(r"\b(?:api|load|pageOf)\(\s*([\"'`])(/[^\"'`]*)\1", PAGE):
         path = re.sub(r"\$\{[^}]*\}", "x", call.group(2))
         options = re.match(r"\s*,\s*\{\s*method:\s*\"(\w+)\"", PAGE[call.end() :])
         method = options.group(1) if options else "GET"

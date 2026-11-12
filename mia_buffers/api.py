@@ -37,6 +37,7 @@ from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
 from .dispatch import DispatchError
+from .explore import Page, page_query, paged
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
@@ -272,6 +273,32 @@ class SettleBody(_Strict):
     usd: float | None = None
     fetched_bytes: int = 0
     staged_bytes: int = 0
+
+
+def _data(name: str) -> Any:
+    """A sort key: the named field of a row's `data` (an asset without a row has none)."""
+    return lambda row: (row.get("data") or {}).get(name)
+
+
+# what a paged list may be sorted by: the name the page sends -> the row's value for it
+ASSET_SORTS = {
+    "dataset": lambda row: row.get("record"),
+    "artifact": lambda row: row["key"],
+    "state": _data("state"),
+    "bytes": _data("bytes"),
+    "last_used": _data("last_used"),
+    "buffers": lambda row: len(row.get("refs") or []),
+    "levels_key": _data("levels_key"),
+    "job": _data("job"),
+}
+LOCK_SORTS = {
+    name: (lambda row, name=name: row.get(name)) for name in ("kind", "key", "owner", "taken_at", "heartbeat_at")
+}
+
+
+def _asset_haystack(row: dict) -> tuple:
+    data = row.get("data") or {}
+    return (row["key"], row.get("record"), data.get("state"), data.get("job"), data.get("levels_key"))
 
 
 class HttpError(Exception):
@@ -521,9 +548,27 @@ class BufferService:
             raise HttpError(404, f"no {kind} asset {key}")
         return 200, {"kind": kind, "key": key, "data": data, "refs": refs}, {}
 
+    @staticmethod
+    def _page_of(query: dict[str, str], sorts: dict[str, Any]) -> Page | None:
+        """The page a list route is asked for (None: the whole list, as the workers call it); 422 on a bad one."""
+        try:
+            return page_query(query, sorts)
+        except ValueError as error:
+            raise HttpError(422, str(error)) from None
+
     def _list_assets(self, kind: str, *, query: dict[str, str], body: bytes) -> Response:
+        page = self._page_of(query, ASSET_SORTS)
         assets = self.ledger.assets(kind, state=query.get("state"), record=query.get("record"))
-        return 200, {"kind": kind, "assets": assets, "bytes": self.ledger.asset_bytes(kind)}, {}
+        out: dict[str, Any] = {"kind": kind, "bytes": self.ledger.asset_bytes(kind)}
+        if page is None:
+            return 200, {**out, "assets": assets}, {}
+        # the page's row names its dataset: a raw download is keyed by it, a staged artifact carries it
+        issues = {row["id"]: row.get("issue") for row in self.ledger.datasets()}
+        for asset in assets:
+            asset["record"] = asset["key"] if kind == "raw" else (asset["data"] or {}).get("record")
+            asset["issue"] = issues.get(asset["record"])
+        rows, total = paged(assets, page, ASSET_SORTS, _asset_haystack)
+        return 200, {**out, "assets": rows, "total": total}, {}
 
     def _sync_assets(self, *, query: dict[str, str], body: bytes) -> Response:
         if self.raw_root is None and self.staged_root is None:
@@ -543,7 +588,12 @@ class BufferService:
             self._sync_lock.release()
 
     def _locks(self, *, query: dict[str, str], body: bytes) -> Response:
-        return 200, {"locks": [asdict(holder) for holder in self.locks.holders()] if self.locks else []}, {}
+        page = self._page_of(query, LOCK_SORTS)
+        locks = [asdict(holder) for holder in self.locks.holders()] if self.locks else []
+        if page is None:
+            return 200, {"locks": locks}, {}
+        rows, total = paged(locks, page, LOCK_SORTS, lambda row: (row["kind"], row["key"], row["owner"]))
+        return 200, {"locks": rows, "total": total}, {}
 
     # --- records, datasets and the plan: what the catalog holds and which of it is prepared ------
 

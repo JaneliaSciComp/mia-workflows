@@ -1566,3 +1566,51 @@ def test_needs_lists_a_buffer_whose_dataset_waits_for_its_files(tmp_path):
     assert (waiting["key"], waiting["status"], waiting["drops"]) == (SPEC_NAME, "working", ["rec-a"])
     _stage(s, "buffer", number, "ready")
     assert call(s, "GET", "/needs")[1]["needs"] == []  # the round is over: a waiting row of it asks for nothing
+
+
+# --- one page of a list (docs/plans/2026-11-12-ui-domain-flow.md): with `limit`, a route answers a page and a total
+
+
+def test_assets_paged_name_their_dataset_and_sort_by_it(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/datasets/rec-b", payload={"state": "prepared", "issue": 12})
+    call(
+        s, "PUT", "/assets/staged/a1", payload={"state": "ready", "record": "rec-b", "bytes": 100, "levels_key": "p256"}
+    )
+    call(s, "PUT", "/assets/staged/a2", payload={"state": "evicted", "record": "rec-a", "bytes": 50})
+    call(s, "PUT", "/assets/staged/a3", payload={"state": "ready", "record": "rec-c"})
+    whole = call(s, "GET", "/assets/staged")[1]
+    assert [a["key"] for a in whole["assets"]] == ["a1", "a2", "a3"] and "total" not in whole
+    assert set(whole["assets"][0]) == {"key", "data", "refs"}  # a worker's answer is what it was
+    status, out, _ = call(s, "GET", "/assets/staged", {"limit": "2", "sort": "dataset"})
+    assert status == 200 and out["total"] == 3 and out["bytes"] == 100
+    assert [(a["record"], a["issue"], a["key"]) for a in out["assets"]] == [("rec-a", None, "a2"), ("rec-b", 12, "a1")]
+    out = call(s, "GET", "/assets/staged", {"limit": "2", "offset": "2", "sort": "dataset"})[1]
+    assert [a["record"] for a in out["assets"]] == ["rec-c"] and out["total"] == 3
+    out = call(s, "GET", "/assets/staged", {"limit": "5", "sort": "bytes", "dir": "desc"})[1]
+    assert [a["key"] for a in out["assets"]] == ["a1", "a2", "a3"]  # no bytes sorts last
+    out = call(s, "GET", "/assets/staged", {"limit": "5", "q": "P256"})[1]
+    assert [a["key"] for a in out["assets"]] == ["a1"] and out["total"] == 1
+    out = call(s, "GET", "/assets/staged", {"limit": "5", "record": "rec-a"})[1]
+    assert [a["key"] for a in out["assets"]] == ["a2"]
+    status, out, _ = call(s, "GET", "/assets/staged", {"limit": "5", "sort": "nope"})
+    assert status == 422 and "sort must be one of" in out["error"]
+    assert call(s, "GET", "/assets/staged", {"limit": "500"})[0] == 422
+
+
+def test_a_raw_asset_is_its_dataset(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/datasets/rec-a", payload={"state": "prepared", "issue": 7})
+    call(s, "PUT", "/assets/raw/rec-a", payload={"state": "ready", "bytes": 10})
+    out = call(s, "GET", "/assets/raw", {"limit": "5"})[1]
+    assert [(a["record"], a["issue"]) for a in out["assets"]] == [("rec-a", 7)] and out["total"] == 1
+
+
+def test_locks_paged(tmp_path):
+    locks = LockDir(tmp_path / "locks")
+    for record in ("rec-b", "rec-a", "rec-c"):
+        assert locks.take("raw", record, f"job-{record}", 900)
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), locks=locks)
+    out = call(s, "GET", "/locks", {"limit": "2", "sort": "key"})[1]
+    assert [h["key"] for h in out["locks"]] == ["rec-a", "rec-b"] and out["total"] == 3
+    assert call(svc(tmp_path / "other"), "GET", "/locks", {"limit": "2"})[1] == {"locks": [], "total": 0}
