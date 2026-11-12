@@ -32,7 +32,6 @@ from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import read_untrusted
-
 from mia_data import config as mia_data_config
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
@@ -544,7 +543,9 @@ class BufferService:
         if url:
             meta = self.meta or {}
             kinds = {meta.get("datasets_repo"): ("dataset",), meta.get("buffers_repo"): ("buffer", "prep")}
-            rows += [row for row in self.ledger.find_subjects(issue=int(url[2])) if row["kind"] in kinds.get(url[1], ())]
+            rows += [
+                row for row in self.ledger.find_subjects(issue=int(url[2])) if row["kind"] in kinds.get(url[1], ())
+            ]
         elif text.removeprefix("#").isdecimal():
             rows += self.ledger.find_subjects(issue=int(text.removeprefix("#")))
         unique = {(row["kind"], row["number"]): row for row in rows}  # a key that is also its issue number

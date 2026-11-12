@@ -273,6 +273,27 @@ mia exec mia-buffers catalog sync [--ref <catalog sha>]   # load the catalog rec
 mia exec mia-buffers datasets sync                        # rebuild the prepared rows from storage_root
 ```
 
+**Subjects** (spec webapp-actions §4.1, §5.1). A dataset, a buffer spec and a preparation request are each a
+*subject*: `{kind, number, key, stage, revision, issue, data}`, with the status word (`not started`, `working`,
+`waiting`, `stuck`, `done`) and the actions its stage accepts, both read from one table per kind
+(`STAGE_ACTIONS` in `mia_data/config.py`, `STAGE_ACTIONS` and `PREP_STAGE_ACTIONS` in `mia_buffers/config.py`).
+`GET /subjects/<kind>/<key>` reads one, `GET /needs` lists those waiting on a person or stuck,
+`GET /lookup?q=` finds subjects from an issue number, an issue URL or a key, and `GET /stream` is a server-sent
+event per change (`{kind, number}`; the reader fetches the subject again).
+
+Adopting existing issues, once after deploying a service that has the `subjects` table and again whenever you like
+(a subject a workflow has written a stage to keeps it):
+
+```
+mia exec mia-buffers adopt-issues --dry-run   # the report: one line per issue, nothing written
+mia exec mia-buffers adopt-issues             # write the subjects
+```
+
+Every dataset issue (the one its registry row names, else the lowest number), every buffer issue (key: its spec's
+name) and every request issue (`prep-<number>`) becomes a subject numbered by its issue. Read the lines that start
+`duplicate:`, `skipped:` or `refused:`: a duplicate dataset issue at a working stage has a running workflow, which
+must be stopped before the timeline and mirror are deployed (spec webapp-actions §11).
+
 A volume's `samples` (from `stage.json`) register as candidates. Train draws a candidate by weight for volumes that
 have them; val and test lists are drawn from the candidates without replacement, so a list can run out: the response
 says `exhausted` and `size` is capped by the candidates available.
