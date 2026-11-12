@@ -120,7 +120,7 @@ class FakeNode {
   addEventListener() {}
   append(...kids) { this.kids.push(...kids); }
 }
-const document = { createElement: tag => new FakeNode(tag) };
+const document = { createElement: tag => new FakeNode(tag), createElementNS: (space, tag) => new FakeNode(tag) };
 const escaped = text => text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 const html = node => typeof node === "string" ? escaped(node)
   : `<${node.tag}${Object.entries(node.attrs).map(([k, v]) => ` ${k}="${v}"`).join("")}>${node.kids.map(html).join("")}</${node.tag}>`;
@@ -132,7 +132,10 @@ def rendered(*bodies: str) -> list[str]:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
-    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith(("const el = ", "const link = ")))
+    names = ("el", "svgEl", "GH_MARK", "ghMark", "link")
+    helpers = "\n".join(
+        line for line in PAGE.splitlines() if line.startswith(tuple(f"const {name} = " for name in names))
+    )
     renderer = PAGE[PAGE.index("// ---- a timeline entry's markdown") : PAGE.index("function actionBar(")]
     script = (
         f"{FAKE_DOM}\n{helpers}\n{renderer}\n"
@@ -171,6 +174,24 @@ def test_a_timeline_entry_is_rendered_as_markdown() -> None:
         '<ul><li>one</li><li>two <a href="https://example.org/x" target="_blank" rel="noopener">https://example.org/x</a></li></ul>'
         "<blockquote><p>the masks<br></br>are shifted</p></blockquote>"
     )
+
+
+def test_a_link_to_github_carries_the_github_mark() -> None:
+    (body,) = rendered(
+        "see [the PR](https://github.com/o/r/pull/3) and https://github.com/o/r/issues/4 "
+        "but not https://github.com.evil.example/x"
+    )
+    assert body.count("<svg") == 2
+    assert '<a href="https://github.com/o/r/pull/3" target="_blank" rel="noopener"><svg' in body
+    assert "</svg> the PR</a>" in body
+    assert "</svg> https://github.com/o/r/issues/4</a>" in body
+    assert '<a href="https://github.com.evil.example/x" target="_blank" rel="noopener">https://github.com.evil' in body
+
+
+def test_a_github_issue_is_the_mark_with_a_tooltip() -> None:
+    """No link to GitHub is spelled out in words ("log on GitHub"): it is the mark, and the tooltip says what it is."""
+    assert "log on GitHub" not in PAGE and "ghIssue" not in PAGE
+    assert "a read-only copy of the timeline" in PAGE
 
 
 def test_markdown_never_becomes_html_or_a_script_link() -> None:

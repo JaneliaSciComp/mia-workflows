@@ -716,6 +716,11 @@ per table id), fed by `pageOf(path, rowsKey, filters)`.
 sort. Then `issue` (a GitHub mark linking the issue, a read-only log; empty without one), then `artifact` where
 there is one, then `files`. A registry number is never shown as `#<number>`: the thing's name links to its page.
 
+**A link to GitHub is the GitHub mark.** `link()` puts the mark before the text of any `https://github.com/` link
+(the catalog record, a round's crop gallery, a link in a timeline entry), and `ghIcon` is an issue: the mark alone
+in a table, the mark and `#<issue>` on the subject's own page, with a tooltip saying that the issue is a read-only
+copy of the timeline. No link to GitHub is spelled out in words.
+
 With an empty registry the views say so ("No catalog synced; run `mia-buffers catalog sync`."). A record's landing
 link is shown only for an `http(s)` URL.
 

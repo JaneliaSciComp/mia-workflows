@@ -154,7 +154,8 @@ table.plain th{cursor:default}
 table.plain th.sortable{cursor:pointer}
 .pager{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:12.5px;color:var(--muted);min-height:24px}
 .pager .btn{font-size:12px;padding:1px 8px}
-a.gh{color:var(--fg2);display:inline-flex;vertical-align:middle}
+a.gh{color:var(--fg2);display:inline-flex;align-items:center;gap:3px;vertical-align:middle}
+svg.ghm{vertical-align:-2px}
 a.gh:hover{color:var(--fg)}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 td.id{max-width:300px;overflow:hidden;text-overflow:ellipsis}
@@ -1117,7 +1118,10 @@ const pct = x => (x * 100).toFixed(x && x < 0.001 ? 3 : 1) + "%";
 const el = (tag, attrs, ...kids) => { const n = document.createElement(tag); for (const [k,v] of Object.entries(attrs||{})) { if (v == null || v === false) continue; if (k==="class") n.className=v; else if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else n.setAttribute(k, v === true ? "" : v); } for (const k of kids) if (k != null && k !== false) n.append(k); return n; };
 const svgEl = (tag, attrs) => { const n = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k,v] of Object.entries(attrs||{})) n.setAttribute(k,v); return n; };
 // catalog records are untrusted: only an http(s) href becomes a link, anything else (javascript:, data:) stays text
-const link = (href, text) => /^https?:\/\//i.test(String(href || "")) ? el("a", { href, target: "_blank", rel: "noopener" }, text) : text;
+// a link to GitHub is never spelled out: it starts with the GitHub mark
+const GH_MARK = "M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z";
+const ghMark = () => { const svg = svgEl("svg", { class: "ghm", viewBox: "0 0 16 16", width: 14, height: 14, fill: "currentColor", "aria-hidden": "true" }); svg.append(svgEl("path", { d: GH_MARK })); return svg; };
+const link = (href, text, title) => /^https?:\/\//i.test(String(href || "")) ? el("a", { href, target: "_blank", rel: "noopener", title }, ...(/^https:\/\/github\.com\//i.test(href) ? [ghMark(), " "] : []), ...[].concat(text)) : text;
 // what each pill means, by its text; the tooltip shows it (a decision pill adds the planner's exact reason)
 const PILL_HELP = {
   // the planner's decision for a dataset against the current spec
@@ -1271,7 +1275,6 @@ function hbars(container, items, opts) {
 const tile = (label, value, sub, kind) => el("div", { class: "tile" + (kind ? " " + kind : "") }, el("div", { class: "label" }, label), el("div", { class: "value" }, value), sub ? el("div", { class: "sub" }, sub) : null);
 const card = (title, sub, ...kids) => el("div", { class: "card" }, el("h2", {}, title), sub ? el("div", { class: "sub" }, sub) : null, ...kids);
 const kv = pairs => el("dl", { class: "kv" }, ...pairs.filter(p => p).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v == null || v === "" ? "—" : v)]));
-const ghIssue = (repo, n) => repo && n ? link(`https://github.com/${repo}/issues/${n}`, `#${n}`) : (n ? `#${n}` : "");
 const code = (v, n) => v ? el("code", { title: String(v) }, n ? short(v, n) : String(v)) : null;
 const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) }, id);
 // a prepared dataset's first crop overlay, served by buffer-api from the dataset folder (`previews` lists the crops that have one); hover enlarges, click opens
@@ -1283,12 +1286,9 @@ const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src
 const folderLink = (root, folder) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, "files") : "";
 // how every table names a dataset: its id links to its page; its GitHub issue (a read-only log) is a small mark
 const datasetLink = record => record ? el("a", { href: "#datasets/" + encodeURIComponent(record) }, record) : "";
-const GH_MARK = "M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z";
-function ghIcon(repo, n) {
+function ghIcon(repo, n, numbered) {  // in a table the mark alone; on a subject's own page the mark and the number
   if (!repo || !n) return "";
-  const svg = svgEl("svg", { viewBox: "0 0 16 16", width: 14, height: 14, fill: "currentColor", "aria-hidden": "true" });
-  svg.append(svgEl("path", { d: GH_MARK }));
-  return el("a", { class: "gh", href: `https://github.com/${repo}/issues/${n}`, target: "_blank", rel: "noopener", title: `issue #${n} on GitHub (a read-only log)`, "aria-label": `issue ${n} on GitHub` }, svg);
+  return el("a", { class: "gh", href: `https://github.com/${repo}/issues/${n}`, target: "_blank", rel: "noopener", title: `GitHub issue #${n}: a read-only copy of the timeline`, "aria-label": `GitHub issue ${n}` }, ghMark(), numbered ? `#${n}` : null);
 }
 const bufferLinks = ids => { const span = el("span"); (ids || []).forEach((b, i) => span.append(i ? " " : "", bufferLink(b))); return span; };
 
@@ -1652,8 +1652,8 @@ function datasetCards(d) {
   const voxel = imaging.voxel_size_nm ? ["z", "y", "x"].filter(axis => imaging.voxel_size_nm[axis] != null).map(axis => `${axis} ${imaging.voxel_size_nm[axis]}`).join(" · ") : "";
   const links = el("div", { class: "links" },
     link(rec.landing_url, "source"), rec.doi ? link(`https://doi.org/${rec.doi}`, `doi ${rec.doi}`) : null,
-    d.path && meta.catalog_repo ? link(`https://github.com/${meta.catalog_repo}/blob/${d.ref}/${d.path.split("/").map(encodeURIComponent).join("/")}`, "catalog record") : null,
-    !d.subject && row.issue ? el("span", {}, "log on GitHub ", ghIssue(meta.datasets_repo, row.issue)) : null,
+    d.path && meta.catalog_repo ? link(`https://github.com/${meta.catalog_repo}/blob/${d.ref}/${d.path.split("/").map(encodeURIComponent).join("/")}`, "catalog record", "this dataset's record in the catalog repository on GitHub") : null,
+    !d.subject ? ghIcon(meta.datasets_repo, row.issue, true) || null : null,
     ds.folder && roots.storage_root ? el("span", {}, "published crops ", folderLink(roots.storage_root, ds.folder)) : null);
   const cards = [links];
   if (!row.in_catalog) cards.push(el("div", { class: "notice" }, "This dataset's record is not in the newest synced catalog: only what the registry holds is shown."));
@@ -1964,7 +1964,7 @@ function mdInline(text) {  // `code`, **bold**, *italic*, [text](url) and bare U
     if (m[1]) out.push(el("code", {}, m[2].trim()));
     else if (m[3] != null) out.push(el("strong", {}, ...mdInline(m[3])));
     else if (m[4] != null) out.push(el("em", {}, ...mdInline(m[4])));
-    else if (m[5] != null) out.push(el("a", { href: m[6], target: "_blank", rel: "noopener" }, ...(m[5].includes("://") ? [m[5]] : mdInline(m[5]))));
+    else if (m[5] != null) out.push(link(m[6], m[5].includes("://") ? m[5] : mdInline(m[5])));
     else out.push(link(m[0], m[0]));
   }
   out.push(text.slice(last));
@@ -2049,10 +2049,10 @@ function subjectFacts(subject, run, entries) {
   if (subject.status === "waiting" && wants.length) facts.append(el("span", {}, "waiting on you: " + wants.join(", ")));
   if (run) facts.append(el("span", {}, "workflow " + (run.status || "never ran").toLowerCase()));
   const repo = subject.kind === "dataset" ? S.meta.datasets_repo : S.meta.buffers_repo;
-  if (subject.issue) facts.append(el("span", {}, "log on GitHub ", ghIssue(repo, subject.issue)));
+  if (subject.issue) facts.append(ghIcon(repo, subject.issue, true) || `#${subject.issue}`);
   if (subject.kind === "dataset" && S.meta.datasets_workflow_url) facts.append(link(S.meta.datasets_workflow_url + subject.number, "temporal"));
   const round = [...entries].reverse().find(e => e.round)?.round;
-  if (subject.kind === "dataset" && round && repo && S.meta.gallery_branch) facts.append(link(`https://github.com/${repo}/tree/${S.meta.gallery_branch}/galleries/${subject.key}/${round}`, "crops of this round"));
+  if (subject.kind === "dataset" && round && repo && S.meta.gallery_branch) facts.append(link(`https://github.com/${repo}/tree/${S.meta.gallery_branch}/galleries/${subject.key}/${round}`, "crops of this round", "the crop gallery of this round, on GitHub"));
   return facts;
 }
 async function specControls(subject) {  // what only a buffer spec has: edit and run, its datasets' files, revoke, its buffers
