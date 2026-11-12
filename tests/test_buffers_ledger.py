@@ -557,3 +557,41 @@ def test_agreement_pairs_judge_with_newest_human(tmp_path):
         "pending": 0,
         "pairs": [],
     }
+
+
+def test_adopt_subject_is_idempotent_and_keeps_a_written_stage(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    row = ledger.adopt_subject("dataset", 234, "rec-a", stage="review", data={"note": 1})
+    assert {name: row[name] for name in ("kind", "number", "key", "stage", "revision", "issue", "data")} == {
+        "kind": "dataset",
+        "number": 234,
+        "key": "rec-a",
+        "stage": "review",
+        "revision": 0,
+        "issue": 234,
+        "data": {"note": 1},
+    }
+    # until a workflow writes a stage, the label is the truth: a second adoption refreshes stage and data
+    assert ledger.adopt_subject("dataset", 234, "rec-a", stage="done")["stage"] == "done"
+    assert ledger.set_subject_stage("dataset", 234, "testing")["revision"] == 1
+    again = ledger.adopt_subject("dataset", 234, "rec-a", stage="new", data={"note": 2})
+    assert (again["stage"], again["revision"], again["data"]) == ("testing", 1, {})
+
+
+def test_subject_keys_are_unique_within_a_kind(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.adopt_subject("buffer", 8, "em pool")
+    with pytest.raises(ValueError, match="em pool"):
+        ledger.adopt_subject("buffer", 9, "em pool")
+    assert ledger.adopt_subject("prep", 9, "em pool")["number"] == 9  # another kind may hold the same key
+
+
+def test_find_subjects_by_issue_and_key(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.adopt_subject("dataset", 234, "rec-a")
+    ledger.adopt_subject("buffer", 234, "pool")
+    assert [row["kind"] for row in ledger.find_subjects(issue=234)] == ["buffer", "dataset"]
+    assert [row["number"] for row in ledger.find_subjects(key="pool")] == [234]
+    assert len(ledger.find_subjects()) == 2
+    assert ledger.subject("dataset", "rec-a")["number"] == 234 and ledger.subject("dataset", "nope") is None
+    assert ledger.set_subject_stage("dataset", 999, "new") is None

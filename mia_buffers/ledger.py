@@ -75,7 +75,12 @@ CREATE TABLE IF NOT EXISTS assessments (id TEXT PRIMARY KEY, gate TEXT, subject_
                                         verdict TEXT, author TEXT, at TEXT, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS assessments_subject ON assessments (subject_kind, subject_ref);
 CREATE TABLE IF NOT EXISTS budgets (root TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL);
+CREATE TABLE IF NOT EXISTS subjects (kind TEXT, number INTEGER, key TEXT NOT NULL, stage TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0, issue INTEGER, data TEXT NOT NULL, updated REAL,
+    PRIMARY KEY (kind, number), UNIQUE (kind, key));
 """
+
+SUBJECT_COLUMNS = ("kind", "number", "key", "stage", "revision", "issue", "data", "updated")
 
 BOARD_COLUMNS = ("record", "status", "reason", "job", "updated_at")
 EVENT_COLUMNS = ("seq", "kind", "at", "issue", "event_id", "detail")
@@ -459,6 +464,50 @@ class Ledger:
             ]
             db.executemany("DELETE FROM datasets WHERE id = ?", [(record,) for record in stale])
         return {"prepared": len(prepared) - kept, "demoted": len(stale), "revoked_kept": kept}
+
+    # --- subjects: a dataset, a buffer spec or a preparation request (spec webapp-actions §4.1) ---
+
+    @staticmethod
+    def _subjects(db: sqlite3.Connection, where: str = "", values: tuple = ()) -> list[dict]:
+        rows = db.execute(f"SELECT {', '.join(SUBJECT_COLUMNS)} FROM subjects {where} ORDER BY kind, number", values)
+        return [{**dict(zip(SUBJECT_COLUMNS, row, strict=True)), "data": json.loads(row[6])} for row in rows]
+
+    def adopt_subject(self, kind: str, number: int, key: str, *, stage: str = "new", data: dict | None = None) -> dict:
+        """Create the subject, or refresh its stage and data while no workflow has written a stage (revision 0):
+        after that the registry's stage is the truth and an issue's label is not. ValueError: the key is taken."""
+        with self._transaction() as db:
+            try:
+                db.execute(
+                    "INSERT INTO subjects VALUES (?, ?, ?, ?, 0, ?, ?, ?) ON CONFLICT (kind, number) DO UPDATE SET "
+                    "stage = excluded.stage, data = excluded.data, updated = excluded.updated WHERE revision = 0",
+                    (kind, number, key, stage, number, json.dumps(data or {}), time.time()),
+                )
+            except sqlite3.IntegrityError:
+                holder = self._subjects(db, "WHERE kind = ? AND key = ?", (kind, key))[0]["number"]
+                raise ValueError(f"{kind} {key!r} is already subject #{holder}") from None
+            return self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))[0]
+
+    def set_subject_stage(self, kind: str, number: int, stage: str) -> dict | None:
+        """Write the stage a workflow reached and raise the revision; None when there is no such subject."""
+        with self._transaction() as db:
+            db.execute(
+                "UPDATE subjects SET stage = ?, revision = revision + 1, updated = ? WHERE kind = ? AND number = ?",
+                (stage, time.time(), kind, number),
+            )
+            found = self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))
+        return found[0] if found else None
+
+    def subject(self, kind: str, key: str) -> dict | None:
+        with self._lock:
+            found = self._subjects(self._db, "WHERE kind = ? AND key = ?", (kind, key))
+        return found[0] if found else None
+
+    def find_subjects(self, *, issue: int | None = None, key: str | None = None) -> list[dict]:
+        """Subjects of every kind with this issue number and with this key (all of them with neither)."""
+        filters = [(name, value) for name, value in (("issue", issue), ("key", key)) if value is not None]
+        where = "WHERE " + " AND ".join(f"{name} = ?" for name, _ in filters) if filters else ""
+        with self._lock:
+            return self._subjects(self._db, where, tuple(value for _, value in filters))
 
     # --- assessments: the append-only record every gate decision leaves (spec autonomous-gates §5) ----
 
