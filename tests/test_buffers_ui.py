@@ -100,9 +100,18 @@ def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
     assert {h if h.endswith("/") else h + "/" for h in hosts} <= allowed
 
 
-def test_page_names_the_new_states_and_labels() -> None:
-    for needle in ('"revoked":', '"quarantined":', "buffer:revoke", "data:revoke", "paused by the operator"):
+def test_page_names_the_revoked_states_and_the_pause() -> None:
+    for needle in ('"revoked":', '"quarantined":', "Revoke the ticked", "paused by the operator"):
         assert needle in PAGE, needle
+
+
+def test_the_docs_describe_the_system_as_it_is() -> None:
+    """The Docs tab names buttons, never label commands, and explains nothing by what it replaced."""
+    docs = PAGE[PAGE.index('<section data-view="docs"') : PAGE.index("</main>")]
+    assert not re.search(r"\b(buffer|data|prep|autodev):[a-z]", docs)
+    assert not re.search(r"\b(no longer|any more|anymore|used to|as before|previously|read-only log)\b", docs, re.I)
+    for needle in ("Needs you", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):
+        assert needle in docs, needle
 
 
 def test_page_has_a_decisions_tab() -> None:
