@@ -48,6 +48,25 @@ PREP_STAGES = {
     "needs-human": ("d93f0b", "mia-buffers: the request stopped, needs a human"),
 }
 PREP_HUMAN_LABELS = {"go": ("0e8a16", "Prepare the datasets this request names")}
+# stage -> (status word, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1);
+# a "working" stage accepts only what ends or feeds its round. The workflow stays the code that carries a round out.
+STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
+    "new": ("not started", frozenset({"go"})),
+    "planning": ("working", frozenset({"stop"})),
+    "plan-review": ("waiting", frozenset({"approve", "go", "stop"})),
+    "sourcing": ("working", frozenset({"dropped", "stop"})),
+    "staged": ("waiting", frozenset({"approve", "go", "dropped", "stop"})),
+    "ready": ("done", frozenset({"go", "revoke", "retire", "stop"})),
+    "idle": ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"})),
+    "retired": ("done", frozenset({"go"})),
+    "needs-human": ("stuck", frozenset({"go"})),
+}
+PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
+    "new": ("not started", frozenset({"go"})),  # a request has no `new` label: a subject before its first stage
+    "requested": ("working", frozenset({"stop"})),
+    "done": ("done", frozenset({"go"})),
+    "needs-human": ("stuck", frozenset({"go"})),
+}
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
     "MIA_BUFFERS_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy"),

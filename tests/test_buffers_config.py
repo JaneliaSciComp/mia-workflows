@@ -185,3 +185,18 @@ def test_every_label_description_fits_github():
         spec[1] for spec in EXTRA_LABELS.values()
     ]
     assert all(len(text) <= 100 for text in descriptions), [text for text in descriptions if len(text) > 100]
+
+
+def test_every_buffer_and_prep_stage_has_a_rule():
+    from mia_buffers.config import PREP_STAGE_ACTIONS, STAGE_ACTIONS
+    from mia_buffers.poll import LIVE_STAGES
+    from mia_data.config import STATUS_WORDS
+
+    assert set(STAGE_ACTIONS) == set(STAGES) and set(PREP_STAGE_ACTIONS) == {"new", *PREP_STAGES}
+    vocabulary = (set(HUMAN_LABELS) - {"plan"}) | {"dropped", "stop"}  # plan is an option of go (spec §4.2)
+    for status, actions in [*STAGE_ACTIONS.values(), *PREP_STAGE_ACTIONS.values()]:
+        assert status in STATUS_WORDS and actions <= vocabulary
+    assert STAGE_ACTIONS["idle"] == ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"}))
+    assert PREP_STAGE_ACTIONS["requested"] == ("working", frozenset({"stop"}))
+    # stop is offered exactly where closing the issue retires today
+    assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "stop" in actions} == set(LIVE_STAGES)

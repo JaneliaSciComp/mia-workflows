@@ -111,3 +111,13 @@ def test_judge_section_loads(tmp_path):
     assert cfg.judge.crops.mode == "shadow" and cfg.judge.model == "opus"
     # the author's own model is allowed as the judge: a different one is a precaution, not a rule
     assert make_cfg(tmp_path, judge={"crops": {"mode": "shadow"}, "model": "sonnet"}).judge.model == "sonnet"
+
+
+def test_every_dataset_stage_has_a_rule():
+    from mia_data.config import HUMAN_LABELS, STAGE_ACTIONS, STAGES, STATUS_WORDS
+
+    assert set(STAGE_ACTIONS) == set(STAGES)
+    for status, actions in STAGE_ACTIONS.values():
+        assert status in STATUS_WORDS and actions <= set(HUMAN_LABELS)
+    assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "go"}))
+    assert all(not actions for status, actions in STAGE_ACTIONS.values() if status == "working")

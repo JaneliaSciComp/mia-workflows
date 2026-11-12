@@ -51,6 +51,19 @@ HUMAN_LABELS = {  # set by humans
         "Revoke this dataset's published crops: buffers that drew from it are degraded, nothing is deleted",
     ),
 }
+STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done")
+# stage -> (status word, the actions it accepts); "working" means a round is in progress, and it accepts nothing
+# until cancel is built (spec webapp-actions §5.1). The workflow stays the code that carries a round out.
+STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
+    "new": ("not started", frozenset({"go"})),
+    "matching": ("working", frozenset()),
+    "developing": ("working", frozenset()),
+    "testing": ("working", frozenset()),
+    "review": ("waiting", frozenset({"approve", "reject", "go"})),
+    "merging": ("working", frozenset()),
+    "done": ("done", frozenset({"go", "revoke"})),
+    "needs-human": ("stuck", frozenset({"go", "revoke"})),
+}
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),
 }
