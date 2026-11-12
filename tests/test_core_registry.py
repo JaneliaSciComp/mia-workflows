@@ -183,3 +183,22 @@ def test_subject_calls():
     assert json.loads(seen[0].content) == {"key": "EM pool/2", "stage": "ready", "data": {"spec": "s"}}
     assert (seen[1].method, seen[1].url.raw_path) == ("GET", b"/subjects/buffer/EM%20pool%2F2")
     assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).subject("buffer", "x") is None
+
+
+def test_timeline_calls():
+    seen = []
+    reg = Registry("http://svc", "tok", transport=transport(seen))
+    reg.append_entry("dataset", 7, body="text", marker="m", round_id="i7-e1", stage="testing")
+    reg.append_entry("prep", 9, stage="done")
+    reg.timeline("buffer", 8)
+    reg.mark_mirrored("buffer", 8, 3, "https://x/c")
+    assert [(request.method, request.url.path) for request in seen] == [
+        ("POST", "/timeline/dataset/7"),
+        ("POST", "/timeline/prep/9"),
+        ("GET", "/timeline/buffer/8"),
+        ("PUT", "/timeline/buffer/8/3"),
+    ]
+    assert json.loads(seen[0].content) == {"body": "text", "marker": "m", "round": "i7-e1", "stage": "testing"}
+    assert json.loads(seen[1].content) == {"body": "", "marker": "", "round": None, "stage": "done"}
+    assert json.loads(seen[3].content) == {"comment_url": "https://x/c"}
+    assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).timeline("buffer", 1) is None

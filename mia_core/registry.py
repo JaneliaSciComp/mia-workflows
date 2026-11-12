@@ -117,6 +117,28 @@ class Registry:
     def subject(self, kind: str, key: str) -> dict | None:
         return self._lookup(f"/subjects/{quote(kind, safe='')}/{quote(key, safe='')}")
 
+    def append_entry(
+        self,
+        kind: str,
+        number: int,
+        *,
+        body: str = "",
+        marker: str = "",
+        round_id: str | None = None,
+        stage: str | None = None,
+    ) -> dict:
+        """Write a subject's stage, a timeline entry (once per marker), or both: {subject, entry}. 404: no such
+        subject."""
+        fields = {"body": body, "marker": marker, "round": round_id, "stage": stage}
+        return self.request("POST", f"/timeline/{quote(kind, safe='')}/{number}", json=fields)
+
+    def timeline(self, kind: str, number: int) -> dict | None:
+        """{subject, entries} of the subject with this number; None when there is none."""
+        return self._lookup(f"/timeline/{quote(kind, safe='')}/{number}")
+
+    def mark_mirrored(self, kind: str, number: int, seq: int, comment_url: str | None) -> None:
+        self.request("PUT", f"/timeline/{quote(kind, safe='')}/{number}/{seq}", json={"comment_url": comment_url})
+
     def put_asset(self, kind: str, key: str, data: dict) -> dict:
         return self.request("PUT", f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}", json=data)
 

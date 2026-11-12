@@ -21,7 +21,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
@@ -176,6 +176,27 @@ class AdoptBody(_Strict):
     data: dict = {}
 
 
+class EntryBody(_Strict):
+    """One write of a round: a stage, a timeline entry (text with the marker that makes it once-only), or both."""
+
+    body: str = ""
+    marker: str = ""
+    round: str | None = None
+    stage: str | None = None
+
+    @model_validator(mode="after")
+    def _something_to_write(self) -> EntryBody:
+        if bool(self.body) != bool(self.marker):
+            raise ValueError("an entry needs both its body and its marker")
+        if not self.body and self.stage is None:
+            raise ValueError("nothing to write: give a stage, an entry, or both")
+        return self
+
+
+class MirroredBody(_Strict):
+    comment_url: str | None = None
+
+
 class AssessmentBody(_Strict):
     """One assessment as `mia_core.judge.policy.new_assessment` shapes it (spec autonomous-gates §5)."""
 
@@ -288,6 +309,9 @@ ROUTES = [
     ("GET", re.compile(r"^/needs$"), "needs", "read"),
     ("GET", re.compile(r"^/lookup$"), "lookup", "read"),
     ("GET", re.compile(r"^/stream$"), "stream", "read"),
+    ("POST", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "append_entry", "worker"),
+    ("GET", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "timeline", "read"),
+    ("PUT", re.compile(r"^/timeline/([a-z]+)/(\d+)/(\d+)$"), "mark_mirrored", "worker"),
 ]
 
 
@@ -307,8 +331,11 @@ class BufferService:
         archive_dir: Path | None = None,
         meta: dict | None = None,
         ui_dir: Path | None = None,
+        dispatcher: Any = None,
     ):
         self.ledger = ledger
+        # the way to Temporal (`dispatch.Dispatcher`, or a test's stand-in); None reaches no workflow
+        self.dispatcher = dispatcher
         self.token = token  # None disables the worker check (tests, a dev service)
         self.stale_s = stale_s
         self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
@@ -553,6 +580,51 @@ class BufferService:
 
     def _stream(self, *, query: dict[str, str], body: bytes) -> Response:
         return 200, self.changes.stream(), {"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
+
+    # --- the timeline: what happened to a subject; rounds write it, the page reads it, the mirror copies it ---
+
+    def _numbered(self, kind: str, number: str) -> dict:
+        found = self.ledger.find_subjects(kind=kind, number=int(number)) if kind in SUBJECT_RULES else []
+        if not found:
+            raise HttpError(404, f"no {kind} #{number}")
+        return found[0]
+
+    def _changed(self, kind: str, number: int) -> None:
+        """Tell the page's stream and the subject's mirror that something was written."""
+        self.changes.announce(kind, number)
+        if self.dispatcher is not None:
+            self.dispatcher.kick_mirror(kind, number)
+
+    def kick_unmirrored(self) -> None:
+        """Kick the mirror of every subject with an entry not yet posted: run at start, so an entry appended just
+        before a crash, or while Temporal was away, is not left behind."""
+        if self.dispatcher is not None:
+            for kind, number in self.ledger.unmirrored_subjects():
+                self.dispatcher.kick_mirror(kind, number)
+
+    def _append_entry(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._numbered(kind, number)
+        parsed = _parse(EntryBody, body)
+        if parsed.stage is not None and parsed.stage not in SUBJECT_RULES[kind]:
+            raise HttpError(422, f"stage must be one of {list(SUBJECT_RULES[kind])}, got {parsed.stage!r}")
+        written = self.ledger.append_entry(
+            kind, int(number), body=parsed.body, marker=parsed.marker, round_id=parsed.round, stage=parsed.stage
+        )
+        assert written is not None  # the subject was just found, and nothing deletes one
+        self._changed(kind, int(number))
+        return 200, {"subject": self._subject_view(written[0]), "entry": written[1]}, {}
+
+    def _timeline(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        subject = self._numbered(kind, number)
+        entries = self.ledger.timeline(kind, int(number))
+        return 200, {"subject": self._subject_view(subject), "entries": entries}, {}
+
+    def _mark_mirrored(self, kind: str, number: str, seq: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(MirroredBody, body)
+        if not self.ledger.mark_mirrored(kind, int(number), int(seq), parsed.comment_url):
+            raise HttpError(404, f"no entry {seq} of {kind} #{number}")
+        self.changes.announce(kind, int(number))
+        return 200, {"ok": True}, {}
 
     # --- assessments and budgets: what the gates decided and what each root request has spent ------
 

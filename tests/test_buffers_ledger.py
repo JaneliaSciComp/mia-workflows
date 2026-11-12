@@ -595,3 +595,42 @@ def test_find_subjects_by_issue_and_key(tmp_path):
     assert len(ledger.find_subjects()) == 2
     assert ledger.subject("dataset", "rec-a")["number"] == 234 and ledger.subject("dataset", "nope") is None
     assert ledger.set_subject_stage("dataset", 999, "new") is None
+
+
+def test_timeline_entries_are_once_per_marker_and_a_stage_always_moves(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    assert ledger.append_entry("dataset", 1, body="x", marker="m") is None  # no such subject
+    ledger.adopt_subject("dataset", 1, "rec-a")
+    subject, entry = ledger.append_entry(
+        "dataset", 1, body="testing\nm1", marker="m1", round_id="i1-e2", stage="testing"
+    )
+    assert (subject["stage"], subject["revision"]) == ("testing", 1)
+    assert {name: entry[name] for name in ("seq", "round", "stage", "body", "marker", "mirrored_at")} == {
+        "seq": 1,
+        "round": "i1-e2",
+        "stage": "testing",
+        "body": "testing\nm1",
+        "marker": "m1",
+        "mirrored_at": None,
+    }
+    ledger.append_entry("dataset", 1, body="review", marker="m2", stage="review")
+    # the round enters testing again: nothing is appended, the stage and the revision still move
+    subject, again = ledger.append_entry("dataset", 1, body="other text", marker="m1", stage="testing")
+    assert (subject["stage"], subject["revision"], again["seq"], again["body"]) == ("testing", 3, 1, "testing\nm1")
+    subject, none = ledger.append_entry("dataset", 1, stage="done")  # a stage with nothing to say
+    assert (subject["stage"], none) == ("done", None)
+    assert [row["seq"] for row in ledger.timeline("dataset", 1)] == [1, 2]
+
+
+def test_mark_mirrored_and_the_subjects_still_to_mirror(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.adopt_subject("dataset", 1, "rec-a")
+    ledger.adopt_subject("buffer", 8, "pool")
+    ledger.append_entry("dataset", 1, body="a", marker="a")
+    ledger.append_entry("buffer", 8, body="b", marker="b")
+    assert ledger.unmirrored_subjects() == [("buffer", 8), ("dataset", 1)]
+    assert ledger.mark_mirrored("buffer", 8, 1, "https://x/c1") and not ledger.mark_mirrored("buffer", 8, 9, None)
+    assert ledger.unmirrored_subjects() == [("dataset", 1)]
+    row = ledger.timeline("buffer", 8)[0]
+    assert row["comment_url"] == "https://x/c1" and row["mirrored_at"]
+    assert [row["number"] for row in ledger.find_subjects(kind="buffer", number=8)] == [8]

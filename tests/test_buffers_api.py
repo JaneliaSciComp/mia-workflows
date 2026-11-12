@@ -1126,3 +1126,61 @@ def test_stream_over_http_and_a_reader_that_leaves(tmp_path):
         assert httpx.get(url + "/subjects/dataset/rec-b").json()["number"] == 235
     finally:
         server.shutdown()
+
+
+# --- the timeline: what a round writes instead of an issue comment (spec webapp-actions §4.3, §7) ---
+
+
+class Kicks:
+    """Stands in for the Temporal gateway: records which subjects' mirrors were kicked."""
+
+    def __init__(self):
+        self.kicked = []
+
+    def kick_mirror(self, kind, number):
+        self.kicked.append((kind, number))
+
+
+def test_a_stage_and_an_entry_are_written_read_and_mirrored_back(tmp_path):
+    kicks = Kicks()
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), dispatcher=kicks)
+    call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a"})
+    entry = {"body": "testing\n<!-- m -->", "marker": "<!-- m -->", "round": "i234-e5", "stage": "testing"}
+    status, out, _ = call(s, "POST", "/timeline/dataset/234", payload=entry)
+    assert status == 200 and out["subject"]["status"] == "working" and out["entry"]["seq"] == 1
+    assert call(s, "POST", "/timeline/dataset/234", payload=entry)[1]["entry"]["seq"] == 1  # a retry appends nothing
+    status, out, _ = call(s, "POST", "/timeline/dataset/234", payload={"stage": "review"})  # a stage with no text
+    assert (out["subject"]["stage"], out["entry"]) == ("review", None)
+    assert kicks.kicked == [("dataset", 234)] * 3  # every write: the label follows the stage
+    status, out, _ = call(s, "GET", "/timeline/dataset/234")
+    assert status == 200 and out["subject"]["key"] == "rec-a" and [row["seq"] for row in out["entries"]] == [1]
+    assert call(s, "PUT", "/timeline/dataset/234/1", payload={"comment_url": "https://x/c"})[0] == 200
+    assert call(s, "GET", "/timeline/dataset/234")[1]["entries"][0]["comment_url"] == "https://x/c"
+    assert call(s, "PUT", "/timeline/dataset/234/9", payload={"comment_url": None})[0] == 404
+
+
+def test_timeline_writes_are_checked(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/subjects/dataset/1", payload={"key": "rec-a"})
+    assert call(s, "POST", "/timeline/dataset/2", payload={"stage": "testing"})[0] == 404  # no such subject
+    assert call(s, "POST", "/timeline/widget/1", payload={"stage": "testing"})[0] == 404
+    assert call(s, "POST", "/timeline/dataset/1", payload={"stage": "bogus"})[0] == 422
+    assert call(s, "POST", "/timeline/dataset/1", payload={})[0] == 422  # nothing to write
+    assert call(s, "POST", "/timeline/dataset/1", payload={"body": "text"})[0] == 422  # an entry needs its marker
+    assert call(s, "GET", "/timeline/dataset/2")[0] == 404
+    guarded = BufferService(Ledger(tmp_path / "g.sqlite"), token="t")
+    assert call(guarded, "POST", "/timeline/dataset/1", payload={"stage": "testing"})[0] == 401
+    assert call(guarded, "PUT", "/timeline/dataset/1/1", payload={"comment_url": None})[0] == 401
+
+
+def test_a_start_kicks_every_subject_with_something_to_mirror(tmp_path):
+    kicks = Kicks()
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), dispatcher=kicks)
+    call(s, "PUT", "/subjects/dataset/1", payload={"key": "rec-a"})
+    call(s, "PUT", "/subjects/buffer/8", payload={"key": "pool"})
+    call(s, "POST", "/timeline/dataset/1", payload={"body": "a", "marker": "a"})
+    call(s, "PUT", "/timeline/dataset/1/1", payload={"comment_url": None})
+    call(s, "POST", "/timeline/buffer/8", payload={"body": "b", "marker": "b"})
+    kicks.kicked.clear()
+    s.kick_unmirrored()
+    assert kicks.kicked == [("buffer", 8)]

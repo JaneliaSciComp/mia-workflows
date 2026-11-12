@@ -78,7 +78,12 @@ CREATE TABLE IF NOT EXISTS budgets (root TEXT PRIMARY KEY, data TEXT NOT NULL, u
 CREATE TABLE IF NOT EXISTS subjects (kind TEXT, number INTEGER, key TEXT NOT NULL, stage TEXT NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0, issue INTEGER, data TEXT NOT NULL, updated REAL,
     PRIMARY KEY (kind, number), UNIQUE (kind, key));
+CREATE TABLE IF NOT EXISTS timeline (kind TEXT, number INTEGER, seq INTEGER, at TEXT, round TEXT, stage TEXT,
+    body TEXT NOT NULL, marker TEXT NOT NULL, mirrored_at TEXT, comment_url TEXT,
+    PRIMARY KEY (kind, number, seq), UNIQUE (kind, number, marker));
 """
+
+TIMELINE_COLUMNS = ("seq", "at", "round", "stage", "body", "marker", "mirrored_at", "comment_url")
 
 SUBJECT_COLUMNS = ("kind", "number", "key", "stage", "revision", "issue", "data", "updated")
 
@@ -502,12 +507,77 @@ class Ledger:
             found = self._subjects(self._db, "WHERE kind = ? AND key = ?", (kind, key))
         return found[0] if found else None
 
-    def find_subjects(self, *, issue: int | None = None, key: str | None = None) -> list[dict]:
-        """Subjects of every kind with this issue number and with this key (all of them with neither)."""
-        filters = [(name, value) for name, value in (("issue", issue), ("key", key)) if value is not None]
+    def find_subjects(
+        self, *, kind: str | None = None, number: int | None = None, issue: int | None = None, key: str | None = None
+    ) -> list[dict]:
+        """The subjects matching every filter given (all of them with none)."""
+        given = (("kind", kind), ("number", number), ("issue", issue), ("key", key))
+        filters = [(name, value) for name, value in given if value is not None]
         where = "WHERE " + " AND ".join(f"{name} = ?" for name, _ in filters) if filters else ""
         with self._lock:
             return self._subjects(self._db, where, tuple(value for _, value in filters))
+
+    # --- timeline: what happened to a subject, in order; what the page shows and the mirror copies (§4.3) ---
+
+    @staticmethod
+    def _entries(db: sqlite3.Connection, where: str, values: tuple) -> list[dict]:
+        rows = db.execute(f"SELECT {', '.join(TIMELINE_COLUMNS)} FROM timeline {where} ORDER BY seq", values)
+        return [dict(zip(TIMELINE_COLUMNS, row, strict=True)) for row in rows]
+
+    def append_entry(
+        self,
+        kind: str,
+        number: int,
+        *,
+        body: str = "",
+        marker: str = "",
+        round_id: str | None = None,
+        stage: str | None = None,
+    ) -> tuple[dict, dict | None] | None:
+        """Write a stage, an entry or both, in one transaction: (subject, entry), or None without such a subject.
+        A `stage` always becomes the subject's and raises its revision. A `body` is appended once per marker: a
+        second write with the marker (a retried activity, a stage entered twice in a round) returns the first
+        entry and appends nothing."""
+        key = (kind, number)
+        with self._transaction() as db:
+            if not self._subjects(db, "WHERE kind = ? AND number = ?", key):
+                return None
+            if stage is not None:
+                db.execute(
+                    "UPDATE subjects SET stage = ?, revision = revision + 1, updated = ? WHERE kind = ? AND number = ?",
+                    (stage, time.time(), *key),
+                )
+            entry = None
+            if body:
+                seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM timeline WHERE kind = ? AND number = ?", key)
+                db.execute(
+                    "INSERT OR IGNORE INTO timeline (kind, number, seq, at, round, stage, body, marker) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (*key, seq.fetchone()[0], datetime.now(UTC).isoformat(), round_id, stage, body, marker),
+                )
+                entry = self._entries(db, "WHERE kind = ? AND number = ? AND marker = ?", (*key, marker))[0]
+            return self._subjects(db, "WHERE kind = ? AND number = ?", key)[0], entry
+
+    def timeline(self, kind: str, number: int) -> list[dict]:
+        with self._lock:
+            return self._entries(self._db, "WHERE kind = ? AND number = ?", (kind, number))
+
+    def mark_mirrored(self, kind: str, number: int, seq: int, comment_url: str | None) -> bool:
+        """The mirror's write-back for one entry; False when there is no such entry."""
+        with self._transaction() as db:
+            done = db.execute(
+                "UPDATE timeline SET mirrored_at = ?, comment_url = ? WHERE kind = ? AND number = ? AND seq = ?",
+                (datetime.now(UTC).isoformat(), comment_url, kind, number, seq),
+            )
+            return done.rowcount > 0
+
+    def unmirrored_subjects(self) -> list[tuple[str, int]]:
+        """The subjects with an entry the mirror has not posted: what the service kicks when it starts."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT kind, number FROM timeline WHERE mirrored_at IS NULL ORDER BY kind, number"
+            )
+            return [(kind, number) for kind, number in rows]
 
     # --- assessments: the append-only record every gate decision leaves (spec autonomous-gates §5) ----
 
