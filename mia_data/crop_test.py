@@ -20,8 +20,10 @@ def job_succeeded(job: JobDone) -> bool:
     return job.state == "DONE" and job.exit_code in (0, None)
 
 
-def describe_failure(kind: str, job: JobDone) -> str:
-    return f"{kind} job {job.job_id} ended {job.state} (exit {job.exit_code})"
+def describe_failure(kind: str, job: JobDone, errors: list[str] | None = None) -> str:
+    """The job's end state and, when its own report said why (harness exits 1 on any error), the first errors."""
+    text = f"{kind} job {job.job_id} ended {job.state} (exit {job.exit_code})"
+    return f"{text}: {'; '.join(errors[:5])}" if errors else text
 
 
 def judge(verify: VerifyResult, jobs: list[JobDone], needed: int | None = None) -> tuple[bool, list[str]]:
@@ -29,7 +31,7 @@ def judge(verify: VerifyResult, jobs: list[JobDone], needed: int | None = None) 
     and every crop verified. The dataset's own set (spec §13) passes when the crop job succeeded and at least
     `needed` crops verified: verify exits 1 whenever one crop fails, so its report is the judge, not its exit."""
     failed = [
-        describe_failure(kind, job)
+        describe_failure(kind, job, verify.crop_errors if kind == "crop" else None)
         for kind, job in zip(("crop", "verify"), jobs, strict=False)
         if not job_succeeded(job)
     ]

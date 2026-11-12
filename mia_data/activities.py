@@ -925,7 +925,13 @@ class Activities:
             return value if type(value) is int and value >= 0 else None
 
         return VerifyResult(
-            len(verified), n_crops, (errors + failed)[:20], verified, count("n"), count("bytes_fetched") or 0
+            len(verified),
+            n_crops,
+            (errors + failed)[:20],
+            verified,
+            count("n"),
+            count("bytes_fetched") or 0,
+            _texts(crop_report.get("errors"))[:10],
         )
 
     # --- publication -------------------------------------------------------------------------

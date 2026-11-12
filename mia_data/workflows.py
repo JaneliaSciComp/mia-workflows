@@ -260,6 +260,13 @@ class MiaDataDataset:
             start_to_close_timeout=timedelta(seconds=60),
             schedule_to_close_timeout=budget,
             retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            # stage-write-wait: a cancelled write already inside its GitHub call finishes before the next write
+            # starts, so two writes never swap labels at once (two issues once kept `matching` and `needs-human`)
+            cancellation_type=(
+                workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
+                if workflow.patched("stage-write-wait")
+                else workflow.ActivityCancellationType.TRY_CANCEL
+            ),
         )
 
     async def _rollover(self) -> None:
@@ -268,9 +275,9 @@ class MiaDataDataset:
         workflow.continue_as_new(self.state)
 
     async def _drop_stage_write(self) -> None:
-        """Cancel the stage write still pending, so a late retry cannot swap the label back; a write that failed
-        meanwhile is logged (the registry row and the next write carry the stage)."""
-        # ponytail: an attempt already inside its GitHub call finishes it; a label can lag one stage for a moment.
+        """Cancel the stage write still pending, so a late retry cannot swap the label back, and wait for an
+        attempt already inside its GitHub call to finish; a write that failed meanwhile is logged (the registry
+        row and the next write carry the stage)."""
         await self._settle_stage_write(cancel=True)
 
     async def _settle_stage_write(self, cancel: bool) -> None:
@@ -584,11 +591,11 @@ class MiaDataDataset:
             finally:
                 await self._release_raw(lock)
             if not ran:
-                return await self._finish("needs-human", describe_failure("smoke", job))
+                return await self._finish("needs-human", await self._smoke_failure(job, workspace))
         else:
             workspace = await self._prepare("smoke")
             if not job_succeeded(job := await self._job("smoke", workspace)):
-                return await self._finish("needs-human", describe_failure("smoke", job))
+                return await self._finish("needs-human", await self._smoke_failure(job, workspace))
             smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
         if not smoke.ok:
             why = "; ".join(smoke.errors) or "no errors reported"
@@ -628,6 +635,17 @@ class MiaDataDataset:
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
         await self._judge_crops(test)  # in shadow: after the gate opens, so a human verdict is only queued, never held
         await self._from_review()
+
+    async def _smoke_failure(self, job: JobDone, workspace: str) -> str:
+        """Why a smoke job failed: its end state and the errors of its own smoke.json, when it wrote one. `harness
+        smoke` exits 1 whenever `ok` is false, so the exit code alone told the issue nothing."""
+        if not workflow.patched("job-report-errors"):
+            return describe_failure("smoke", job)
+        smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
+        errors = [error for error in smoke.errors if not error.startswith("smoke.json is missing")]
+        if smoke.host_not_allowed:
+            errors.append(f"host not allowed: {smoke.host_not_allowed}")
+        return describe_failure("smoke", job, errors)
 
     async def _from_review(self) -> None:
         """At `data:review` without a PR to follow: approve publishes the set; reject asks autodev for a snippet
@@ -808,7 +826,8 @@ class MiaDataDataset:
         ):  # a limit or a crash: the surviving crops are published, the round needs a human
             return await self._finish(
                 "needs-human",
-                f"{describe_failure('crop', crop_job)}; the {verify.ok_count} crops that passed are published",
+                f"{describe_failure('crop', crop_job, verify.crop_errors)}; "
+                f"the {verify.ok_count} crops that passed are published",
                 extra,
             )
         if verify.ok_count >= needed:

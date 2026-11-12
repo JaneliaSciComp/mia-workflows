@@ -430,13 +430,22 @@ async def reject_review(h, m, eid="12", dt=1):
 async def test_a_stage_write_does_not_hold_the_round(env):
     """stage-write-async: the match job is submitted while GitHub still owes the `matching` label; a final stage
     (needs-human here, from the failed match) waits for its write."""
-    m = Mocks(outcome="blocked", slow_stages={"matching", "needs-human"})
+    m = Mocks(outcome="blocked", slow_stages={"matching"})
     async with started(env, m) as h:
         await until(lambda: m.of("submit"))
         assert m.stages == [] and m.of("submit")[0][1] == "match"
-        # open the gate once the final write waits: the matching write's cancel went first, so its completion
-        # cannot race the cancel (the test server answers that race with ACTIVITY_UNKNOWN and a failed task)
-        await until(lambda: ("needs-human",) in m.of("stage_waits"))
+        # stage-write-wait: the final write starts only once the cancelled `matching` write has finished, so the
+        # two can never swap labels at once; open the gate after the cancel was requested
+        cancel = EventType.EVENT_TYPE_ACTIVITY_TASK_CANCEL_REQUESTED
+
+        async def cancel_requested():
+            return any(e.event_type == cancel for e in (await h.fetch_history()).events)
+
+        for _ in range(500):
+            if await cancel_requested():
+                break
+            await asyncio.sleep(0.02)
+        assert m.of("set_stage") == []
         m.stage_gate.set()
         await idle(h, m, "needs-human")
     assert m.stages == ["matching", "needs-human"]
@@ -674,11 +683,15 @@ async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke
     assert m.stages == ["matching", "needs-human"] and "no data" in m.of("set_stage")[-1][1]
 
 
-async def test_a_failed_smoke_job_still_releases_the_raw_lock(env):
-    m = Mocks(states={"smoke": ("EXIT", 2)})
+async def test_a_failed_smoke_job_still_releases_the_raw_lock_and_posts_its_own_errors(env):
+    """harness smoke exits 1 on any error: the issue gets smoke.json's errors, read after the lock is released."""
+    m = Mocks(states={"smoke": ("EXIT", 2)}, smoke=SmokeResult(False, errors=["peer closed connection"]))
     async with started(env, m) as h:
         await idle(h, m, "needs-human")
-    assert "read_smoke" not in m.names() and m.of("release_lock") == [("raw", "rec-1", "mia-data i7-e11 smoke")]
+    assert m.of("release_lock") == [("raw", "rec-1", "mia-data i7-e11 smoke")]
+    assert m.of("read_smoke") == [("/w/i7-e11/smoke-1", None)]  # no raw asset row for a failed job
+    assert m.names().index("release_lock") < m.names().index("read_smoke")
+    assert m.of("set_stage")[-1][1] == "smoke job job-mia-7-i7-e11-smoke-1 ended EXIT (exit 2): peer closed connection"
 
 
 # --- the development path (§7.3) ------------------------------------------------------------

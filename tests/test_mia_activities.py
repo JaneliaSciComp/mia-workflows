@@ -497,8 +497,9 @@ async def test_read_verify_reports_the_lowered_n(tmp_path):
     ws.mkdir()
     (ws / "verify.json").write_text(json.dumps({"crops": [], "n": 0, "errors": []}))
     assert (await t.a.read_verify(str(ws), str(cw))).n_effective is None  # no report: the caller's n stands
-    (cw / "crops" / "report.json").write_text(json.dumps({"requested_n": 16, "n": 3}))
+    (cw / "crops" / "report.json").write_text(json.dumps({"requested_n": 16, "n": 3, "errors": ["ReadTimeout: x"]}))
     assert (await t.a.read_verify(str(ws), str(cw))).n_effective == 3
+    assert (await t.a.read_verify(str(ws), str(cw))).crop_errors == ["ReadTimeout: x"]  # why the crop job failed
     assert (await t.a.read_verify(str(ws))).n_effective is None
 
 
