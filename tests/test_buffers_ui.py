@@ -62,7 +62,11 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
 def test_the_pages_buttons_call_action_routes_and_it_follows_the_stream() -> None:
     """spec webapp-actions §8: a button is a POST to an action route; the page is told what changed."""
     requested = requested_paths()
-    assert ("POST", "/datasets/x/actions") in requested and resolve("POST", "/datasets/x/actions") == "action"
+    for path in ("/datasets/x/actions", "/specs", "/specs/x/actions", "/prep", "/prep/x/actions"):
+        assert ("POST", path) in requested and resolve("POST", path) == "action", path
+    for path in ("/needs", "/subjects/buffer", "/subjects/prep"):
+        assert ("GET", path) in requested, path
+    assert "issues/new" not in PAGE  # nothing is started by opening a GitHub issue any more
     for path in ("/subjects/x/x", "/timeline/x/x", "/run/x/x", "/lookup?q=x", "/health"):
         assert ("GET", path) in requested, path
     assert 'new EventSource("/stream")' in PAGE and resolve("GET", "/stream") == "read"

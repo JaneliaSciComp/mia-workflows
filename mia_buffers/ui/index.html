@@ -65,6 +65,8 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
 .actions textarea{flex:1 1 100%;max-width:80ch;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .btn.danger{border-color:var(--warn);color:var(--warn)}
+.specbox{width:100%;max-width:100ch;min-height:16em;font-family:var(--mono);font-size:12.5px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
+.ticks{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0;font-size:13px}
 .entry{border-top:1px solid var(--grid);padding:8px 0}
 .entry .at{font-size:12px;color:var(--muted);margin-bottom:2px}
 .entry pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px;margin:0}
@@ -215,6 +217,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 <header class="topbar">
   <h1>MIA Buffers</h1>
   <nav class="tabs" aria-label="Views">
+    <a href="#needs" data-tab="needs">Needs you</a>
     <a href="#datasets" data-tab="datasets">Datasets</a>
     <a href="#buffers" data-tab="buffers">Buffers</a>
     <a href="#cache" data-tab="cache">Cache</a>
@@ -289,6 +292,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
   </div>
 </section>
 
+<section data-view="needs" class="subject" hidden><div id="needsBody"></div></section>
 <section data-view="subject" class="subject" hidden><div id="subjectBody"></div></section>
 <section data-view="buffers" hidden><div id="buffersBody"></div></section>
 <section data-view="cache" hidden><div id="cacheBody"></div></section>
@@ -1087,7 +1091,6 @@ const LIC = ["CC0-1.0","CC-BY-4.0","CC-BY-3.0","MIT","BSD-3-Clause","Apache-2.0"
 const SRC = ["manual","proofread","automatic","mixed","unknown"];
 const LEVELS = [1,2,4,8,16,32];
 const NOT_PREPARED = "not prepared";  // mia_buffers.plan.NOT_PREPARED
-const MAX_URL = 8000;                 // GitHub refuses new-issue links much longer than this
 const PLAN_DEBOUNCE_MS = 300;
 const $ = id => document.getElementById(id);
 const fmt = n => n >= 1e6 ? (n/1e6).toFixed(n>=1e7?0:1)+"M" : n >= 1e3 ? (n/1e3).toFixed(n>=1e4?0:1)+"K" : String(n);
@@ -1266,7 +1269,7 @@ const cropPng = (d, id, name) => `/crops/${encodeURIComponent(d.folder)}/${encod
 const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src = cropPng(d, d.previews[0], "overlay");
   return tipOn(el("a", { href: src, target: "_blank", rel: "noopener" }, el("img", { class: "thumb", src, loading: "lazy", alt: "crop overlay" })),
     [{ t: `${num(d.crops || d.previews.length)} crops published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
-const dsIssue = record => { const d = S.datasets.get(record); return d?.issue ? ghIssue(S.meta.datasets_repo, d.issue) : ""; };
+const dsIssue = record => { const d = S.datasets.get(record); return d?.issue ? el("a", { href: "#datasets/" + encodeURIComponent(record) }, "open") : ""; };
 // a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
 const folderLink = (root, folder) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, "open") : "";
 
@@ -1357,29 +1360,48 @@ function toPrepYaml(records, ref, repo) {
   return ["schema_version: 1", "kind: preparation", `catalog: {repo: ${yq(repo || "")}, ref: ${yq(ref || "")}}`, "records:", ...records.map(r => `  - ${yq(r)}`), ""].join("\n");
 }
 
-// ---- GitHub links: a prefilled new-issue page, or "copy YAML" when the link would be too long
-async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); return true; }
-  catch {
-    const area = el("textarea", { style: "position:fixed;opacity:0" }); area.value = text; document.body.append(area); area.select();
-    let ok = false; try { ok = document.execCommand("copy"); } catch { ok = false; } area.remove(); return ok;
+// ---- creating things: a buffer spec and a preparation request are posted to the service, which runs them
+const JSON_HEADERS = { "Content-Type": "application/json" };
+const findLink = n => el("a", { href: "#find/" + n, title: "open its page" }, "#" + n);  // a number as rounds and buffer ids show it
+function createBuffer(container, yaml, blocker) {
+  // built once and kept: what a person typed into the box survives the page's re-renders
+  let area = container.querySelector("textarea");
+  if (!area) {
+    area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML", oninput: () => { area.dataset.edited = "1"; renderActions(); } });  // an edited spec enables Run
+    const first = el("input", { type: "checkbox" }), status = el("span", { class: "small" });
+    const run = el("button", { type: "button", class: "btn", onclick: async () => {
+      run.disabled = true; status.textContent = "starting…";
+      try {
+        const action = await api("/specs", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: area.value, action: "go", plan_first: first.checked, key: newKey() }) });
+        location.hash = "#find/" + action.number;
+      } catch (e) { status.textContent = ""; banner(e.status === 422 ? `The spec was refused: ${e.message}` : e.status === 409 ? `Not started. ${e.message}` : `Not started (${e.status || "network error"}): ${e.message}`); }
+      run.disabled = false;
+    } }, "Run");
+    const reset = el("button", { type: "button", class: "btn", title: "replace the text with the spec the controls above describe", onclick: () => { delete area.dataset.edited; renderActions(); } }, "Reset to the controls");
+    container.replaceChildren(el("details", {}, el("summary", {}, "Create buffer"),
+      el("div", { class: "small" }, "The spec the controls describe; edit it here if you need what they do not offer. Run saves it under its name and starts a round."),
+      area, el("div", { class: "actions" }, run, el("label", { class: "inline" }, first, " Show me the plan first"), reset, status)));
   }
+  if (!area.dataset.edited) area.value = yaml;
+  const run = container.querySelector("button"), status = container.querySelector(".actions .small");
+  run.disabled = !!blocker && !area.dataset.edited;  // an edited spec is judged by the service, not by the controls' plan
+  run.title = run.disabled ? blocker : "";
+  if (!status.textContent || status.dataset.blocker) { status.textContent = run.disabled ? blocker : ""; status.dataset.blocker = "1"; }
 }
-function issueAction(container, label, repo, title, intro, yaml, disabledReason) {
-  const disabled = reason => container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: reason }, label), el("span", { class: "small" }, reason));
-  if (disabledReason) return disabled(disabledReason);
-  if (!repo) return disabled("GET /meta names no repo");
-  const body = `${intro}\n\n\`\`\`yaml\n${yaml}\`\`\`\n`;
-  // no label is prefilled: nothing runs until the human adds the go label, after reading what the issue says
-  const base = `https://github.com/${repo}/issues/new?title=${encodeURIComponent(title)}`;
-  const url = `${base}&body=${encodeURIComponent(body)}`;
-  if (url.length <= MAX_URL) { container.replaceChildren(el("a", { class: "btn", href: url, target: "_blank", rel: "noopener" }, label)); return; }
-  const status = el("span", { class: "small" });
-  container.replaceChildren(
-    el("a", { class: "btn", href: `${base}&body=${encodeURIComponent(intro + "\n\n(paste the copied YAML here)")}`, target: "_blank", rel: "noopener" }, label),
-    el("button", { type: "button", class: "btn", title: "the YAML is too long for a prefilled link: copy it, open the issue, paste it into the body",
-      onclick: async () => { status.textContent = (await copyText(body)) ? "copied" : "copy failed: select the YAML from Download spec YAML"; } }, "copy YAML"),
-    status);
+function prepareButton(container, todo, blocker) {
+  const label = `Prepare these ${num(todo.length)} datasets`;
+  const why = blocker || (todo.length > 200 ? "a request takes at most 200 records: trim the list (search, fitting only) or prepare it in parts" : null);
+  if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
+  container.replaceChildren(el("button", { type: "button", class: "btn", title: "one preparation request for every unprepared dataset in the list below", onclick: async e => {
+    if (!confirm(`Start preparing ${todo.length} datasets? Each one costs an agent run.`)) return;
+    e.target.disabled = true;
+    // more than 25 records need the count written into the request: the confirmation above is that
+    const yaml = toPrepYaml(todo, S.ref, S.meta.catalog_repo) + (todo.length > 25 ? `max_records: ${todo.length}\n` : "");
+    try {
+      const action = await api("/prep", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: yaml, key: newKey() }) });
+      location.hash = "#find/" + action.number;
+    } catch (err) { banner(err.status === 422 ? `The request was refused: ${err.message}` : `Not started (${err.status || "network error"}): ${err.message}`); e.target.disabled = false; }
+  } }, label));
 }
 
 // ---- rules: the planner's reason strings, grouped and in its order, for the funnel and the decision column
@@ -1515,18 +1537,11 @@ function bufferBlocker() {
   return "the plan has errors: " + errors.join("; ");
 }
 function renderActions() {
-  const name = C.name.trim() || "buffer", yaml = toSpecYaml(C, S.ref, S.meta.catalog_repo);
-  issueAction($("bufferIssue"), "Open buffer issue", S.meta.buffers_repo, name,
-    `Buffer spec \`${name}\` from the buffer page, catalog \`${short(S.ref, 12)}\`. Nothing runs until you add the \`buffer:go\` label.`, yaml, bufferBlocker());
+  createBuffer($("bufferIssue"), toSpecYaml(C, S.ref, S.meta.catalog_repo), bufferBlocker());
   // every unprepared record in the results list below (search and fitting-only applied); in progress is already on its way
   const todo = tableRows().filter(x => x.prepared !== "prepared" && x.prepared !== "in-progress").map(x => x.id);
   const none = C.preparedOnly ? "the prepared-only toggle hides the unprepared records" : "every record in the list is prepared or in progress";
-  const q = $("search").value.trim(), scope = `\`${name}\`` + (q ? `, search "${q}"` : "") + ($("fitOnly").checked ? ", fitting only" : "");
-  issueAction($("prepIssue"), `Request preparation (${num(todo.length)})`, S.meta.buffers_repo, `Prepare ${todo.length} records for ${name}`,
-    `Preparation request from the Datasets tab: the ${todo.length} unprepared records in its list (${scope}). Nothing runs until you add the \`prep:go\` label; each record then costs an agent run.`
-    + (todo.length > 200 ? ` A request takes at most 200 records: trim the list (search, fitting only) or split it into several requests.`
-      : todo.length > 25 ? ` Before that, add \`max_records: ${todo.length}\` to the YAML to confirm the count.` : ""),
-    toPrepYaml(todo, S.ref, S.meta.catalog_repo), !S.plan ? "no plan yet" : todo.length ? null : none);
+  prepareButton($("prepIssue"), todo, !S.plan ? "no plan yet" : todo.length ? null : none);
 }
 function renderPlanMessages() {
   const box = $("planMsgs"); box.replaceChildren();
@@ -1593,7 +1608,7 @@ async function viewBuffers(id, refresh) {
   const root = $("buffersBody"), hash = location.hash;
   if (id) return viewBuffer(root, id, refresh);
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
-  const out = await load("/buffers");
+  const [out, specs] = await Promise.all([load("/buffers"), load("/subjects/buffer")]);
   if (location.hash !== hash) return;  // the reader moved on while this loaded
   // newest round first within an issue, newest issue first; every older round of an issue is superseded by its newest
   const eventOf = id => Number((id.match(/-e(\d+)$/) || [])[1] || 0);
@@ -1601,10 +1616,16 @@ async function viewBuffers(id, refresh) {
   const current = new Map();
   for (const b of buffers) if (!current.has(issueOf(b.id))) current.set(issueOf(b.id), b.id);
   const supersededBy = b => { const c = current.get(issueOf(b.id)); return c !== b.id ? c : null; };
-  root.replaceChildren(el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer with its issue and stage, the issue's newest round first; an older round is superseded by it. Open one for its events, status board, volumes, consumers and usage."),
+  root.replaceChildren(card("Buffer specs", "A spec is what you run; each run builds a buffer. Open one to approve, run again, revoke, retire or cancel. Create one from the Datasets view.", table([
+      { label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.key) },
+      { label: "state", cell: x => el("span", {}, statePill(x.status), " ", x.stage) },
+      { label: "waits for", cell: x => x.status === "waiting" || x.status === "stuck" ? x.actions.filter(a => a !== "stop" && a !== "cancel").join(", ") : "" },
+      { label: "updated", cell: x => when(x.updated) },
+    ], (specs?.subjects || []).slice().sort((a, b) => (b.updated || 0) - (a.updated || 0)), "No spec yet.")),
+    el("h2", {}, "Buffers"), el("p", { class: "small" }, "One row per registered buffer with its spec and stage, the spec's newest round first; an older round is superseded by it. Open one for its events, status board, volumes, consumers and usage."),
     table([
       { label: "buffer", cell: b => bufferLink(b.id) },
-      { label: "issue", cell: b => ghIssue(S.meta.buffers_repo, issueOf(b.id)) },
+      { label: "spec page", cell: b => findLink(issueOf(b.id)) },
       { label: "spec", cell: b => b.config?.spec_name || "" },
       { label: "state", cell: b => el("span", {}, ...(supersededBy(b) ? [pill("superseded", ""), " "] : []),
         ...(b.latest_event ? [statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at)]
@@ -1614,7 +1635,7 @@ async function viewBuffers(id, refresh) {
       { label: "servable", cell: b => servableText(b.servable) },
       { label: "consumer seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
       { label: "draws today", num: true, cell: b => num(b.draws_today) },
-    ], buffers, out ? "No buffers yet: open a buffer issue from the Datasets view." : "The buffer list did not load.",
+    ], buffers, out ? "No buffers yet: create one from the Datasets view." : "The buffer list did not load.",
     b => ({ class: "click" + (supersededBy(b) ? " superseded" : ""), title: supersededBy(b) ? `superseded by ${supersededBy(b)}, the issue's newest round` : "",
       onclick: e => { if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id); } })));
 }
@@ -1683,12 +1704,12 @@ async function viewBuffer(root, id, refresh) {
       ]) : el("div", { class: "empty" }, evs.length ? "not sourced yet" : "the buffer's status did not load"))),
     card("Events", null, table([
       { label: "#", num: true, cell: x => num(x.seq) }, { label: "kind", cell: x => statePill(x.kind) }, { label: "when", cell: x => when(x.at) },
-      { label: "issue", cell: x => x.issue ? ghIssue(meta.buffers_repo, x.issue) : "" }, { label: "detail", wrap: true, cell: x => x.detail || "" },
+      { label: "issue", cell: x => x.issue ? findLink(x.issue) : "" }, { label: "detail", wrap: true, cell: x => x.detail || "" },
     ], evs, "no events yet")),
     card("Data set pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason. Links: the dataset issue and its mia-data workflow, the crops and stage folders.", table([
       { label: "dataset", cell: x => x.record }, { label: "status", cell: x => statePill(x.status) }, { label: "reason", wrap: true, cell: x => x.reason || "" },
       { label: "job", cell: x => x.job ? el("code", {}, x.job) : "" }, { label: "updated", cell: x => when(x.updated_at) },
-      { label: "issue", cell: x => dsOf(x).issue ? ghIssue(meta.datasets_repo, dsOf(x).issue) : "" },
+      { label: "issue", cell: x => dsOf(x).issue ? findLink(dsOf(x).issue) : "" },
       { label: "workflow", cell: x => dsOf(x).issue && meta.datasets_workflow_url ? link(meta.datasets_workflow_url + dsOf(x).issue, "temporal") : "" },
       { label: "preview", cell: x => thumb(dsOf(x)) },
       { label: "crops", cell: x => folderLink(roots.storage_root, dsOf(x).folder) },
@@ -1756,19 +1777,21 @@ async function viewCache() {
 async function viewPreparation() {
   const root = $("prepBody");
   root.replaceChildren(el("div", { class: "empty" }, "loading…"));
-  await loadRegistry();
-  const meta = S.meta, rows = [...S.datasets.values()];
+  const [requests] = await Promise.all([load("/subjects/prep"), loadRegistry()]);
+  const rows = [...S.datasets.values()];
   const by = state => rows.filter(d => d.state === state).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-  const issue = d => d.issue ? ghIssue(meta.datasets_repo, d.issue) : "";
-  const q = label => `https://github.com/${meta.buffers_repo}/issues?q=${encodeURIComponent(`is:issue is:open label:${label}`)}`;
+  const issue = d => el("a", { href: SUBJECT_HASH.dataset(d.id) }, "open");
   root.replaceChildren(
-    el("div", { class: "links" }, meta.buffers_repo ? link(q("prep:requested"), "open preparation requests") : el("span", { class: "small" }, "GET /meta names no buffers repo"),
-      meta.buffers_repo ? link(q("prep:needs-human"), "requests that need a human") : null),
+    card("Requests", "A request prepares a set of datasets under one budget. File one from the Datasets view (Prepare these datasets). Open one to cancel it or run it again.", table([
+      { label: "request", cell: x => el("a", { href: SUBJECT_HASH.prep(x.key) }, x.key) },
+      { label: "state", cell: x => el("span", {}, statePill(x.status), " ", x.stage) },
+      { label: "updated", cell: x => when(x.updated) },
+    ], (requests?.subjects || []).slice().sort((a, b) => (b.updated || 0) - (a.updated || 0)), "No request yet.")),
     card("In progress", "Datasets mia-data is preparing, with the stage it reached.", table([
-      { label: "dataset", cell: d => d.id }, { label: "stage", cell: d => d.data_stage ? pill(d.data_stage) : "" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
+      { label: "dataset", cell: d => d.id }, { label: "stage", cell: d => d.data_stage ? pill(d.data_stage) : "" }, { label: "page", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
     ], by("in-progress"), "Nothing in progress.")),
-    card("Needs a human", "Stopped datasets; the dataset issue says why.", table([
-      { label: "dataset", cell: d => d.id }, { label: "stage", cell: d => d.data_stage || "" }, { label: "reason", wrap: true, cell: d => d.reason || "see the issue" }, { label: "issue", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
+    card("Needs a human", "Stopped datasets; each one's page says why.", table([
+      { label: "dataset", cell: d => d.id }, { label: "stage", cell: d => d.data_stage || "" }, { label: "reason", wrap: true, cell: d => d.reason || "see the issue" }, { label: "page", cell: issue }, { label: "updated", cell: d => when(d.updated_at) },
     ], by("needs-human"), "Nothing needs a human.")));
 }
 
@@ -1776,7 +1799,7 @@ async function viewPreparation() {
 const VERDICT_KIND = { approve: "pool", reject: "warn", escalate: "" };
 const subjectLink = subject => {  // a crop set's ref starts with the round id, i<issue>-e<event>: link the dataset issue
   const issue = subject?.kind === "crop_set" ? issueOf(subject.ref || "") : null;
-  return issue ? ghIssue(S.meta.datasets_repo, issue) : "";
+  return issue ? findLink(issue) : "";
 };
 function agreementLine(gate, a) {
   if (!a || !a.judged) return el("div", { class: "small" }, `${gate}: no judge verdict yet`);
@@ -1820,22 +1843,30 @@ function viewDocs(arg) {  // static: show one of the two documents and mark its 
 }
 // ---- a subject's page: its state, the actions its stage accepts, its timeline (spec webapp-actions §8)
 // The server decides what a stage accepts (`subject.actions`) and refuses anything else; the page only offers it.
-const SUBJECT_VIEWS = { datasets: "dataset" };  // #datasets/<record> is that dataset's page
-const SUBJECT_HASH = { dataset: key => "#datasets/" + encodeURIComponent(key), buffer: () => "#buffers", prep: () => "#preparation" };
-const ACTION_ORDER = ["approve", "reject", "keep", "go", "dropped", "revoke", "retire", "cancel", "stop"];
+const SUBJECT_VIEWS = { datasets: "dataset", specs: "buffer", requests: "prep" };  // #datasets/<record>, #specs/<name>, #requests/<key>
+const SUBJECT_TAB = { datasets: "datasets", specs: "buffers", requests: "preparation" };
+const SUBJECT_HASH = { dataset: key => "#datasets/" + encodeURIComponent(key), buffer: key => "#specs/" + encodeURIComponent(key), prep: key => "#requests/" + encodeURIComponent(key) };
+const ACTION_ORDER = ["approve", "reject", "keep", "go", "revoke", "retire", "cancel", "stop"];
 const ACTION_WORDS = { approve: "Approve", reject: "Reject", keep: "Keep", go: "Run again", revoke: "Revoke", retire: "Retire", cancel: "Cancel the round", stop: "Force stop" };
 const ACTION_CONFIRM = {
   revoke: "Revoke what this published? Buffers that drew from it are degraded; nothing is deleted.",
-  cancel: "Cancel the round in progress? Its cluster job is killed and the work so far is not kept.",
+  retire: "Retire this buffer? Training jobs reading it are refused and its staged data is released.",
+  cancel: "Cancel the round in progress? Its cluster jobs are killed and the work so far is not kept.",
+  stop: "Force stop? Use it when Cancel gets no answer. The workflow is terminated and the buffers are retired; a cluster job already running is NOT killed, and a request's dataset rounds keep running.",
 };
 const UNDELIVERED_AFTER_S = 10;  // an action still pending this long was not delivered: the service died, or the answer was lost
 let shownSubject = null;  // {kind, key, number} of the subject page on screen: what the stream refetches
+let shownView = "";  // the view on screen, so the stream can refresh Needs you
 const newKey = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);  // one per click; Retry sends it again
-async function sendAction(subject, body) {  // the answer is shown by the reload that follows, a refusal by the banner
+const roundEvent = id => Number((id.match(/-e(\d+)$/) || [])[1] || 0);
+async function sendAction(subject, body, after) {  // the answer is shown by the reload that follows, a refusal by the banner
+  const send = { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) };
   try {
-    if (subject.kind === "dataset") await api(`/datasets/${encodeURIComponent(subject.key)}/actions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (subject.kind === "dataset") await api(`/datasets/${encodeURIComponent(subject.key)}/actions`, { method: "POST", headers: JSON_HEADERS, body: send.body });
+    else if (subject.kind === "buffer") await api(`/specs/${encodeURIComponent(subject.key)}/actions`, { method: "POST", headers: JSON_HEADERS, body: send.body });
+    else await api(`/prep/${subject.number}/actions`, { method: "POST", headers: JSON_HEADERS, body: send.body });
   } catch (e) { banner(e.status === 409 ? `Not sent. ${e.message}` : `${body.action}: not delivered (${e.status || "network error"}): ${e.message}`); }
-  viewSubject(subject.kind, subject.key, true);
+  (after || (() => viewSubject(subject.kind, subject.key, true)))();
 }
 function linkified(text) {  // text with its URLs as links, built as DOM nodes: nothing here is ever parsed as HTML
   const parts = [], url = /https?:\/\/[^\s)>\]"'`]+/g; let last = 0, m;
@@ -1843,31 +1874,33 @@ function linkified(text) {  // text with its URLs as links, built as DOM nodes: 
   parts.push(text.slice(last));
   return parts;
 }
-function actionBar(subject) {
+function actionBar(subject, after, skip) {  // `skip`: actions that have their own control on the page (a spec's go, revoke)
   const bar = el("div", { class: "actions" });
   const note = el("textarea", { rows: 3, placeholder: "What is wrong with these crops? This goes to the agent that fixes the reader.", "aria-label": "feedback sent with Reject" });
-  for (const action of ACTION_ORDER.filter(a => subject.actions.includes(a))) {
-    const word = action === "go" && subject.stage === "new" ? "Prepare" : ACTION_WORDS[action] || action;
+  const offered = ACTION_ORDER.filter(a => subject.actions.includes(a) && !(skip || []).includes(a));
+  for (const action of offered) {
+    const word = action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? "Prepare" : "Run") : ACTION_WORDS[action] || action;
     bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), onclick: e => {
       if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
       bar.querySelectorAll("button").forEach(b => { b.disabled = true; });
       e.target.textContent = word + "…";
       // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
       const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
-      sendAction(subject, { action, key: newKey(), ...verdict, ...(action === "reject" ? { note: note.value } : {}) });
+      sendAction(subject, { action, key: newKey(), ...verdict, ...(action === "reject" ? { note: note.value } : {}) }, after);
     } }, word));
   }
-  if (subject.actions.includes("reject")) bar.append(note);
+  if (offered.includes("reject")) bar.append(note);
   if (!subject.actions.length) bar.append(el("span", { class: "small" }, "Nothing can be asked of it at this stage."));
   return bar;
 }
-function undelivered(subject, actions) {  // an action that did not reach its workflow, with a Retry that sends the same one
+function undelivered(subject, actions, after) {  // an action that did not reach its workflow, with a Retry that sends the same one
   const box = el("div"), now = Date.now() / 1000;
   for (const a of actions) {
     const lost = a.state === "failed" || (a.state === "pending" && now - (toEpoch(a.at) || now) > UNDELIVERED_AFTER_S);
     if (!lost) continue;
     const line = el("div", { class: "notice" }, el("b", {}, a.action), ` was not delivered${a.detail ? ": " + a.detail : ""}. `);
-    if (a.key) line.append(el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, { action: a.action, key: a.key, ...(a.payload?.note ? { note: a.payload.note } : {}) }); } }, "Retry"));
+    const again = { action: a.action, key: a.key, ...(a.payload?.note ? { note: a.payload.note } : {}), ...(a.payload?.spec ? { spec: a.payload.spec, plan_first: !!a.payload.plan_first } : {}), ...(a.payload?.records ? { records: a.payload.records } : {}), ...(a.payload?.record ? { record: a.payload.record } : {}) };
+    if (a.key) line.append(el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, again, after); } }, "Retry"));
     box.append(line);
   }
   return box;
@@ -1884,6 +1917,41 @@ function subjectFacts(subject, run, entries) {
   if (subject.kind === "dataset" && round && repo && S.meta.gallery_branch) facts.append(link(`https://github.com/${repo}/tree/${S.meta.gallery_branch}/galleries/${subject.key}/${round}`, "crops of this round"));
   return facts;
 }
+async function specControls(subject) {  // what only a buffer spec has: edit and run, its datasets' files, revoke, its buffers
+  const box = el("div"), again = () => viewSubject(subject.kind, subject.key, true);
+  const all = (await load("/buffers"))?.buffers || [];
+  const mine = all.filter(b => String(issueOf(b.id)) === String(subject.number)).sort((a, b) => roundEvent(b.id) - roundEvent(a.id));
+  const board = mine.length ? ((await load(`/buffers/${encodeURIComponent(mine[0].id)}/datasets`, true))?.datasets || []) : [];
+  if (subject.actions.includes("dropped")) {
+    const waiting = board.filter(d => d.status === "waiting-drop");
+    for (const d of waiting) box.append(el("div", { class: "notice" }, el("b", {}, d.record), " waits for its files to be copied into its incoming/ folder. ",
+      el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, { action: "dropped", record: d.record, key: newKey() }, again); } }, "Files are in place")));
+  }
+  if (subject.actions.includes("revoke")) {
+    const records = board.filter(d => d.status === "servable").map(d => d.record);
+    const ticks = el("div", { class: "ticks" }, ...records.map(r => el("label", { class: "inline" }, el("input", { type: "checkbox", value: r }), " " + r)));
+    box.append(card("Revoke datasets", "The ticked datasets leave this buffer: their volumes are unregistered and their staged pyramids quarantined.", records.length ? ticks : el("div", { class: "empty" }, "no dataset is being served"),
+      el("div", { class: "actions" }, el("button", { type: "button", class: "btn danger", onclick: e => {
+        const chosen = [...ticks.querySelectorAll("input:checked")].map(i => i.value);
+        if (!chosen.length) return banner("Tick the datasets to revoke first.");
+        if (!confirm(ACTION_CONFIRM.revoke)) return;
+        e.target.disabled = true; sendAction(subject, { action: "revoke", records: chosen, key: newKey() }, again);
+      } }, "Revoke the ticked"))));
+  }
+  if (subject.actions.includes("go")) {
+    const area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML" }); area.value = subject.data?.spec || "";
+    const first = el("input", { type: "checkbox" });
+    box.append(card(subject.stage === "new" ? "Run" : "Edit and run again", "The spec as it was last saved. Run starts a new round with this text; the buffer it builds gets a new id, and training jobs keep the buffer they connected to.", area,
+      el("div", { class: "actions" }, el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, { action: "go", spec: area.value, plan_first: first.checked, key: newKey() }, again); } }, "Run"),
+        el("label", { class: "inline" }, first, " Show me the plan first"))));
+  }
+  box.append(card("Buffers of this spec", "Newest first; each run builds a new one.", table([
+    { label: "buffer", cell: b => bufferLink(b.id) },
+    { label: "state", cell: b => b.latest_event ? el("span", {}, statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at)) : "no events" },
+    { label: "volumes", num: true, cell: b => num(b.volumes) }, { label: "servable", cell: b => servableText(b.servable) },
+  ], mine, "No buffer yet.")));
+  return box;
+}
 async function viewSubject(kind, key, refresh) {
   const root = $("subjectBody"), hash = location.hash;
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
@@ -1892,17 +1960,19 @@ async function viewSubject(kind, key, refresh) {
   if (location.hash !== hash) return;  // the reader moved on while this loaded
   if (!subject) {  // nothing was ever asked of it: the first Prepare creates it
     const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [] };
-    root.replaceChildren(el("h2", {}, key), el("div", { class: "facts" }, statePill("not started")), actionBar(fresh));
+    root.replaceChildren(el("h2", {}, key), el("div", { class: "facts" }, statePill("not started")), actionBar(fresh), kind === "dataset" ? "" : el("div", { class: "empty" }, "No such " + (kind === "buffer" ? "buffer spec" : "request") + "."));
     return;
   }
   shownSubject.number = subject.number;
-  const [timeline, run] = await Promise.all([load(`/timeline/${kind}/${subject.number}`), api(`/run/${kind}/${subject.number}`).catch(() => null)]);
+  const [timeline, run, extras] = await Promise.all([load(`/timeline/${kind}/${subject.number}`), api(`/run/${kind}/${subject.number}`).catch(() => null), kind === "buffer" ? specControls(subject) : null]);
   if (location.hash !== hash) return;
   const entries = timeline?.entries || [];
   const parts = [el("h2", {}, key), subjectFacts(subject, run, entries)];
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
   if (subject.status === "working" && run && run.status !== "RUNNING") parts.push(el("div", { class: "notice" }, `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`));
-  parts.push(actionBar(subject), undelivered(subject, timeline?.actions || []));
+  parts.push(actionBar(subject, null, kind === "buffer" ? ["go", "revoke"] : []), undelivered(subject, timeline?.actions || []));
+  if (extras) parts.push(extras);
+  if (kind === "prep" && subject.data?.spec) parts.push(card("The request", "As it was filed.", el("pre", { class: "err" }, subject.data.spec)));
   const log = el("div", { class: "card" }, el("h2", {}, "Timeline"), el("div", { class: "sub" }, "What was asked and what each round did, newest first. The issue on GitHub is a copy of this."));
   for (const e of [...entries].reverse()) log.append(el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("pre", {}, ...linkified(e.body.replace(/\n*<!--[^>]*-->\s*$/, "")))));
   if (!entries.length) log.append(el("div", { class: "empty" }, "nothing yet"));
@@ -1920,6 +1990,26 @@ async function viewFind(text) {  // the lookup box: an issue number, an issue UR
   // issue numbers repeat across the two repos, so a bare number can be a dataset and a buffer spec
   root.replaceChildren(el("h2", {}, `“${text}”`), found.length ? list : el("div", { class: "empty" }, "Nothing matches. Try an issue number (#234), a pasted issue URL, a record id or a spec name."));
 }
+// ---- Needs you: everything that waits on a person, with the button that answers it (spec webapp-actions §8.2)
+const KIND_WORDS = { dataset: "dataset", buffer: "buffer spec", prep: "request" };
+async function viewNeeds(arg, refresh) {
+  const root = $("needsBody"), hash = location.hash;
+  if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  const out = await load("/needs");
+  if (location.hash !== hash) return;
+  const again = () => viewNeeds("", true);
+  const needs = (out?.needs || []).slice().sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  const parts = [el("h2", {}, "Needs you"), el("p", { class: "small" }, "Everything that waits on a person or has stopped, newest first, each with what it will take. Open one for its timeline.")];
+  for (const a of out?.failed || []) if (a.subject) parts.push(el("div", {}, el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.key), undelivered(a.subject, [a], again)));
+  parts.push(table([
+    { label: "what", cell: s => KIND_WORDS[s.kind] },
+    { label: "name", cell: s => el("a", { href: SUBJECT_HASH[s.kind](s.key) }, s.key) },
+    { label: "state", cell: s => el("span", {}, statePill(s.status), " ", s.stage) },
+    { label: "since", cell: s => when(s.updated) },
+    { label: "answer", wrap: true, cell: s => actionBar(s, again, s.kind === "buffer" ? ["go", "revoke"] : []) },
+  ], needs, out ? "Nothing waits on you." : "The list did not load."));
+  root.replaceChildren(...parts);
+}
 async function checkHealth() {  // so that "working" is true: say when nothing can start, or nothing is being worked on
   const health = await load("/health");
   if (!health) return;
@@ -1929,30 +2019,33 @@ async function checkHealth() {  // so that "working" is true: say when nothing c
 function followStream() {  // told what changed, the page refetches it; a lost stream reconnects by itself
   const stream = new EventSource("/stream");
   let timer = 0;
-  stream.onopen = () => { checkHealth(); if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, true); };
+  const refresh = () => { if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, true); else if (shownView === "needs") viewNeeds("", true); };
+  stream.onopen = () => { checkHealth(); refresh(); };
   stream.onmessage = e => {
     let change; try { change = JSON.parse(e.data); } catch { return; }
-    if (!shownSubject || change.kind !== shownSubject.kind) return;
-    if (shownSubject.number != null && change.number !== shownSubject.number) return;
-    clearTimeout(timer); timer = setTimeout(() => { if (shownSubject) viewSubject(shownSubject.kind, shownSubject.key, true); }, 150);
+    if (shownSubject) {
+      if (change.kind !== shownSubject.kind) return;
+      if (shownSubject.number != null && change.number !== shownSubject.number) return;
+    } else if (shownView !== "needs") return;
+    clearTimeout(timer); timer = setTimeout(refresh, 150);
   };
 }
 
-const VIEWS = { datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation, decisions: viewDecisions, docs: viewDocs };
+const VIEWS = { needs: viewNeeds, datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation, decisions: viewDecisions, docs: viewDocs };
 const REFRESH_MS = 30000;  // the buffer views poll; the others reload when their tab is clicked
 let refreshTimer = 0;
 function route() {
   const [name, ...rest] = location.hash.slice(1).split("/");
   let arg = rest.join("/");
   try { arg = decodeURIComponent(arg); } catch { /* a malformed escape: use the raw text */ }
-  const kind = arg ? SUBJECT_VIEWS[name] : null;  // #datasets/<record>: that dataset's own page
-  const view = kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "datasets";
-  const tab = kind ? name : view;
+  const kind = arg ? SUBJECT_VIEWS[name] : null;  // #datasets/<record>, #specs/<name>, #requests/<key>: its own page
+  const view = kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "needs";
+  const tab = kind ? SUBJECT_TAB[name] : view;
   document.querySelectorAll("[data-view]").forEach(s => { s.hidden = s.dataset.view !== view; });
   document.querySelectorAll("[data-tab]").forEach(a => { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
   hideTip();
   clearInterval(refreshTimer);
-  shownSubject = null;
+  shownSubject = null; shownView = view;
   if (kind) return viewSubject(kind, arg);
   if (view === "subject") return viewFind(arg);
   if (view === "buffers") refreshTimer = setInterval(() => { hideTip(); VIEWS.buffers(arg, true); }, REFRESH_MS);

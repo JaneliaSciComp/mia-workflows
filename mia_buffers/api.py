@@ -342,6 +342,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/keeper$"), "put_keeper", "worker"),
     ("GET", re.compile(r"^/keeper$"), "keeper", "read"),
     ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)$"), "adopt_subject", "worker"),
+    ("GET", re.compile(r"^/subjects/([a-z]+)$"), "list_subjects", "read"),
     ("GET", re.compile(r"^/subjects/([a-z]+)/(.+)$"), "get_subject", "read"),
     ("GET", re.compile(r"^/needs$"), "needs", "read"),
     ("GET", re.compile(r"^/lookup$"), "lookup", "read"),
@@ -605,6 +606,11 @@ class BufferService:
             raise HttpError(404, f"no {kind} {key!r}")
         return 200, self._subject_view(row), {}
 
+    def _list_subjects(self, kind: str, *, query: dict[str, str], body: bytes) -> Response:
+        if kind not in SUBJECT_RULES:
+            raise HttpError(404, f"no subjects of kind {kind!r}")
+        return 200, {"subjects": [self._subject_view(row) for row in self.ledger.find_subjects(kind=kind)]}, {}
+
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
         """Everything that waits on a person: the subjects waiting or stuck, and the actions of the last day that
         did not reach Temporal (each with its subject, for the Retry)."""
@@ -617,8 +623,8 @@ class BufferService:
         return 200, {"needs": [view for view in views if view["status"] in NEEDS_A_PERSON], "failed": failed}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
-        """From what a person has in hand to the subjects: an issue number (`234`, `#234`) in every kind, an issue
-        URL in the kinds of its repo, and always an exact key."""
+        """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
+        number in every kind, an issue URL in the kinds of its repo, and always an exact key."""
         text = query.get("q", "").strip()
         if not text:
             raise HttpError(422, "q is required: an issue number, an issue URL or a subject's key")
@@ -632,6 +638,7 @@ class BufferService:
             ]
         elif text.removeprefix("#").isdecimal():
             rows += self.ledger.find_subjects(issue=int(text.removeprefix("#")))
+            rows += self.ledger.find_subjects(number=int(text.removeprefix("#")))  # as a round or buffer id shows it
         unique = {(row["kind"], row["number"]): row for row in rows}  # a key that is also its issue number
         return 200, {"subjects": [self._subject_view(row) for row in unique.values()]}, {}
 

@@ -1499,3 +1499,15 @@ def test_needs_names_the_actions_that_were_not_delivered(tmp_path):
     gateway.fail = None
     act(s, "/datasets/rec-a/actions", {"action": "go", "key": "k"})  # retried: delivered
     assert call(s, "GET", "/needs")[1]["failed"] == []
+
+
+def test_a_kinds_subjects_are_listed_and_a_number_finds_its_subject(tmp_path):
+    s, _ = _acting(tmp_path)
+    number = act(s, "/prep", {"spec": PREP_TEXT})[1]["number"]  # a request filed on the page: no issue yet
+    worker(s, "PUT", "/subjects/prep/9", {"key": "prep-9", "stage": "done"})
+    worker(s, "PUT", "/subjects/buffer/8", {"key": "pool"})
+    listed = call(s, "GET", "/subjects/prep")[1]["subjects"]
+    assert [(row["key"], row["status"]) for row in listed] == [("prep-9", "done"), (f"prep-{number}", "not started")]
+    assert call(s, "GET", "/subjects/widget")[0] == 404
+    found = call(s, "GET", "/lookup", {"q": str(number)})[1]["subjects"]  # a round id shows the number, not an issue
+    assert [row["key"] for row in found] == [f"prep-{number}"]
