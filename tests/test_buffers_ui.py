@@ -86,7 +86,12 @@ def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
     assert not re.search(r"https?://\$\{", PAGE), "a host built from a template could be any host"
     assert len(re.findall(r"\bfetch\(", PAGE)) == 1, "every request goes through api()"
     hosts = set(re.findall(r"https?://[^/\"'`$\s)]+/?", PAGE))
-    allowed = {"https://github.com/", "https://fonts.googleapis.com/", "http://www.w3.org/"}
+    allowed = {
+        "https://github.com/",
+        "https://fonts.googleapis.com/",
+        "http://www.w3.org/",
+        "https://doi.org/",
+    }  # doi: a link
     assert {h if h.endswith("/") else h + "/" for h in hosts} <= allowed
 
 

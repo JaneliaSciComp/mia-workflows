@@ -165,6 +165,9 @@ tr.click:hover td{background:var(--accent-soft)}
 .pill{display:inline-block;border-radius:999px;padding:0 7px;font-size:11.5px;border:1px solid var(--axis)}
 .pill.pool{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
 .pill.warn{border-color:var(--warn);color:var(--warn)}
+.gallery{display:flex;flex-wrap:wrap;gap:8px}
+.gallery img{display:block;width:128px;height:128px;object-fit:cover;border-radius:4px;background:var(--grid)}
+.tablebar select{border:1px solid var(--axis);border-radius:6px;padding:4px 6px;background:var(--surface);color:var(--fg);font:inherit;font-size:13px}
 img.thumb{display:block;width:36px;height:36px;object-fit:cover;border-radius:3px;background:var(--grid)}
 td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 .tip img{display:block;width:256px;height:256px;margin-top:4px}
@@ -246,7 +249,11 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 <div class="banner" id="banner" role="alert"></div>
 <noscript><p class="notice">This page needs JavaScript: every number on it comes from the service's routes.</p></noscript>
 
-<section data-view="datasets" hidden>
+<section data-view="datasets" hidden><div id="datasetsBody"></div></section>
+<section data-view="designer" hidden>
+  <p><a href="#buffers">← all buffers</a></p>
+  <h2>New buffer</h2>
+  <p class="small">Describe the buffer with the controls; the plan below shows which datasets it would draw from. Only prepared datasets enter a buffer: prepare the ones that fit first.</p>
   <div id="dsEmpty" class="empty" hidden>No catalog synced; run <code>mia-buffers catalog sync</code>.</div>
   <div id="dsBody">
   <details class="filterbox" id="filterBox" open>
@@ -1307,7 +1314,7 @@ const pageOf = (path, rowsKey, extra, quiet404) => async state => {
   const out = await load(`${path}?${query}`, quiet404);
   return out && { rows: out[rowsKey] || [], total: out.total ?? (out[rowsKey] || []).length, out };
 };
-// cols: {key (the server's sort name; none: not sortable), label, num, wrap, title, cell}. `select`: {chosen (a Set), id, onchange}
+// cols: {key (the server's sort name; none: not sortable), label, num, wrap, title, cell}. `select`: {chosen (a Set), id, onchange, can}
 // adds a tick per row. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
 function pagedTable(id, { source, cols, empty, sort = null, dir = "asc", search = true, rowAttrs, tools = [], select, onPage }) {
   if (!TABLE_STATE.has(id)) TABLE_STATE.set(id, { sort, dir, q: "", offset: 0, limit: PAGE_SIZE });
@@ -1331,7 +1338,7 @@ function pagedTable(id, { source, cols, empty, sort = null, dir = "asc", search 
     const head = el("tr", {}, select ? el("th", {}) : null, ...cols.map(c => el("th", { class: (c.num ? "num" : "") + (c.key ? " sortable" : ""), title: c.title || null,
       onclick: c.key ? () => { if (state.sort === c.key) state.dir = state.dir === "asc" ? "desc" : "asc"; else { state.sort = c.key; state.dir = c.num ? "desc" : "asc"; } go(0); } : null },
       c.label + (c.key && state.sort === c.key ? (state.dir === "asc" ? " ▲" : " ▼") : ""))));
-    const rows = page.rows.map(r => el("tr", rowAttrs ? rowAttrs(r) : {}, select ? el("td", {}, tick(r)) : null, ...cols.map(c => { const v = c.cell(r); return el("td", { class: c.num ? "num" : c.wrap ? "wrap" : "" }, v == null ? "" : v); })));
+    const rows = page.rows.map(r => el("tr", rowAttrs ? rowAttrs(r) : {}, select ? el("td", {}, !select.can || select.can(r) ? tick(r) : null) : null, ...cols.map(c => { const v = c.cell(r); return el("td", { class: c.num ? "num" : c.wrap ? "wrap" : "" }, v == null ? "" : v); })));
     body.replaceChildren(page.total ? el("div", { class: "tablewrap" }, el("table", { class: "plain" }, el("thead", {}, head), el("tbody", {}, ...rows))) : el("div", { class: "empty" }, state.q ? "Nothing matches the search." : empty));
     const last = state.offset + page.rows.length;
     pager.replaceChildren(el("span", {}, page.total ? `${num(state.offset + 1)}–${num(last)} of ${num(page.total)}` : ""),
@@ -1339,7 +1346,7 @@ function pagedTable(id, { source, cols, empty, sort = null, dir = "asc", search 
   }
   const input = el("input", { type: "search", placeholder: typeof search === "string" ? search : "search", "aria-label": "search this table" });
   input.value = state.q;
-  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { state.q = input.value.trim(); go(0); }, 250); });
+  input.addEventListener("input", e => { e.stopPropagation(); clearTimeout(timer); timer = setTimeout(() => { state.q = input.value.trim(); go(0); }, 250); });
   if (search || tools.length) box.append(el("div", { class: "tablebar" }, search ? input : null, ...tools));
   box.append(body, pager);
   box.reload = reset => { if (reset) state.offset = 0; draw(); };
@@ -1436,6 +1443,7 @@ function toPrepYaml(records, ref, repo) {
 
 // ---- creating things: a buffer spec and a preparation request are posted to the service, which runs them
 const JSON_HEADERS = { "Content-Type": "application/json" };
+const PREP_MAX = 200;  // the most datasets one preparation request takes (mia_buffers.spec.MAX_PREP_RECORDS)
 const findLink = n => el("a", { href: "#find/" + n, title: "open its page" }, "#" + n);  // a number as rounds and buffer ids show it
 function createBuffer(container, yaml, blocker) {
   // built once and kept: what a person typed into the box survives the page's re-renders
@@ -1462,9 +1470,9 @@ function createBuffer(container, yaml, blocker) {
   run.title = run.disabled ? blocker : "";
   if (!status.textContent || status.dataset.blocker) { status.textContent = run.disabled ? blocker : ""; status.dataset.blocker = "1"; }
 }
-function prepareButton(container, todo, blocker) {
+function prepareButton(container, todo, blocker, done) {
   const label = `Prepare these ${num(todo.length)} datasets`;
-  const why = blocker || (todo.length > 200 ? "a request takes at most 200 records: trim the list (search, fitting only) or prepare it in parts" : null);
+  const why = blocker || (todo.length > PREP_MAX ? `a request takes at most ${PREP_MAX} datasets: prepare them in parts` : null);
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", title: "one preparation request for every unprepared dataset in the list below", onclick: async e => {
     if (!confirm(`Start preparing ${todo.length} datasets? Each one costs an agent run.`)) return;
@@ -1473,6 +1481,7 @@ function prepareButton(container, todo, blocker) {
     const yaml = toPrepYaml(todo, S.ref, S.meta.catalog_repo) + (todo.length > 25 ? `max_records: ${todo.length}\n` : "");
     try {
       const action = await api("/prep", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: yaml, key: newKey() }) });
+      if (done) done();
       location.hash = "#find/" + action.number;
     } catch (err) { banner(err.status === 422 ? `The request was refused: ${err.message}` : `Not started (${err.status || "network error"}): ${err.message}`); e.target.disabled = false; }
   } }, label));
@@ -1664,12 +1673,129 @@ function renderDatasets() {
   $("top").replaceChildren(...(heavy.length ? heavy.map(x => el("li", {}, el("b", {}, pct(x.weight || 0)), el("span", { title: x.id }, `${x.id} · ${x.modality_group || "none"} · ${fmt(x.positions || 0)} positions · ${x.channels ?? "?"} ch`))) : [el("li", { class: "empty" }, "no prepared dataset in the pool yet")]));
   shown = 150; renderTable();
 }
-async function viewDatasets() {
+async function viewDesigner() {
   $("dsEmpty").hidden = !!S.ref; $("dsBody").hidden = !S.ref;
   if (!S.ref) return;
   await Promise.all([loadRegistry(), loadRecords()]);
   renderDatasets();
   schedulePlan(0);
+}
+
+// ---- datasets: every dataset of the catalog with what the registry knows about it, one page at a time
+const DS_FILTER = { state: "", modality: "", dims: "", licence: "" }, CHOSEN = new Set();
+const PREPARABLE = row => row.state !== "prepared" && row.state !== "in-progress";
+function viewDatasetList(arg, params) {
+  const root = $("datasetsBody");
+  if (!S.ref) { root.replaceChildren(el("div", { class: "empty" }, "No catalog synced; run ", el("code", {}, "mia-buffers catalog sync"), ".")); return; }
+  // a link into the list (Preparation's "in progress") names its filters; a bare #datasets keeps what was set
+  if (params && [...params.keys()].length) for (const name of Object.keys(DS_FILTER)) DS_FILTER[name] = params.get(name) || "";
+  const roots = S.meta.roots || {}, repo = S.meta.datasets_repo;
+  const filters = () => Object.fromEntries(Object.entries(DS_FILTER).filter(([, value]) => value));
+  const selects = Object.fromEntries(Object.keys(DS_FILTER).map(name => {
+    const select = el("select", { "aria-label": `filter by ${name}` });
+    select.addEventListener("change", () => { DS_FILTER[name] = select.value; list.reload(true); });
+    return [name, select];
+  }));
+  const fill = facets => {  // each box offers the values the catalog has, with how many datasets carry them
+    for (const [name, select] of Object.entries(selects)) {
+      const values = Object.entries(facets?.[name] || {});
+      if (DS_FILTER[name] && !values.some(([value]) => value === DS_FILTER[name])) values.push([DS_FILTER[name], 0]);
+      select.replaceChildren(el("option", { value: "" }, `any ${name}`), ...values.map(([value, n]) => el("option", { value }, `${value} (${num(n)})`)));
+      select.value = DS_FILTER[name];
+    }
+  };
+  const prepare = el("span"), chosen = el("span", { class: "small" });
+  const showChosen = () => {
+    chosen.textContent = CHOSEN.size ? `${num(CHOSEN.size)} selected` : "";
+    prepareButton(prepare, [...CHOSEN], CHOSEN.size ? null : "tick the datasets to prepare first", () => CHOSEN.clear());
+  };
+  const selectAll = el("button", { type: "button", class: "btn", title: `ticks every dataset the search and the filters match that is not prepared or in progress, at most ${PREP_MAX}`, onclick: async () => {
+    const query = new URLSearchParams({ ids: "1", preparable: "1", sort: "dataset", ...filters(), ...(TABLE_STATE.get("datasets").q ? { q: TABLE_STATE.get("datasets").q } : {}) });
+    const found = await load(`/catalog/datasets?${query}`);
+    if (!found) return;
+    for (const id of found.ids.slice(0, PREP_MAX)) CHOSEN.add(id);
+    if (found.ids.length > PREP_MAX) banner(`${num(found.ids.length)} datasets match; the first ${PREP_MAX} are selected, since a request takes at most ${PREP_MAX}.`);
+    list.reload();
+  } }, "Select all matching");
+  const clear = el("button", { type: "button", class: "btn", onclick: () => { CHOSEN.clear(); list.reload(); } }, "Clear selection");
+  const list = pagedTable("datasets", { source: pageOf("/catalog/datasets", "rows", filters), sort: "dataset", search: "search id, title, modality, licence",
+    tools: Object.values(selects), empty: "No dataset matches these filters.",
+    select: { chosen: CHOSEN, id: row => row.id, can: PREPARABLE, onchange: showChosen },
+    onPage: page => { fill(page.out.facets); showChosen(); },
+    cols: [
+      { key: "dataset", label: "dataset", cell: x => { const a = datasetLink(x.id); a.title = x.title || x.id; return a; } },
+      { label: "issue", cell: x => ghIcon(repo, x.issue) },
+      { label: "files", cell: x => folderLink(roots.storage_root, x.folder) },
+      { key: "crops", label: "preview", cell: x => thumb(x) },
+      { key: "state", label: "state", title: "preparation, then the raw cache's state, then \"staged\" when a pyramid of it exists",
+        cell: x => { const pills = el("span", { class: "pills" }, statePill(x.state)); if (x.raw) pills.append(" ", assetPill(x.raw.state)); if (x.staged) pills.append(" ", pill("staged", "pool")); if (x.quarantined) pills.append(" ", assetPill("quarantined")); return pills; } },
+      { key: "stage", label: "stage", cell: x => x.stage || "" },
+      { key: "dims", label: "dims", cell: x => x.dims || "" },
+      { key: "modality", label: "modality", cell: x => x.modality || "" },
+      { key: "licence", label: "licence", cell: x => x.licence || "" },
+      { key: "bytes", label: "size", num: true, cell: x => x.bytes ? fmtBytes(x.bytes) : "" },
+      { key: "raw", label: "raw cache", num: true, cell: x => x.raw?.bytes ? fmtBytes(x.raw.bytes) : "" },
+      { key: "staged", label: "staged", num: true, cell: x => x.staged ? num(x.staged) : "" },
+      { key: "buffers", label: "buffers", cell: x => bufferLinks(x.buffers) },
+      { key: "updated", label: "updated", cell: x => when(x.updated_at) },
+    ] });
+  root.replaceChildren(el("h2", {}, "Datasets"),
+    el("p", { class: "small" }, "Every dataset of the catalog and what is known about it. Open one for its record, crops, decisions, cache and timeline. Tick datasets to prepare them in one request."),
+    list, el("div", { class: "actions" }, selectAll, clear, chosen, prepare));
+}
+// what a dataset's own page shows besides its state, buttons and timeline (GET /catalog/datasets/<record>)
+function datasetCards(d) {
+  const row = d.row, rec = d.record || {}, ds = d.dataset || {}, meta = S.meta, roots = meta.roots || {}, data = a => a.data || {};
+  const imaging = rec.imaging || {}, ann = rec.annotations || {}, files = rec.data || {};
+  const join = xs => (xs || []).join(", ");
+  const voxel = imaging.voxel_size_nm ? ["z", "y", "x"].filter(axis => imaging.voxel_size_nm[axis] != null).map(axis => `${axis} ${imaging.voxel_size_nm[axis]}`).join(" · ") : "";
+  const links = el("div", { class: "links" },
+    link(rec.landing_url, "source"), rec.doi ? link(`https://doi.org/${rec.doi}`, `doi ${rec.doi}`) : null,
+    d.path && meta.catalog_repo ? link(`https://github.com/${meta.catalog_repo}/blob/${d.ref}/${d.path.split("/").map(encodeURIComponent).join("/")}`, "catalog record") : null,
+    !d.subject && row.issue ? el("span", {}, "log on GitHub ", ghIssue(meta.datasets_repo, row.issue)) : null,
+    ds.folder && roots.storage_root ? el("span", {}, "published crops ", folderLink(roots.storage_root, ds.folder)) : null);
+  const cards = [links];
+  if (!row.in_catalog) cards.push(el("div", { class: "notice" }, "This dataset's record is not in the newest synced catalog: only what the registry holds is shown."));
+  if (d.record) cards.push(card("Record", null, el("p", {}, el("b", {}, rec.title || row.id)), rec.description ? el("p", { class: "small" }, rec.description) : null, kv([
+    ["modality", join(imaging.modality)], ["dimensionality", imaging.dimensionality], ["voxel size (nm)", voxel], ["channels", imaging.channels == null ? "" : String(imaging.channels)],
+    ["organism", join(imaging.organism)], ["sample", imaging.sample], ["size", files.size_bytes ? fmtBytes(files.size_bytes) : ""], ["items", files.n_items == null ? "" : num(files.n_items)],
+    ["formats", join(files.formats)], ["annotations", ann.present ? [join(ann.types), ann.source, ann.coverage].filter(Boolean).join(" · ") || "present" : "none"],
+    ["licence", rec.license?.spdx ? link(rec.license.url, rec.license.spdx) : ""], ["repository", [rec.repository, rec.accession].filter(Boolean).join(" ")], ["published", rec.date_published],
+  ])));
+  cards.push(card("Preparation", "What mia-data made of it: a binding to a reader, and reviewed crops.", kv([
+    ["state", el("span", { class: "pills" }, statePill(row.state))], ["stage", row.stage], ["reason", ds.reason],
+    ["crops published", ds.crops == null ? "" : num(ds.crops)], ["published", ds.published_at ? when(ds.published_at) : ""],
+    ["binding", ds.binding_hash ? el("span", {}, code(ds.binding_hash, 12), ds.binding_commit ? " at snippets " : "", code(ds.binding_commit, 10)) : ""],
+    ds.revoked_at ? ["revoked", el("span", {}, when(ds.revoked_at), ds.revoked_by ? ` by ${ds.revoked_by}` : "")] : null,
+    ["updated", when(row.updated_at)],
+    ["requests", d.requests.length ? el("span", {}, ...d.requests.flatMap((r, i) => [i ? " " : "", el("a", { href: SUBJECT_HASH.prep(r.key) }, r.key)])) : "none named it"],
+  ])));
+  if (ds.folder && (ds.previews || []).length) cards.push(card("Crops", `${num(ds.crops || ds.previews.length)} published; the first ${num(ds.previews.length)} with their annotation overlay. Click one to open it.`,
+    el("div", { class: "gallery" }, ...ds.previews.map(id => el("a", { href: cropPng(ds, id, "overlay"), target: "_blank", rel: "noopener", title: id }, el("img", { src: cropPng(ds, id, "overlay"), loading: "lazy", alt: `crop ${id} with its overlay` }))))));
+  cards.push(card("Decisions", "Every verdict about this dataset, newest first: its crops and its staged artifacts, by a person or a judge.", pagedTable("dataset-decisions:" + row.id, {
+    source: pageOf("/decisions", "assessments", () => ({ record: row.id })), search: false, empty: "No decision yet.", cols: [
+      { label: "when", cell: r => when(r.at) }, { label: "gate", cell: r => r.gate },
+      { label: "about", cell: r => el("span", {}, `${(r.subject?.kind || "").replace("_", " ")} `, code(r.subject?.ref, 24)) },
+      { label: "verdict", cell: r => pill(r.verdict, VERDICT_KIND[r.verdict] ?? "") }, { label: "by", cell: r => r.by },
+      { label: "confidence", num: true, cell: r => r.confidence == null ? "" : Number(r.confidence).toFixed(2) }, { label: "summary", wrap: true, cell: r => r.summary || "" },
+    ] })));
+  const raw = d.raw_asset;
+  cards.push(card("Cache", "Its download in the raw cache, and each staged artifact: this dataset staged for one crop geometry by one recipe.",
+    raw ? kv([["raw download", el("span", { class: "pills" }, assetPill(data(raw).state), " ", data(raw).bytes ? fmtBytes(data(raw).bytes) : "", " · last used ", when(data(raw).last_used), " · ", folderLink(roots.raw_root, raw.key), " ", bufferLinks(raw.refs))]])
+      : el("div", { class: "small" }, "Not in the raw cache."),
+    pagedTable("dataset-staged:" + row.id, { source: pageOf("/assets/staged", "assets", () => ({ record: row.id })), sort: "last_used", dir: "desc", search: false, empty: "Not staged yet.", cols: [
+      { key: "artifact", label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) },
+      { label: "files", cell: a => folderLink(roots.staged_root, data(a).levels_key && `${data(a).levels_key}/${row.id}/${a.key}`) },
+      { key: "state", label: "state", cell: a => { const pills = el("span", { class: "pills" }, assetPill(data(a).state)); if (data(a).quarantined) pills.append(" ", assetPill("quarantined")); return pills; } },
+      { key: "bytes", label: "bytes", num: true, cell: a => data(a).bytes ? fmtBytes(data(a).bytes) : "" }, { key: "last_used", label: "last used", cell: a => when(data(a).last_used) },
+      { key: "buffers", label: "buffers", cell: a => bufferLinks(a.refs) }, { key: "levels_key", label: "levels key", cell: a => el("code", {}, data(a).levels_key || "") },
+      { label: "binding", cell: a => el("code", {}, short(data(a).binding_hash, 10)) }, { label: "harness", cell: a => el("code", {}, short(data(a).harness_commit, 10)) },
+    ] })));
+  cards.push(card("Buffers", "Each buffer whose pool holds this dataset, newest first.", table([
+    { label: "buffer", cell: b => bufferLink(b.buffer) }, { label: "spec", cell: b => b.spec ? el("a", { href: SUBJECT_HASH.buffer(b.spec) }, b.spec) : "" },
+    { label: "status", cell: b => statePill(b.status) }, { label: "reason", wrap: true, cell: b => b.reason || "" }, { label: "updated", cell: b => when(b.updated_at) },
+  ], d.boards, "In no buffer's pool.")));
+  return cards;
 }
 
 // ---- buffers
@@ -1690,7 +1816,7 @@ async function viewBuffers(id, refresh) {
   const current = new Map();
   for (const b of buffers) if (!current.has(issueOf(b.id))) current.set(issueOf(b.id), b.id);
   const supersededBy = b => { const c = current.get(issueOf(b.id)); return c !== b.id ? c : null; };
-  root.replaceChildren(card("Buffer specs", "A spec is what you run; each run builds a buffer. Open one to approve, run again, revoke, retire or cancel. Create one from the Datasets view.", table([
+  root.replaceChildren(card("Buffer specs", "A spec is what you run; each run builds a buffer. Open one to approve, run again, revoke, retire or cancel.", el("p", {}, el("a", { class: "btn", href: "#buffers/new" }, "New buffer")), table([
       { label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.key) },
       { label: "state", cell: x => el("span", {}, statePill(x.status), " ", x.stage) },
       { label: "waits for", cell: x => x.status === "waiting" || x.status === "stuck" ? x.actions.filter(a => a !== "stop" && a !== "cancel").join(", ") : "" },
@@ -1709,7 +1835,7 @@ async function viewBuffers(id, refresh) {
       { label: "servable", cell: b => servableText(b.servable) },
       { label: "consumer seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
       { label: "draws today", num: true, cell: b => num(b.draws_today) },
-    ], buffers, out ? "No buffers yet: create one from the Datasets view." : "The buffer list did not load.",
+    ], buffers, out ? "No buffers yet: start with New buffer." : "The buffer list did not load.",
     b => ({ class: "click" + (supersededBy(b) ? " superseded" : ""), title: supersededBy(b) ? `superseded by ${supersededBy(b)}, the issue's newest round` : "",
       onclick: e => { if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id); } })));
 }
@@ -1862,7 +1988,7 @@ async function viewPreparation() {
   const by = state => rows.filter(d => d.state === state).sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
   const issue = d => el("a", { href: SUBJECT_HASH.dataset(d.id) }, "open");
   root.replaceChildren(
-    card("Requests", "A request prepares a set of datasets under one budget. File one from the Datasets view (Prepare these datasets). Open one to cancel it or run it again.", table([
+    card("Requests", "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a new buffer's plan. Open one to cancel it or run it again.", table([
       { label: "request", cell: x => el("a", { href: SUBJECT_HASH.prep(x.key) }, x.key) },
       { label: "state", cell: x => el("span", {}, statePill(x.status), " ", x.stage) },
       { label: "updated", cell: x => when(x.updated) },
@@ -2011,7 +2137,7 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
   const note = el("textarea", { rows: 3, placeholder: "What is wrong with these crops? This goes to the agent that fixes the reader.", "aria-label": "feedback sent with Reject" });
   const offered = ACTION_ORDER.filter(a => subject.actions.includes(a) && !(skip || []).includes(a));
   for (const action of offered) {
-    const word = action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? "Prepare" : "Run") : ACTION_WORDS[action] || action;
+    const word = action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Prepare again" : "Prepare") : "Run") : ACTION_WORDS[action] || action;
     bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), onclick: e => {
       if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
       bar.querySelectorAll("button").forEach(b => { b.disabled = true; });
@@ -2097,11 +2223,13 @@ async function viewSubject(kind, key, refresh) {
   delete root.dataset.dirty;
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   shownSubject = { kind, key, number: shownSubject && shownSubject.kind === kind && shownSubject.key === key ? shownSubject.number : null };
-  const subject = await load(`/subjects/${kind}/${encodeURIComponent(key)}`, true);
+  const [subject, detail] = await Promise.all([load(`/subjects/${kind}/${encodeURIComponent(key)}`, true), kind === "dataset" ? load(`/catalog/datasets/${encodeURIComponent(key)}`, true) : null]);
   if (location.hash !== hash) return;  // the reader moved on while this loaded
-  if (!subject) {  // nothing was ever asked of it: the first Prepare creates it
-    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [] };
-    root.replaceChildren(el("h2", {}, key), el("div", { class: "facts" }, statePill("not started")), actionBar(fresh), kind === "dataset" ? "" : el("div", { class: "empty" }, "No such " + (kind === "buffer" ? "buffer spec" : "request") + "."));
+  const about = detail ? datasetCards(detail) : [];
+  if (!subject) {  // nothing was ever asked of it on this page: the first Prepare creates it
+    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again: !!detail && detail.row.state !== "unprepared" };
+    const missing = kind === "dataset" ? (detail ? null : "No dataset with this id in the newest catalog or the registry.") : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
+    root.replaceChildren(el("h2", {}, key), el("div", { class: "facts" }, statePill(detail ? detail.row.state : "not started")), actionBar(fresh), missing ? el("div", { class: "empty" }, missing) : "", ...about);
     return;
   }
   shownSubject.number = subject.number;
@@ -2113,6 +2241,7 @@ async function viewSubject(kind, key, refresh) {
   if (subject.status === "working" && run && run.status !== "RUNNING") parts.push(el("div", { class: "notice" }, `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`));
   parts.push(actionBar(subject, null, kind === "buffer" ? ["go", "revoke"] : []), undelivered(subject, timeline?.actions || []));
   if (extras) parts.push(extras);
+  parts.push(...about);
   if (kind === "prep" && subject.data?.spec) parts.push(card("The request", "As it was filed.", el("pre", { class: "err" }, subject.data.spec)));
   const log = el("div", { class: "card" }, el("h2", {}, "Timeline"), el("div", { class: "sub" }, "What was asked and what each round did, newest first. The issue on GitHub is a copy of this."));
   for (const e of [...entries].reverse()) log.append(el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("div", { class: "md" }, ...markdown(e.body))));
@@ -2176,16 +2305,18 @@ function followStream() {  // told what changed, the page refetches it; a lost s
   };
 }
 
-const VIEWS = { needs: viewNeeds, datasets: viewDatasets, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation, decisions: viewDecisions, docs: viewDocs };
+const VIEWS = { needs: viewNeeds, datasets: viewDatasetList, buffers: viewBuffers, cache: viewCache, preparation: viewPreparation, decisions: viewDecisions, docs: viewDocs };
 const REFRESH_MS = 30000;  // the buffer views poll; the others reload when their tab is clicked
 let refreshTimer = 0;
 function route() {
-  const [name, ...rest] = location.hash.slice(1).split("/");
+  const [path, filters] = location.hash.slice(1).split("?");  // #datasets?state=in-progress: a list with its filters set
+  const [name, ...rest] = path.split("/");
   let arg = rest.join("/");
   try { arg = decodeURIComponent(arg); } catch { /* a malformed escape: use the raw text */ }
+  const designer = name === "buffers" && arg === "new";
   const kind = arg ? SUBJECT_VIEWS[name] : null;  // #datasets/<record>, #specs/<name>, #requests/<key>: its own page
-  const view = kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "needs";
-  const tab = kind ? SUBJECT_TAB[name] : view;
+  const view = designer ? "designer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "needs";
+  const tab = designer ? "buffers" : kind ? SUBJECT_TAB[name] : view;
   document.querySelectorAll("[data-view]").forEach(s => { s.hidden = s.dataset.view !== view; });
   document.querySelectorAll("[data-tab]").forEach(a => { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
   hideTip();
@@ -2193,8 +2324,9 @@ function route() {
   shownSubject = null; shownView = view;
   if (kind) return viewSubject(kind, arg);
   if (view === "subject") return viewFind(arg);
+  if (designer) return viewDesigner();
   if (view === "buffers") refreshTimer = setInterval(() => { hideTip(); VIEWS.buffers(arg, true); }, REFRESH_MS);
-  VIEWS[view](arg);
+  VIEWS[view](arg, new URLSearchParams(filters || ""));
 }
 function renderTopbar() {
   const c = S.catalogs[0];

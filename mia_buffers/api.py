@@ -37,7 +37,17 @@ from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
 from .dispatch import DispatchError
-from .explore import Page, page_query, paged
+from .explore import (
+    DATASET_FILTERS,
+    DATASET_SORTS,
+    Page,
+    dataset_haystack,
+    dataset_row,
+    facets,
+    page_query,
+    paged,
+    record_row,
+)
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
@@ -301,6 +311,28 @@ def _asset_haystack(row: dict) -> tuple:
     return (row["key"], row.get("record"), data.get("state"), data.get("job"), data.get("levels_key"))
 
 
+ROUND_REF_RE = re.compile(r"^i(\d+)-e")  # a round id starts a crop set's ref: i<subject number>-e<event>
+
+
+def _assessed_record(subject: dict, numbers: dict[int, str], artifacts: dict[str, str]) -> str | None:
+    """The dataset a decision is about: a staged artifact's record, or the dataset of the round a crop set came
+    from. A snippet PR's head (`pr_head`) belongs to no one dataset."""
+    ref = str(subject.get("ref") or "")
+    if subject.get("kind") == "artifact":
+        return artifacts.get(ref.rsplit("/", 1)[-1])
+    if subject.get("kind") == "crop_set" and (found := ROUND_REF_RE.match(ref)):
+        return numbers.get(int(found.group(1)))
+    return None
+
+
+def _prep_records(request: dict) -> list[str]:
+    """The records a preparation request's stored spec names; none when it selects by rule or does not parse."""
+    try:
+        return list(load_prep_text(str((request.get("data") or {}).get("spec") or "")).records)
+    except SpecError:
+        return []
+
+
 class HttpError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
@@ -348,6 +380,8 @@ ROUTES = [
     ("GET", re.compile(r"^/records$"), "records", "read"),
     ("GET", re.compile(r"^/catalogs$"), "catalogs", "read"),
     ("GET", re.compile(r"^/datasets$"), "list_datasets", "read"),
+    ("GET", re.compile(r"^/catalog/datasets$"), "catalog_datasets", "read"),
+    ("GET", re.compile(r"^/catalog/datasets/([^/]+)$"), "catalog_dataset", "read"),
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
     ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
@@ -428,6 +462,7 @@ class BufferService:
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
+        self._record_rows: tuple[str | None, list[dict]] = (None, [])  # a catalog ref's rows never change
 
     def _authorized(self, headers: dict[str, str]) -> bool:
         if self.token is None:
@@ -631,6 +666,96 @@ class BufferService:
         if row is None:
             raise HttpError(404, f"no dataset row for {record}")
         return 200, row, {}
+
+    # --- datasets as the page shows them: a catalog record joined with what the registry knows ------
+
+    def _dataset_rows(self) -> tuple[str, list[dict]]:
+        """(the newest catalog ref, one row per dataset): every record of that catalog, then every dataset the
+        registry knows whose record is not in it."""
+        ref = self.ledger.latest_catalog()
+        if ref is None:
+            raise HttpError(404, "no catalog synced")
+        if self._record_rows[0] != ref:  # a ref is a commit: its records are parsed once
+            self._record_rows = (ref, [record_row(path, record) for path, record in self.ledger.records(ref)])
+        datasets = {row["id"]: row for row in self.ledger.datasets()}
+        raw = {asset["key"]: asset for asset in self.ledger.assets("raw")}
+        staged: dict[str, list[dict]] = {}
+        for asset in self.ledger.assets("staged"):
+            staged.setdefault(str((asset["data"] or {}).get("record")), []).append(asset)
+        statics = list(self._record_rows[1])
+        known = {static["id"] for static in statics}
+        statics += [record_row(None, {"id": record}) for record in datasets if record not in known]
+        rows = [
+            dataset_row(static, datasets.get(static["id"]), raw.get(static["id"]), staged.get(static["id"], []))
+            for static in statics
+        ]
+        return ref, rows
+
+    def _request_records(self, number: str) -> list[str]:
+        """The records a preparation request names. One that selects by rule names none here: the round's first
+        timeline entry lists what it admitted."""
+        if not number.isdigit():
+            raise HttpError(422, "query request must be a request's number")
+        found = self.ledger.find_subjects(kind="prep", number=int(number))
+        if not found:
+            raise HttpError(404, f"no preparation request {number}")
+        return _prep_records(found[0])
+
+    def _catalog_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The Datasets list: one page of datasets, filtered by state, modality, dims, licence or a request's
+        records, with how many datasets have each filter value. `preparable=1` leaves out the prepared and the
+        in-progress; `ids=1` answers every matching id instead."""
+        page = self._page_of({"limit": "50", **query}, DATASET_SORTS)
+        assert page is not None
+        ref, rows = self._dataset_rows()
+        counts = facets(rows)
+        if "request" in query:
+            wanted = set(self._request_records(query["request"]))
+            rows = [row for row in rows if row["id"] in wanted]
+        for name in DATASET_FILTERS:
+            if name in query:
+                rows = [row for row in rows if row[name] == query[name]]
+        if query.get("preparable"):  # what a preparation request could still do something for
+            rows = [row for row in rows if row["state"] not in ("prepared", "in-progress")]
+        if query.get("ids"):
+            found, total = paged(rows, replace(page, limit=len(rows) + 1, offset=0), DATASET_SORTS, dataset_haystack)
+            return 200, {"ids": [row["id"] for row in found], "total": total}, {}
+        found, total = paged(rows, page, DATASET_SORTS, dataset_haystack)
+        return 200, {"ref": ref, "rows": found, "total": total, "facets": counts}, {}
+
+    def _catalog_dataset(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        """Everything known about one dataset: its row, its catalog record, its preparation row, its raw download,
+        its staged artifacts, the buffers whose pool holds it, the requests that name it, and its subject."""
+        ref, rows = self._dataset_rows()
+        row = next((row for row in rows if row["id"] == record), None)
+        if row is None:
+            raise HttpError(404, f"no dataset {record}")
+        found = self.ledger.record(ref, record)
+        specs = {buffer["id"]: (buffer.get("config") or {}).get("spec_name") for buffer in self.ledger.buffers()}
+        boards = [{**board, "spec": specs.get(board["buffer"])} for board in self.ledger.boards_of(record)]
+        requests = [
+            {name: request[name] for name in ("key", "number", "stage", "status", "updated")}
+            for request in map(self._subject_view, self.ledger.find_subjects(kind="prep"))
+            if record in _prep_records(request)
+        ]  # ponytail: reads every request; an index of request -> records when there are thousands
+        subject = self.ledger.subject("dataset", record)
+        raw = self.ledger.assets("raw", record=None)
+        return (
+            200,
+            {
+                "ref": ref,
+                "row": row,
+                "path": found[0] if found else None,
+                "record": found[1] if found else None,
+                "dataset": self.ledger.dataset(record),
+                "raw_asset": next((asset for asset in raw if asset["key"] == record and asset["data"]), None),
+                "staged_assets": self.ledger.assets("staged", record=record),
+                "boards": boards,
+                "requests": requests,
+                "subject": self._subject_view(subject) if subject else None,
+            },
+            {},
+        )
 
     # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
 
@@ -1083,11 +1208,26 @@ class BufferService:
         gate = query.get("gate")
         if gate is not None and gate not in GATES:
             raise HttpError(422, f"gate must be one of {list(GATES)}, got {gate!r}")
-        rows = self.ledger.assessments(
-            gate=gate, before=query.get("before"), limit=_int(query, "limit", 200, low=1, high=1000)
-        )
+        page = self._page_of({"limit": "50", **query}, {})
+        assert page is not None
+        # ponytail: reads every assessment of the gate to name its dataset; a record column when there are 100k
+        rows = self.ledger.assessments(gate=gate, limit=100_000)
+        numbers = {row["issue"]: row["id"] for row in self.ledger.datasets() if row.get("issue")}
+        numbers |= {row["number"]: row["key"] for row in self.ledger.find_subjects(kind="dataset")}
+        artifacts = {
+            asset["key"].rsplit("/", 1)[-1]: asset["data"].get("record")
+            for asset in self.ledger.assets("staged")
+            if asset["data"]
+        }
+        for row in rows:
+            if record := _assessed_record(row.get("subject") or {}, numbers, artifacts):
+                row["record"] = record
+        if "record" in query:
+            rows = [row for row in rows if row.get("record") == query["record"]]
+        found, total = paged(rows, page, {})
         gates = [gate] if gate else list(GATES)
-        return 200, {"assessments": rows, "agreement": {name: self.ledger.agreement(name) for name in gates}}, {}
+        agreement = {name: self.ledger.agreement(name) for name in gates}
+        return 200, {"assessments": found, "total": total, "agreement": agreement}, {}
 
     def _reserve(self, root: str, *, query: dict[str, str], body: bytes) -> Response:
         parsed = _parse(ReserveBody, body)

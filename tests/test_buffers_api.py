@@ -986,7 +986,7 @@ def test_decisions_route_is_open_and_returns_agreement(tmp_path):
     assert out["agreement"]["crops"]["agree"] == 1 and out["agreement"]["review"]["judged"] == 0
     only = call(s, "GET", "/decisions", {"gate": "crops", "limit": "1"})[1]
     assert only["assessments"] == [judge] and list(only["agreement"]) == ["crops"]
-    assert call(s, "GET", "/decisions", {"before": judge["id"]})[1]["assessments"] == [human]
+    assert call(s, "GET", "/decisions", {"offset": "1"})[1]["assessments"] == [human]  # older ones: the next page
     assert call(s, "GET", "/decisions", {"gate": "vibes"})[0] == 422
 
 
@@ -1614,3 +1614,146 @@ def test_locks_paged(tmp_path):
     out = call(s, "GET", "/locks", {"limit": "2", "sort": "key"})[1]
     assert [h["key"] for h in out["locks"]] == ["rec-a", "rec-b"] and out["total"] == 3
     assert call(svc(tmp_path / "other"), "GET", "/locks", {"limit": "2"})[1] == {"locks": [], "total": 0}
+
+
+def catalog_service(tmp_path):
+    """A service with the fixture catalog synced at REF_A."""
+    s = svc(tmp_path)
+    records = [{"path": p, "record": r} for p, r in load_records(FIXTURE_CATALOG)]
+    assert call(s, "PUT", f"/records/{REF_A}", payload={"records": records})[0] == 200
+    return s
+
+
+HEMIBRAIN = "janelia-hemibrain-v1-2-fib-sem-connectome"
+
+
+def test_catalog_datasets_joins_each_record_with_what_the_registry_knows(tmp_path):
+    assert call(svc(tmp_path / "empty"), "GET", "/catalog/datasets")[:2] == (404, {"error": "no catalog synced"})
+    s = catalog_service(tmp_path)
+    call(s, "PUT", f"/datasets/{U937}", payload={"state": "prepared", "issue": 9, "data_stage": "done", "crops": 16})
+    call(s, "PUT", f"/assets/raw/{U937}", payload={"state": "ready", "bytes": 10})
+    call(s, "PUT", "/assets/staged/p256/a1", payload={"state": "ready", "record": U937, "bytes": 5})
+    call(s, "PUT", "/assets/staged/p256/a2", payload={"state": "evicted", "record": U937})
+    status, out, _ = call(s, "GET", "/catalog/datasets", {"sort": "dataset"})
+    assert status == 200 and out["total"] == 6 and out["ref"] == REF_A
+    assert [row["id"] for row in out["rows"]][:2] == [
+        "empiar-11037-cem-mitolab-mitochondria",
+        "github-bcss-breast-cancer-semantic-segmentation",
+    ]
+    row = next(row for row in out["rows"] if row["id"] == U937)
+    assert (row["state"], row["stage"], row["issue"], row["crops"]) == ("prepared", "done", 9, 16)
+    assert (row["dims"], row["modality"], row["licence"], row["bytes"]) == ("2D", "confocal", "CC-BY-4.0", 1153470226)
+    assert row["title"].startswith("Dataset of confocal images") and row["in_catalog"] is True
+    assert row["raw"] == {"state": "ready", "bytes": 10} and row["staged"] == 1 and row["quarantined"] is False
+    other = next(row for row in out["rows"] if row["id"] == HEMIBRAIN)
+    assert (other["state"], other["raw"], other["staged"], other["issue"]) == ("unprepared", None, 0, None)
+    assert out["facets"]["state"] == {"prepared": 1, "unprepared": 5} and out["facets"]["dims"] == {"2D": 5, "3D": 1}
+    assert out["facets"]["modality"]["TEM"] == 2 and out["facets"]["licence"]["CC0-1.0"] == 2
+
+    def found(**query):
+        return [row["id"] for row in call(s, "GET", "/catalog/datasets", {"sort": "dataset", **query})[1]["rows"]]
+
+    assert found(state="prepared") == [U937] and found(dims="3D") == [HEMIBRAIN]
+    assert found(modality="TEM") == [ONE_CH, "synthetic-em-2d-dup"] and len(found(licence="CC0-1.0")) == 2
+    assert found(q="HEMIBRAIN") == [HEMIBRAIN] and found(q="confocal") == [U937]  # the id, the title, the modality
+    assert found(sort="bytes", dir="desc")[0] == HEMIBRAIN and found(limit="2", offset="4") == found()[4:]
+    assert found(state="prepared", q="nothing") == []
+    out = call(s, "GET", "/catalog/datasets", {"modality": "TEM", "ids": "1"})[1]
+    assert out == {"ids": [ONE_CH, "synthetic-em-2d-dup"], "total": 2}
+    call(s, "PUT", f"/datasets/{ONE_CH}", payload={"state": "in-progress"})
+    assert len(found(preparable="1")) == 4 and U937 not in found(preparable="1") and ONE_CH not in found(preparable="1")
+    assert call(s, "GET", "/catalog/datasets", {"sort": "nope"})[0] == 422
+
+
+def test_catalog_datasets_lists_a_dataset_whose_record_left_the_catalog(tmp_path):
+    s = catalog_service(tmp_path)
+    call(s, "PUT", "/datasets/rec-gone", payload={"state": "needs-human", "issue": 3})
+    out = call(s, "GET", "/catalog/datasets", {"q": "rec-gone"})[1]
+    assert [(row["id"], row["state"], row["in_catalog"], row["title"]) for row in out["rows"]] == [
+        ("rec-gone", "needs-human", False, "")
+    ]
+    assert call(s, "GET", "/catalog/datasets")[1]["total"] == 7
+
+
+def test_catalog_datasets_of_a_request(tmp_path):
+    s = catalog_service(tmp_path)
+    text = yaml.safe_dump(
+        {
+            "schema_version": 1,
+            "kind": "preparation",
+            "catalog": {"repo": "o/c", "ref": REF_A},
+            "records": [U937, ONE_CH],
+        }
+    )
+    number = s.ledger.create_subject("prep", None, data={"spec": text})["number"]
+    out = call(s, "GET", "/catalog/datasets", {"request": str(number), "sort": "dataset"})[1]
+    assert [row["id"] for row in out["rows"]] == [ONE_CH, U937] and out["total"] == 2
+    assert call(s, "GET", "/catalog/datasets", {"request": "5"})[0] == 404
+    assert call(s, "GET", "/catalog/datasets", {"request": "x"})[0] == 422
+
+
+def test_one_dataset_with_everything_known_about_it(tmp_path):
+    s = catalog_service(tmp_path)
+    path = f"/catalog/datasets/{U937}"
+    status, out, _ = call(s, "GET", path)
+    assert status == 200 and out["row"]["state"] == "unprepared" and out["record"]["id"] == U937
+    assert out["path"].endswith(".yaml") and out["ref"] == REF_A
+    assert (out["dataset"], out["raw_asset"], out["staged_assets"], out["boards"], out["requests"], out["subject"]) == (
+        None, None, [], [], [], None
+    )  # fmt: skip
+    call(s, "PUT", f"/datasets/{U937}", payload={"state": "prepared", "issue": 9, "binding_hash": "b" * 64})
+    call(s, "PUT", f"/assets/raw/{U937}", payload={"state": "ready", "bytes": 10})
+    call(s, "PUT", "/assets/staged/a1", payload={"state": "ready", "record": U937})
+    call(s, "PUT", "/buffers/i5-e6", payload=CFG)
+    call(s, "PUT", f"/buffers/i5-e6/datasets/{U937}", payload={"status": "servable"})
+    text = yaml.safe_dump(
+        {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": REF_A}, "records": [U937]}
+    )
+    request = s.ledger.create_subject("prep", None, data={"spec": text})
+    call(s, "PUT", "/subjects/dataset/9", payload={"key": U937, "stage": "review"})
+    out = call(s, "GET", path)[1]
+    assert out["dataset"]["binding_hash"] == "b" * 64 and out["raw_asset"]["data"]["bytes"] == 10
+    assert [asset["key"] for asset in out["staged_assets"]] == ["a1"]
+    assert [(board["buffer"], board["spec"], board["status"]) for board in out["boards"]] == [
+        ("i5-e6", "s", "servable")
+    ]
+    assert [(r["key"], r["number"]) for r in out["requests"]] == [(request["key"], request["number"])]
+    assert out["subject"]["stage"] == "review" and "approve" in out["subject"]["actions"]
+    assert call(s, "GET", "/catalog/datasets/no-such-record")[0] == 404
+    call(s, "PUT", "/datasets/rec-gone", payload={"state": "needs-human"})
+    gone = call(s, "GET", "/catalog/datasets/rec-gone")[1]
+    assert gone["record"] is None and gone["row"]["in_catalog"] is False and gone["dataset"]["state"] == "needs-human"
+
+
+def test_decisions_are_paged_and_name_their_dataset(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    s = catalog_service(tmp_path)
+    call(s, "PUT", f"/datasets/{U937}", payload={"state": "prepared", "issue": 7})
+    call(s, "PUT", "/subjects/dataset/31", payload={"key": ONE_CH})
+    call(s, "PUT", "/assets/staged/p256/abc123", payload={"state": "ready", "record": HEMIBRAIN})
+    rows = [
+        new_assessment(
+            gate="crops", subject_kind="crop_set", subject_ref="i7-e11:s", verdict="approve", by="judge", at=10.0
+        ),
+        new_assessment(
+            gate="crops", subject_kind="crop_set", subject_ref="i31-e2:s", verdict="reject", by="human:a", at=11.0
+        ),
+        new_assessment(
+            gate="staged", subject_kind="artifact", subject_ref="abc123", verdict="reject", by="human:a", at=12.0
+        ),
+        new_assessment(
+            gate="code", subject_kind="pr_head", subject_ref="f" * 40, verdict="approve", by="human:a", at=13.0
+        ),
+    ]
+    for row in rows:
+        s.ledger.put_assessment(row)
+    status, out, _ = call(s, "GET", "/decisions")
+    assert status == 200 and out["total"] == 4
+    assert [row.get("record") for row in out["assessments"]] == [None, HEMIBRAIN, ONE_CH, U937]  # newest first
+    out = call(s, "GET", "/decisions", {"limit": "2", "offset": "2"})[1]
+    assert [row["subject"]["ref"] for row in out["assessments"]] == ["i31-e2:s", "i7-e11:s"] and out["total"] == 4
+    out = call(s, "GET", "/decisions", {"record": U937})[1]
+    assert [row["subject"]["ref"] for row in out["assessments"]] == ["i7-e11:s"] and out["total"] == 1
+    assert call(s, "GET", "/decisions", {"record": HEMIBRAIN, "gate": "crops"})[1]["total"] == 0
+    assert call(s, "GET", "/decisions", {"limit": "500"})[0] == 422

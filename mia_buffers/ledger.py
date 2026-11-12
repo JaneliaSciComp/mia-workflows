@@ -207,6 +207,16 @@ class Ledger:
             ).fetchall()
         return [dict(zip(BOARD_COLUMNS, row, strict=True)) for row in rows]
 
+    def boards_of(self, record: str) -> list[dict]:
+        """The record's row on every buffer's board, newest first: the board's columns plus `buffer`."""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT buffer, {', '.join(BOARD_COLUMNS)} FROM buffer_datasets WHERE record = ? "
+                "ORDER BY updated_at DESC",
+                (record,),
+            ).fetchall()
+        return [dict(zip(("buffer", *BOARD_COLUMNS), row, strict=True)) for row in rows]
+
     def add_event(self, buffer: str, kind: str, *, issue: int | None, event_id: str | None, detail: str) -> dict:
         """Append one event with the buffer's next seq, at now; returns it."""
         with self._transaction() as db:
@@ -408,6 +418,14 @@ class Ledger:
         with self._lock:
             rows = self._db.execute("SELECT path, data FROM records WHERE ref = ? ORDER BY path", (ref,)).fetchall()
         return [(path, json.loads(data)) for path, data in rows]
+
+    def record(self, ref: str, record_id: str) -> tuple[str, dict] | None:
+        """One record of a synced ref by its id: (path, record)."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT path, data FROM records WHERE ref = ? AND id = ?", (ref, record_id)
+            ).fetchone()
+        return (row[0], json.loads(row[1])) if row else None
 
     def catalogs(self) -> list[dict]:
         """Every synced ref, newest first: {ref, synced_at, count}."""
