@@ -2071,3 +2071,143 @@ def test_serve_refuses_a_policy_dir_it_must_not_write(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match=re.escape(str(inside))):
         api_module.serve(cfg)
     assert not inside.exists()
+
+
+# --- approve_hosts: the hosts a person ticked on an action that starts jobs ---
+
+
+def _starting(tmp_path):
+    """`_checking`'s service with a gateway stand-in to send to."""
+    s = _checking(tmp_path)
+    gateway = Gateway()
+    s.dispatcher = gateway
+    return s, gateway
+
+
+def _approvals(s):
+    path = s.hosts.policy_dir / "approved-hosts.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _bodies(s, kind, number):
+    return [entry["body"] for entry in s.ledger.timeline(kind, number)]
+
+
+def test_a_go_with_approve_hosts_approves_them_then_starts_the_round(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    status, action, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "approve_hosts": ["data.example.org"]})
+    assert status == 202
+    number = action["number"]
+    assert _bodies(s, "dataset", number) == [
+        "**Hosts approved:** `data.example.org` by `page`",
+        "**Action:** `go` by `page`",
+    ]
+    (line,) = _approvals(s)
+    assert (line["host"], line["by"], line["kind"], line["number"]) == ("data.example.org", "page", "dataset", number)
+    assert _missing(s, {"records": ["rec-a"]})[:2] == (200, {"hosts": []})
+    assert len(gateway.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "host", ["Data.4tu.nl", "data.4tu.nl.", "*.4tu.nl", "data.4tu.nl:443", "github.com", "other.example.org"]
+)
+def test_a_host_the_run_does_not_name_is_refused_and_nothing_happens(tmp_path, _home, host):
+    s, gateway = _starting(tmp_path)
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "approve_hosts": [host]})
+    assert status == 422 and host in out["error"]
+    assert _approvals(s) == [] and s.ledger.subject("dataset", "rec-a") is None and gateway.sent == []
+
+
+def test_approve_hosts_on_an_action_that_starts_nothing_is_422(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    subject = s.ledger.create_subject("dataset", "rec-a")
+    _stage(s, "dataset", subject["number"], "testing")
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "cancel", "approve_hosts": ["data.example.org"]})
+    assert (status, out["error"]) == (422, "approve_hosts goes with an action that starts jobs")
+    assert _approvals(s) == [] and gateway.sent == []
+
+
+def test_a_refused_action_approves_nothing(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    subject = s.ledger.create_subject("dataset", "rec-a")
+    _stage(s, "dataset", subject["number"], "testing")
+    assert act(s, "/datasets/rec-a/actions", {"action": "go", "approve_hosts": ["data.example.org"]})[0] == 409
+    assert _approvals(s) == [] and gateway.sent == []
+
+
+def test_a_policy_that_cannot_be_generated_is_503_and_nothing_is_sent(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    before = (s.hosts.policy_dir / "broker.toml").read_bytes()
+    s.hosts.base_policy.write_text("not toml")
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "approve_hosts": ["data.example.org"]})
+    assert status == 503 and out["error"]
+    assert (s.hosts.policy_dir / "broker.toml").read_bytes() == before and gateway.sent == []
+    assert _approvals(s) == []
+
+
+def test_a_repeat_of_the_key_adds_no_line_and_no_entry(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    body = {"action": "go", "key": "k1", "approve_hosts": ["data.example.org"]}
+    first = act(s, "/datasets/rec-a/actions", body)[1]
+    assert act(s, "/datasets/rec-a/actions", body)[1]["id"] == first["id"]
+    assert len(_approvals(s)) == 1 and len(gateway.sent) == 1
+    assert len(_bodies(s, "dataset", first["number"])) == 2
+
+
+def test_filing_a_request_approves_its_hosts(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    status, action, _ = act(s, "/prep", {"spec": PREP_TEXT, "approve_hosts": ["data.example.org"]})
+    assert status == 202
+    assert _bodies(s, "prep", action["number"])[0] == "**Hosts approved:** `data.example.org` by `page`"
+    assert _approvals(s)[0]["kind"] == "prep" and len(gateway.sent) == 1
+    status, out, _ = act(s, "/prep", {"spec": PREP_TEXT, "approve_hosts": ["other.example.org"]})
+    assert status == 422 and "other.example.org" in out["error"]
+    assert len(s.ledger.find_subjects(kind="prep")) == 1
+
+
+def test_running_a_buffers_plan_approves_its_hosts(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    number = s.ledger.create_subject("buffer", SPEC_NAME, data={"spec": SPEC_TEXT})["number"]
+    _, entry = s.ledger.append_entry("buffer", number, body="plan", marker="m1", round_id="i7-e1", stage="plan-review")
+    plan = tmp_path / "rounds" / "i7-e1" / "plan.json"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(json.dumps({"rows": [{"id": "rec-a", "admitted": True, "fit": {"ok": True}}]}))
+    s.ledger.put_dataset("rec-a", {"folder": "rec-a"})
+    folder = tmp_path / "storage" / "rec-a"
+    folder.mkdir(parents=True)
+    (folder / "binding.yaml").write_text(yaml.safe_dump({"raw": [{"urls": ["https://data.example.org/x"]}]}))
+    revision = s.ledger.subject("buffer", SPEC_NAME)["revision"]
+    body = {"action": "approve", "revision": revision, "approve_hosts": ["data.example.org"]}
+    assert act(s, SPEC_ACTIONS, {**body, "approve_hosts": ["other.example.org"]})[0] == 422
+    assert act(s, SPEC_ACTIONS, body)[0] == 202
+    assert _bodies(s, "buffer", number)[1] == "**Hosts approved:** `data.example.org` by `page`"
+    assert _approvals(s)[0]["kind"] == "buffer" and len(gateway.sent) == 1
+
+
+def test_two_approvals_at_once_both_land(tmp_path, _home):
+    s, _ = _starting(tmp_path)
+    s.hosts.base_policy.write_text('[broker]\nallowed_hosts = ["zenodo.org"]\n')
+    worker(
+        s,
+        "PUT",
+        f"/records/{REF_A}",
+        {
+            "records": [
+                {"path": f"{n}.yaml", "record": {"id": n, "data": {"download_url": f"https://{n}.example.org/a.zip"}}}
+                for n in ("rec-c", "rec-d")
+            ]
+        },
+    )
+    results = {}
+
+    def go(name):
+        results[name] = act(s, f"/datasets/{name}/actions", {"action": "go", "approve_hosts": [f"{name}.example.org"]})
+
+    threads = [threading.Thread(target=go, args=(name,)) for name in ("rec-c", "rec-d")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert [results[name][0] for name in results] == [202, 202]
+    policy = (s.hosts.policy_dir / "broker.toml").read_text()
+    assert "rec-c.example.org" in policy and "rec-d.example.org" in policy

@@ -16,12 +16,13 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
@@ -51,6 +52,7 @@ from .explore import (
     plan_view,
     record_row,
 )
+from .hosts import HostCheck, Needed
 from .jobspec import levels_key
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
@@ -58,9 +60,6 @@ from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
 from .stream import Changes
 from .sync import scan_assets, scan_storage
-
-if TYPE_CHECKING:  # hosts imports activities, which imports this module
-    from .hosts import HostCheck, Needed
 
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
@@ -262,6 +261,7 @@ class ActionBody(_Strict):
     plan_first: bool = False  # a buffer's go: stop at the plan and wait for an approve before staging anything
     records: list[str] = []  # a buffer's revoke: the records that leave it
     record: str | None = None  # dropped: the dataset whose files are in place
+    approve_hosts: list[str] = []  # a start action: hosts the run needs that the person ticked (spec host-approval §5)
 
 
 class SpecBody(_Strict):
@@ -271,6 +271,7 @@ class SpecBody(_Strict):
     action: Literal["go"] | None = None
     plan_first: bool = False
     key: str | None = None
+    approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person ticked
 
 
 class RefusalBody(_Strict):
@@ -1010,10 +1011,7 @@ class BufferService:
         if self.hosts is None:
             raise HttpError(503, "this service has no csub policy to check hosts against")
         if prep is not None:
-            found = self.ledger.find_subjects(kind="prep", number=prep)
-            if not found:
-                raise HttpError(404, f"no preparation request {prep}")
-            records = _prep_records(found[0])
+            records = self._request_records(str(prep))
         if records is not None:
             catalog = {}
             for record in records:
@@ -1021,7 +1019,8 @@ class BufferService:
                     raise HttpError(404, f"{record!r} is not a record of a synced catalog")
                 catalog[record] = row
             return self.hosts.for_records(catalog)
-        assert spec is not None
+        if spec is None:
+            raise HttpError(422, "give records, prep or spec")
         subject = self.ledger.subject("buffer", spec)
         if subject is None:
             raise HttpError(404, f"no buffer spec {spec!r}")
@@ -1059,12 +1058,14 @@ class BufferService:
                 raise HttpError(404, f"no dataset {record!r} has been started")
             if self._catalog_record(record) is None:
                 raise HttpError(404, f"{record!r} is not a record of a synced catalog")
+            self._check_hosts(parsed, partial(self._needed, records=[record]))
             # a dataset whose registry row already names an issue keeps that number: its
             # workflow id, rounds and budget root are built from it
             known = (self.ledger.dataset(record) or {}).get("issue")
             subject = self.ledger.create_subject("dataset", record, number=known if isinstance(known, int) else None)
         payload = {name: value for name, value in (("note", parsed.note), ("root", parsed.root)) if value}
-        return self._act_on(subject, parsed, actor, payload)
+        needed = (partial(self._needed, records=[record])) if parsed.action == "go" else None
+        return self._act_on(subject, parsed, actor, payload, needed)
 
     # --- buffer specs and preparation requests: created and run from the page (spec §4.4, §8.1) ---
 
@@ -1091,7 +1092,13 @@ class BufferService:
         if parsed.action is None:
             return 200, {"subject": self._subject_view(self._save_spec(parsed.spec))}, {}
         name = self._spec_name(parsed.spec)
-        go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, plan_first=parsed.plan_first)
+        go = ActionBody(
+            action="go",
+            key=parsed.key,
+            spec=parsed.spec,
+            plan_first=parsed.plan_first,
+            approve_hosts=parsed.approve_hosts,
+        )
         return self._buffer_action(name, go, headers, create=True)
 
     def _spec_action(self, name: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
@@ -1115,13 +1122,16 @@ class BufferService:
             subject = self._save_spec(text)  # only once the stage takes a go: what is stored is what ran last
             payload = {"spec": text, **({"plan_first": True} if parsed.plan_first else {})}
         assert subject is not None
+        needed = None
+        if parsed.action == "approve" and subject["stage"] == "plan-review":
+            needed = partial(self._needed, spec=name)
         if parsed.action == "revoke":
             if not parsed.records:
                 raise HttpError(422, "a revoke names the records that leave the buffer: `records`")
             payload = {"records": parsed.records}
         if parsed.action == "dropped":
             payload = {"record": self._dropped_record(subject, parsed)}
-        return self._act_on(subject, parsed, actor, payload)
+        return self._act_on(subject, parsed, actor, payload, needed)
 
     def _dropped_record(self, subject: dict, parsed: ActionBody) -> str:
         """The record of a `dropped`, once its files look complete. The workflow takes any non-empty file and
@@ -1144,31 +1154,35 @@ class BufferService:
         """File a preparation request and run it: a new subject `prep-<number>` holding the request's text."""
         parsed = _parse(SpecBody, body)
         try:
-            load_prep_text(parsed.spec)
+            records = load_prep_text(parsed.spec).records
         except SpecError as error:
             raise HttpError(422, f"not a preparation request: {error}") from None
-        go = ActionBody(action="go", key=parsed.key, spec=parsed.spec)
+        go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, approve_hosts=parsed.approve_hosts)
+        needed = partial(self._needed, records=records)
+        self._check_hosts(go, needed)
         repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
         if repeat is not None and repeat["kind"] == "prep":  # a double click: the request filed by the first one
             subject = self.ledger.find_subjects(kind="prep", number=repeat["number"])[0]
         else:
             subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec})
-        return self._act_on(subject, go, self._actor(headers, go), {"spec": parsed.spec})
+        return self._act_on(subject, go, self._actor(headers, go), {"spec": parsed.spec}, needed)
 
     def _prep_action(self, number: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
         subject = self._numbered("prep", number)
         payload: dict = {}
+        needed = None
         if parsed.action == "go":
             text = parsed.spec if parsed.spec is not None else subject["data"].get("spec")
             if not text:
                 raise HttpError(422, f"request {subject['key']} has no text to run: send one as `spec`")
             try:
-                load_prep_text(text)
+                records = load_prep_text(text).records
             except SpecError as error:
                 raise HttpError(422, f"not a preparation request: {error}") from None
             payload = {"spec": text}
-        return self._act_on(subject, parsed, self._actor(headers, parsed), payload)
+            needed = partial(self._needed, records=records)
+        return self._act_on(subject, parsed, self._actor(headers, parsed), payload, needed)
 
     def _stop(self, subject: dict, action: dict, stopped: bool) -> None:
         """The force stop, for a run that does not answer a cancel (one frozen by nondeterminism), once its
@@ -1220,12 +1234,49 @@ class BufferService:
             if parsed.revision != subject["revision"]:
                 raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
 
-    def _act_on(self, subject: dict, parsed: ActionBody, actor: str, payload: dict) -> Response:
+    def _check_hosts(self, parsed: ActionBody, needed: Callable[[], Needed] | None) -> None:
+        """Refuse approve_hosts that cannot be approved here: the action starts no job (422), the service has no
+        policy (503), or a host is not one the run needs (422). Nothing is written."""
+        if not parsed.approve_hosts:
+            return
+        if needed is None:
+            raise HttpError(422, "approve_hosts goes with an action that starts jobs")
+        if self.hosts is None:
+            raise HttpError(503, "this service has no csub policy to approve hosts in")
+        try:
+            self.hosts.check(parsed.approve_hosts, needed())
+        except ValueError as error:
+            raise HttpError(422, str(error)) from None
+
+    def _act_on(
+        self,
+        subject: dict,
+        parsed: ActionBody,
+        actor: str,
+        payload: dict,
+        needed: Callable[[], Needed] | None = None,
+    ) -> Response:
         """Steps 1 to 6 of spec §5 for one subject: check the stage and the revision (`_accepts`), record the
         action, send it to Temporal, and settle it with its timeline entry. A key seen before is the same action
-        sent again under its id, whatever the stage is by now."""
+        sent again under its id, whatever the stage is by now. `approve_hosts` (only with `needed`, the hosts this
+        run needs) is checked, approved and written to the timeline before the action is recorded."""
         kind, number = subject["kind"], subject["number"]
         self._accepts(subject, parsed)
+        if parsed.approve_hosts:
+            self._check_hosts(parsed, needed)
+            assert self.hosts is not None  # _check_hosts answered 503 otherwise
+            try:
+                added = self.hosts.approve(parsed.approve_hosts, by=actor, kind=kind, number=number)
+            except PolicyError as error:
+                raise HttpError(503, str(error)) from None
+            if added:
+                names = ", ".join(f"`{neutralize(host)}`" for host in added)
+                self.ledger.append_entry(
+                    kind,
+                    number,
+                    body=f"**Hosts approved:** {names} by `{neutralize(actor)}`",
+                    marker=f"<!-- mia: hosts {time.time_ns()} -->",
+                )
         if self.dispatcher is None:
             raise HttpError(503, "this service has no way to Temporal: no workflow can be started from it")
         try:
@@ -1903,7 +1954,6 @@ def serve(cfg: Config) -> None:
         raise SystemExit(str(error)) from error
     url = urlparse(cfg.service.url)
     assert url.port is not None  # ServiceCfg requires an explicit port
-    from .hosts import HostCheck  # here, not at the top: hosts imports activities, which imports this module
 
     check = HostCheck.from_config(cfg)
     try:
