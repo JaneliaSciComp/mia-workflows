@@ -69,6 +69,7 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .chosen .btn{background:var(--surface)}
 .btn.danger:disabled{border-color:var(--axis);color:var(--muted)}
 dialog.ask{width:min(560px,calc(100vw - 32px));border:1px solid var(--ring);border-radius:8px;background:var(--surface);color:var(--fg);padding:16px 16px 6px}
+dialog.ask.hosts{width:min(720px,calc(100vw - 32px))}
 dialog.ask::backdrop{background:rgba(11,11,11,.4)}
 dialog.ask h2{margin:0 0 4px;font-size:16px;font-weight:600}
 dialog.ask label{display:block;margin:4px 0}
@@ -2259,7 +2260,7 @@ async function askHosts(run, send) {
   ticks.forEach(tick => tick.addEventListener("change", refresh));
   const rows = missing.map((m, n) => el("label", { class: "row" }, ticks[n], " ", el("span", { class: "mono" }, m.host), " ",
     el("span", { class: "small", title: m.records.join(", ") }, `${m.records.length} ${m.records.length === 1 ? "dataset" : "datasets"}`)));
-  const box = el("dialog", { class: "ask", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
+  const box = el("dialog", { class: "ask hosts", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
     el("h2", { id: "askTitle" }, "Hosts to approve"),
     el("p", { class: "small" }, "Jobs of this deployment may download from an approved host from then on."),
     el("label", {}, all, " Select all"), ...rows,
