@@ -385,7 +385,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 </figure>
 
 <h2>Step 1. The spec</h2>
-<p><a href="#buffers/new">New buffer</a>, on the Buffers tab, builds a spec from its filters: dimensionality, modality, licence, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, and the weighting between datasets. Each change is planned against the catalog on the server, so the counts shown are the plan that spec produces.</p>
+<p><a href="#buffers/new">New buffer</a>, on the Buffers tab, builds a spec from its filters: dimensionality, licence, annotation source, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, and the weighting between datasets. Each change is planned against the catalog on the server, so the counts shown are the plan that spec produces.</p>
 <ul>
   <li><b>Where datasets leave</b> counts the datasets each rule removes. The last rule, <em>not prepared</em>, means a dataset fits the spec but no reader exists for its files yet; the other rules are the spec's own filters.</li>
   <li><b>Fitting datasets by modality</b> and <b>Weight share</b> show the composition of the pool and of the draws. The weighting temperature runs from uniform over modalities (0) to proportional to each dataset's capacity (1).</li>
@@ -503,7 +503,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>dataset, record</td><td>one entry of the catalog: a published dataset with its files, licence, modality and annotations described. The code and the catalog say <em>record</em> for the entry and its id; the pages say <em>dataset</em>.</td></tr>
 <tr><td>prepared</td><td>a dataset with an approved reader and verified sample crops, produced by the preparation pipeline. Only prepared datasets enter a plan.</td></tr>
 <tr><td>spec, buffer, round</td><td>a spec is the YAML you save and run; a buffer is one served pool of crops built from it. A spec runs one round at a time; each round builds a buffer with a new id.</td></tr>
-<tr><td>stage, timeline</td><td>a spec, a dataset and a preparation request are each in one stage at a time, and the stage decides which buttons are offered. The timeline is the list of everything that happened to it, newest last.</td></tr>
+<tr><td>stage, timeline</td><td>a spec, a dataset and a preparation request are each in one stage at a time, and the stage decides which buttons are offered. The timeline is the list of everything that happened to it, newest first.</td></tr>
 <tr><td>weighting group</td><td>the datasets that share the first key of <code>weighting.over</code>, a modality for instance. <code>min_fraction</code> and the floors are per group.</td></tr>
 <tr><td>staged</td><td>converted: a dataset's volumes rewritten once as immutable OME-Zarr pyramids in the shared cache, reused by every buffer that needs the same geometry and plan.</td></tr>
 <tr><td>crop, level</td><td>a crop is one training window, served at each pyramid level the spec lists, all centred on the same point: level 1 is full resolution, level 2 half, and so on.</td></tr>
@@ -725,7 +725,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="e" x1="190" y1="528" x2="225" y2="528" marker-end="url(#f2)"/>
 <line class="e" x1="375" y1="528" x2="410" y2="528" marker-end="url(#f2)"/>
 <line class="e" x1="560" y1="528" x2="595" y2="528" marker-end="url(#f2)"/>
-<text class="l" x="762" y="590" text-anchor="middle">every 30 min</text>
+<text class="l" x="762" y="590" text-anchor="middle">every keeper.minutes (30)</text>
 <!-- top → middle arrows -->
 <line class="ed" x1="300" y1="148" x2="300" y2="278" marker-start="url(#f2)" marker-end="url(#f2)"/>
 <text class="l" x="306" y="206">reads · writes</text>
@@ -956,7 +956,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <rect class="b" x="330" y="228" width="140" height="44" rx="10"/>
 <text class="t" x="400" y="247" text-anchor="middle">cancelled</text><text class="s" x="400" y="262" text-anchor="middle">Cancel, before ready</text>
 </svg>
-<figcaption><b>Figure 5.</b> The round stages before it asks to serve. The staged entry is the board: it lists each failed dataset with its error and each weighting group against <code>ready.min_fraction</code>. The approve accepts the board as it is, and the fraction accepted per group becomes that group's floor. buffer-api refuses consumers until the buffer is approved. The keeper, a scheduled pass every thirty minutes, watches ready buffers and retires a staged buffer that nobody approves. <i>Cancel the round</i> ends a round at any stage before <code>ready</code> and leaves the spec at <code>cancelled</code>. Every way out of a dead end is <i>Plan</i>. A <code>go</code> sent to the action route without <code>plan_first</code> does not wait at the plan; the page always sends it.</figcaption>
+<figcaption><b>Figure 5.</b> The round stages before it asks to serve. The staged entry is the board: it lists each failed dataset with its error and each weighting group against <code>ready.min_fraction</code>. The approve accepts the board as it is, and the fraction accepted per group becomes that group's floor. buffer-api refuses consumers until the buffer is approved. The keeper, a scheduled pass every <code>keeper.minutes</code> (30 unless set), watches ready buffers and retires a staged buffer that nobody approves. <i>Cancel the round</i> ends a round at any stage before <code>ready</code> and leaves the spec at <code>cancelled</code>. Every way out of a dead end is <i>Plan</i>. A <code>go</code> sent to the action route without <code>plan_first</code> does not wait at the plan; the page always sends it.</figcaption>
 </figure>
 
 <h2>6. Sourcing one dataset</h2>
@@ -1159,17 +1159,17 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
   ../.building-&lt;artifact&gt;-&lt;job&gt;/         <span class="c">a build in progress; swept by the keeper if abandoned</span>
 
 &lt;state_root&gt;/&lt;service&gt;/                 <span class="c">per worker: rounds/&lt;id&gt;/{spec, pins, plan, bindings}</span>
-  backups/ · archive/ · keeper/          <span class="c">registry copies every 30 min · retired buffers' draws · the catalog sync mark</span></pre>
+  backups/ · archive/ · keeper/          <span class="c">registry copies every keeper.minutes · retired buffers' draws · the catalog sync mark</span></pre>
 
 <h2>11. The page</h2>
 <p>buffer-api serves the page at <code>/</code>. The page holds no token: it reads the open routes, its buttons call the action routes, and it follows <code>/stream</code> to redraw what changed. Each tab is one kind of thing, and each thing has one page of its own. The search box in the header finds a dataset, a spec or a request by its name, its issue number or its issue URL.</p>
 <div class="tw"><table>
 <tr><th>tab</th><th>shows</th><th>reads</th></tr>
 <tr><td>Needs you</td><td>everything that waits on a person or is stuck, with the buttons that answer it, and the actions of the last day that were not delivered</td><td><code>/needs</code></td></tr>
-<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw download, staged artifacts and buffers; a tick per dataset and <i>Prepare these</i>. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
+<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw download, staged artifacts and buffers; a tick per dataset and <i>Prepare</i>. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
 <tr><td>Preparation</td><td>the preparation requests; a request's page lists its datasets with where each stands</td><td><code>/subjects/prep</code> · <code>/catalog/datasets</code></td></tr>
 <tr><td>Buffers</td><td>the specs and the buffers. <i>New buffer</i> designs a spec against a live plan. A spec's page has its buttons, its timeline and its buffers; a buffer's page has its board, volumes, consumers, daily usage and health line</td><td><code>/subjects/buffer</code> · <code>/buffers</code> · <code>POST /plan</code> · <code>/usage</code></td></tr>
-<tr><td>Cache</td><td>raw by dataset, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
+<tr><td>Cache</td><td>raw by dataset, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets/raw</code> · <code>/assets/staged</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
 <tr><td>Decisions</td><td>every verdict at a gate, newest first, with how often the judge and the person agree</td><td><code>/decisions</code></td></tr>
 <tr><td>Docs</td><td>the user guide (the loop from spec to training, as the person training a model sees it) and this architecture overview</td><td>nothing: static</td></tr>
 </table></div>
