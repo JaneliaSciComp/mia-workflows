@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mia_core.hosts import HOST_RE
 from mia_core.judge.evidence import command as judge_command
 
 from . import jobs
@@ -159,9 +160,10 @@ MAX_JOB_HOSTS = 64
 
 
 def agent_hosts(configured: list[str], policy_hosts: list[str]) -> list[str]:
-    """The configured hosts, then the exact hosts the broker's policy allows (never patterns or GitHub hosts),
-    without repeats; past MAX_JOB_HOSTS the oldest policy hosts are dropped and configured hosts stay."""
-    usable = [host for host in policy_hosts if "*" not in host and not is_github_host(host)]
+    """The configured hosts, then the exact hosts the broker's policy allows (never patterns, names csub refuses
+    as a job host, or GitHub hosts), without repeats; past MAX_JOB_HOSTS the oldest policy hosts are dropped and
+    configured hosts stay."""
+    usable = [host for host in policy_hosts if HOST_RE.fullmatch(host) and not is_github_host(host)]
     hosts = list(dict.fromkeys(configured))
     extra = [host for host in dict.fromkeys(usable) if host not in hosts]
     return hosts + extra[max(0, len(hosts) + len(extra) - MAX_JOB_HOSTS) :]

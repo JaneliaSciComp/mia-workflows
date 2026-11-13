@@ -104,7 +104,17 @@ def test_a_base_that_is_a_symlink_inside_the_policy_dir_is_refused(tmp_path, ope
 
 
 @pytest.mark.parametrize(
-    "host", ["*.example.org", "Data.Example.org", "data.example.org.", "data.example.org:443", "10.1.2.3", "::1"]
+    "host",
+    [
+        "*.example.org",
+        "Data.Example.org",
+        "data.example.org.",
+        "data.example.org:443",
+        "10.1.2.3",
+        "::1",
+        "a" * 64 + ".example.org",
+        ("a" * 60 + ".") * 4 + "example.org",
+    ],
 )
 def test_an_unapprovable_host_is_refused_before_anything_is_written(base, policy_dir, host):
     with pytest.raises(PolicyError, match=re.escape(host)):
@@ -189,6 +199,48 @@ def test_a_broken_approvals_line_names_the_file_and_line(base, policy_dir):
     (policy_dir / APPROVALS_NAME).write_text('{"host": "a.example.org"}\nnot json\n')
     with pytest.raises(PolicyError, match=r"approved-hosts\.jsonl line 2"):
         approved_hosts(policy_dir)
+
+
+def test_an_approval_after_a_hand_edit_that_left_no_trailing_newline_is_a_line_of_its_own(base, policy_dir):
+    approve(base, policy_dir, ["a.example.org", "b.example.org"])
+    approvals = policy_dir / APPROVALS_NAME
+    approvals.write_text(approvals.read_text().splitlines()[0])  # b withdrawn by hand, no newline left
+    assert approve(base, policy_dir, ["c.example.org"]) == ["c.example.org"]
+    assert [json.loads(line)["host"] for line in approvals.read_text().splitlines()] == [
+        "a.example.org",
+        "c.example.org",
+    ]
+    assert {"a.example.org", "c.example.org"} <= set(allowed_patterns(policy_dir))
+
+
+def test_a_blank_line_in_the_approvals_is_skipped(base, policy_dir):
+    policy_dir.mkdir(parents=True)
+    (policy_dir / APPROVALS_NAME).write_text('{"host": "a.example.org"}\n\n  \n{"host": "b.example.org"}\n')
+    assert approved_hosts(policy_dir) == ["a.example.org", "b.example.org"]
+
+
+def test_a_base_that_cannot_be_written_records_no_approval(tmp_path, policy_dir):
+    odd = tmp_path / "operator" / "odd.toml"
+    odd.parent.mkdir()
+    odd.write_text("[limits]\nwhen = 2026-01-01\n")
+    with pytest.raises(PolicyError, match=r"limits\.when"):
+        approve(odd, policy_dir, ["a.example.org"])
+    assert not (policy_dir / APPROVALS_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['[broker]\nallowed_hosts = "zenodo.org"\n', "[broker]\nallowed_hosts = [1]\n", '[broker]\nnote = "\U0001f600"\n'],
+)
+def test_a_base_the_policy_cannot_be_built_from_is_a_policy_error(tmp_path, policy_dir, text):
+    odd = tmp_path / "operator" / "odd.toml"
+    odd.parent.mkdir()
+    odd.write_text(text)
+    with pytest.raises(PolicyError, match=re.escape(str(odd))):
+        generate_policy(odd, policy_dir)
+    with pytest.raises(PolicyError):
+        approve(odd, policy_dir, ["a.example.org"])
+    assert not (policy_dir / POLICY_NAME).exists() and not (policy_dir / APPROVALS_NAME).exists()
 
 
 def test_a_base_that_cannot_be_read_records_no_approval(tmp_path, policy_dir):

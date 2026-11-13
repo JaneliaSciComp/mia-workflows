@@ -140,7 +140,8 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
 
 
 async def test_an_agent_job_names_its_configured_hosts_then_the_policys(tmp_path):
-    policy = ["pypi.org", "zenodo.org", "*.huggingface.co", "github.com", "data.4tu.nl"]
+    too_long = "a" * 64 + ".example.org"  # csub refuses a job host with a label over 63 characters
+    policy = ["pypi.org", "zenodo.org", "*.huggingface.co", "github.com", too_long, "data.4tu.nl"]
     fake = FakeCsub(policy_hosts=policy)
     j = _jobs(tmp_path, fake, allow_hosts=["pypi.org"])
     await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
@@ -166,10 +167,12 @@ async def test_a_failed_probe_on_a_first_submission_submits_nothing(tmp_path):
 
 
 async def test_past_the_cap_the_newest_policy_hosts_are_kept(tmp_path):
-    fake = FakeCsub(policy_hosts=[f"h{n}" for n in range(70)])
+    fake = FakeCsub(policy_hosts=[f"h{n}.example.org" for n in range(70)])
     j = _jobs(tmp_path, fake, allow_hosts=["pypi.org", "files.pythonhosted.org"])
     await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
-    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "files.pythonhosted.org"] + [f"h{n}" for n in range(8, 70)]
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "files.pythonhosted.org"] + [
+        f"h{n}.example.org" for n in range(8, 70)
+    ]
 
 
 async def test_submit_reuses_job_found_by_name(tmp_path):
