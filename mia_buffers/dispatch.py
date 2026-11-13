@@ -13,6 +13,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from typing import Any
 
+from mia_core.temporal import last_poll
 from mia_data.models import DatasetState, LabelEvent
 
 from .config import Config
@@ -180,23 +181,9 @@ class Dispatcher:
             return {"temporal": False, "queues": {}}
 
     async def _polled(self) -> dict[str, bool]:
-        from temporalio.api.enums.v1 import TaskQueueType
-        from temporalio.api.taskqueue.v1 import TaskQueue
-        from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
-
         polled: dict[str, bool] = {}
         for task_queue, namespace in self.queues.items():
-            client = await self._client(namespace)
-            answer = await client.workflow_service.describe_task_queue(
-                DescribeTaskQueueRequest(
-                    namespace=namespace,
-                    task_queue=TaskQueue(name=task_queue),
-                    task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-                )
-            )
-            polled[task_queue] = bool(
-                answer.pollers
-            )  # Temporal forgets a poller about five minutes after its last poll
+            polled[task_queue] = await last_poll(await self._client(namespace), namespace, task_queue) is not None
         return polled
 
 

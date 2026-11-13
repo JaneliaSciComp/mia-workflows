@@ -53,7 +53,8 @@ class FakeClient:
         return SimpleNamespace(status=SimpleNamespace(name="RUNNING"))
 
     async def _describe_task_queue(self, request):
-        return SimpleNamespace(pollers=list(self.pollers))
+        polled = SimpleNamespace(seconds=1800000000, nanos=0)
+        return SimpleNamespace(pollers=[SimpleNamespace(last_access_time=polled) for _ in self.pollers])
 
 
 def gateway(calls, **client_kwargs):

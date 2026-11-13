@@ -4,6 +4,7 @@ which runs on the host like the broker)."""
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 import importlib
 import os
@@ -76,18 +77,35 @@ def windows(session: str) -> str:
     return _tmux("list-windows", "-t", f"={session}", "-F", fmt, capture_output=True).stdout
 
 
+def dead_windows(session: str) -> list[str]:
+    """The session's windows whose process has exited; such a window stays, showing the process's last lines."""
+    return [line.split(":")[0].strip() for line in windows(session).splitlines() if line.endswith(": dead")]
+
+
+def last_lines(session: str, window: str, count: int = 15) -> str:
+    """The last lines a window's process wrote."""
+    target = f"={session}:{window}"
+    shown = _tmux("capture-pane", "-p", "-S", "-200", "-t", target, capture_output=True).stdout
+    return "\n".join([line for line in shown.splitlines() if line.strip()][-count:])
+
+
 def attach(session: str) -> int:
     if not is_running(session):
         sys.exit(f"{session} is not running (run `mia up {session}` first)")
     return _tmux("attach", "-t", f"={session}").returncode
 
 
-def new_session(session: str, window: str, command: str) -> None:
-    _tmux("new-session", "-d", "-s", session, "-n", window, command, check=True)
+KEEP = (";", "set-option", "-w", "remain-on-exit", "on")  # in the same tmux call: a window outlives its process
+
+
+def new_session(session: str, window: str, command: str, keep: bool = False) -> None:
+    """Start a session with one window. `keep`: the window stays when its process exits, marked dead."""
+    _tmux("new-session", "-d", "-s", session, "-n", window, command, *(KEEP if keep else ()), check=True)
 
 
 def new_window(session: str, window: str, command: str) -> None:
-    _tmux("new-window", "-t", f"={session}", "-n", window, command, check=True)
+    """Add a window that stays when its process exits, marked dead, so `mia ps` can say so."""
+    _tmux("new-window", "-t", f"={session}", "-n", window, command, *KEEP, check=True)
 
 
 def shell(*parts: object) -> str:
@@ -353,10 +371,36 @@ def ensure_policy(stack: Stack) -> Path:
         sys.exit(f"mia: csub.base_policy: {error}")
 
 
+WORKER_START_S = 90  # how long `mia up` waits for a new worker's first poll
+
+
+async def _polls_since(svc: Service, since: float) -> bool:
+    from autodev.cli import _client
+    from mia_core.temporal import last_poll
+
+    client = await _client(svc.cfg)
+    for _ in range(WORKER_START_S):
+        if dead_windows(svc.name):
+            return False
+        polled = await last_poll(client, svc.cfg.temporal.namespace, svc.cfg.task_queue)
+        # ponytail: this host's clock against Temporal's; a server more than ~30 s behind fails a good start
+        if polled is not None and polled >= since:
+            return True
+        await asyncio.sleep(1)
+    return False
+
+
+def worker_started(svc: Service, since: float) -> bool:
+    """Wait for the service's worker to poll its task queue after `since` (Unix seconds). False when a window of
+    the service dies first, or `WORKER_START_S` pass without a poll."""
+    return asyncio.run(_polls_since(svc, since))
+
+
 def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
-    """Start one app service: broker + sandboxed worker in tmux, then apply its poll schedule.
-    Temporal is started (managed) or verified (external) first. Re-running on a live session only
-    re-applies the schedule, so a run that failed partway is repaired by running it again."""
+    """Start one app service: broker + sandboxed worker in tmux, then apply its poll schedule, then wait for the
+    worker's first poll: 1 when it never comes. Temporal is started (managed) or verified (external) first.
+    Re-running on a live session only re-applies the schedule, so a run that failed partway is repaired by
+    running it again; a session with a dead window is reported, not repaired."""
     cfg = svc.cfg
     if cfg.agent.api_key_env:
         sys.exit(f"{svc.name}: agent.api_key_env is not supported by `mia up` yet; give the account a Claude login")
@@ -407,14 +451,16 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     env = {**os.environ, **svc.env()}
     if is_running(svc.name):
         subprocess.run(schedule, env=env, check=True)
+        if dead := dead_windows(svc.name):
+            print(f"{svc.name}: its {', '.join(dead)} has exited: mia restart {svc.name}", file=sys.stderr)
+            return 1
         print(f"{svc.name}: already running (tmux attach -t {svc.name})")
         return 0
 
     sock = svc.run / "csub.sock"
     broker_log = svc.host / "logs/broker.log"
-    new_session(
-        svc.name, "broker", f"{shell(BROKER, '--policy', policy, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}"
-    )
+    broker = f"{shell(BROKER, '--policy', policy, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}"
+    new_session(svc.name, "broker", broker, keep=True)
     allow = ["github.com", "api.github.com", temporal.host]
     if (service := getattr(cfg, "service", None)) and (host := urlparse(service.url).hostname):
         allow.append(host)  # every worker with a `service` block writes the registry (mia-data's dataset rows too)
@@ -437,7 +483,15 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
         "env", *(f"{key}={value}" for key, value in svc.env().items()), "CSUB_TRANSPORT=unix", f"CSUB_SOCKET={sock}",
         f"{svc.app.proxy_env}=1", PY, "-m", svc.app.module, "worker",
     )  # fmt: skip
-    new_window(svc.name, "worker", f"cd {shell(svc.state)} && {worker}; read -p 'worker exited; press enter'")
+    since = time.time()
+    new_window(svc.name, "worker", f"cd {shell(svc.state)} && {worker}")
     subprocess.run(schedule, env=env, check=True)
+    if not worker_started(svc, since):
+        dead = dead_windows(svc.name)
+        what = f"its {', '.join(dead)} exited" if dead else f"its worker has not polled Temporal in {WORKER_START_S} s"
+        print(f"{svc.name}: NOT RUNNING: {what}. Its last lines:", file=sys.stderr)
+        print(last_lines(svc.name, dead[0] if dead else "worker"), file=sys.stderr)
+        print(f"{svc.name}: see `mia attach {svc.name}` and `mia logs {svc.name}`", file=sys.stderr)
+        return 1
     print(f"{svc.name}: started (attach: mia attach {svc.name}; logs: mia logs {svc.name} -f)")
     return 0
