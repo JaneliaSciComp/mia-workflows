@@ -111,10 +111,10 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .md h3,.md h4,.md h5,.md h6{font-size:13.5px;margin-top:6px}
 .md .tablewrap{width:max-content;max-width:100%}
 
-/* filters: one row above everything, wraps on narrow screens; a <details> so the row folds to its summary line.
-   It sticks at the offset it already has at the top of the page (topbar plus the 14px gap), so scrolling never moves it;
-   the box-shadow fills that gap in the page colour while the content scrolls under. */
-.filterbox{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:8px 14px 12px;margin-bottom:10px;
+/* filters: one row above the plan, wraps on narrow screens; a <details> so the row folds to its summary line.
+   It sticks 14px under the topbar. The box-shadow fills that gap in the page colour while the content scrolls under,
+   and the top margin is as tall as the shadow, so at rest the shadow covers nothing above the box. */
+.filterbox{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:8px 14px 12px;margin:14px 0 10px;
   position:sticky;top:calc(var(--topbar-h,0px) + 14px);z-index:5;box-shadow:0 -14px 0 var(--bg)}
 .filterbox:not([open]){padding-bottom:8px}
 .filterbox summary{cursor:pointer;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);user-select:none;width:max-content}
