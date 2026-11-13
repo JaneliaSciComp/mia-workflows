@@ -859,6 +859,11 @@ def test_meta_route(tmp_path):
         "roots": {},
         "quota": {},
         "keeper": {},
+        "lines": {
+            "dataset": ["new", "matching", "developing", "testing", "review", "merging", "done"],
+            "buffer": ["new", "planning", "plan-review", "sourcing", "staged", "ready", "idle", "retired"],
+            "prep": ["new", "requested", "done"],
+        },
     }
     from mia_buffers.api import page_meta
 

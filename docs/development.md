@@ -705,6 +705,9 @@ Each tab is one kind of thing, and each thing has one page:
   its controls are a spec, run through `POST /plan` with `page` (debounced 300 ms) for the funnel, the charts and
   one page of the plan's rows. A spec's page (`#specs/<name>`) has its buttons, its timeline and its buffers; a
   buffer's page reads `/buffers/<id>/status`, `/events`, `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
+- **A lifecycle** tops the page of a dataset, a spec, a request and a buffer: the kind's stages as boxes and arrows
+  with the current one filled. The stages are `lines` of `/meta`, which is each stage table in its own order
+  without `needs-human` and `cancelled`; those two hang under the step the round stopped at.
 - **Cache** reads `/assets/raw|staged`, `/locks`, `/keeper` and the quotas from `/meta`.
 - **Decisions** reads `/decisions` (newest first, by gate, with the judge/human agreement); a human approve that a
   later reject overrules is marked by the server.

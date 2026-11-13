@@ -81,6 +81,9 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
 # kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
 SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
+OFF_LINE = ("needs-human", "cancelled")  # where a round can end from any step: not steps of a lifecycle themselves
+# kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
+LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
 NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
@@ -1659,7 +1662,7 @@ class BufferService:
             "datasets_workflow_url",
             "gallery_branch",
         )
-        return 200, {**dict.fromkeys(names), "roots": {}, "quota": {}, "keeper": {}}, {}
+        return 200, {**dict.fromkeys(names), "roots": {}, "quota": {}, "keeper": {}, "lines": LINES}, {}
 
     def _usage(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         config = self._config(buffer)
@@ -1808,7 +1811,7 @@ def backup_forever(ledger: Ledger, directory: Path, minutes: int, stop: threadin
 def page_meta(cfg: Config) -> dict:
     """What the page reads from mia.yaml (`GET /meta`): the repos, the service URL, the Temporal UI prefix of a
     dataset's workflow (append the issue number; None without `temporal.ui_url`), each root's browser URL (None when
-    unset), the quota and the keeper's cadence."""
+    unset), the quota, the keeper's cadence and each kind's lifecycle line."""
     github, paths, ui_url = cfg.github, cfg.paths, cfg.temporal.ui_url
     # ponytail: mia-data's namespace is its default; read services.mia-data.temporal.namespace when a deployment renames it
     workflow_prefix = quote(f"mia-data/{github.datasets_repo}/issue-", safe="")
@@ -1826,6 +1829,7 @@ def page_meta(cfg: Config) -> dict:
         "roots": {root: getattr(paths, f"{root}_url") for root in paths.ROOTS},
         "quota": cfg.quota.model_dump(),
         "keeper": cfg.keeper.model_dump(),
+        "lines": LINES,
     }
 
 

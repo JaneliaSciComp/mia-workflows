@@ -211,6 +211,49 @@ def test_markdown_never_becomes_html_or_a_script_link() -> None:
     )
 
 
+def lifecycle(*calls: list) -> list[str]:
+    """What the page's `lifecycle()` builds for each (line, stage, history), as HTML text."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith(("const el = ", "const BAD = ")))
+    drawer = PAGE[PAGE.index("// ---- a lifecycle as boxes and arrows") : PAGE.index("// ---- buffers")]
+    script = (
+        f"{FAKE_DOM}\n{helpers}\n{drawer}\n"
+        'const calls = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
+        "console.log(JSON.stringify(calls.map(call => html(lifecycle(...call)))));\n"
+    )
+    done = subprocess.run([node, "-e", script], input=json.dumps(calls), capture_output=True, text=True, check=True)
+    return json.loads(done.stdout)
+
+
+def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
+    """The steps before the current one are past, it alone is current; a stage off the line hangs under the step
+    its round stopped at, and stands apart at the end when the history names no step."""
+    line = ["new", "testing", "review", "done"]
+    on, stopped, unknown = lifecycle(
+        [line, "review", []], [line, "needs-human", ["needs-human", "testing", "new"]], [line, "cancelled", [None]]
+    )
+    step = '<span class="step">{}</span>'.format
+    assert on == (
+        '<ol class="flow" aria-label="lifecycle">'
+        f'<li class="past">{step("new")}</li><li class="past">{step("testing")}</li>'
+        f'<li class="now" aria-current="step">{step("review")}</li><li>{step("done")}</li></ol>'
+    )
+    assert stopped == (
+        '<ol class="flow" aria-label="lifecycle">'
+        f'<li class="past">{step("new")}</li>'
+        f'<li class="past">{step("testing")}<span class="step off stuck" aria-current="step">needs-human</span></li>'
+        f"<li>{step('review')}</li><li>{step('done')}</li></ol>"
+    )
+    assert unknown == (
+        '<ol class="flow" aria-label="lifecycle">'
+        + "".join(f"<li>{step(name)}</li>" for name in line)
+        + '<li class="apart"><span class="step off" aria-current="step">cancelled</span></li></ol>'
+    )
+    assert PAGE.count("lifecycle(") == 4  # the function, a subject's page (twice: one never asked of) and a buffer's
+
+
 def test_a_buffer_is_always_planned_first() -> None:
     """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
     assert "Show me the plan first" not in PAGE and "first.checked" not in PAGE

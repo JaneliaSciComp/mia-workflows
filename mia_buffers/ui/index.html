@@ -73,6 +73,22 @@ dialog.ask .mono{overflow-wrap:anywhere;margin-bottom:8px}
 dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0 0;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .specbox{width:100%;max-width:100ch;min-height:16em;font-family:var(--mono);font-size:12.5px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .ticks{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0;font-size:13px}
+/* a lifecycle: a kind's stages as boxes joined by arrows, the current one filled; a stage off the line (needs-human,
+   cancelled) hangs under the step its round stopped at, or stands apart when no step is known */
+.flow{list-style:none;display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 0;padding:0;margin:2px 0 12px;font-size:12.5px}
+.flow li{display:grid;grid-template-columns:auto auto;position:relative}
+.flow li+li::before{content:"";grid-area:1/1;align-self:center;width:18px;height:1px;margin:0 5px;background:var(--axis)}
+.flow li+li::after{content:"";position:absolute;left:16px;top:10px;width:6px;height:6px;border:solid var(--axis);border-width:1px 1px 0 0;transform:rotate(45deg)}
+.flow .step{grid-column:2;height:26px;line-height:24px;padding:0 10px;border:1px solid var(--grid);border-radius:6px;color:var(--muted);text-align:center;white-space:nowrap}
+.flow .past .step{border-color:var(--axis);color:var(--fg2)}
+.flow .now .step{background:var(--accent-soft);border-color:var(--accent);color:var(--fg);font-weight:500}
+.flow .step.off{background:var(--grid);border-color:var(--axis);color:var(--fg);font-weight:500}
+.flow .step.off.stuck{background:var(--warn-soft);border-color:var(--warn)}
+.flow li:not(.apart) .off{grid-row:2;margin-top:14px;position:relative}
+.flow li:not(.apart) .off::before{content:"";position:absolute;left:50%;top:-14px;height:12px;border-left:1px solid var(--axis)}
+.flow li:not(.apart) .off::after{content:"";position:absolute;left:calc(50% - 2.5px);top:-9px;width:6px;height:6px;border:solid var(--axis);border-width:0 1px 1px 0;transform:rotate(45deg)}
+.flow li.apart{margin-left:14px}
+.flow li.apart::before,.flow li.apart::after{content:none}
 .entry{border-top:1px solid var(--grid);padding:8px 0}
 .entry .at{font-size:12px;color:var(--muted);margin-bottom:2px}
 .md{font-size:13.5px;overflow-wrap:anywhere}
@@ -387,7 +403,7 @@ ready:
 
 <h2>Step 2. Plan, then run</h2>
 <p><b>Create buffer</b>, below the filters, shows the spec as YAML, with the catalog commit pinned; edit it there if the controls do not offer what you need. <b>Plan</b> saves the spec under its name and starts a round that stops at its plan, before any job runs.</p>
-<p>The page then opens the spec's own page: its stage, what it is waiting for, the buttons its stage accepts, and its timeline. The plan is a timeline entry that lists the pool, one row per dataset, with weights. <b>Run</b> starts the jobs. To change the spec instead, edit the YAML under <i>Edit and plan again</i> and press <b>Plan</b>: a new round plans the edited text.</p>
+<p>The page then opens the spec's own page: its lifecycle with the current stage marked, what it is waiting for, the buttons its stage accepts, and its timeline. The plan is a timeline entry that lists the pool, one row per dataset, with weights. <b>Run</b> starts the jobs. To change the spec instead, edit the YAML under <i>Edit and plan again</i> and press <b>Plan</b>: a new round plans the edited text.</p>
 <div class="tw"><table>
 <tr><th>button</th><th>offered when the spec is</th><th>what it does</th></tr>
 <tr><td><i>Plan</i></td><td>not in a round; or waiting at a gate</td><td>Saves the spec text and starts a round that stops at its plan. Each round builds a buffer with a new id. A buffer that is already serving keeps serving the training jobs connected to it; a staged buffer nobody approved is retired.</td></tr>
@@ -1764,6 +1780,21 @@ function datasetCards(d) {
   return cards;
 }
 
+// ---- a lifecycle as boxes and arrows: a kind's stages in order (`lines` of GET /meta), the current one filled.
+// It shows where on the line the object is, not the path its round took: a round can skip a step or return to one.
+// A stage off the line (needs-human, cancelled) hangs under the step the round stopped at, which is the newest
+// stage of `history` (newest first) that is on the line; with none, it stands apart at the end.
+function lifecycle(line, stage, history) {
+  if (!line || !stage) return null;
+  const off = !line.includes(stage), at = line.indexOf(off ? (history || []).find(s => line.includes(s)) : stage);
+  const hung = el("span", { class: "step off" + (BAD.has(stage) ? " stuck" : ""), "aria-current": "step" }, stage);
+  const flow = el("ol", { class: "flow", "aria-label": "lifecycle" });
+  line.forEach((name, i) => flow.append(el("li", { class: i < at || (off && i === at) ? "past" : i === at ? "now" : null, "aria-current": i === at && !off ? "step" : null },
+    el("span", { class: "step" }, name), off && i === at ? hung : null)));
+  if (off && at < 0) flow.append(el("li", { class: "apart" }, hung));
+  return flow;
+}
+
 // ---- buffers
 function servableText(servable) { const e = Object.entries(servable || {}); return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none"; }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
@@ -1840,6 +1871,7 @@ async function viewBuffer(root, id, refresh) {
   root.replaceChildren(...[  // filtered: a native replaceChildren would print a null as "null"
     el("p", {}, el("a", { href: "#buffers" }, "← all buffers")),
     el("h2", {}, id, " ", evs[0] ? statePill(stageOf(evs[0])) : null),
+    lifecycle(meta.lines?.buffer.slice(1), stageOf(evs[0]), evs.map(stageOf)),  // a buffer starts at its plan: `new` is its spec's
     el("div", { class: "links" },
       spec ? el("span", {}, "spec ", el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.key), " ", ghIcon(meta.buffers_repo, spec.issue)) : null,
       ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),
@@ -2135,7 +2167,7 @@ function undelivered(subject, actions, after) {  // an action that did not reach
   return box;
 }
 function subjectFacts(subject, run, entries) {
-  const facts = el("div", { class: "facts" }, statePill(subject.status), el("span", {}, "stage ", el("b", {}, subject.stage)));
+  const facts = el("div", { class: "facts" }, statePill(subject.status));
   const wants = subject.actions.filter(a => a !== "cancel" && a !== "stop");
   if (subject.status === "waiting" && wants.length) facts.append(el("span", {}, "waiting on you: " + wants.join(", ")));
   if (run) facts.append(el("span", {}, "workflow " + (run.status || "never ran").toLowerCase()));
@@ -2199,7 +2231,8 @@ async function viewSubject(kind, key, refresh) {
   if (!subject) {  // nothing was ever asked of it on this page: the first Prepare creates it
     const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again };
     const missing = kind === "dataset" ? (detail ? null : "No dataset with this id in the newest catalog or the registry.") : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
-    root.replaceChildren(el("h2", {}, key), el("div", { class: "facts" }, statePill(detail ? detail.row.state : "not started")), actionBar(fresh), missing ? el("div", { class: "empty" }, missing) : "", ...about);
+    root.replaceChildren(...[el("h2", {}, key), missing ? null : lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new"), el("div", { class: "facts" }, statePill(detail ? detail.row.state : "not started")), actionBar(fresh),
+      missing ? el("div", { class: "empty" }, missing) : null, ...about].filter(Boolean));
     return;
   }
   shownSubject.number = subject.number;
@@ -2207,7 +2240,8 @@ async function viewSubject(kind, key, refresh) {
   const [timeline, run, extras] = await Promise.all([load(`/timeline/${kind}/${subject.number}`), api(`/run/${kind}/${subject.number}`).catch(() => null), kind === "buffer" ? specControls(subject) : null]);
   if (location.hash !== hash || turn !== subjectTurn) return;
   const entries = timeline?.entries || [];
-  const parts = [el("h2", {}, key), subjectFacts(subject, run, entries)];
+  const flow = lifecycle(S.meta.lines?.[kind], subject.stage, [...entries].reverse().map(e => e.stage));
+  const parts = [el("h2", {}, key), ...(flow ? [flow] : []), subjectFacts(subject, run, entries)];
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
   if (subject.status === "working" && run && run.status !== "RUNNING") parts.push(el("div", { class: "notice" }, `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`));
   parts.push(actionBar(subject, null, kind === "buffer" ? ["go", "revoke"] : []), undelivered(subject, timeline?.actions || []));
