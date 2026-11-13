@@ -1568,15 +1568,12 @@ function prepareButton(container, all, blocker, done, again, text) {  // `text`:
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }), onclick: async e => {
     if (checking) return;
-    // the button says what a click starts; it asks only about what the button does not say: prepared datasets
-    // that get a new round, or more datasets than a request takes without its count written in
-    if ((again || todo.length > 25) && !confirm(`Start preparing ${plural(todo.length, "dataset")}?${again ? ` ${again} of them ${again === 1 ? "is" : "are"} prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
     checking = true;
     askHosts({ records: todo }, hosts => start(e.target, hosts)).finally(() => { checking = false; });
   } }, label));
   async function start(button, hosts) {
     button.disabled = true;
-    // more than 25 records need the count written into the request: the confirmation above is that
+    // more than 25 records need the count written into the request: the button's label names it
     const yaml = toPrepYaml(todo, S.ref, S.meta.catalog_repo) + (again == null ? "" : "again: true\n") + (todo.length > 25 ? `max_records: ${todo.length}\n` : "");
     try {
       const action = await api("/prep", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: yaml, key: newKey(), ...(hosts.length ? { approve_hosts: hosts } : {}) }) });
