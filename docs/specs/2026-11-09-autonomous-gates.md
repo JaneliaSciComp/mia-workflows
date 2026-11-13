@@ -10,7 +10,7 @@ judges run in **shadow mode** against an evaluation set before they get authorit
 measurements are diagnostics, not rules, and the crop set must cover every array (§4.2); the judge infers no
 metadata (§4.2); what each gate proves is named (§2). What was rejected from the review, and why, is §13.
 Written from the current code on `main` (2e50442) and the four specs it implements
-([crops](../mia-crops-spec.md), [training buffers](2026-10-21-training-buffers.md),
+([crops](2026-10-12-mia-crops.md), [training buffers](2026-10-21-training-buffers.md),
 [prep and buffering](2026-10-25-prep-and-buffering.md) §13–§15,
 [sparse staging](2026-11-01-sparse-ome-zarr-0.6-staging.md)). It changes **who decides** at each gate; it does
 not change what the pipelines produce. Calls marked *my call* were made without the user and are listed again

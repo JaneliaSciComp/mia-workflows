@@ -76,4 +76,5 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 
 Descriptive names (no single-letter attributes), a plain-language line on each module, class and non-obvious
 method, type hints on object parameters, line length 120. Mark deliberate shortcuts with a `# ponytail:` comment
-naming the ceiling and the upgrade path.
+naming the ceiling and the upgrade path. Comments and docs say what the code does, never what it replaced or how
+it once worked; dated specs and plans are the record of that.

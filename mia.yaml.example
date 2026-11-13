@@ -7,7 +7,7 @@
 # `pixi run mia` runs each service as one tmux session named after it: a csub broker and a sandboxed worker.
 #
 # Three sections bound three scopes. `limits` is per job: what one csub job may read, write and run for. `quota` is
-# per disk root: how much the shared caches may hold. `autonomy` is per request: what every job of one issue adds up
+# per disk root: how much the shared caches may hold. `autonomy` is per request: what every job of one request adds up
 # to, plus the operator's switches. A number that is per job goes in limits, per root in quota, per request in
 # autonomy.
 
@@ -44,7 +44,7 @@ github:
 # Where things live. `state_root/<service>` is each service's state_dir: trusted, never mounted into jobs, a shared
 # fs is fine. `local_root` must be host-local disk (refused on a network fs): locks/ and buffer-api's service/
 # state. The other roots are a path, or {path, url} with the Fileglancer (or other browser) URL of that folder, so
-# issue comments can link the round's workspace and the dataset's crops. `work_root`: job workspaces and
+# timeline entries can link the round's workspace and the dataset's crops. `work_root`: job workspaces and
 # snapshots, inside the csub policy's allowed_roots. `storage_root`: published crops; mia-buffers reads each
 # dataset's binding.yaml there. `raw_root`: the shared raw cache, raw_root/<record id>/, where humans drop files
 # under incoming/; defaults to <work_root>/_cache. `staged_root`: one NGFF pyramid per volume,
@@ -113,7 +113,7 @@ keeper:
 # The judge (autonomous-gates spec §4, §9): a read-only Claude Code job that looks at the evidence of a gate (crop
 # galleries, a PR diff) and answers approve / reject / escalate. A `model` other than the authors' agent.model is a
 # precaution, not a rule.
-# Each gate has a mode: `off` (today), `shadow` (the verdict is recorded beside the human label and decides
+# Each gate has a mode: `off` (no judge runs), `shadow` (the verdict is recorded beside the person's and decides
 # nothing; the Decisions tab shows the agreement), `active` (the verdict authorizes). A gate goes active only after
 # its shadow numbers say so. `min_confidence`: under it the judge abstains and a human decides.
 judge:
@@ -126,8 +126,8 @@ judge:
 
 # Per request, and the operator's switches (autonomous-gates spec). `pause`: `mia pause` and `mia resume` flip it;
 # every worker re-reads it before each job and a paused round stops at its next job. `quarantine_days`: a revoked
-# artifact is held this long before the keeper may evict it. `root`: what one request (a buffer, prep or dataset
-# issue, including the dataset issues it opens) may spend in all. A request busy for `max_days` straight is
+# artifact is held this long before the keeper may evict it. `root`: what one request (a buffer spec, a preparation
+# request or a dataset, including the dataset rounds it starts) may spend in all. A request busy for `max_days` straight is
 # stopped; one idle that long starts a fresh budget. The concurrency cap makes a job wait; the others end the work.
 autonomy:
   pause: false
@@ -181,8 +181,8 @@ services:
       base_branch: main
       protected_paths: [".github/"]
 
-  # mia-data: dataset to published crops. `data_repo` receives one issue per dataset, a read-only log the system
-  # writes (datasets are started and steered from the buffers page). `crops`: the round's set
+  # mia-data: dataset to published crops. `data_repo` receives one issue per dataset, a copy of its timeline that the
+  # system writes and nothing reads (datasets are started and steered from the buffers page). `crops`: the round's set
   # (`per_round`, reviewed and, approved, published), the hand-run `test-pr` command's `test_per_round`, and how
   # many crops per plane and per file. `gallery.branch` receives the crop galleries. `agent` is the match agent:
   # its walltime is limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not
@@ -207,7 +207,7 @@ services:
     # evaluate: {enabled: false}
 
   # mia-buffers: training buffers. `buffers_repo` receives one issue per buffer spec and per preparation request,
-  # a read-only log (they are created and run on the page); `datasets_repo` is mia-data's issue repo.
+  # a copy of its timeline (they are created and run on the page); `datasets_repo` is mia-data's issue repo.
   # `sourcing`: stage jobs (`parallel`) and fetch jobs (`parallel_fetch`) in flight per buffer, the tensorizer under
   # <harness.dir>/tensorizers/, and the frozen val and test list lengths.
   mia-buffers:

@@ -42,7 +42,7 @@ withdraws a published dataset later: nothing is deleted, the buffers that drew f
 verdict is recorded beside the human's and decides nothing, and the buffers page's Decisions tab shows how often
 they agree; a gate goes active only on those numbers. Every stage is an entry
 in the dataset's timeline, with links to the folders involved. The whole flow, with a diagram and the component for each
-step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/mia-crops-spec.md`](docs/mia-crops-spec.md).
+step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/specs/2026-10-12-mia-crops.md`](docs/specs/2026-10-12-mia-crops.md).
 
 ## mia-buffers
 
