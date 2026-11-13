@@ -78,7 +78,8 @@ def test_log_tail_reads_claude_and_job_stderr(tmp_path):
 
 
 class FakeCsub:
-    def __init__(self, states=("DONE",), existing=(), error=None):
+    def __init__(self, states=("DONE",), existing=(), error=None, policy_hosts=()):
+        self.policy_hosts = list(policy_hosts)
         self.submitted, self.states, self.existing, self.error = [], list(states), list(existing), error
         self.killed = []
 
@@ -88,6 +89,9 @@ class FakeCsub:
         JobSpec.from_dict(spec)
         self.submitted.append(spec)
         return SimpleNamespace(job_id="777", walltime_min=spec["walltime_min"])
+
+    def probe(self):
+        return SimpleNamespace(allowed_hosts=list(self.policy_hosts))
 
     def kill(self, job_ids=None):
         self.killed.extend(job_ids or [])
@@ -130,6 +134,21 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     assert spec["agent"] == "claude" and spec["shell"] is True and spec["cwd"] == ws.dir
     assert spec["mounts"] == [{"path": ws.dir, "mode": "rw"}, {"path": "/tools", "mode": "ro"}]
     assert spec["allow_hosts"] == ["pypi.org"] and spec["name"] == "autodev-7-r1" and "env" not in spec
+
+
+async def test_an_agent_job_names_its_configured_hosts_then_the_policys(tmp_path):
+    policy = ["pypi.org", "zenodo.org", "*.huggingface.co", "github.com", "data.4tu.nl"]
+    fake = FakeCsub(policy_hosts=policy)
+    j = _jobs(tmp_path, fake, allow_hosts=["pypi.org"])
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "zenodo.org", "data.4tu.nl"]
+
+
+async def test_past_the_cap_the_newest_policy_hosts_are_kept(tmp_path):
+    fake = FakeCsub(policy_hosts=[f"h{n}" for n in range(70)])
+    j = _jobs(tmp_path, fake, allow_hosts=["pypi.org", "files.pythonhosted.org"])
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "files.pythonhosted.org"] + [f"h{n}" for n in range(8, 70)]
 
 
 async def test_submit_reuses_job_found_by_name(tmp_path):

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from mia_core.judge.evidence import command as judge_command
 
 from . import jobs
+from .config import is_github_host
 from .jobs import read_untrusted
 from .models import JobOutcome, JobRef, Workspace, check_key
 
@@ -152,6 +153,20 @@ def csub_client(cfg: Config) -> Any:
     return jobs.csub_client(cfg.deployment)
 
 
+# ponytail: csub refuses more than 64 hosts on a job, so the oldest policy hosts drop first; upgrade is a per-issue
+# host list or a higher limit in csub.
+MAX_JOB_HOSTS = 64
+
+
+def agent_hosts(configured: list[str], policy_hosts: list[str]) -> list[str]:
+    """The configured hosts, then the exact hosts the broker's policy allows (never patterns or GitHub hosts),
+    without repeats; past MAX_JOB_HOSTS the oldest policy hosts are dropped and configured hosts stay."""
+    usable = [host for host in policy_hosts if "*" not in host and not is_github_host(host)]
+    hosts = list(dict.fromkeys(configured))
+    extra = [host for host in dict.fromkeys(usable) if host not in hosts]
+    return hosts + extra[max(0, len(hosts) + len(extra) - MAX_JOB_HOSTS) :]
+
+
 class AgentJobs:
     """Submits and waits on agent jobs for one deployment, keyed by (issue, key, round)."""
 
@@ -171,6 +186,8 @@ class AgentJobs:
         """Submit once per (issue, key, round); a retry returns the same job."""
         agent_cfg = self.cfg.agent
         job_key = f"issue-{issue}-{check_key(key)}-r{round_number}"
+        policy_hosts = (await asyncio.to_thread(self.jobs.client.probe)).allowed_hosts
+        allow_hosts = agent_hosts(agent_cfg.allow_hosts, policy_hosts)
 
         def build_spec() -> jobs.JobSpec:  # built lazily: the API key env var is read only when no id file exists
             return jobs.JobSpec(
@@ -180,7 +197,7 @@ class AgentJobs:
                 walltime_min=agent_cfg.walltime_min,
                 cpus=agent_cfg.cpus,
                 mem_mb=agent_cfg.mem_mb,
-                allow_hosts=list(agent_cfg.allow_hosts),
+                allow_hosts=allow_hosts,
                 agent="claude",
                 ro_mounts=[mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts],  # Config guarantees ":ro"
                 env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
