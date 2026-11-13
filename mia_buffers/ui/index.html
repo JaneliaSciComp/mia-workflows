@@ -1202,6 +1202,7 @@ const PLAN_DEBOUNCE_MS = 300;
 const $ = id => document.getElementById(id);
 const fmt = n => n >= 1e6 ? (n/1e6).toFixed(n>=1e7?0:1)+"M" : n >= 1e3 ? (n/1e3).toFixed(n>=1e4?0:1)+"K" : String(n);
 const num = n => n == null || n === "" ? "" : Number(n).toLocaleString();
+const plural = (n, one) => `${num(n)} ${Number(n) === 1 ? one : one + "s"}`;  // "1 dataset", "2 datasets"
 const fmtBytes = b => { b = Number(b) || 0; for (const [s, u] of [[1e12,"TB"],[1e9,"GB"],[1e6,"MB"],[1e3,"KB"]]) if (b >= s) return (b/s).toFixed(1)+" "+u; return b+" B"; };
 const short = (s, n) => s ? String(s).slice(0, n || 8) : "";
 const pct = x => (x * 100).toFixed(x && x < 0.001 ? 3 : 1) + "%";
@@ -1226,7 +1227,7 @@ const PILL_HELP = {
   "licence not allowed": "The record's licence is not in the spec's licence allowlist.",
   "annotations required": "The spec requires annotations and the record has none.",
   "annotation types": "The record's annotation types (masks, boxes, points, …) are not among those the spec asks for.",
-  "annotation source": "The record's annotation source (manual, model, …) is not among those the spec asks for.",
+  "annotation source": "The record's annotation source (manual, proofread, automatic, …) is not among those the spec asks for.",
   "array below minimum": "The record's largest array has fewer voxels than the spec's where.min_size_voxels.",
   "no mia-data folder": "The record does not name exactly one modality family and one organism, which is how a prepared dataset's folder is named, so the preparation pipeline cannot place it.",
   "duplicate DOI": "Another record with the same DOI is already in the pool; dedup keeps the first.",
@@ -1351,7 +1352,7 @@ function hoverable(node, lines) { node.addEventListener("pointerenter", e => sho
 // ---- horizontal bars (the explorer's: single series, sequential hue)
 function barPath(x, y, w, h, r) { if (w <= r) return `M${x} ${y}h${w}v${h}h${-w}z`; return `M${x} ${y}h${w-r}a${r} ${r} 0 0 1 ${r} ${r}v${h-2*r}a${r} ${r} 0 0 1 ${-r} ${r}h${-(w-r)}z`; }
 function hbars(container, items, opts) {
-  if (!items.length) { container.replaceChildren(el("div", { class: "empty" }, opts.empty || "nothing to show")); return; }
+  if (!items.length) { container.replaceChildren(el("div", { class: "empty" }, opts.empty || "Nothing to show.")); return; }
   const W = 560, labelW = opts.labelW || 170, rowH = 26, barH = 16, pad = 8;
   const H = items.length * rowH + pad * 2;
   const max = Math.max(1e-12, ...items.map(i => i.value));
@@ -1382,7 +1383,7 @@ const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) },
 const cropPng = (d, id, name) => `/crops/${encodeURIComponent(d.folder)}/${encodeURIComponent(id)}/${name}.png`;
 const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src = cropPng(d, d.previews[0], "overlay");
   return tipOn(el("a", { href: src, target: "_blank", rel: "noopener" }, el("img", { class: "thumb", src, loading: "lazy", alt: "crop overlay" })),
-    [{ t: `${num(d.crops || d.previews.length)} crops published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
+    [{ t: `${plural(d.crops || d.previews.length, "crop")} published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
 // a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
 const folderLink = (root, folder, text, title) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, text || "files", title) : "";
 // how every table names a dataset: its id links to its page; its GitHub issue (a read-only log) is a small mark
@@ -1561,11 +1562,11 @@ function prepareButton(container, all, blocker, done, again, text) {  // `text`:
   // a request takes at most PREP_MAX datasets: a longer list is prepared in parts, the first PREP_MAX now
   const todo = all.slice(0, PREP_MAX), why = blocker;
   let checking = false;  // a click while the host check or its dialog is open starts nothing
-  const label = all.length > PREP_MAX ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets` : text || `Prepare these ${num(todo.length)} datasets`;
+  const label = all.length > PREP_MAX ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets` : text || (todo.length === 1 ? "Prepare this dataset" : `Prepare these ${num(todo.length)} datasets`);
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }), onclick: async e => {
     if (checking) return;
-    if (!confirm(`Start preparing ${todo.length} datasets?${again ? ` ${again} of them are prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
+    if (!confirm(`Start preparing ${plural(todo.length, "dataset")}?${again ? ` ${again} of them ${again === 1 ? "is" : "are"} prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
     checking = true;
     askHosts({ records: todo }, hosts => start(e.target, hosts)).finally(() => { checking = false; });
   } }, label));
@@ -1681,10 +1682,10 @@ function renderDesigner() {  // the numbers over the whole plan, as the server s
   renderPlanMessages();
   const plan = S.plan, m = plan?.summary || {}, dims = m.dims || [];
   $("kpis").replaceChildren(
-    tile("Datasets that fit", plan ? num(m.fitting) : "—", plan ? `of ${num(plan.n_seen)} records seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
+    tile("Datasets that fit", plan ? num(m.fitting) : "—", plan ? `of ${plural(plan.n_seen, "record")} seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
     tile("Prepared", num(m.prepared || 0), "the buffer's pool today"),
     tile("In progress", num(m.in_progress || 0), "mia-data is preparing them"),
-    tile("Unprepared", num(m.unprepared || 0), `${num(m.needs_human || 0)} need a human`),
+    tile("Unprepared", num(m.unprepared || 0), `${num(m.needs_human || 0)} ${m.needs_human === 1 ? "needs" : "need"} a human`),
     tile("Raw bytes", `${fmtBytes(m.bytes_pool || 0)} / ${fmtBytes(m.bytes_fitting || 0)}`, `the prepared pool now / every fitting dataset; ${fmtBytes(m.bytes_to_fetch || 0)} not in the raw cache`),
     tile("Dimensionalities", dims.length ? dims.join(" · ") : "none", dims.length > 1 ? "one buffer serves one: narrow dims" : "one buffer, one model", "text"),
     tile("Capacity", fmt(m.capacity || 0), "non-overlapping coarsest crops in the fitting datasets"),
@@ -1693,10 +1694,10 @@ function renderDesigner() {  // the numbers over the whole plan, as the server s
   const steps = (m.funnel || []).map(step => ({ label: step.label, value: step.value, sub: step.remaining == null ? undefined : `${num(step.remaining)} remain after this rule`,
     color: step.label === NOT_PREPARED ? "var(--s4)" : step.remaining == null ? "var(--s3)" : "var(--accent)" }));
   hbars($("funnel"), steps, { labelW: 165, aria: "Records removed per rule", empty: S.planError ? "no plan: see the message above the actions" : "planning…" });
-  hbars($("bymod"), m.by_modality || [], { labelW: 140, aria: "Fitting datasets by modality", empty: "no dataset fits this spec" });
-  hbars($("byweight"), (m.weight_by_modality || []).map(bar => ({ ...bar, text: pct(bar.value) })), { labelW: 140, aria: "Weight share by modality", empty: "no prepared dataset in the pool yet: weights cover prepared datasets only" });
+  hbars($("bymod"), m.by_modality || [], { labelW: 140, aria: "Fitting datasets by modality", empty: "No dataset fits this spec." });
+  hbars($("byweight"), (m.weight_by_modality || []).map(bar => ({ ...bar, text: pct(bar.value) })), { labelW: 140, aria: "Weight share by modality", empty: "No prepared dataset in the pool yet: weights cover prepared datasets only." });
   const heavy = m.heaviest || [];
-  $("top").replaceChildren(...(heavy.length ? heavy.map(x => el("li", {}, el("b", {}, pct(x.weight || 0)), el("span", { title: x.id }, `${x.id} · ${x.modality_group || "none"} · ${fmt(x.positions || 0)} positions · ${x.channels ?? "?"} ch`))) : [el("li", { class: "empty" }, "no prepared dataset in the pool yet")]));
+  $("top").replaceChildren(...(heavy.length ? heavy.map(x => el("li", {}, el("b", {}, pct(x.weight || 0)), el("span", { title: x.id }, `${x.id} · ${x.modality_group || "none"} · ${fmt(x.positions || 0)} positions · ${x.channels ?? "?"} ch`))) : [el("li", { class: "empty" }, "No prepared dataset in the pool yet.")]));
   renderActions();
 }
 function viewDesigner() {
@@ -1745,7 +1746,7 @@ function viewDatasetList(arg, params) {
   const showChosen = () => {
     box.hidden = !CHOSEN.size;
     if (!CHOSEN.size) return;
-    count.textContent = `${num(CHOSEN.size)} ${CHOSEN.size === 1 ? "dataset" : "datasets"} selected`;
+    count.textContent = `${plural(CHOSEN.size, "dataset")} selected`;
     prepareButton(prepare, [...CHOSEN], null, sent => sent.forEach(id => { CHOSEN.delete(id); SETTLED.delete(id); }), SETTLED.size, "Prepare");
   };
   const ticked = (row, on) => { if (on && !PREPARABLE(row)) SETTLED.add(row.id); else SETTLED.delete(row.id); showChosen(); };
@@ -1871,11 +1872,11 @@ function viewBuffers(id, refresh) {
       { key: "key", label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.key) },
       { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
       { key: "status", label: "stage", cell: x => stagePill(x.stage) },
-      { label: "waits for", cell: x => x.status === "waiting" || x.status === "stuck" ? x.actions.filter(a => a !== "stop" && a !== "cancel").join(", ") : "" },
+      { label: "waits for", cell: x => x.status === "waiting" || x.status === "stuck" ? x.actions.filter(a => a !== "stop" && a !== "cancel").map(a => actionWord(x, a)).join(", ") : "" },
       { key: "updated", label: "updated", cell: x => when(x.updated) },
     ] })),
     card("Buffers", "One row per buffer a run built, the newest spec first and its newest round first; an older round is superseded by the newest. Open one for its events, pool, volumes, consumers and usage.",
-      pagedTable("buffers", { source: pageOf("/buffers", "buffers"), empty: "No buffers yet: start with New buffer.",
+      pagedTable("buffers", { source: pageOf("/buffers", "buffers"), empty: "No buffer yet: start with New buffer.",
         rowAttrs: b => ({ class: "click" + (b.superseded_by ? " superseded" : ""), title: b.superseded_by ? `superseded by ${b.superseded_by}, its spec's newest round` : "",
           onclick: e => { if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id); } }),
         cols: [
@@ -1886,12 +1887,12 @@ function viewBuffers(id, refresh) {
           { key: "volumes", label: "volumes", num: true, cell: b => num(b.volumes) },
           { key: "missing", label: "missing", num: true, cell: b => b.missing ? pill(num(b.missing), "warn", [{ b: "missing", t: PILL_HELP.missing + " These are volumes registered to the buffer whose pyramid the last scan did not find." }]) : "0" },
           { label: "servable", cell: b => servableText(b.servable) },
-          { key: "consumers_seen", label: "consumer seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
+          { key: "consumers_seen", label: "consumer last seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
           { key: "draws_today", label: "draws today", num: true, cell: b => num(b.draws_today) },
         ] })));
 }
 function sparkline(days) {
-  if (!days.length) return el("div", { class: "empty" }, "no draws recorded yet");
+  if (!days.length) return el("div", { class: "empty" }, "No draw recorded yet.");
   const W = 560, H = 130, left = 40, right = 8, top = 10, bottom = 22, plotW = W - left - right, plotH = H - top - bottom;
   const max = Math.max(1, ...days.map(d => Math.max(d.draws || 0, d.empty || 0)));
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Crops drawn per day, and requests answered empty per day" });
@@ -1903,7 +1904,7 @@ function sparkline(days) {
     svg.append(svgEl("rect", { x, y: top + plotH - h, width: bw, height: h, fill: "var(--accent)", rx: 2 }));
     if (d.empty) svg.append(svgEl("rect", { x: x + bw / 2 - 1, y: top + plotH - he, width: 2, height: he, fill: "var(--warn)" }));
     const hit = svgEl("rect", { x: left + slot * i, y: top, width: slot, height: plotH + bottom, fill: "transparent" }); svg.append(hit);
-    hoverable(hit, [{ b: d.day, t: "" }, { k: "var(--accent)", b: num(d.draws || 0), t: " crops drawn" }, { k: "var(--warn)", b: num(d.empty || 0), t: " requests answered empty" }, { t: `${num(d.consumers || 0)} consumers` }]);
+    hoverable(hit, [{ b: d.day, t: "" }, { k: "var(--accent)", b: num(d.draws || 0), t: " crops drawn" }, { k: "var(--warn)", b: num(d.empty || 0), t: d.empty === 1 ? " request answered empty" : " requests answered empty" }, { t: plural(d.consumers || 0, "consumer") }]);
   });
   for (const [i, anchor] of [[0, "start"], [days.length - 1, "end"]]) { const l = svgEl("text", { x: i ? W - right : left, y: H - 6, "text-anchor": anchor, class: "tick" }); l.textContent = days[i].day; svg.append(l); }
   return el("div", {}, el("div", { class: "legend" }, el("span", {}, el("i", { style: "background:var(--accent)" }), "crops drawn"), el("span", {}, el("i", { style: "background:var(--warn)" }), "requests answered empty (204)")), svg);
@@ -1913,7 +1914,7 @@ function healthLine(usage) {
   const h = usage.last_hour || {}, total = (h.requests ?? h.draws ?? 0) + (h.empty || 0), limit = usage.max_empty_fraction ?? 0.05;
   if (!total) return el("div", { class: "health" }, `no requests in the last hour (degraded above ${pct(limit)} empty)`);
   const frac = (h.empty || 0) / total, bad = frac > limit;
-  return el("div", { class: "health " + (bad ? "bad" : "ok") }, `${bad ? "degraded" : "healthy"}: ${pct(frac)} of the last hour's ${num(total)} requests were empty (limit ${pct(limit)})`);
+  return el("div", { class: "health " + (bad ? "bad" : "ok") }, `${bad ? "degraded" : "healthy"}: ${pct(frac)} of the last hour's ${plural(total, "request")} ${total === 1 ? "was" : "were"} empty (limit ${pct(limit)})`);
 }
 async function viewBuffer(root, id, refresh) {
   const hash = location.hash, e = encodeURIComponent(id);
@@ -1943,8 +1944,8 @@ async function viewBuffer(root, id, refresh) {
     !status && evs.length ? el("div", { class: "notice" }, "Not sourced yet: a buffer is registered when sourcing starts, after ", el("b", {}, "Run"), " on its spec's page. Until then it has only its events.") : null,
     !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
     el("section", { class: "grid2" },
-      card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", ...(status ? [healthLine(usage), sparkline(days.slice(-60))] : [el("div", { class: "empty" }, "not sourced yet")]),
-        retired ? pagedTable("buffer-usage:" + id, { source: pageOf(`/usage/${e}`, "days", null, true), search: false, empty: "no usage rows", cols: [
+      card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", ...(status ? [healthLine(usage), sparkline(days.slice(-60))] : [el("div", { class: "empty" }, "Not sourced yet.")]),
+        retired ? pagedTable("buffer-usage:" + id, { source: pageOf(`/usage/${e}`, "days", null, true), search: false, empty: "No usage yet.", cols: [
           { key: "day", label: "day", cell: d => d.day }, { key: "draws", label: "draws", num: true, cell: d => num(d.draws) },
           { key: "consumers", label: "consumers", num: true, cell: d => num(d.consumers) }, { key: "empty", label: "empty", num: true, cell: d => num(d.empty) },
         ] }) : null),
@@ -1955,12 +1956,12 @@ async function viewBuffer(root, id, refresh) {
         ["plan hash", code(cfg.plan_hash, 12)], ["split fractions", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
         ["servable volumes", servableText(status.servable)], ["volumes registered", num(status.volumes)], ["empty answers allowed", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
         (status.quarantined || []).length ? ["quarantined", el("span", { class: "pills" }, assetPill("quarantined"), " " + status.quarantined.join(", "))] : null,
-      ]) : el("div", { class: "empty" }, evs.length ? "not sourced yet" : "the buffer's status did not load"))),
-    card("Events", "What happened to this buffer, newest first.", pagedTable("buffer-events:" + id, { source: pageOf(`/buffers/${e}/events`, "events"), empty: "no events yet", cols: [
+      ]) : el("div", { class: "empty" }, evs.length ? "Not sourced yet." : "The buffer's status did not load."))),
+    card("Events", "What happened to this buffer, newest first.", pagedTable("buffer-events:" + id, { source: pageOf(`/buffers/${e}/events`, "events"), empty: "No event yet.", cols: [
       { key: "seq", label: "#", num: true, cell: x => num(x.seq) }, { key: "kind", label: "event", cell: x => statePill(x.kind) }, { key: "at", label: "when", cell: x => when(x.at) },
       { label: "detail", wrap: true, cell: x => x.detail || "" },
     ] })),
-    status ? card("Dataset pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", pagedTable("buffer-pool:" + id, { source: pageOf(`/buffers/${e}/datasets`, "datasets"), sort: "dataset", empty: "no dataset in the pool yet", cols: [
+    status ? card("Dataset pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", pagedTable("buffer-pool:" + id, { source: pageOf(`/buffers/${e}/datasets`, "datasets"), sort: "dataset", empty: "No dataset in the pool yet.", cols: [
       { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) }, { label: "issue", cell: x => ghIcon(meta.datasets_repo, x.issue) },
       { label: "files", title: "the dataset's published crops", cell: x => folderLink(roots.storage_root, x.folder) },
       { label: "staged", title: "the staged artifact this buffer draws from", cell: x => folderLink(roots.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)) },
@@ -1969,10 +1970,10 @@ async function viewBuffer(root, id, refresh) {
       { key: "job", label: "job", cell: x => x.job ? el("code", {}, x.job) : "" }, { key: "updated", label: "updated", cell: x => when(x.updated_at) },
     ] })) : null,
     status ? el("section", { class: "grid2" },
-      card("Volumes", `${num(status.volumes || 0)} registered, the most drawn from first.`, pagedTable("buffer-volumes:" + id, { source: pageOf(`/buffers/${e}/volumes`, "volumes"), sort: "draws", dir: "desc", empty: "no volume registered", cols: [
+      card("Volumes", `${num(status.volumes || 0)} registered, the most drawn from first.`, pagedTable("buffer-volumes:" + id, { source: pageOf(`/buffers/${e}/volumes`, "volumes"), sort: "draws", dir: "desc", empty: "No volume registered.", cols: [
         { key: "volume", label: "volume", cell: v => el("code", {}, v.id) }, { key: "draws", label: "draws", num: true, cell: v => num(v.draws) }, { key: "missing", label: "", cell: v => v.missing ? pill("missing", "warn") : "" },
       ] })),
-      card("Consumers", "The training jobs registered with this buffer.", pagedTable("buffer-consumers:" + id, { source: pageOf(`/buffers/${e}/consumers`, "consumers"), sort: "last_seen", dir: "desc", search: false, empty: "no consumer has registered", cols: [
+      card("Consumers", "The training jobs registered with this buffer.", pagedTable("buffer-consumers:" + id, { source: pageOf(`/buffers/${e}/consumers`, "consumers"), sort: "last_seen", dir: "desc", search: false, empty: "No consumer has registered.", cols: [
         { key: "name", label: "name", cell: c => c.name }, { key: "host", label: "host", cell: c => c.host }, { label: "pid", num: true, cell: c => String(c.pid ?? "") },
         { key: "rank", label: "rank", num: true, cell: c => c.rank == null ? "" : String(c.rank) }, { key: "split", label: "split", cell: c => c.split },
         { key: "last_seen", label: "last seen", cell: c => when(c.last_seen) }, { label: "", cell: c => c.stale ? pill("stale", "warn") : "" },
@@ -2047,7 +2048,7 @@ async function viewPreparation() {
     card("Datasets", "Where each dataset stands; each count opens the Datasets list filtered to it.", counts));
   const states = (await load("/catalog/datasets?limit=1", true))?.facets?.state || {};
   if (location.hash !== hash) return;
-  counts.replaceChildren(...[["in-progress", "in progress"], ["needs-human", "need a human"], ["prepared", "prepared"], ["revoked", "revoked"], ["unprepared", "not prepared"]]
+  counts.replaceChildren(...[["in-progress", "in progress"], ["needs-human", states["needs-human"] === 1 ? "needs a human" : "need a human"], ["prepared", "prepared"], ["revoked", "revoked"], ["unprepared", "unprepared"]]
     .map(([state, words]) => el("a", { href: "#datasets?state=" + state }, `${num(states[state] || 0)} ${words}`)));
 }
 
@@ -2137,12 +2138,18 @@ const ACTION_HELP = {
 const actionHelp = (subject, action) => { const help = ACTION_HELP[subject.kind]?.[action]; return typeof help === "function" ? help(subject) : help; };
 const ACTION_ORDER = ["approve", "reject", "keep", "go", "revoke", "retire", "cancel", "stop"];
 const ACTION_WORDS = { approve: "Approve", reject: "Reject…", keep: "Keep", go: "Run again", revoke: "Revoke", retire: "Retire", cancel: "Cancel the round", stop: "Force stop" };
+// the word on an action's button; the Buffers list names what a spec waits for by the same words
+const actionWord = (subject, action) => action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
+  : action === "go" && subject.kind === "buffer" ? "Plan" : action === "dropped" ? "Files are in place"  // a spec's own controls
+  : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {
-  revoke: "Revoke what this published? Buffers that drew from it are degraded; nothing is deleted.",
+  revoke: "Revoke this dataset's published crops? Buffers that drew from it are degraded; nothing is deleted.",
   retire: "Retire this buffer? Training jobs reading it are refused and its staged data is released.",
-  cancel: "Cancel the round in progress? Its cluster jobs are killed and the work so far is not kept.",
+  cancel: s => s.kind === "prep" ? "Cancel the request's round in progress? The dataset rounds it started are stopped too."
+    : "Cancel the round in progress? Its cluster jobs are killed and the work so far is not kept.",
   stop: "Force stop? Use it when Cancel gets no answer. The workflow is terminated and the buffers are retired; a cluster job already running is NOT killed, and a request's dataset rounds keep running.",
 };
+const actionConfirm = (subject, action) => { const text = ACTION_CONFIRM[action]; return typeof text === "function" ? text(subject) : text; };
 const UNDELIVERED_AFTER_S = 10;  // an action still pending this long was not delivered: the service died, or the answer was lost
 let shownSubject = null;  // {kind, key, number} of the subject page on screen: what the stream refetches
 let shownView = "";  // the view on screen, so the stream can refresh Needs you
@@ -2248,7 +2255,7 @@ async function askHosts(run, send) {
   all.addEventListener("change", () => { ticks.forEach(tick => { tick.checked = all.checked; }); refresh(); });
   ticks.forEach(tick => tick.addEventListener("change", refresh));
   const rows = missing.map((m, n) => el("label", { class: "row" }, ticks[n], " ", el("span", { class: "mono" }, m.host), " ",
-    el("span", { class: "small", title: m.records.join(", ") }, `${m.records.length} dataset(s)`)));
+    el("span", { class: "small", title: m.records.join(", ") }, `${m.records.length} ${m.records.length === 1 ? "dataset" : "datasets"}`)));
   const box = el("dialog", { class: "ask", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
     el("h2", { id: "askTitle" }, "Hosts to approve"),
     el("p", { class: "small" }, "Jobs of this deployment may download from an approved host from then on."),
@@ -2281,8 +2288,7 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
   if (asked) { clearTimeout(askedTimer); askedTimer = setTimeout(refreshShown, asked.wait_s * 1000 + 300); }
   let checking = false;  // a click while the host check or its dialog is open starts nothing
   for (const action of offered) {
-    const word = action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
-      : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
+    const word = actionWord(subject, action);
     const sending = action === "reject" ? "Rejecting…" : word + "…";  // Reject… already ends in the dots of "more to enter"
     // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
     const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
@@ -2293,7 +2299,7 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
         sendAction(subject, { action, key: newKey(), ...verdict, ...more }, after);
       };
       if (action === "reject") return askReject(subject, note => send({ note }));
-      if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
+      if (ACTION_CONFIRM[action] && !confirm(actionConfirm(subject, action))) return;
       const run = hostsRun(subject, action);
       if (run) {
         if (checking) return;
@@ -2341,11 +2347,11 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   if (subject.actions.includes("revoke")) {
     const records = board.filter(d => d.status === "servable").map(d => d.record);
     const ticks = el("div", { class: "ticks" }, ...records.map(r => el("label", { class: "inline" }, el("input", { type: "checkbox", value: r }), " " + r)));
-    box.append(card("Revoke datasets", "The ticked datasets leave this buffer: their volumes are unregistered and their staged pyramids quarantined.", records.length ? ticks : el("div", { class: "empty" }, "no dataset is being served"),
+    box.append(card("Revoke datasets", "The ticked datasets leave this buffer: their volumes are unregistered and their staged pyramids quarantined.", records.length ? ticks : el("div", { class: "empty" }, "No dataset is being served."),
       el("div", { class: "actions" }, el("button", { type: "button", class: "btn danger", title: BUTTON_HELP.revokeTicked, disabled: !!subject.asked, onclick: e => {
         const chosen = [...ticks.querySelectorAll("input:checked")].map(i => i.value);
         if (!chosen.length) return banner("Tick the datasets to revoke first.");
-        if (!confirm(ACTION_CONFIRM.revoke)) return;
+        if (!confirm("Revoke the ticked datasets? Their volumes leave this buffer and their staged pyramids are quarantined; nothing is deleted.")) return;
         e.target.disabled = true; sendAction(subject, { action: "revoke", records: chosen, key: newKey() }, again);
       } }, "Revoke the ticked"))));
   }
@@ -2410,7 +2416,7 @@ async function viewSubject(kind, key, refresh) {
   if (kind === "prep" && subject.data?.spec) parts.push(card("The request", "As it was filed.", el("pre", { class: "err" }, subject.data.spec)));
   const log = el("div", { class: "card" }, el("h2", {}, "Timeline"), el("div", { class: "sub" }, "What was asked and what each round did, newest first. The issue on GitHub is a copy of this."));
   for (const e of [...entries].reverse()) log.append(el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("div", { class: "md" }, ...markdown(e.body))));
-  if (!entries.length) log.append(el("div", { class: "empty" }, "nothing yet"));
+  if (!entries.length) log.append(el("div", { class: "empty" }, "Nothing yet."));
   parts.push(log);
   root.replaceChildren(...parts);
 }
@@ -2493,7 +2499,7 @@ function route() {
 }
 function renderTopbar() {
   const c = S.catalogs[0];
-  $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${num(c.count)} datasets · synced `, when(c.synced_at)) : "no catalog synced");
+  $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${plural(c.count, "dataset")} · synced `, when(c.synced_at)) : "no catalog synced");
 }
 function setupFilterBox() {  // the fold is a per-viewer convenience, remembered in this browser
   const box = $("filterBox");
