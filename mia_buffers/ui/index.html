@@ -1741,13 +1741,8 @@ function viewDatasetList(arg, params) {
     prepareButton(prepare, [...CHOSEN], null, sent => sent.forEach(id => { CHOSEN.delete(id); SETTLED.delete(id); }), SETTLED.size, "Prepare");
   };
   const ticked = (row, on) => { if (on && !PREPARABLE(row)) SETTLED.add(row.id); else SETTLED.delete(row.id); showChosen(); };
-  const selectAll = el("button", { type: "button", class: "btn", title: `ticks every dataset the search and the filters match, on every page, at most ${PREP_MAX}`, onclick: async () => {
-    const matching = more => new URLSearchParams({ ids: "1", sort: "dataset", ...more, ...filters(), ...(TABLE_STATE.get("datasets").q ? { q: TABLE_STATE.get("datasets").q } : {}) });
-    const [found, fresh] = await Promise.all([load(`/catalog/datasets?${matching({})}`), load(`/catalog/datasets?${matching({ preparable: "1" })}`)]);
-    if (!found || !fresh) return;
-    const preparable = new Set(fresh.ids);
-    for (const id of found.ids.slice(0, PREP_MAX)) { CHOSEN.add(id); if (!preparable.has(id)) SETTLED.add(id); }
-    if (found.ids.length > PREP_MAX) banner(`${num(found.ids.length)} datasets match; the first ${PREP_MAX} are selected, since a request takes at most ${PREP_MAX}.`);
+  const selectAll = el("button", { type: "button", class: "btn", title: "ticks every dataset on this page", onclick: () => {
+    for (const row of TABLE_STATE.get("datasets").last?.rows || []) { CHOSEN.add(row.id); if (!PREPARABLE(row)) SETTLED.add(row.id); }
     list.reload();
   } }, "Select all");
   const clear = el("button", { type: "button", class: "btn", title: BUTTON_HELP.clearSelection, onclick: () => { CHOSEN.clear(); SETTLED.clear(); list.reload(); } }, "Clear selection");

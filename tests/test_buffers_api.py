@@ -1706,10 +1706,6 @@ def test_catalog_datasets_joins_each_record_with_what_the_registry_knows(tmp_pat
     assert found(q="HEMIBRAIN") == [HEMIBRAIN] and found(q="confocal") == [U937]  # the id, the title, the modality
     assert found(sort="bytes", dir="desc")[0] == HEMIBRAIN and found(limit="2", offset="4") == found()[4:]
     assert found(state="prepared", q="nothing") == []
-    out = call(s, "GET", "/catalog/datasets", {"modality": "TEM", "ids": "1"})[1]
-    assert out == {"ids": [ONE_CH, "synthetic-em-2d-dup"], "total": 2}
-    call(s, "PUT", f"/datasets/{ONE_CH}", payload={"state": "in-progress"})
-    assert len(found(preparable="1")) == 4 and U937 not in found(preparable="1") and ONE_CH not in found(preparable="1")
     assert call(s, "GET", "/catalog/datasets", {"sort": "nope"})[0] == 422
 
 

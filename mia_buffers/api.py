@@ -786,8 +786,7 @@ class BufferService:
 
     def _catalog_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         """The Datasets list: one page of datasets, filtered by state, modality, dims, licence or a request's
-        records, with how many datasets have each filter value. `preparable=1` leaves out the prepared and the
-        in-progress; `ids=1` answers every matching id instead."""
+        records, with how many datasets have each filter value."""
         page = self._page_of({"limit": "50", **query}, DATASET_SORTS)
         assert page is not None
         ref, rows = self._dataset_rows()
@@ -798,11 +797,6 @@ class BufferService:
         for name in DATASET_FILTERS:
             if name in query:
                 rows = [row for row in rows if row[name] == query[name]]
-        if query.get("preparable"):  # what a preparation request could still do something for
-            rows = [row for row in rows if row["state"] not in ("prepared", "in-progress")]
-        if query.get("ids"):
-            found, total = paged(rows, replace(page, limit=len(rows) + 1, offset=0), DATASET_SORTS, dataset_haystack)
-            return 200, {"ids": [row["id"] for row in found], "total": total}, {}
         found, total = paged(rows, page, DATASET_SORTS, dataset_haystack)
         return 200, {"ref": ref, "rows": found, "total": total, "facets": counts}, {}
 

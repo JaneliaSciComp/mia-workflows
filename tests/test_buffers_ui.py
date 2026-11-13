@@ -367,3 +367,5 @@ def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked(
     assert "tick the datasets to prepare first" not in PAGE
     assert 'class: "chosen", hidden: true' in PAGE and ".chosen[hidden]{display:none}" in PAGE
     assert "box.hidden = !CHOSEN.size" in PAGE and '"Create buffer")' in PAGE
+    # Select all takes the rows of the page that is showing, and asks the server for nothing
+    assert "datasets match; the first" not in PAGE and 'ids: "1"' not in PAGE
