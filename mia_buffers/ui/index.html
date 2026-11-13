@@ -176,6 +176,8 @@ dl.kv dd{margin:0;overflow-wrap:anywhere;min-width:0}
 .health{font-size:13px;font-weight:500}
 .health.ok{color:var(--s3)} .health.bad{color:var(--warn)}
 .links{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin:4px 0 12px}
+.toggles{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+.toggles .btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);font-weight:600}
 .links a[aria-current="page"]{color:var(--fg);font-weight:600;text-decoration:none}
 
 /* table */
@@ -2457,15 +2459,30 @@ async function viewFind(text) {  // the lookup box: an issue number, an issue UR
 }
 // ---- Needs you: everything that waits on a person, with the button that answers it (spec webapp-actions §8.2)
 const KIND_WORDS = { dataset: "dataset", buffer: "buffer spec", prep: "request" };
+const NEEDS_KINDS = [["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]];  // the "what" a person can narrow the list to
+let needsKind = "";  // the kind shown; kept while the list redraws itself, cleared by opening the tab
 function viewNeeds(arg, refresh) {
   const root = $("needsBody");
   if (keepTyping(root, refresh, () => viewNeeds("", true))) return;
   delete root.dataset.dirty;
+  if (!refresh) needsKind = NEEDS_KINDS.some(([kind]) => kind === arg) ? arg : "";
   const again = () => viewNeeds("", true);
   const failed = el("div");
-  root.replaceChildren(el("h2", {}, "Needs you"), el("p", { class: "small" }, "Everything that waits on a person or has stopped, newest first, each with what it will take. Open one for its timeline."), failed,
-    pagedTable("needs", { source: pageOf("/needs", "needs"), sort: "updated", dir: "desc", empty: "Nothing waits on you.",
-      onPage: page => failed.replaceChildren(...(page.out.failed || []).filter(a => a.subject).map(a => el("div", {}, el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.key), undelivered(a.subject, [a], again)))),
+  const show = kind => {  // the address keeps the choice across a reload; it is set without a new route
+    needsKind = kind;
+    if (TABLE_STATE.has("needs")) TABLE_STATE.get("needs").offset = 0;
+    history.replaceState(null, "", "#needs" + (kind ? "/" + kind : ""));
+    again();
+  };
+  const kinds = el("div", { class: "toggles", role: "group", "aria-label": "Show" }, ...NEEDS_KINDS.map(([kind, word]) =>
+    el("button", { type: "button", class: "btn", "aria-pressed": String(kind === needsKind), "data-kind": kind, "data-word": word, onclick: () => show(kind) }, word)));
+  const count = out => kinds.querySelectorAll("button").forEach(b => {  // each button says how many wait under it
+    const n = b.dataset.kind ? (out.kinds || {})[b.dataset.kind] : Object.values(out.kinds || {}).reduce((a, c) => a + c, 0);
+    b.textContent = n == null ? b.dataset.word : `${b.dataset.word} ${num(n)}`;
+  });
+  root.replaceChildren(el("h2", {}, "Needs you"), el("p", { class: "small" }, "Everything that waits on a person or has stopped, newest first, each with what it will take. Open one for its timeline."), kinds, failed,
+    pagedTable("needs", { source: pageOf("/needs", "needs", () => needsKind ? { kind: needsKind } : {}), sort: "updated", dir: "desc", empty: needsKind ? "Nothing of this kind waits on you." : "Nothing waits on you.",
+      onPage: page => { count(page.out); failed.replaceChildren(...(page.out.failed || []).filter(a => a.subject).map(a => el("div", {}, el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.key), undelivered(a.subject, [a], again)))); },
       cols: [
         { key: "kind", label: "what", cell: x => KIND_WORDS[x.kind] },
         { key: "key", label: "name", cell: x => el("a", { href: SUBJECT_HASH[x.kind](x.key) }, x.key) },

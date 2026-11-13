@@ -1158,6 +1158,14 @@ def test_needs_lists_what_waits_on_a_person(tmp_path):
         ("buffer", "pool", "stuck"),
         ("dataset", "rec-a", "waiting"),
     ]
+    # one kind at a time, with every kind's count for the page's toggle buttons
+    call(s, "PUT", "/subjects/dataset/3", payload={"key": "rec-c", "stage": "failed"})
+    only = call(s, "GET", "/needs", {"kind": "dataset", "limit": "1"})[1]
+    assert len(only["needs"]) == 1 and only["needs"][0]["kind"] == "dataset" and only["total"] == 2
+    assert sorted(row["key"] for row in call(s, "GET", "/needs", {"kind": "dataset"})[1]["needs"]) == ["rec-a", "rec-c"]
+    assert only["kinds"] == {"dataset": 2, "buffer": 1, "prep": 0}
+    assert call(s, "GET", "/needs", {"kind": "prep"})[1]["needs"] == []
+    assert call(s, "GET", "/needs", {"kind": "issue"})[0] == 422
 
 
 def test_lookup_by_number_url_and_key(tmp_path):

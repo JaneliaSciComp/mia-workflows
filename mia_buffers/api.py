@@ -900,7 +900,8 @@ class BufferService:
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
         """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
         for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
-        last day that did not reach Temporal (each with its subject, for the Retry)."""
+        last day that did not reach Temporal (each with its subject, for the Retry). `kind` narrows the list to
+        one kind of subject; `kinds` counts every kind's share of the whole list."""
         views = [self._subject_view(row) for row in self.ledger.find_subjects()]
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
         for index, view in enumerate(views):
@@ -915,11 +916,16 @@ class BufferService:
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
             failed.append({**action, "subject": self._subject_view(found[0]) if found else None})
         needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+        kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
+        if (kind := query.get("kind")) is not None:
+            if kind not in SUBJECT_RULES:
+                raise HttpError(422, f"kind must be one of {list(SUBJECT_RULES)}, got {kind!r}")
+            needs = [view for view in needs if view["kind"] == kind]
         page = self._page_of(query, SUBJECT_SORTS)
         if page is None:
-            return 200, {"needs": needs, "failed": failed}, {}
+            return 200, {"needs": needs, "failed": failed, "kinds": kinds}, {}
         rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
-        return 200, {"needs": rows, "total": total, "failed": failed}, {}
+        return 200, {"needs": rows, "total": total, "failed": failed, "kinds": kinds}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own

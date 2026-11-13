@@ -187,6 +187,14 @@ def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
     assert 'row.state !== "prepared" && !ROUND_OPEN.has(row.stage)' in PAGE
 
 
+def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
+    view = PAGE[PAGE.index("function viewNeeds(") : PAGE.index("const HEALTH_MS")]
+    assert '"aria-pressed": String(kind === needsKind)' in view and "<select" not in view and '"select"' not in view
+    assert 'pageOf("/needs", "needs", () => needsKind ? { kind: needsKind } : {})' in view
+    assert '["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]' in PAGE
+    assert '.toggles .btn[aria-pressed="true"]' in PAGE
+
+
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
     stage, spec, plan, notes = rendered(
         "**Stage:** `buffer:planning`\n\n**Folders:** [Workspace](https://files.example/w) · [Staged](https://files.example/s)\n\n"
