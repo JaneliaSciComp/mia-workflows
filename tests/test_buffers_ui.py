@@ -156,6 +156,29 @@ def rendered(*bodies: str) -> list[str]:
     return json.loads(done.stdout)
 
 
+def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    lines = PAGE[PAGE.index("function downLines(") : PAGE.index("async function checkHealth(")]
+    healths = [
+        {"temporal": True, "queues": {"mia-data": True, "snippets": False, "autodev": False}},
+        {"temporal": True, "queues": {"mia-data": True, "snippets": False}},
+        {"temporal": True, "queues": {"mia-data": True}},
+        {"temporal": False, "queues": {}},
+    ]
+    script = f'{lines}\nconsole.log(JSON.stringify(JSON.parse(require("fs").readFileSync(0, "utf8")).map(downLines)));'
+    done = subprocess.run([node, "-e", script], input=json.dumps(healths), capture_output=True, text=True, check=True)
+    both, one, none, no_temporal = json.loads(done.stdout)
+    assert len(both) == 1 and both[0].startswith(
+        "No worker is running for snippets, autodev: nothing that waits on them"
+    )
+    assert both[0].endswith("pixi run mia restart snippets autodev") and "waits on it is" in one[0]
+    assert none == [] and len(no_temporal) == 1 and no_temporal[0].startswith("Temporal does not answer")
+    # the lines are replaced by each check, never faded, and the check repeats
+    assert '$("down").replaceChildren(' in PAGE and "setInterval(checkHealth, HEALTH_MS)" in PAGE
+
+
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
     stage, spec, plan, notes = rendered(
         "**Stage:** `buffer:planning`\n\n**Folders:** [Workspace](https://files.example/w) · [Staged](https://files.example/s)\n\n"

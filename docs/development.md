@@ -341,7 +341,10 @@ its end while the cancel was on its way keeps its stage and the cancel is refuse
 `cleanup=True`; anything a best-effort `except ActivityError` wraps cannot swallow a cancel, because the cancel
 is raised as `asyncio.CancelledError`. A queued cancel is never rolled over (`_roll_due`).
 
-**Health.** `GET /health` says whether Temporal answers and whether a worker polls each task queue;
+**Health.** `GET /health` says whether Temporal answers and whether a worker polls the task queue of each service
+in `mia.yaml` (a queue carries its service's name). The page asks every minute and keeps a line at its top for as
+long as one is away, with the `mia restart` that brings it back. Temporal remembers a poller for about five minutes,
+so a worker that stops is reported that long after; one that never started is reported at once.
 `GET /run/<kind>/<number>` is the Temporal status of a subject's latest run.
 
 **Planning from outside.** `POST /plan` plans a spec against the synced catalog and the registry; datasets that

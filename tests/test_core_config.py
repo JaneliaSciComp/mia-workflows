@@ -46,6 +46,10 @@ def test_a_buffers_service_learns_where_the_datasets_pipeline_runs():
     cfg = service_config(manifest, "buffers")
     assert cfg["datasets_pipeline"] == {"namespace": "data-ns", "task_queue": "mia-data"}  # the queue is the name
     assert "datasets_pipeline" not in service_config(manifest, "mia-data")
+    # every service's queue (its name) and namespace, for /health: a block's own, else the shared section's
+    assert cfg["workers"] == {"mia-data": "data-ns", "snippets": "default", "buffers": "default"}
+    bare = {"services": {"buffers": {"app": "mia-buffers"}, "dev": {"app": "autodev"}}}  # no temporal section at all
+    assert service_config(bare, "buffers")["workers"] == {"buffers": "mia-buffers", "dev": "default"}
     del manifest["services"]["mia-data"]
     assert "datasets_pipeline" not in service_config(manifest, "buffers")  # no such service: the model's default
 

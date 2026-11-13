@@ -44,10 +44,17 @@ def mirror_id(kind: str, number: int) -> str:
 
 class Dispatcher:
     """Starts and signals workflows for the service. `targets` maps a subject kind to its `Target`;
-    `connect(namespace)` returns a Temporal client."""
+    `connect(namespace)` returns a Temporal client; `workers` maps each further task queue whose worker
+    `health` watches to its namespace."""
 
-    def __init__(self, connect: Callable[[str], Awaitable[Any]], targets: dict[str, Target]) -> None:
+    def __init__(
+        self,
+        connect: Callable[[str], Awaitable[Any]],
+        targets: dict[str, Target],
+        workers: dict[str, str] | None = None,
+    ) -> None:
         self._connect, self.targets = connect, targets
+        self.queues = {**{target.task_queue: target.namespace for target in targets.values()}, **(workers or {})}
         self._clients: dict[str, Any] = {}
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True, name="temporal-dispatcher").start()
@@ -178,24 +185,24 @@ class Dispatcher:
         from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 
         polled: dict[str, bool] = {}
-        for target in self.targets.values():
-            if target.task_queue in polled:
-                continue
-            client = await self._client(target.namespace)
+        for task_queue, namespace in self.queues.items():
+            client = await self._client(namespace)
             answer = await client.workflow_service.describe_task_queue(
                 DescribeTaskQueueRequest(
-                    namespace=target.namespace,
-                    task_queue=TaskQueue(name=target.task_queue),
+                    namespace=namespace,
+                    task_queue=TaskQueue(name=task_queue),
                     task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
                 )
             )
-            polled[target.task_queue] = bool(answer.pollers)
+            polled[task_queue] = bool(
+                answer.pollers
+            )  # Temporal forgets a poller about five minutes after its last poll
         return polled
 
 
 def dispatcher_for(cfg: Config) -> Dispatcher:
     """The gateway of a configured service: datasets on mia-data's namespace and queue under mia-data's own
-    workflow ids, buffers and requests on this service's."""
+    workflow ids, buffers and requests on this service's; its health watches every service's worker."""
     from autodev.cli import _client
 
     async def connect(namespace: str) -> Any:
@@ -217,4 +224,5 @@ def dispatcher_for(cfg: Config) -> Dispatcher:
             "buffer": Target(*own, "MiaBuffer", cfg.workflow_id, BufferState),
             "prep": Target(*own, "MiaPrep", cfg.prep_workflow_id, PrepState),
         },
+        cfg.workers,
     )

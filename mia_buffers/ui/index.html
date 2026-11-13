@@ -55,6 +55,7 @@ td.pills{white-space:nowrap}
 .banner{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 .banner div{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--warn);border-radius:8px;padding:6px 10px;background:var(--surface);font-size:13px}
 .banner span{flex:1;overflow-wrap:anywhere}
+#down:empty{display:none}
 .banner button{border:0;background:transparent;cursor:pointer;color:var(--fg2);font-size:16px;line-height:1}
 .notice{border-left:3px solid var(--warn);padding:4px 10px;margin:6px 0;font-size:13px;color:var(--fg2);max-width:80ch}
 pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;background:var(--surface);max-height:240px;overflow:auto}
@@ -282,6 +283,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
   <input type="search" class="lookup" id="lookup" placeholder="#234, issue URL, record, spec" aria-label="Find a dataset, buffer spec or request by issue number, issue URL or name">
   <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme" title="Switch between the light and the dark theme">theme</button>
 </header>
+<div class="banner" id="down" role="alert"></div>
 <div class="banner" id="banner" role="alert"></div>
 <noscript><p class="notice">This page needs JavaScript: every number on it comes from the service's routes.</p></noscript>
 
@@ -2471,11 +2473,17 @@ function viewNeeds(arg, refresh) {
             el("button", { type: "button", class: "btn", title: BUTTON_HELP.dropped, disabled: !!x.asked, onclick: e => { e.target.disabled = true; sendAction(x, { action: "dropped", record, key: newKey() }, again); } }, "Files are in place")))) },
       ] }));
 }
-async function checkHealth() {  // so that "working" is true: say when nothing can start, or nothing is being worked on
+const HEALTH_MS = 60000;  // how often the page asks whether Temporal and every worker are still there
+function downLines(health) {  // what is away, in words; a service's task queue carries its name
+  const away = Object.keys(health.queues || {}).filter(queue => !health.queues[queue]);
+  return [
+    !health.temporal && "Temporal does not answer: nothing can be started or cancelled from this page right now.",
+    away.length && `No worker is running for ${away.join(", ")}: nothing that waits on ${away.length > 1 ? "them" : "it"} is moving. On the host: pixi run mia restart ${away.join(" ")}`,
+  ].filter(Boolean);
+}
+async function checkHealth() {  // so that "working" is true: these lines stay until a later check finds everything back
   const health = await load("/health");
-  if (!health) return;
-  if (!health.temporal) banner("Temporal does not answer: nothing can be started or cancelled from this page right now.");
-  for (const [queue, polled] of Object.entries(health.queues || {})) if (!polled) banner(`No worker is polling “${queue}”: its rounds are not moving.`);
+  if (health) $("down").replaceChildren(...downLines(health).map(line => el("div", {}, el("span", {}, line))));
 }
 function followStream() {  // told what changed, the page refetches it; a lost stream reconnects by itself
   const stream = new EventSource("/stream");
@@ -2549,6 +2557,7 @@ async function boot() {
   $("lookup").addEventListener("keydown", e => { const text = e.target.value.trim(); if (e.key === "Enter" && text) { location.hash = "#find/" + encodeURIComponent(text); e.target.value = ""; } });
   route();
   followStream();  // its first open also reads /health
+  setInterval(checkHealth, HEALTH_MS);
 }
 boot();
 })();

@@ -184,6 +184,20 @@ def _app_of(block: object) -> str | None:
     return block.get("app") if isinstance(block, dict) else None
 
 
+# the namespace each application's Config works in when mia.yaml gives it no temporal section at all
+APP_NAMESPACE = {"autodev": "default", "mia-data": "mia-data", "mia-buffers": "mia-buffers"}
+
+
+def _namespace(services: dict, shared: object, name: str) -> str:
+    """The Temporal namespace service `name` works in: its block's, else the shared section's, else its
+    application's default (`default` once either temporal section exists)."""
+    block = services[name] if isinstance(services[name], dict) else {}
+    sections = [section for section in (shared, block.get("temporal")) if isinstance(section, dict)]
+    if not sections:
+        return APP_NAMESPACE.get(str(block.get("app")), "default")
+    return str({**sections[0], **sections[-1]}.get("namespace", "default"))
+
+
 def service_config(manifest: dict, name: str) -> dict:
     """Merge the shared sections with service `name`'s block (one level deep); the input is not modified."""
     services = manifest.get("services")
@@ -210,12 +224,13 @@ def service_config(manifest: dict, name: str) -> dict:
     if block["app"] == "mia-buffers":
         # buffer-api starts and signals mia-data's workflows: tell it their namespace and task queue (the task
         # queue is the service's name). A manifest without such a service leaves the model's default.
+        shared = manifest.get("temporal")
         data_name = next((key for key, other in services.items() if _app_of(other) == "mia-data"), None)
         if data_name is not None:
-            temporal = service_config(manifest, data_name).get("temporal")
-            # mia-data's own default namespace when it has no temporal section; pydantic's when it has one
-            namespace = temporal.get("namespace", "default") if isinstance(temporal, dict) else "mia-data"
+            namespace = _namespace(services, shared, data_name)
             result["datasets_pipeline"] = {"namespace": namespace, "task_queue": data_name}
+        # and its /health says whether a worker polls each service's task queue: every service, by namespace
+        result["workers"] = {other: _namespace(services, shared, other) for other in services}
     paths = result.get("paths")
     if isinstance(paths, dict) and "state_root" in paths:
         state_root = paths.pop("state_root")
