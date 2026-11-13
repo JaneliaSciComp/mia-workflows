@@ -1378,7 +1378,7 @@ const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src
   return tipOn(el("a", { href: src, target: "_blank", rel: "noopener" }, el("img", { class: "thumb", src, loading: "lazy", alt: "crop overlay" })),
     [{ t: `${num(d.crops || d.previews.length)} crops published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
 // a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
-const folderLink = (root, folder) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, "files") : "";
+const folderLink = (root, folder, text, title) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, text || "files", title) : "";
 // how every table names a dataset: its id links to its page; its GitHub issue (a read-only log) is a small mark
 const datasetLink = record => record ? el("a", { href: "#datasets/" + encodeURIComponent(record) }, record) : "";
 function ghIcon(repo, n, numbered) {  // in a table the mark alone; on a subject's own page the mark and the number
@@ -1800,8 +1800,8 @@ function datasetCards(d) {
 // It shows where on the line the object is, not the path its round took: a round can skip a step or return to one.
 // A stage off the line (needs-human, cancelled) hangs under the step the round stopped at, which is the newest
 // stage of `history` (newest first) that is on the line; with none, it stands apart at the end.
-// On a dataset's page the line is named for what it is: the workflow that prepares the dataset.
-const FLOW_LABELS = { dataset: "Preparation workflow:" };
+// The line is named for what it is: the workflow that prepares a dataset, builds a buffer, or carries a request.
+const FLOW_LABELS = { dataset: "Preparation workflow:", buffer: "Buffer workflow:", prep: "Request workflow:" };
 const flowRow = (kind, flow) => flow && FLOW_LABELS[kind] ? el("div", { class: "flowrow" }, el("span", { class: "flowlabel" }, FLOW_LABELS[kind]), flow) : flow;
 function lifecycle(line, stage, history, busy) {  // `busy`: a round is in progress at the current step
   if (!line || !stage) return null;
@@ -1889,32 +1889,34 @@ async function viewBuffer(root, id, refresh) {
   const days = (usage?.days || []).slice().sort((a, b) => a.day < b.day ? -1 : 1);
   const levelsKey = cfg.patch && cfg.levels?.length ? `p${cfg.patch}-l${cfg.levels.join("-")}` : null;  // jobspec.levels_key
   root.replaceChildren(...[  // filtered: a native replaceChildren would print a null as "null"
-    el("p", {}, el("a", { href: "#buffers" }, "← all buffers")),
-    el("h2", {}, id, " ", evs[0] ? statePill(stageOf(evs[0])) : null),
-    lifecycle(meta.lines?.buffer.slice(1), stageOf(evs[0]), evs.map(stageOf)),  // a buffer starts at its plan: `new` is its spec's
-    el("div", { class: "links" },
-      spec ? el("span", {}, "spec ", el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.key), " ", ghIcon(meta.buffers_repo, spec.issue)) : null,
-      ...Object.entries(roots).filter(([, url]) => url).map(([name, url]) => link(url, name.replace(/_/g, " ")))),
+    el("h2", {}, id),
+    el("div", { class: "links" },  // its spec and the spec's issue, then this round's own folders
+      spec ? el("span", {}, "spec ", el("a", { href: SUBJECT_HASH.buffer(spec.key), title: "the spec this buffer was built from: its buttons and its timeline" }, spec.key)) : null,
+      spec ? ghIcon(meta.buffers_repo, spec.issue, true) || null : null,
+      n ? folderLink(roots.work_root, `issue-${n}/${id}`, "workspace", "this round's plan and the workspaces of its jobs") || null : null,
+      folderLink(roots.staged_root, levelsKey, "staged pyramids", "the staged pyramids of this buffer's patch size and levels") || null),
+    // a buffer starts at its plan (`new` is its spec's); the step is marked while its spec's round is working there
+    flowRow("buffer", lifecycle(meta.lines?.buffer.slice(1), stageOf(evs[0]), evs.map(stageOf), spec?.status === "working" && spec.stage === stageOf(evs[0]))),
     retired ? el("div", { class: "notice" }, `Retired ${ago(retired.at)}; the draws are archived at `, el("code", {}, archive || "none"), ".") : null,
     status && evs[0]?.kind === "staged" ? el("div", { class: "notice" }, "Staged, waiting for ", el("b", {}, "Approve"), " on its spec's page: the approve serves what the pool shows as servable, partial or not; consumers are refused until then.") : null,
     !status && evs.length ? el("div", { class: "notice" }, "Not sourced yet: a buffer is registered when sourcing starts, after ", el("b", {}, "Run"), " on its spec's page. Until then it has only its events.") : null,
     !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
     el("section", { class: "grid2" },
-      card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", healthLine(usage), sparkline(days.slice(-60)),
+      card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", ...(status ? [healthLine(usage), sparkline(days.slice(-60))] : [el("div", { class: "empty" }, "not sourced yet")]),
         retired ? pagedTable("buffer-usage:" + id, { source: pageOf(`/usage/${e}`, "days", null, true), search: false, empty: "no usage rows", cols: [
           { key: "day", label: "day", cell: d => d.day }, { key: "draws", label: "draws", num: true, cell: d => num(d.draws) },
           { key: "consumers", label: "consumers", num: true, cell: d => num(d.consumers) }, { key: "empty", label: "empty", num: true, cell: d => num(d.empty) },
         ] }) : null),
-      card("Config", null, status ? kv([
-        ["spec", cfg.spec_name], ["spec hash", code(cfg.spec_hash, 12)], ["catalog", code(cfg.catalog_ref, 12)],
-        ["levels", (cfg.levels || []).join(", ")], ["patch", num(cfg.patch)], ["channels", String(cfg.channels ?? "")],
-        ["recipe", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} @ ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
-        ["plan hash", code(cfg.plan_hash, 12)], ["splits", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
-        ["servable", servableText(status.servable)], ["volumes", num(status.volumes)], ["max empty", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
+      card("Recipe", "What this buffer was built with, and what it serves.", status ? kv([
+        ["spec", spec ? el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.key) : cfg.spec_name], ["spec hash", code(cfg.spec_hash, 12)], ["catalog commit", code(cfg.catalog_ref, 12)],
+        ["pyramid levels", (cfg.levels || []).join(", ")], ["patch size (px)", num(cfg.patch)], ["channels", String(cfg.channels ?? "")],
+        ["tensorizer", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} at harness ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
+        ["plan hash", code(cfg.plan_hash, 12)], ["split fractions", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
+        ["servable volumes", servableText(status.servable)], ["volumes registered", num(status.volumes)], ["empty answers allowed", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
         (status.quarantined || []).length ? ["quarantined", el("span", { class: "pills" }, assetPill("quarantined"), " " + status.quarantined.join(", "))] : null,
       ]) : el("div", { class: "empty" }, evs.length ? "not sourced yet" : "the buffer's status did not load"))),
     card("Events", "What happened to this buffer, newest first.", pagedTable("buffer-events:" + id, { source: pageOf(`/buffers/${e}/events`, "events"), empty: "no events yet", cols: [
-      { key: "seq", label: "#", num: true, cell: x => num(x.seq) }, { key: "kind", label: "kind", cell: x => statePill(x.kind) }, { key: "at", label: "when", cell: x => when(x.at) },
+      { key: "seq", label: "#", num: true, cell: x => num(x.seq) }, { key: "kind", label: "event", cell: x => statePill(x.kind) }, { key: "at", label: "when", cell: x => when(x.at) },
       { label: "detail", wrap: true, cell: x => x.detail || "" },
     ] })),
     status ? card("Dataset pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", pagedTable("buffer-pool:" + id, { source: pageOf(`/buffers/${e}/datasets`, "datasets"), sort: "dataset", empty: "no dataset in the pool yet", cols: [

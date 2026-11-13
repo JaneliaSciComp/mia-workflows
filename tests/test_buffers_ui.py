@@ -332,3 +332,15 @@ def test_every_button_that_asks_for_something_says_what_it_does() -> None:
     assert {"plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
     for key in keys:
         assert f"title: BUTTON_HELP.{key}" in PAGE, key
+
+
+def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
+    """A buffer's page reads like a dataset's: its id, a row of links (its spec, the spec's GitHub issue with its
+    number, the round's workspace and its staged pyramids), then the labelled workflow. No pill beside the id, no
+    row of bare root folders."""
+    body = PAGE[PAGE.index("async function viewBuffer(root, id, refresh) {") : PAGE.index("// ---- cache")]
+    name, links, flow = body.index('el("h2", {}, id)'), body.index('class: "links"'), body.index('flowRow("buffer", ')
+    assert name < links < flow
+    assert "ghIcon(meta.buffers_repo, spec.issue, true)" in body and "SUBJECT_HASH.buffer(spec.key)" in body
+    assert "Object.entries(roots)" not in body and "all buffers" not in body
+    assert 'buffer: "Buffer workflow:"' in PAGE
