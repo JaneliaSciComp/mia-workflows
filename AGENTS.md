@@ -47,10 +47,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
   (`Activities._post`); the `MiaMirror` workflow copies them to GitHub.
 - **Nothing reads a data or buffers issue.** No label, comment, body, close or reopen is input: nothing polls
-  those repos, and a new feature gets an action route and a button, never a label. The exceptions are the mirror
-  (it looks for its own issue and comments), `adopt-issues`, and the branches marked `ponytail: ... a label's
-  round`, which only serve rounds that a label started before the cutover and are deleted with them
-  (`docs/plans/2026-11-11-webapp-actions-e-github-input-removed.md`). autodev and the snippets repo stay on GitHub.
+  those repos, and a new feature gets an action route and a button, never a label. The one exception is the mirror,
+  which looks for its own issue and comments. autodev and the snippets repo stay on GitHub.
 - **One writer per raw cache.** No job writes a record's raw cache unless its worker holds
   `<local_root>/locks/raw/<record>` (`mia_core.locks`; TTL 900 s, heartbeat with every `await_job` poll). A wait
   whose heartbeat finds the lock gone kills its job (`csub kill`) and fails the round; a stale lease is never

@@ -20,6 +20,8 @@ sets `MIA_SERVICE` for you.
 - **`paths.local_root`** is needed by the mia-data and mia-buffers services and must be host-local disk, not NFS
   (`mia up` refuses otherwise). It holds `locks/` and buffer-api's SQLite ledger,
   `<local_root>/service/buffers.sqlite`, which is backed up on a timer under `<state_dir>/backups/`.
+- **`service`** names buffer-api (`url`). mia-data and mia-buffers both need it: every stage, timeline entry and
+  action of a round lives there, and a worker without it refuses to start.
 - **`service.token_file`** (mode 600; `mia init-token` creates it) holds the buffer-api worker token and is mounted
   read-only into the workers. mia-buffers needs it; `mia up` refuses to start it without.
 - **Three blocks bound three scopes.** `limits` is per job (one csub job's bytes, walltime and attempts, one agent
@@ -241,7 +243,6 @@ and `GET /buffers/<b>/status` names the `quarantined` volumes (those whose artif
 ```
 mia exec mia-buffers catalog sync [--ref <catalog sha>]   # load the catalog records of a commit
 mia exec mia-buffers datasets sync                        # rebuild the prepared rows from storage_root
-mia exec mia-buffers adopt-issues [--dry-run]             # a subject for each issue of the two repos that has none
 ```
 
 **Subjects.** A dataset, a buffer spec and a preparation request are each a *subject*: `{kind, number, key, stage,

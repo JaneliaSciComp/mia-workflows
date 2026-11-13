@@ -886,7 +886,7 @@ class BufferService:
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
         for index, view in enumerate(views):
             if view["kind"] == "buffer" and "dropped" in view["actions"]:
-                # the round's buffer has the id of the go that started it (a label's round is not found here)
+                # the round's buffer has the id of the go that started it
                 gos = [a for a in self.ledger.actions("buffer", view["number"]) if a["action"] == "go"]
                 board = self.ledger.buffer_datasets(f"i{view['number']}-e{gos[-1]['id']}") if gos else []
                 if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
@@ -999,7 +999,7 @@ class BufferService:
             refs = [catalog["ref"] for catalog in self.ledger.catalogs()]
             if not any(row.get("id") == record for ref in refs for _, row in self.ledger.records(ref)):
                 raise HttpError(404, f"{record!r} is not a record of a synced catalog")
-            # a dataset whose issue is known (it ran from a label, was never adopted) keeps that number: its
+            # a dataset whose registry row already names an issue keeps that number: its
             # workflow id, rounds and budget root are built from it
             known = (self.ledger.dataset(record) or {}).get("issue")
             subject = self.ledger.create_subject("dataset", record, number=known if isinstance(known, int) else None)
@@ -1774,18 +1774,11 @@ def ledger_path(cfg: Config) -> Path:
 
 
 def open_ledger(cfg: Config) -> Ledger:
-    """The ledger on the local root. The first start moves the old `<state_dir>/buffers.sqlite` there (the old file
-    keeps a `.moved` suffix); a missing ledger beside existing backups is refused, never silently started empty."""
+    """The ledger on the local root; a missing ledger beside existing backups is refused, never silently started
+    empty."""
     path = ledger_path(cfg)
     require_local_dir(path.parent)
-    old = cfg.paths.state_dir / "buffers.sqlite"
-    if not path.exists() and old.exists():
-        old_ledger = Ledger(old)
-        old_ledger.backup(path)
-        old_ledger.close()
-        os.replace(old, old.with_suffix(".sqlite.moved"))
-        print(f"buffer-api: moved the ledger from {old} to {path}", flush=True)
-    elif not path.exists():
+    if not path.exists():
         backups = sorted((cfg.paths.state_dir / "backups").glob("buffers-*.sqlite"))
         if backups:
             raise RuntimeError(

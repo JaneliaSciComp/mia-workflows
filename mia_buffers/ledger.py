@@ -618,7 +618,7 @@ class Ledger:
         self, kind: str, key: str | None, *, data: dict | None = None, number: int | None = None
     ) -> dict:
         """The subject with this key, created when there is none: stage `new`, a number from the clock and no
-        issue yet, or the given `number` as both (a dataset whose GitHub issue is known but was never adopted).
+        issue yet, or the given `number` as both (a dataset whose row already names its GitHub issue).
         Without a key (a preparation request has no name of its own) the key is `<kind>-<number>`."""
         with self._transaction() as db:
             found = self._subjects(db, "WHERE kind = ? AND key = ?", (kind, key)) if key is not None else []

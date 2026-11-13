@@ -62,18 +62,10 @@ def test_load_manifest_invalid_file_exits(tmp_path):
         load_manifest(tmp_path / "mia.yaml")
 
 
-def test_load_manifest_env_default(tmp_path, monkeypatch):
-    p = tmp_path / "m.yaml"
-    p.write_text("services:\n  autodev: {app: autodev, config: autodev.yaml}\n")
-    monkeypatch.setenv("MIA_MANIFEST", str(p))
-    assert list(load_manifest().services) == ["autodev"]
-
-
-def test_load_manifest_prefers_mia_config_env(tmp_path, monkeypatch):
+def test_load_manifest_reads_mia_config_env(tmp_path, monkeypatch):
     p = tmp_path / "m.yaml"
     p.write_text("services:\n  autodev: {app: autodev, config: autodev.yaml}\n")
     monkeypatch.setenv("MIA_CONFIG", str(p))
-    monkeypatch.delenv("MIA_MANIFEST", raising=False)
     assert load_manifest().path == p
 
 

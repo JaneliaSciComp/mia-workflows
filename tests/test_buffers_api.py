@@ -504,18 +504,6 @@ def buffers_cfg(tmp_path, local_root):
     return make_cfg(tmp_path, paths={"local_root": str(local_root) if local_root else None})
 
 
-def test_open_ledger_moves_the_old_file_once(tmp_path, capsys):
-    cfg = buffers_cfg(tmp_path, tmp_path / "local")
-    old = Ledger(cfg.paths.state_dir / "buffers.sqlite")
-    old.put_buffer("b", {"x": 1})
-    old.close()  # the pre-B service is stopped before the upgrade
-    assert open_ledger(cfg).buffer("b") == {"x": 1} and "moved the ledger" in capsys.readouterr().out
-    assert not (tmp_path / "state" / "buffers.sqlite").exists()
-    assert Ledger(tmp_path / "state" / "buffers.sqlite.moved").buffer("b") == {"x": 1}
-    Ledger(cfg.paths.state_dir / "buffers.sqlite").put_buffer("b", {"x": 2})
-    assert open_ledger(cfg).buffer("b") == {"x": 1}  # already moved: the old file is not read again
-
-
 def test_open_ledger_refuses_a_missing_ledger_when_backups_exist(tmp_path):
     cfg = buffers_cfg(tmp_path, tmp_path / "local")
     backups = cfg.paths.state_dir / "backups"
@@ -1982,5 +1970,7 @@ def test_a_dataset_started_from_the_page_names_the_issue_the_mirror_opened(tmp_p
     assert issues() == (None, None, None, None, None)  # the mirror has opened none yet: no link, never the number
     s.ledger.set_subject_issue("dataset", number, 301)
     assert issues() == (301, 301, 301, 301, 301)
-    call(s, "PUT", f"/datasets/{ONE_CH}", payload={"state": "prepared", "issue": 12})  # a label's dataset, not adopted
+    call(
+        s, "PUT", f"/datasets/{ONE_CH}", payload={"state": "prepared", "issue": 12}
+    )  # its row names an issue; it has no subject
     assert call(s, "GET", "/catalog/datasets", {"q": ONE_CH})[1]["rows"][0]["issue"] == 12
