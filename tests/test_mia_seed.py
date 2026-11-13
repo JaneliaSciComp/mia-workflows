@@ -90,8 +90,16 @@ def test_dataset_folder_follows_miao_layout(rid, organism, name):
     for organisms in ([], ["Homo sapiens", "Mus musculus"], ["?"]):  # none, several, no letters: filed as unknown
         unclear = {**rec, "imaging": {**rec["imaging"], "organism": organisms}}
         assert catalog.dataset_folder(unclear, rid) == f"{family}-unknown-{name}"
-    with pytest.raises(ValueError, match="modality .* unclear"):
-        catalog.dataset_folder({**rec, "imaging": {**rec["imaging"], "modality": ["other"]}}, rid)
+
+    def with_modality(*modalities: str) -> str:
+        return catalog.dataset_folder({**rec, "imaging": {**rec["imaging"], "modality": list(modalities)}}, rid)
+
+    # `other` is the family of a record whose modalities settle on no other one
+    assert with_modality("other") == with_modality("other", "confocal", "TEM") == f"other-{organism}-{name}"
+    assert with_modality("other", "confocal") == f"lm-{organism}-{name}"
+    for unplaceable in ((), ("no-such-modality",)):
+        with pytest.raises(ValueError, match="modality .* unclear"):
+            with_modality(*unplaceable)
 
 
 def test_render_issue_with_record_commit_only():

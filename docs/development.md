@@ -397,10 +397,10 @@ names its `agent.allow_hosts` plus the exact hosts its broker's policy allows, a
    out with the rule `not prepared`). When the registry has never seen the round's catalog ref, the activity
    syncs it first. `plan.md` and `plan.json` land in the round directory and in the browsable
    `work_root/issue-<n>/<round>/`. Everything sourcing needs is checked here: a record mia-data could not place
-   (no single modality family, the rule behind `<dataset folder>`; a record without one organism is filed under
-   `unknown`) or whose voxel size is unknown stays out of the pool with that reason, and each pool row's voxel
-   size travels to its stage job (1 nm for the plane axis a 2D stack keeps). The plan is posted to the timeline
-   (pool table, cut at 60k characters); an
+   (no modality family, the rule behind `<dataset folder>`; a record without one organism is filed under
+   `unknown`, one of modality `other` under the family `other`) or whose voxel size is unknown stays out of the
+   pool with that reason, and each pool row's voxel size travels to its stage job (1 nm for the plane axis a 2D
+   stack keeps). The plan is posted to the timeline (pool table, cut at 60k characters); an
    invalid plan, or no `tensorizers/<name>` in the harness checkout, ends in `needs-human`. The plan's hash
    (sha256 of the `plan.json` text) goes to the buffer.
 3. **The plan gate** (a `plan_first` round). The stage is `plan-review`. `approve` (the page's *Run*) starts

@@ -101,6 +101,7 @@ def _slug(text: str) -> str:
 
 
 UNKNOWN_ORGANISM = "unknown"
+OTHER_FAMILY = "other"  # the catalog's modality `other`, and the family of a record nothing else places
 
 
 def organism_of(organisms: list) -> str:
@@ -111,8 +112,9 @@ def organism_of(organisms: list) -> str:
 def dataset_folder(record: dict, record_id: str) -> str:
     """The dataset's folder name under storage_root: `{modality family}-{organism}-{name}`.
 
-    A record with no single organism is filed under `unknown`. Raises ValueError when the modality family is
-    unclear. `record_id` is the trusted id (the record's own `id` field is not, see seed)."""
+    A record with no single organism is filed under `unknown`; one whose modalities settle on no family but
+    include `other` is filed under the family `other`. Raises ValueError when the record names no modality the
+    tables know. `record_id` is the trusted id (the record's own `id` field is not, see seed)."""
     imaging = record.get("imaging") or {}
     modalities, organisms = imaging.get("modality") or [], imaging.get("organism") or []
     # The family of the first modality if it is unambiguous, else the family all modalities share.
@@ -120,7 +122,10 @@ def dataset_folder(record: dict, record_id: str) -> str:
         {family for modality in subset for family, members in FAMILIES.items() if modality in members}
         for subset in (modalities[:1], modalities)
     ]
-    family = next((next(iter(candidates)) for candidates in family_sets if len(candidates) == 1), None)
+    family = next(
+        (next(iter(candidates)) for candidates in family_sets if len(candidates) == 1),
+        OTHER_FAMILY if OTHER_FAMILY in modalities else None,
+    )
     if family is None:
         raise ValueError(f"{record_id}: no dataset folder: modality {modalities} unclear (one family needed)")
     organism = organism_of(organisms)

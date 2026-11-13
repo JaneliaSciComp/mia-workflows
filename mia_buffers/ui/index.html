@@ -1230,7 +1230,7 @@ const PILL_HELP = {
   "annotation types": "The record's annotation types (masks, boxes, points, …) are not among those the spec asks for.",
   "annotation source": "The record's annotation source (manual, proofread, automatic, …) is not among those the spec asks for.",
   "array below minimum": "The record's largest array has fewer voxels than the spec's where.min_size_voxels.",
-  "no mia-data folder": "The record's modalities do not fall into one modality family, which is part of how a prepared dataset's folder is named, so the preparation pipeline cannot place it.",
+  "no mia-data folder": "The record names no modality the preparation pipeline knows, and a prepared dataset's folder is named after its modality family, so the pipeline cannot place it.",
   "duplicate DOI": "Another record with the same DOI is already in the pool; dedup keeps the first.",
   "record unreadable": "The record's YAML could not be parsed; the planner skipped it.",
   "no patch for dims": "The spec has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
