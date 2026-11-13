@@ -2380,7 +2380,7 @@ async function viewSubject(kind, key, refresh) {
   if (!subject) {  // nothing was ever asked of it on this page: the first Start creates it
     const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again };
     const missing = kind === "dataset" ? (detail ? null : "No dataset with this id in the newest catalog or the registry.") : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
-    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new")), actionBar(fresh),
+    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new")), missing ? null : actionBar(fresh),
       missing ? el("div", { class: "empty" }, missing) : null, ...cards].filter(Boolean));
     return;
   }
