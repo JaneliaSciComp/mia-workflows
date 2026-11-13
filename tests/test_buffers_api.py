@@ -1133,7 +1133,7 @@ def test_adopt_then_read_a_subject(tmp_path):
     status, row, _ = call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "stage": "review"})
     assert status == 200 and row["issue"] == 234
     status, row, _ = call(s, "GET", "/subjects/dataset/rec-a")
-    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "reject"])
+    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "go", "reject"])
     assert call(s, "GET", "/subjects/dataset/nope")[0] == 404
     assert call(s, "GET", "/subjects/widget/x")[0] == 404
     assert call(s, "PUT", "/subjects/dataset/235", payload={"key": "rec-b", "stage": "bogus"})[0] == 422
@@ -1323,7 +1323,8 @@ def test_a_first_go_creates_the_dataset_subject_and_starts_its_workflow(tmp_path
     assert subject["issue"] is None and subject["number"] == action["number"] > 20_000_000  # from the clock
     (sent,) = gateway.sent
     event = LabelEvent("go", str(action["id"]), "page", action["at"])
-    assert sent == ("dataset", subject["number"], "go", event)
+    assert sent == ("dataset", subject["number"], "restart", event)  # a dataset's go: its round starts in a new run
+    assert event.kind == "go"
     timeline = call(s, "GET", f"/timeline/dataset/{subject['number']}")[1]
     assert [entry["body"] for entry in timeline["entries"]] == ["**Action:** `go` by `page`"]
     assert timeline["entries"][0]["marker"] == f"<!-- mia: action {action['id']} -->"

@@ -119,6 +119,7 @@ class MiaDataDataset:
         self.reject_events: list[LabelEvent] = []
         self.revoke_events: list[LabelEvent] = []
         self.cancel_events: list[LabelEvent] = []
+        self.restarts: set[str] = set()  # ids of the gos that came as `restart`: each starts its round in a new run
         # a cancel in progress (see _cancel_round): the round starts no new activity, the one in flight answers
         self.cancelling = False
         self.unwinding = False  # the round's task has been told to stop: what it runs from here on is clean-up
@@ -130,6 +131,14 @@ class MiaDataDataset:
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
+        self.go_events.append(event)
+
+    @workflow.signal
+    def restart(self, event: LabelEvent) -> None:
+        """A go whose round starts in a new run of this workflow (see `run`). A run keeps the code paths it began
+        with for as long as it lives (its patches), so only a new run does everything today's code does. At
+        `review` it also ends the round that waits there, whichever path made its crops."""
+        self.restarts.add(event.event_id)
         self.go_events.append(event)
 
     @workflow.signal
@@ -164,10 +173,16 @@ class MiaDataDataset:
     @workflow.run
     async def run(self, state: DatasetState) -> None:
         rounds = 0
-        if state.stage == "review" and state.tests and not state.pr:  # rolled over while waiting for a verdict
+        worked = True  # whether this run has carried a round yet: one it started, or one it took over
+        if state.restart:  # rolled over for this go: its round is the run's first step
+            event, state.restart = state.restart, None
+            await self._guard(self._round(event, restarted=True))
+        elif state.stage == "review" and state.tests and not state.pr:  # rolled over while waiting for a verdict
             await self._guard(self._from_review())
         elif (state.stage in DEVELOP or state.stage == "review") and state.snippet_issue:  # ... or following the PR
             await self._guard(self._follow_pr())
+        else:
+            worked = False
         while True:
             await workflow.wait_condition(lambda: bool(self._labels() or self.cancel_events) or self._roll_due())
             if not (self._labels() or self.cancel_events):
@@ -180,8 +195,13 @@ class MiaDataDataset:
             event = self.go_events.pop(0)
             if self._seen(event):  # redelivery
                 continue
+            restarted = event.event_id in self.restarts
+            if restarted and worked and not (self._labels() or self.cancel_events):
+                state.restart = event  # this run has carried a round: the next one starts in a new run
+                await self._rollover()
             rounds += 1
-            await self._guard(self._round(event))
+            worked = True
+            await self._guard(self._round(event, restarted))
             if (rounds >= MAX_ROUNDS_PER_EXECUTION or self._roll_due()) and not (self._labels() or self.cancel_events):
                 await self._rollover()
 
@@ -696,7 +716,7 @@ class MiaDataDataset:
 
     # --- the round -------------------------------------------------------------------------
 
-    async def _round(self, event: LabelEvent) -> None:
+    async def _round(self, event: LabelEvent, restarted: bool = False) -> None:
         """One round from a `go`: admit, match, smoke, test crops, then wait for review.
 
         After a develop round stopped, the `go` resumes its snippet PR instead when that PR is still
@@ -704,7 +724,9 @@ class MiaDataDataset:
         state = self.state
         snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
         # (a cancelled develop round left its snippet issue and PR open too: autodev is not asked twice)
-        if state.stage in (*STOPPED, "cancelled") and state.snippet_issue and workflow.patched("resume-snippet-pr"):
+        # (a restart at review leaves them open as well)
+        left = (*STOPPED, "cancelled", "review") if restarted else (*STOPPED, "cancelled")
+        if state.stage in left and state.snippet_issue and workflow.patched("resume-snippet-pr"):
             snippet_issue, snippet_pr = state.snippet_issue, state.pr
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
@@ -1082,8 +1104,8 @@ class MiaDataDataset:
 
     async def _follow_pr(self) -> None:
         """The develop round's one wait: wake on pr_update and on labels until the round ends. At `review` (the
-        PR head's set passed) an approve or reject is the verdict (spec §14); any other label is refused (a go is
-        busy throughout). Rolls over only here, idle."""
+        PR head's set passed) an approve or reject is the verdict (spec §14) and a `restart` ends the round; any
+        other label is refused (a plain go is busy throughout). Rolls over only here, idle."""
         state = self.state
         await self._limits()
         loop = workflow.patched("review-loop")
@@ -1096,6 +1118,8 @@ class MiaDataDataset:
             if loop and state.stage == "review" and state.pr and (verdict := await self._verdict()):
                 kind, event = verdict
                 await (self._approve_pr(event) if kind == "approve" else self._revise_pr(event))
+            if state.stage == "review" and any(go.event_id in self.restarts for go in self.go_events):
+                return  # a restart of the set under review: the round ends here, and `run` starts the next
             await self._refuse_queued()
             while state.pending:
                 if await self._on_pr(state.pending.pop(0).pr):

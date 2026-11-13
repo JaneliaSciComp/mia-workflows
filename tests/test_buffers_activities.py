@@ -403,7 +403,7 @@ async def test_nudge_dataset_sends_a_go_through_the_registry_once(acts, gateway)
     assert (subject["number"], subject["issue"]) == (info.number, None)  # no issue is opened or labelled
     assert gh.created == [] and gh.issues == {}
     ((kind, number, signal, event),) = gateway.sent
-    assert (kind, number, signal, event.actor) == ("dataset", info.number, "go", "buffer:7")
+    assert (kind, number, signal, event.actor) == ("dataset", info.number, "restart", "buffer:7")
     again = await acts.nudge_dataset(ROUND, U937)  # a retried activity: the same key, the same action, no second go
     assert again.number == info.number and len(gateway.sent) == 1
     assert len(acts.registry.timeline("dataset", info.number)["actions"]) == 1
@@ -432,7 +432,7 @@ async def test_nudge_dataset_that_stopped_gets_a_go_again(acts, gateway, stage):
     acts.registry.adopt_subject("dataset", 5, U937, stage=stage)
     info = await acts.nudge_dataset(ROUND, U937)
     assert (info.number, info.stage, info.nudged) == (5, stage, True)
-    assert [(sent[1], sent[2]) for sent in gateway.sent] == [(5, "go")]
+    assert [(sent[1], sent[2]) for sent in gateway.sent] == [(5, "restart")]
 
 
 async def test_nudge_for_a_record_buffer_api_has_not_seen_syncs_the_rounds_catalog_first(acts, gateway):
@@ -1753,7 +1753,7 @@ async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_to
     acts.registry.adopt_subject("dataset", 6, BCSS, stage="needs-human")
     assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "nudged", 5)
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
-    assert [sent[:3] for sent in gateway.sent] == [("dataset", 5, "go"), ("dataset", 6, "go")]
+    assert [sent[:3] for sent in gateway.sent] == [("dataset", 5, "restart"), ("dataset", 6, "restart")]
     assert [acts.registry.dataset(record)["state"] for record in (U937, BCSS)] == ["in-progress", "in-progress"]
     acts.registry.adopt_subject("dataset", 5, U937, stage="review")  # a round is under way: it is left to it
     assert (await acts.prep_nudge(PREP_ROUND, U937)).outcome == "in-progress" and len(gateway.sent) == 2

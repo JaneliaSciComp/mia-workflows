@@ -192,7 +192,11 @@ check failed and running it again may pass, `blocked` when a person has to decid
 match agent says so, a host is not approved, admission refuses the record, the policy refuses an approve, a
 revocation, a pause). `needs-human` is the stage of a stop that says neither;
 *Run again* afterwards retries from the start with a new seed, or, when the round was following a snippet PR that
-is still open, picks that PR up again. *Cancel the round* ends a round in progress: its jobs are killed and the
+is still open, picks that PR up again. At `review` the same action is *Restart*: the set under review is dropped
+unsaved and the dataset is prepared again (a snippet PR's current head is tested again). buffer-api delivers a
+dataset's `go` as the workflow's `restart` signal: a run that has carried a round continues as new first, so every
+round begins in a run that takes all of today's code paths, the crop judge among them (a run keeps the patches it
+started with). *Cancel the round* ends a round in progress: its jobs are killed and the
 stage is `cancelled`.
 
 The `MiaMirror` workflow copies each entry to the dataset's GitHub issue as a comment and sets the stage as the

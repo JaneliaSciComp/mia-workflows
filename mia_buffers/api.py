@@ -1347,7 +1347,8 @@ class BufferService:
                 reason = f"stopped from the page (action {action['id']})"
                 running = self.dispatcher.terminate(kind, number, reason)
             else:
-                self.dispatcher.send(kind, number, signal, event)
+                # a dataset's go is its workflow's `restart`: the round starts in a new run, on today's code
+                self.dispatcher.send(kind, number, "restart" if (kind, signal) == ("dataset", "go") else signal, event)
         except DispatchError as error:
             self._asked.pop((kind, number), None)  # nothing was asked of any workflow
             failed = self.ledger.settle_action(action["id"], "failed", str(error))

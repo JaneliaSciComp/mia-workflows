@@ -66,7 +66,7 @@ STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "matching": ("working", frozenset({"cancel"})),
     "developing": ("working", frozenset({"cancel"})),
     "testing": ("working", frozenset({"cancel"})),
-    "review": ("waiting", frozenset({"approve", "reject", "cancel"})),
+    "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),  # go: start over, the set is dropped
     "merging": ("working", frozenset({"cancel"})),
     "done": ("done", frozenset({"go", "revoke"})),
     "failed": ("stuck", frozenset({"go", "revoke"})),

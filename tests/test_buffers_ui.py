@@ -195,6 +195,15 @@ def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
     assert '.toggles .btn[aria-pressed="true"]' in PAGE
 
 
+def test_a_dataset_at_review_offers_a_restart_beside_its_verdicts() -> None:
+    from mia_data.config import STAGE_ACTIONS
+
+    assert "go" in STAGE_ACTIONS["review"][1]
+    assert 'action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"' in PAGE
+    order = PAGE[PAGE.index("const ACTION_ORDER = ") :].split("\n")[0]
+    assert order.index('"approve"') < order.index('"reject"') < order.index('"go"') < order.index('"cancel"')
+
+
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
     stage, spec, plan, notes = rendered(
         "**Stage:** `buffer:planning`\n\n**Folders:** [Workspace](https://files.example/w) · [Staged](https://files.example/s)\n\n"

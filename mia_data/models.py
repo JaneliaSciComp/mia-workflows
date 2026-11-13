@@ -91,6 +91,7 @@ class DatasetState:
     attempts: dict[str, int] = field(default_factory=dict)  # stage -> attempts used
     pending: list[PrUpdate] = field(default_factory=list)  # PR updates not yet acted on
     published: bool = False  # some round of this issue published crops: there is something a data:revoke withdraws
+    restart: LabelEvent | None = None  # the go a run was rolled over for: the new run's first step is its round
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:

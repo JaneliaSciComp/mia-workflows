@@ -411,7 +411,7 @@ async def idle(h, m, stage):
 
 
 @contextlib.asynccontextmanager
-async def started(env, m, first=None, runner=None):
+async def started(env, m, first=None, runner=None, signal="go"):
     tq = f"tq-{uuid.uuid4()}"
     kw = {"workflow_runner": runner} if runner else {}
     async with (
@@ -423,11 +423,11 @@ async def started(env, m, first=None, runner=None):
             DatasetState(7),
             id=f"wf-{uuid.uuid4()}",
             task_queue=tq,
-            start_signal="go",
+            start_signal=signal,
             start_signal_args=[first or ev("go", "11")],
         )
         h = env.client.get_workflow_handle(h0.id)  # follows continue-as-new
-        h.first_run_id = h0.run_id
+        h.first_run_id = h0.result_run_id  # the run this call started; `run_id` is unset on such a handle
         try:
             yield h
         finally:
@@ -686,6 +686,59 @@ async def test_continue_as_new_keeps_handled(env, monkeypatch):
         await idle(h, m, "blocked")
         assert (await h.query(MiaDataDataset.status)).handled == ["11", "12"]
     assert m.of("admit") == [("11",), ("12",)]
+
+
+async def test_a_restart_starts_its_round_in_a_new_run(env):
+    """A dataset's go arrives as `restart`. A run that has carried a round rolls over first, so the round runs in a
+    new run (one that takes every code path of today); the round a run starts with stays in it."""
+    m = Mocks(outcome="blocked")
+    async with started(env, m, signal="restart") as h:
+        await idle(h, m, "blocked")
+        assert (await h.describe()).run_id == h.first_run_id and m.of("admit") == [("11",)]  # a new run: in place
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))
+        await until(lambda: m.stages.count("blocked") == 2)
+        await idle(h, m, "blocked")
+        second = (await h.describe()).run_id
+        assert second != h.first_run_id  # the first run had carried a round
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))  # redelivered into the new run: handled already
+        await h.signal(MiaDataDataset.go, ev("go", "13"))  # a plain go stays in the run it reaches
+        await until(lambda: m.stages.count("blocked") == 3)
+        await idle(h, m, "blocked")
+        st = await h.query(MiaDataDataset.status)
+        assert (await h.describe()).run_id == second
+    assert m.of("admit") == [("11",), ("12",), ("13",)] and m.stages == ["matching", "blocked"] * 3
+    assert (st.handled, st.restart, st.round_id) == (["11", "12", "13"], None, "i7-e13") and not m.of("refuse_label")
+
+
+async def test_a_restart_at_review_drops_the_set_and_starts_over_in_a_new_run(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))
+        await until(lambda: m.stages.count("review") == 2)
+        await idle(h, m, "review")
+        assert (await h.describe()).run_id != h.first_run_id
+        await approve_review(h, m, eid="13")
+        await idle(h, m, "done")
+    assert m.stages == ["matching", "testing", "review", "matching", "testing", "review", "done"]
+    assert len(m.of("publish_crops")) == 1 and not m.of("refuse_label")  # the first set was never saved
+
+
+async def test_a_restart_at_review_of_a_pr_heads_set_tests_that_head_again(env):
+    """The snippet PR stays the dataset's: the new round, in a new run, tests its head again and asks autodev for
+    nothing."""
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))
+        await until(lambda: m.stages.count("review") == 2)
+        await idle(h, m, "review")
+        assert (await h.describe()).run_id != h.first_run_id
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "developing", "testing", "review", "testing", "review"]
+    assert m.of("admit") == [("11",), ("12",)] and m.of("open_snippet_issue") == [("i7-e11", None)]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]  # no second match
+    assert (st.round_id, st.snippet_issue) == ("i7-e12", 100) and not m.of("refuse_label")
 
 
 async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke(env):

@@ -303,7 +303,7 @@ the reason.
 
 | subject | routes | actions |
 |---|---|---|
-| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
+| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*, at `review` *Restart*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
 | buffer spec (`#specs/<name>`) | `POST /specs`, `POST /specs/<name>/actions` | `go` (*Plan*), `approve` (*Run* at the plan, *Approve* at the board), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel`, `stop` |
 | preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go`, `cancel`, `stop` |
 

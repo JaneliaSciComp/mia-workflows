@@ -894,7 +894,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 </figure>
 <div class="tw"><table>
 <tr><th>subject</th><th>its page</th><th>action route</th><th>actions</th></tr>
-<tr><td>dataset</td><td><code>#datasets/&lt;record&gt;</code></td><td><code>POST /datasets/&lt;record&gt;/actions</code></td><td><code>go</code> (<i>Start</i>, <i>Run again</i>), <code>approve</code>, <code>reject</code> with a note, <code>revoke</code>, <code>cancel</code></td></tr>
+<tr><td>dataset</td><td><code>#datasets/&lt;record&gt;</code></td><td><code>POST /datasets/&lt;record&gt;/actions</code></td><td><code>go</code> (<i>Start</i>, <i>Run again</i>, <i>Restart</i> at review), <code>approve</code>, <code>reject</code> with a note, <code>revoke</code>, <code>cancel</code></td></tr>
 <tr><td>buffer spec</td><td><code>#specs/&lt;name&gt;</code></td><td><code>POST /specs</code> · <code>POST /specs/&lt;name&gt;/actions</code></td><td><code>go</code> with <code>plan_first</code> (<i>Plan</i>), <code>approve</code> (<i>Run</i> at the plan, <i>Approve</i> at the board), <code>keep</code>, <code>retire</code>, <code>revoke</code>, <code>dropped</code> (<i>Files are in place</i>), <code>cancel</code>, <code>stop</code></td></tr>
 <tr><td>preparation request</td><td><code>#requests/&lt;key&gt;</code></td><td><code>POST /prep</code> · <code>POST /prep/&lt;number&gt;/actions</code></td><td><code>go</code>, <code>cancel</code>, <code>stop</code></td></tr>
 </table></div>
@@ -2123,7 +2123,8 @@ const BUTTON_HELP = {
 };
 const ACTION_HELP = {
   dataset: {
-    go: s => s.stage !== "new" ? "Start a new round of the preparation workflow from the beginning. After a stop it picks up the reader's open pull request, if there is one." + (s.stage === "done" ? " Until its new crops are approved the dataset is not prepared, and a new buffer plan leaves it out." : "")
+    go: s => s.stage === "review" ? "Start over: the crops under review are dropped unsaved and a new round prepares the dataset again, with a judge's verdict on its crops. If a reader's pull request made these crops, its current head is tested again."
+      : s.stage !== "new" ? "Start a new round of the preparation workflow from the beginning. After a stop it picks up the reader's open pull request, if there is one." + (s.stage === "done" ? " Until its new crops are approved the dataset is not prepared, and a new buffer plan leaves it out." : "")
       : s.again ? "Run the preparation workflow again: a new round makes more sample crops, which are saved once you approve them. Until then the dataset is not prepared, and a new buffer plan leaves it out."
       : "Start the preparation workflow: an agent matches the dataset to a reader, then sample crops are made for you to review.",
     approve: "Save the crops under review: the dataset becomes prepared and buffers can use it. If a new reader made them, its pull request is merged first.",
@@ -2151,6 +2152,7 @@ const ACTION_WORDS = { approve: "Approve", reject: "Reject…", keep: "Keep", go
 // the word on an action's button; the Buffers list names what a spec waits for by the same words
 const actionWord = (subject, action) => action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
   : action === "go" && subject.kind === "buffer" ? "Plan" : action === "dropped" ? "Files are in place"  // a spec's own controls
+  : action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"  // beside Approve and Reject: neither verdict, the set is dropped
   : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {
   revoke: "Revoke this dataset's saved crops? Buffers that drew from it are degraded; nothing is deleted.",
