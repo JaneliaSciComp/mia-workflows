@@ -1817,7 +1817,8 @@ function datasetCards(d) {
     ] })));
   const raw = d.raw_asset;
   cards.push(card("Cache", "Its download in the raw cache, and each staged artifact: this dataset staged for one crop geometry by one recipe.",
-    raw ? kv([["raw download", el("span", { class: "pills" }, assetPill(data(raw).state), " ", data(raw).bytes ? fmtBytes(data(raw).bytes) : "", " · last used ", when(data(raw).last_used), " · ", folderLink(roots.raw_root, raw.key), " ", bufferLinks(raw.refs))]])
+    raw ? kv([["raw download", el("span", { class: "pills" }, assetPill(data(raw).state), ...[data(raw).bytes ? fmtBytes(data(raw).bytes) : "", data(raw).last_used ? el("span", {}, "last used ", when(data(raw).last_used)) : "", folderLink(roots.raw_root, raw.key)]
+        .filter(Boolean).flatMap((part, i) => [i ? " · " : " ", part]), " ", bufferLinks(raw.refs))]])
       : el("div", { class: "small" }, "Not in the raw cache."),
     pagedTable("dataset-staged:" + row.id, { source: pageOf("/assets/staged", "assets", () => ({ record: row.id })), sort: "last_used", dir: "desc", search: false, empty: "Not staged yet.", cols: [
       { key: "artifact", label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) },
