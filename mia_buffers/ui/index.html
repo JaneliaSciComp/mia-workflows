@@ -1803,7 +1803,7 @@ function datasetCards(d) {
     ["binding", ds.binding_hash ? el("span", {}, code(ds.binding_hash, 12), ds.binding_commit ? " at snippets " : "", code(ds.binding_commit, 10)) : ""],
     ds.revoked_at ? ["revoked", el("span", {}, when(ds.revoked_at), ds.revoked_by ? ` by ${ds.revoked_by}` : "")] : null,
     ["updated", when(row.updated_at)],
-    ["requests", d.requests.length ? el("span", {}, ...d.requests.flatMap((r, i) => [i ? " " : "", el("a", { href: SUBJECT_HASH.prep(r.key) }, r.key)])) : "none named it"],
+    ["preparation requests", d.requests.length ? el("span", {}, ...d.requests.flatMap((r, i) => [i ? " " : "", el("a", { href: SUBJECT_HASH.prep(r.key) }, r.key)])) : "none named it"],
   ])));
   if (ds.folder && (ds.previews || []).length) cards.push(card("Crops", `${num(ds.crops || ds.previews.length)} published; the first ${num(ds.previews.length)} with their annotation overlay. Click one to open it.`,
     el("div", { class: "gallery" }, ...ds.previews.map(id => el("a", { href: cropPng(ds, id, "overlay"), target: "_blank", rel: "noopener", title: id }, el("img", { src: cropPng(ds, id, "overlay"), loading: "lazy", alt: `crop ${id} with its overlay` }))))));
@@ -1839,7 +1839,7 @@ function datasetCards(d) {
 // A stage off the line (needs-human, cancelled) hangs under the step the round stopped at, which is the newest
 // stage of `history` (newest first) that is on the line; with none, it stands apart at the end.
 // The line is named for what it is: the workflow that prepares a dataset, builds a buffer, or carries a request.
-const FLOW_LABELS = { dataset: "Preparation workflow:", buffer: "Buffer workflow:", prep: "Request workflow:" };
+const FLOW_LABELS = { dataset: "Preparation workflow:", buffer: "Buffer workflow:", prep: "Preparation request workflow:" };
 const flowRow = (kind, flow) => flow && FLOW_LABELS[kind] ? el("div", { class: "flowrow" }, el("span", { class: "flowlabel" }, FLOW_LABELS[kind]), flow) : flow;
 function lifecycle(line, stage, history, busy) {  // `busy`: a round is in progress at the current step
   if (!line || !stage) return null;
