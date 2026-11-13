@@ -59,7 +59,8 @@ def placement_problem(base_policy: Path, policy_dir: Path, writable: Sequence[Pa
     """What is wrong with where `policy_dir` is (the base itself, under home, or a worker-writable mount), or None."""
     base = base_policy.resolve()
     directory = policy_dir.resolve()
-    if directory / POLICY_NAME == base:
+    candidate = directory / POLICY_NAME
+    if base in (candidate, candidate.resolve()) or candidate == base_policy.parent.resolve() / base_policy.name:
         return f"{policy_dir} would hold the base policy {base_policy} itself; choose another directory"
     if not directory.is_relative_to(Path.home().resolve()):
         return f"{policy_dir} is not under the home directory, where a job cannot mount it"
@@ -93,6 +94,8 @@ def approve_hosts(
     writable: Sequence[Path] = (),
 ) -> list[str]:
     """Append an approval line for each host not yet approved, regenerate the policy, return the hosts added."""
+    if bad := [host for host in hosts if not HOST_RE.fullmatch(host)]:
+        raise PolicyError(f"not an approvable hostname (lowercase, exact, no port): {', '.join(bad)}")
     with _approval_lock:
         _check_placement(base_policy, policy_dir, writable)
         _read_base(base_policy)

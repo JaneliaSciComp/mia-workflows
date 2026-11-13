@@ -83,6 +83,33 @@ def test_a_host_the_base_matches_by_pattern_is_not_added(base, policy_dir):
     assert allowed_patterns(policy_dir) == ["zenodo.org", "*.huggingface.co"]
 
 
+@pytest.mark.parametrize("operation", ["generate", "approve"])
+def test_a_base_that_is_a_symlink_inside_the_policy_dir_is_refused(tmp_path, operation):
+    real = tmp_path / "shared" / "real.toml"
+    real.parent.mkdir()
+    real.write_text(BASE)
+    directory = tmp_path / "state" / "csub"
+    directory.mkdir(parents=True)
+    link = directory / POLICY_NAME
+    link.symlink_to(real)
+    with pytest.raises(PolicyError):
+        if operation == "generate":
+            generate_policy(link, directory)
+        else:
+            approve(link, directory, ["a.example.org"])
+    assert link.is_symlink()
+    assert real.read_text() == BASE
+    assert [path.name for path in directory.iterdir()] == [POLICY_NAME]
+
+
+@pytest.mark.parametrize("host", ["*.example.org", "Data.Example.org", "data.example.org.", "data.example.org:443"])
+def test_an_unapprovable_host_is_refused_before_anything_is_written(base, policy_dir, host):
+    with pytest.raises(PolicyError, match=host.replace("*", r"\*")):
+        approve(base, policy_dir, [host])
+    assert not (policy_dir / APPROVALS_NAME).exists()
+    assert generate_policy(base, policy_dir).exists()
+
+
 @pytest.mark.parametrize("through_symlink", [False, True])
 @pytest.mark.parametrize("operation", ["generate", "approve"])
 def test_a_policy_dir_that_holds_the_base_is_refused_and_the_base_keeps_its_bytes(
