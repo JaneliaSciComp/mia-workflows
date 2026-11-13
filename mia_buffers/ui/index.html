@@ -76,11 +76,11 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
    cancelled) hangs under the step its round stopped at, or stands apart when no step is known */
 .flow{list-style:none;display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 0;padding:0;margin:2px 0 12px;font-size:12.5px}
 .flowrow{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0 10px}
-.flowlabel{line-height:30px;font-size:12.5px;font-weight:500;color:var(--fg2);white-space:nowrap}
+.flowlabel{line-height:26px;font-size:12.5px;font-weight:500;color:var(--fg2);white-space:nowrap}
 .flow li{display:grid;grid-template-columns:auto auto;position:relative}
 .flow li+li::before{content:"";grid-area:1/1;align-self:center;width:18px;height:1px;margin:0 5px;background:var(--axis)}
-.flow li+li::after{content:"";position:absolute;left:16px;top:10px;width:6px;height:6px;border:solid var(--axis);border-width:1px 1px 0 0;transform:rotate(45deg)}
-.flow .step{grid-column:2;height:26px;line-height:24px;padding:0 10px;border:1px solid var(--grid);border-radius:6px;color:var(--muted);text-align:center;white-space:nowrap}
+.flow li+li::after{content:"";position:absolute;left:16px;top:8px;width:6px;height:6px;border:solid var(--axis);border-width:1px 1px 0 0;transform:rotate(45deg)}
+.flow .step{grid-column:2;height:22px;line-height:20px;padding:0 9px;border:1px solid var(--grid);border-radius:999px;font-size:12px;color:var(--muted);text-align:center;white-space:nowrap}
 .flow .past .step{border-color:var(--axis);color:var(--fg2)}
 .flow .now .step{background:var(--accent-soft);border-color:var(--accent);color:var(--fg);font-weight:500}
 .flow .busy .step::before{content:"";display:inline-block;width:7px;height:7px;margin-right:7px;border-radius:50%;background:var(--accent);vertical-align:baseline}
@@ -270,7 +270,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
   </nav>
   <span class="catref" id="catref">no catalog synced</span>
   <input type="search" class="lookup" id="lookup" placeholder="#234, issue URL, record, spec" aria-label="Find a dataset, buffer spec or request by issue number, issue URL or name">
-  <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme">theme</button>
+  <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme" title="Switch between the light and the dark theme">theme</button>
 </header>
 <div class="banner" id="banner" role="alert"></div>
 <noscript><p class="notice">This page needs JavaScript: every number on it comes from the service's routes.</p></noscript>
@@ -311,7 +311,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
   </details>
   <div id="planMsgs" aria-live="polite"></div>
   <div class="actions">
-    <button type="button" class="btn" id="download">Download spec YAML</button>
+    <button type="button" class="btn" id="download" title="Save the spec these controls describe as a YAML file">Download spec YAML</button>
     <div id="bufferIssue"></div>
     <div id="prepIssue"></div>
     <span class="small" id="planStatus"></span>
@@ -1521,7 +1521,7 @@ function createBuffer(container, yaml, blocker) {
   if (!area) {
     area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML", oninput: () => { area.dataset.edited = "1"; renderActions(); } });  // an edited spec enables Plan
     const status = el("span", { class: "small" });
-    const run = el("button", { type: "button", class: "btn", onclick: async () => {
+    const run = el("button", { type: "button", class: "btn", title: BUTTON_HELP.plan, onclick: async () => {
       run.disabled = true; status.textContent = "planning…";
       try {
         const action = await api("/specs", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: area.value, action: "go", plan_first: true, key: newKey() }) });
@@ -1545,7 +1545,7 @@ function prepareButton(container, all, blocker, done) {
   const todo = all.slice(0, PREP_MAX), why = blocker;
   const label = all.length > PREP_MAX ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets` : `Prepare these ${num(todo.length)} datasets`;
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
-  container.replaceChildren(el("button", { type: "button", class: "btn", title: "one preparation request for these datasets", onclick: async e => {
+  container.replaceChildren(el("button", { type: "button", class: "btn", title: BUTTON_HELP.prepare, onclick: async e => {
     if (!confirm(`Start preparing ${todo.length} datasets? Each one costs an agent run.`)) return;
     e.target.disabled = true;
     // more than 25 records need the count written into the request: the confirmation above is that
@@ -1714,7 +1714,7 @@ function viewDatasetList(arg, params) {
     if (found.ids.length > PREP_MAX) banner(`${num(found.ids.length)} datasets match; the first ${PREP_MAX} are selected, since a request takes at most ${PREP_MAX}.`);
     list.reload();
   } }, "Select all matching");
-  const clear = el("button", { type: "button", class: "btn", onclick: () => { CHOSEN.clear(); list.reload(); } }, "Clear selection");
+  const clear = el("button", { type: "button", class: "btn", title: BUTTON_HELP.clearSelection, onclick: () => { CHOSEN.clear(); list.reload(); } }, "Clear selection");
   const list = pagedTable("datasets", { source: pageOf("/catalog/datasets", "rows", filters), sort: "dataset", search: "search id, title, modality, licence",
     tools: Object.values(selects), empty: "No dataset matches these filters.",
     select: { chosen: CHOSEN, id: row => row.id, can: PREPARABLE, onchange: showChosen },
@@ -2049,6 +2049,44 @@ function viewDocs(arg) {  // static: show one of the two documents and mark its 
 const SUBJECT_VIEWS = { datasets: "dataset", specs: "buffer", requests: "prep" };  // #datasets/<record>, #specs/<name>, #requests/<key>
 const SUBJECT_TAB = { datasets: "datasets", specs: "buffers", requests: "preparation" };
 const SUBJECT_HASH = { dataset: key => "#datasets/" + encodeURIComponent(key), buffer: key => "#specs/" + encodeURIComponent(key), prep: key => "#requests/" + encodeURIComponent(key) };
+// What a button does, said on hover. BUTTON_HELP: the buttons with a control of their own. ACTION_HELP: a subject's
+// action bar, by kind and action; a function where the stage changes what the action means.
+const BUTTON_HELP = {
+  plan: "Save this spec and start a round that plans the pool and stops there. Nothing is downloaded until you press Run.",
+  dropped: "Tell the round that this dataset's files are in its incoming/ folder. Press it once the copy has finished: the worker checks them and moves them into the cache.",
+  revokeTicked: "Withdraw the ticked datasets from this buffer: their volumes are unregistered and their staged pyramids are quarantined. Nothing is deleted.",
+  retry: "Send the same action again. It carries the same key, so it cannot run twice.",
+  prepare: "File one preparation request for these datasets: each one gets a run of the preparation workflow, and the request's page follows them.",
+  clearSelection: "Untick every dataset.",
+  sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
+  cancelReject: "Close this without sending anything.",
+  showChange: "Redraw the page with what changed; what you typed here is dropped.",
+};
+const ACTION_HELP = {
+  dataset: {
+    go: s => s.stage !== "new" ? "Start a new round of the preparation workflow from the beginning. After a stop it picks up the reader's open pull request, if there is one."
+      : s.again ? "Run the preparation workflow again: a new round makes more sample crops, which are published once you approve them."
+      : "Start the preparation workflow: an agent matches the dataset to a reader, then sample crops are made for you to review.",
+    approve: "Publish the crops under review: the dataset becomes prepared and buffers can use it. If a new reader made them, its pull request is merged first.",
+    reject: "Send the crops back with your feedback: the agent fixes the reader, and new crops come back for review.",
+    revoke: "Withdraw this dataset's published crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Run again repairs it.",
+    cancel: "Stop the round in progress: its cluster jobs are killed and nothing is published.",
+  },
+  buffer: {
+    approve: s => s.stage === "plan-review" ? "Accept the plan and start the jobs: the pool's datasets are downloaded and converted, then the round stops for your approval."
+      : "Serve the buffer as the board shows it. The share each weighting group has now becomes the floor it is judged against.",
+    keep: "Keep this idle buffer: it goes back to ready instead of being retired.",
+    retire: "Release the buffer's staged data: training jobs are refused from then on, and the space can be reclaimed.",
+    cancel: "Stop the round in progress: its cluster jobs are killed and its buffer is retired.",
+    stop: "For a run that does not answer Cancel: the workflow is terminated and the spec's buffers are retired. A cluster job already running is not killed.",
+  },
+  prep: {
+    go: "Run the request again: its datasets that have not settled are handed to the preparation workflow again.",
+    cancel: "Stop the request, and the dataset rounds it started.",
+    stop: "For a request that does not answer Cancel: its workflow is terminated. The dataset rounds it started keep running.",
+  },
+};
+const actionHelp = (subject, action) => { const help = ACTION_HELP[subject.kind]?.[action]; return typeof help === "function" ? help(subject) : help; };
 const ACTION_ORDER = ["approve", "reject", "keep", "go", "revoke", "retire", "cancel", "stop"];
 const ACTION_WORDS = { approve: "Approve", reject: "Reject…", keep: "Keep", go: "Run again", revoke: "Revoke", retire: "Retire", cancel: "Cancel the round", stop: "Force stop" };
 const ACTION_CONFIRM = {
@@ -2135,13 +2173,13 @@ function markdown(text) {  // paragraphs, headings, fenced code, pipe tables, li
 // off the body, so a redraw of the view behind it (the stream's) does not take what was typed.
 function askReject(subject, send) {
   const note = el("textarea", { rows: 7, placeholder: "What is wrong with these crops?", "aria-label": "what is wrong with these crops" });
-  const sendButton = el("button", { type: "submit", class: "btn danger", value: "send", disabled: true }, "Send rejection");
+  const sendButton = el("button", { type: "submit", class: "btn danger", value: "send", title: BUTTON_HELP.sendReject, disabled: true }, "Send rejection");
   note.addEventListener("input", () => { sendButton.disabled = !note.value.trim(); });
   const box = el("dialog", { class: "ask", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
     el("h2", { id: "askTitle" }, "Reject these crops"), el("div", { class: "mono small" }, subject.key),
     el("p", { class: "small" }, "What you write goes to the agent that fixes the dataset's reader. It then makes new crops, which come back for review."),
     note,
-    el("div", { class: "actions" }, sendButton, el("button", { type: "submit", class: "btn", value: "cancel" }, "Cancel"))));
+    el("div", { class: "actions" }, sendButton, el("button", { type: "submit", class: "btn", value: "cancel", title: BUTTON_HELP.cancelReject }, "Cancel"))));
   box.addEventListener("close", () => { if (box.returnValue === "send" && note.value.trim()) send(note.value.trim()); box.remove(); });
   document.body.append(box);
   box.showModal();
@@ -2159,7 +2197,7 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
     const sending = action === "reject" ? "Rejecting…" : word + "…";  // Reject… already ends in the dots of "more to enter"
     // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
     const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
-    bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), disabled: !!subject.asked, onclick: e => {
+    bar.append(el("button", { type: "button", class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""), title: actionHelp(subject, action), disabled: !!subject.asked, onclick: e => {
       const send = more => {
         bar.querySelectorAll("button").forEach(b => { b.disabled = true; });
         e.target.textContent = sending;
@@ -2181,7 +2219,7 @@ function undelivered(subject, actions, after) {  // an action that did not reach
     if (!lost) continue;
     const line = el("div", { class: "notice" }, el("b", {}, a.action), ` was not delivered${a.detail ? ": " + a.detail : ""}. `);
     const again = { action: a.action, key: a.key, ...(a.payload?.note ? { note: a.payload.note } : {}), ...(a.payload?.spec ? { spec: a.payload.spec, plan_first: !!a.payload.plan_first } : {}), ...(a.payload?.records ? { records: a.payload.records } : {}), ...(a.payload?.record ? { record: a.payload.record } : {}) };
-    if (a.key) line.append(el("button", { type: "button", class: "btn", onclick: e => { e.target.disabled = true; sendAction(subject, again, after); } }, "Retry"));
+    if (a.key) line.append(el("button", { type: "button", class: "btn", title: BUTTON_HELP.retry, onclick: e => { e.target.disabled = true; sendAction(subject, again, after); } }, "Retry"));
     box.append(line);
   }
   return box;
@@ -2203,13 +2241,13 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   if (subject.actions.includes("dropped")) {
     const waiting = board.filter(d => d.status === "waiting-drop");
     for (const d of waiting) box.append(el("div", { class: "notice" }, el("b", {}, d.record), " waits for its files to be copied into its incoming/ folder. ",
-      el("button", { type: "button", class: "btn", disabled: !!subject.asked, onclick: e => { e.target.disabled = true; sendAction(subject, { action: "dropped", record: d.record, key: newKey() }, again); } }, "Files are in place")));
+      el("button", { type: "button", class: "btn", title: BUTTON_HELP.dropped, disabled: !!subject.asked, onclick: e => { e.target.disabled = true; sendAction(subject, { action: "dropped", record: d.record, key: newKey() }, again); } }, "Files are in place")));
   }
   if (subject.actions.includes("revoke")) {
     const records = board.filter(d => d.status === "servable").map(d => d.record);
     const ticks = el("div", { class: "ticks" }, ...records.map(r => el("label", { class: "inline" }, el("input", { type: "checkbox", value: r }), " " + r)));
     box.append(card("Revoke datasets", "The ticked datasets leave this buffer: their volumes are unregistered and their staged pyramids quarantined.", records.length ? ticks : el("div", { class: "empty" }, "no dataset is being served"),
-      el("div", { class: "actions" }, el("button", { type: "button", class: "btn danger", disabled: !!subject.asked, onclick: e => {
+      el("div", { class: "actions" }, el("button", { type: "button", class: "btn danger", title: BUTTON_HELP.revokeTicked, disabled: !!subject.asked, onclick: e => {
         const chosen = [...ticks.querySelectorAll("input:checked")].map(i => i.value);
         if (!chosen.length) return banner("Tick the datasets to revoke first.");
         if (!confirm(ACTION_CONFIRM.revoke)) return;
@@ -2219,7 +2257,7 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   if (subject.actions.includes("go")) {
     const area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML" }); area.value = subject.data?.spec || "";
     box.append(card(subject.stage === "new" ? "Plan" : "Edit and plan again", "The spec as it was last saved. Plan starts a new round with this text, which stops at its plan until you press Run; the buffer it builds gets a new id, and training jobs keep the buffer they connected to.", area,
-      el("div", { class: "actions" }, el("button", { type: "button", class: "btn", disabled: !!subject.asked, onclick: e => { e.target.disabled = true; sendAction(subject, { action: "go", spec: area.value, plan_first: true, key: newKey() }, again); } }, subject.asked?.action === "go" ? "Plan…" : "Plan"))));
+      el("div", { class: "actions" }, el("button", { type: "button", class: "btn", title: BUTTON_HELP.plan, disabled: !!subject.asked, onclick: e => { e.target.disabled = true; sendAction(subject, { action: "go", spec: area.value, plan_first: true, key: newKey() }, again); } }, subject.asked?.action === "go" ? "Plan…" : "Plan"))));
   }
   box.append(card("Buffers of this spec", "Newest first; each run builds a new one.", pagedTable("spec-buffers:" + subject.key, { source: pageOf("/buffers", "buffers", () => ({ spec: subject.number })), search: false, empty: "No buffer yet.", cols: [
     { key: "buffer", label: "buffer", cell: b => bufferLink(b.id) },
@@ -2232,7 +2270,7 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
 // them when the stream says something changed: it says so, and waits for them.
 function keepTyping(root, refresh, reload) {
   if (refresh !== "stream" || !root.dataset.dirty) return false;
-  if (!root.querySelector(".stale")) root.prepend(el("div", { class: "notice stale" }, "This changed while you were typing; what you typed is kept. ", el("button", { type: "button", class: "btn", onclick: reload }, "Show the change")));
+  if (!root.querySelector(".stale")) root.prepend(el("div", { class: "notice stale" }, "This changed while you were typing; what you typed is kept. ", el("button", { type: "button", class: "btn", title: BUTTON_HELP.showChange, onclick: reload }, "Show the change")));
   return true;
 }
 async function viewSubject(kind, key, refresh) {
@@ -2310,7 +2348,7 @@ function viewNeeds(arg, refresh) {
         { key: "updated", label: "since", cell: x => when(x.updated) },
         { label: "answer", wrap: true, cell: x => el("div", {}, actionBar(x, again, x.kind === "buffer" ? ["go", "revoke"] : []),
           ...(x.drops || []).map(record => el("div", { class: "notice" }, el("b", {}, record), " waits for its files in its incoming/ folder. ",
-            el("button", { type: "button", class: "btn", disabled: !!x.asked, onclick: e => { e.target.disabled = true; sendAction(x, { action: "dropped", record, key: newKey() }, again); } }, "Files are in place")))) },
+            el("button", { type: "button", class: "btn", title: BUTTON_HELP.dropped, disabled: !!x.asked, onclick: e => { e.target.disabled = true; sendAction(x, { action: "dropped", record, key: newKey() }, again); } }, "Files are in place")))) },
       ] }));
 }
 async function checkHealth() {  // so that "working" is true: say when nothing can start, or nothing is being worked on

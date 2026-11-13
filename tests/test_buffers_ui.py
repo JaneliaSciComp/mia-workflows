@@ -303,3 +303,32 @@ def test_a_lifecycle_marks_the_step_a_round_is_working_at() -> None:
     )
     assert '<li class="now busy" aria-current="step" title="a round is in progress">' in working
     assert "busy" not in waiting and "busy" not in stopped
+
+
+def test_every_button_that_asks_for_something_says_what_it_does() -> None:
+    """A button's tooltip says what pressing it does. Every action a stage table offers has one (a spec's go,
+    revoke and dropped have controls of their own, which carry theirs), and so has every other such button."""
+    from mia_buffers.config import PREP_STAGE_ACTIONS
+    from mia_buffers.config import STAGE_ACTIONS as BUFFER_ACTIONS
+    from mia_data.config import STAGE_ACTIONS as DATASET_ACTIONS
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    block = PAGE[PAGE.index("const ACTION_HELP = {") : PAGE.index("const actionHelp = ")]
+    names = "Object.fromEntries(Object.entries(ACTION_HELP).map(([kind, help]) => [kind, Object.keys(help)]))"
+    done = subprocess.run(
+        [node, "-e", f"{block}\nconsole.log(JSON.stringify({names}));"], capture_output=True, text=True, check=True
+    )
+    covered = json.loads(done.stdout)
+    own_control = {"buffer": {"go", "revoke", "dropped"}}
+    for kind, table in (("dataset", DATASET_ACTIONS), ("buffer", BUFFER_ACTIONS), ("prep", PREP_STAGE_ACTIONS)):
+        offered = set().union(*(actions for _, actions in table.values())) - own_control.get(kind, set())
+        assert offered <= set(covered[kind]), (kind, offered - set(covered[kind]))
+    assert "title: actionHelp(subject, action)" in PAGE
+    keys = re.findall(
+        r"^  (\w+): \"", PAGE[PAGE.index("const BUTTON_HELP = {") : PAGE.index("const ACTION_HELP = {")], re.M
+    )
+    assert {"plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
+    for key in keys:
+        assert f"title: BUTTON_HELP.{key}" in PAGE, key
