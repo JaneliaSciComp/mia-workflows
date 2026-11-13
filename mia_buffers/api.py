@@ -21,13 +21,14 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
+from mia_core.hosts import PolicyError, generate_policy
 from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
@@ -57,6 +58,9 @@ from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
 from .stream import Changes
 from .sync import scan_assets, scan_storage
+
+if TYPE_CHECKING:  # hosts imports activities, which imports this module
+    from .hosts import HostCheck, Needed
 
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
@@ -189,6 +193,12 @@ class PlanPage(_Strict):
 class PlanBody(_Strict):
     spec: str  # the spec's YAML text
     page: PlanPage | None = None  # with it: one page of joined rows and the plan's summary instead of every row
+
+
+class MissingBody(_Strict):
+    records: list[str] | None = None  # catalog record ids
+    prep: int | None = None  # a preparation request's number
+    spec: str | None = None  # a buffer spec's name
 
 
 class BoardBody(_Strict):
@@ -493,6 +503,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)/issue$"), "set_subject_issue", "worker"),
     ("GET", re.compile(r"^/health$"), "health", "read"),
     ("GET", re.compile(r"^/run/([a-z]+)/(\d+)$"), "run_status", "read"),
+    ("POST", re.compile(r"^/hosts/missing$"), "hosts_missing", "read"),
 ]
 
 
@@ -513,8 +524,10 @@ class BufferService:
         meta: dict | None = None,
         ui_dir: Path | None = None,
         dispatcher: Any = None,
+        hosts: HostCheck | None = None,
     ):
         self.ledger = ledger
+        self.hosts = hosts  # which hosts a run needs that the csub policy lacks; None cannot say
         # the way to Temporal (`dispatch.Dispatcher`, or a test's stand-in); None reaches no workflow
         self.dispatcher = dispatcher
         self.token = token  # None disables the worker check (tests, a dev service)
@@ -984,6 +997,59 @@ class BufferService:
             raise HttpError(401, "naming an actor or a root needs the worker token")
         return parsed.actor or "page"
 
+    def _catalog_record(self, record: str) -> dict | None:
+        """The record with this id in the newest synced catalog that holds it, or None."""
+        for catalog in self.ledger.catalogs():
+            if found := self.ledger.record(catalog["ref"], record):
+                return found[1]
+        return None
+
+    def _needed(self, *, records: list[str] | None = None, prep: int | None = None, spec: str | None = None) -> Needed:
+        """The hosts the named catalog records, a request's records or a buffer's planned pool need (host -> the
+        record ids that need it)."""
+        if self.hosts is None:
+            raise HttpError(503, "this service has no csub policy to check hosts against")
+        if prep is not None:
+            found = self.ledger.find_subjects(kind="prep", number=prep)
+            if not found:
+                raise HttpError(404, f"no preparation request {prep}")
+            records = _prep_records(found[0])
+        if records is not None:
+            catalog = {}
+            for record in records:
+                if (row := self._catalog_record(record)) is None:
+                    raise HttpError(404, f"{record!r} is not a record of a synced catalog")
+                catalog[record] = row
+            return self.hosts.for_records(catalog)
+        assert spec is not None
+        subject = self.ledger.subject("buffer", spec)
+        if subject is None:
+            raise HttpError(404, f"no buffer spec {spec!r}")
+        rounds = [
+            entry["round"]
+            for entry in self.ledger.timeline("buffer", subject["number"])
+            if entry["stage"] == "plan-review" and entry["round"]
+        ]
+        try:
+            if not rounds:
+                raise ValueError("no round at plan-review")
+            pool = self.hosts.pool(rounds[-1])
+        except (OSError, ValueError):
+            raise HttpError(409, f"buffer {spec!r} has no plan to read") from None
+        folders = {record: (self.ledger.dataset(record) or {}).get("folder") for record in pool}
+        return self.hosts.for_bindings({record: folder for record, folder in folders.items() if folder})
+
+    def _hosts_missing(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The hosts a run needs that the csub policy lacks. A read route: it writes nothing."""
+        parsed = _parse(MissingBody, body)
+        given = {name: value for name, value in parsed if value is not None}
+        if len(given) != 1:
+            raise HttpError(422, "give exactly one of records, prep or spec")
+        needed = self._needed(**given)
+        assert self.hosts is not None  # _needed answered 503 otherwise
+        absent = self.hosts.missing(needed)
+        return 200, {"hosts": [{"host": host, "records": ids} for host, ids in sorted(absent.items())]}, {}
+
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
         actor = self._actor(headers, parsed)
@@ -991,10 +1057,7 @@ class BufferService:
         if subject is None:
             if parsed.action != "go":
                 raise HttpError(404, f"no dataset {record!r} has been started")
-            # ponytail: reads the synced catalogs' records to find one id (newest first; usually the first
-            # holds it); a lookup by id when a catalog holds 100,000 records
-            refs = [catalog["ref"] for catalog in self.ledger.catalogs()]
-            if not any(row.get("id") == record for ref in refs for _, row in self.ledger.records(ref)):
+            if self._catalog_record(record) is None:
                 raise HttpError(404, f"{record!r} is not a record of a synced catalog")
             # a dataset whose registry row already names an issue keeps that number: its
             # workflow id, rounds and budget root are built from it
@@ -1840,6 +1903,13 @@ def serve(cfg: Config) -> None:
         raise SystemExit(str(error)) from error
     url = urlparse(cfg.service.url)
     assert url.port is not None  # ServiceCfg requires an explicit port
+    from .hosts import HostCheck  # here, not at the top: hosts imports activities, which imports this module
+
+    check = HostCheck.from_config(cfg)
+    try:
+        generate_policy(check.base_policy, check.policy_dir, check.writable)
+    except PolicyError as error:
+        raise SystemExit(str(error)) from error
     from .dispatch import dispatcher_for  # here, not at the top: it reaches autodev's CLI helpers
 
     service = BufferService(
@@ -1853,6 +1923,7 @@ def serve(cfg: Config) -> None:
         meta=page_meta(cfg),
         ui_dir=Path(__file__).parent / "ui",
         dispatcher=dispatcher_for(cfg),
+        hosts=check,
     )
     service.kick_unmirrored()  # what a crash, or Temporal being away, left unposted
     server = make_server(service, url.hostname or "127.0.0.1", url.port)

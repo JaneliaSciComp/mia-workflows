@@ -14,9 +14,12 @@ import yaml
 from mia_buffers import api as api_module
 from mia_buffers.api import BufferService, ledger_path, make_server, open_ledger, prune_backups
 from mia_buffers.dispatch import DispatchError
+from mia_buffers.hosts import HostCheck
 from mia_buffers.ledger import Ledger
 from mia_buffers.plan import load_records
+from mia_core.hosts import generate_policy
 from mia_core.locks import LockDir
+from mia_data.config import NetworkCfg
 from mia_data.models import LabelEvent
 from tests.test_buffers_config import make_cfg
 from tests.test_buffers_plan import CATALOG as FIXTURE_CATALOG
@@ -1975,3 +1978,96 @@ def test_a_dataset_started_from_the_page_names_the_issue_the_mirror_opened(tmp_p
         s, "PUT", f"/datasets/{ONE_CH}", payload={"state": "prepared", "issue": 12}
     )  # its row names an issue; it has no subject
     assert call(s, "GET", "/catalog/datasets", {"q": ONE_CH})[1]["rows"][0]["issue"] == 12
+
+
+# --- POST /hosts/missing: which hosts a run needs and the csub policy lacks ---
+
+
+@pytest.fixture
+def _home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
+def _checking(tmp_path):
+    """A service whose policy allows zenodo.org, with a catalog holding rec-a (data.example.org) and rec-b."""
+    base = tmp_path / "base" / "broker.toml"
+    base.parent.mkdir()
+    base.write_text('[broker]\nallowed_hosts = ["zenodo.org"]\n')
+    policy_dir = tmp_path / ".mia" / "policy"
+    generate_policy(base, policy_dir)
+    check = HostCheck(
+        base_policy=base,
+        policy_dir=policy_dir,
+        network=NetworkCfg(package_hosts=[]),
+        storage_root=tmp_path / "storage",
+        rounds_dir=tmp_path / "rounds",
+    )
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", hosts=check)
+    urls = {"rec-a": "https://data.example.org/a.zip", "rec-b": "https://zenodo.org/b.zip"}
+    records = [{"path": f"{n}.yaml", "record": {"id": n, "data": {"download_url": u}}} for n, u in urls.items()]
+    assert worker(s, "PUT", f"/records/{REF_A}", {"records": records})[0] == 200
+    return s
+
+
+def _missing(s, payload):
+    return act(s, "/hosts/missing", payload)
+
+
+def test_hosts_missing_lists_what_the_named_records_need_and_the_policy_lacks(tmp_path, _home):
+    s = _checking(tmp_path)
+    status, out, _ = _missing(s, {"records": ["rec-a", "rec-b"]})
+    assert (status, out) == (200, {"hosts": [{"host": "data.example.org", "records": ["rec-a"]}]})
+    assert _missing(s, {"records": ["rec-b"]})[:2] == (200, {"hosts": []})
+    assert _missing(s, {"records": ["nope"]})[0] == 404
+    assert _missing(s, {})[0] == 422
+    assert _missing(s, {"records": ["rec-a"], "prep": 1})[0] == 422
+
+
+def test_hosts_missing_for_a_request_reads_its_records(tmp_path, _home):
+    s = _checking(tmp_path)
+    number = s.ledger.create_subject("prep", None, data={"spec": PREP_TEXT})["number"]
+    status, out, _ = _missing(s, {"prep": number})
+    assert (status, out) == (200, {"hosts": [{"host": "data.example.org", "records": ["rec-a"]}]})
+    assert _missing(s, {"prep": 5})[0] == 404
+
+
+def test_hosts_missing_for_a_buffer_reads_the_rounds_plan_and_its_bindings(tmp_path, _home):
+    s = _checking(tmp_path)
+    number = s.ledger.create_subject("buffer", "spec-x", data={"spec": SPEC_TEXT})["number"]
+    assert _missing(s, {"spec": "spec-x"})[:2] == (409, {"error": "buffer 'spec-x' has no plan to read"})
+    s.ledger.append_entry("buffer", number, body="plan", marker="m1", round_id="i7-e1", stage="plan-review")
+    plan = tmp_path / "rounds" / "i7-e1" / "plan.json"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(json.dumps({"rows": [{"id": "rec-a", "admitted": True, "fit": {"ok": True}}]}))
+    s.ledger.put_dataset("rec-a", {"folder": "rec-a"})
+    folder = tmp_path / "storage" / "rec-a"
+    folder.mkdir(parents=True)
+    (folder / "binding.yaml").write_text(yaml.safe_dump({"raw": [{"urls": ["https://data.example.org/x"]}]}))
+    status, out, _ = _missing(s, {"spec": "spec-x"})
+    assert (status, out) == (200, {"hosts": [{"host": "data.example.org", "records": ["rec-a"]}]})
+    plan.unlink()
+    assert _missing(s, {"spec": "spec-x"})[0] == 409
+    assert _missing(s, {"spec": "other"})[0] == 404
+
+
+def test_hosts_missing_without_a_policy_is_503(tmp_path):
+    s, _ = _acting(tmp_path)
+    assert _missing(s, {"records": ["rec-a"]})[0] == 503
+
+
+def test_hosts_missing_writes_nothing(tmp_path, _home):
+    s = _checking(tmp_path)
+    _missing(s, {"records": ["rec-a"]})
+    assert not (s.hosts.policy_dir / "approved-hosts.jsonl").exists()
+
+
+def test_serve_refuses_a_policy_dir_it_must_not_write(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    token = tmp_path / "token"
+    token.write_text("t\n")
+    token.chmod(0o600)
+    inside = tmp_path / "storage" / "csub"
+    cfg = make_cfg(tmp_path, service={"token_file": str(token)}, csub={"policy_dir": str(inside)})
+    with pytest.raises(SystemExit, match=re.escape(str(inside))):
+        api_module.serve(cfg)
+    assert not inside.exists()
