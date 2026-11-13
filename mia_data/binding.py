@@ -7,12 +7,12 @@ from the URLs it names.
 
 from __future__ import annotations
 
-import fnmatch
 import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from autodev.config import is_github_host
+from mia_core.hosts import missing_hosts as missing_hosts  # re-exported: importers use it from here
 
 if TYPE_CHECKING:
     from .config import Config
@@ -98,10 +98,3 @@ def hosts(urls: list[str], cfg: Config) -> list[str]:
     if bad := [host for host in allowed if is_github_host(host)]:
         raise ValueError(f"GitHub hosts {bad} must never be granted to a job")
     return allowed
-
-
-def missing_hosts(hosts: list[str], patterns: list[str]) -> list[str]:
-    """Hosts no `csub probe` allowed_hosts pattern matches (csub/broker/resolve.py: check_hosts)."""
-    return [
-        host for host in hosts if not any(host == pattern or fnmatch.fnmatchcase(host, pattern) for pattern in patterns)
-    ]
