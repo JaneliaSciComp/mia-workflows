@@ -61,7 +61,6 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .empty{color:var(--muted);padding:10px 2px;font-size:13.5px}
 .lookup{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg);width:24ch}
 .subject h2{margin:0 0 6px;font-size:18px;overflow-wrap:anywhere}
-.subject .facts{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;font-size:13px;color:var(--fg2);margin-bottom:10px}
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
 .actions textarea{flex:1 1 100%;max-width:80ch;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .btn.danger{border-color:var(--warn);color:var(--warn)}
@@ -84,6 +83,9 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .flow .step{grid-column:2;height:26px;line-height:24px;padding:0 10px;border:1px solid var(--grid);border-radius:6px;color:var(--muted);text-align:center;white-space:nowrap}
 .flow .past .step{border-color:var(--axis);color:var(--fg2)}
 .flow .now .step{background:var(--accent-soft);border-color:var(--accent);color:var(--fg);font-weight:500}
+.flow .busy .step::before{content:"";display:inline-block;width:7px;height:7px;margin-right:7px;border-radius:50%;background:var(--accent);vertical-align:baseline}
+@keyframes busy{50%{opacity:.2}}
+@media (prefers-reduced-motion:no-preference){ .flow .busy .step::before{animation:busy 1.2s ease-in-out infinite} }
 .flow .step.off{background:var(--grid);border-color:var(--axis);color:var(--fg);font-weight:500}
 .flow .step.off.stuck{background:var(--warn-soft);border-color:var(--warn)}
 .flow li:not(.apart) .off{grid-row:2;margin-top:14px;position:relative}
@@ -1286,6 +1288,17 @@ const pill = (text, kind, extra) => {
 const GOOD = new Set(["prepared","ready","servable","pool","cached"]);
 const BAD = new Set(["failed","needs-human","missing","blocked","evicted","stale","revoked","quarantined"]);
 const statePill = s => s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "";
+// a subject's stage as a pill. A stage that shares its name with another thing's state says what the stage means.
+const STAGE_HELP = {
+  "staged": "No job is left to run and the board is in the timeline; the round waits for Approve.",
+  "requested": "The request's datasets are handed to the preparation pipeline; it follows them until each has settled.",
+  "cancelled": "A person cancelled the round.",
+};
+const stagePill = s => {
+  if (!s) return "";
+  const node = el("span", { class: "pill" + (GOOD.has(s) ? " pool" : BAD.has(s) ? " warn" : "") }, s), help = STAGE_HELP[s] || PILL_HELP[s];
+  return help ? tipOn(node, [{ b: s, t: help }]) : node;
+};
 // an asset's `ready` only says its directory is there and no job writes it: the page says "cached"
 const assetPill = s => statePill(s === "ready" ? "cached" : s);
 
@@ -1790,12 +1803,13 @@ function datasetCards(d) {
 // On a dataset's page the line is named for what it is: the workflow that prepares the dataset.
 const FLOW_LABELS = { dataset: "Preparation workflow:" };
 const flowRow = (kind, flow) => flow && FLOW_LABELS[kind] ? el("div", { class: "flowrow" }, el("span", { class: "flowlabel" }, FLOW_LABELS[kind]), flow) : flow;
-function lifecycle(line, stage, history) {
+function lifecycle(line, stage, history, busy) {  // `busy`: a round is in progress at the current step
   if (!line || !stage) return null;
   const off = !line.includes(stage), at = line.indexOf(off ? (history || []).find(s => line.includes(s)) : stage);
   const hung = el("span", { class: "step off" + (BAD.has(stage) ? " stuck" : ""), "aria-current": "step" }, stage);
   const flow = el("ol", { class: "flow", "aria-label": "lifecycle" });
-  line.forEach((name, i) => flow.append(el("li", { class: i < at || (off && i === at) ? "past" : i === at ? "now" : null, "aria-current": i === at && !off ? "step" : null },
+  const working = i => !!busy && !off && i === at;
+  line.forEach((name, i) => flow.append(el("li", { class: i < at || (off && i === at) ? "past" : i === at ? (working(i) ? "now busy" : "now") : null, "aria-current": i === at && !off ? "step" : null, title: working(i) ? "a round is in progress" : null },
     el("span", { class: "step" }, name), off && i === at ? hung : null)));
   if (off && at < 0) flow.append(el("li", { class: "apart" }, hung));
   return flow;
@@ -1815,7 +1829,7 @@ function viewBuffers(id, refresh) {
     pagedTable("specs", { source: pageOf("/subjects/buffer", "subjects"), sort: "updated", dir: "desc", empty: "No spec yet: start with New buffer.", cols: [
       { key: "key", label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.key) },
       { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
-      { key: "status", label: "state", cell: x => el("span", {}, statePill(x.status), " ", x.stage) },
+      { key: "status", label: "stage", cell: x => stagePill(x.stage) },
       { label: "waits for", cell: x => x.status === "waiting" || x.status === "stuck" ? x.actions.filter(a => a !== "stop" && a !== "cancel").join(", ") : "" },
       { key: "updated", label: "updated", cell: x => when(x.updated) },
     ] })),
@@ -1984,7 +1998,7 @@ async function viewPreparation() {
       pagedTable("requests", { source: pageOf("/subjects/prep", "subjects"), sort: "updated", dir: "desc", empty: "No request yet.", cols: [
         { key: "key", label: "request", cell: x => el("a", { href: SUBJECT_HASH.prep(x.key) }, x.key) },
         { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
-        { key: "status", label: "state", cell: x => el("span", {}, statePill(x.status), " ", x.stage) },
+        { key: "status", label: "stage", cell: x => stagePill(x.stage) },
         { key: "updated", label: "updated", cell: x => when(x.updated) },
       ] })),
     card("Datasets", "Where each dataset stands; each count opens the Datasets list filtered to it.", counts));
@@ -2172,17 +2186,15 @@ function undelivered(subject, actions, after) {  // an action that did not reach
   }
   return box;
 }
-function subjectFacts(subject, run, entries) {
-  const facts = el("div", { class: "facts" }, statePill(subject.status));
-  const wants = subject.actions.filter(a => a !== "cancel" && a !== "stop");
-  if (subject.status === "waiting" && wants.length) facts.append(el("span", {}, "waiting on you: " + wants.join(", ")));
-  if (run) facts.append(el("span", {}, "workflow " + (run.status || "never ran").toLowerCase()));
-  const repo = subject.kind === "dataset" ? S.meta.datasets_repo : S.meta.buffers_repo;
-  if (subject.issue) facts.append(ghIcon(repo, subject.issue, true) || `#${subject.issue}`);
-  if (subject.kind === "dataset" && S.meta.datasets_workflow_url) facts.append(link(S.meta.datasets_workflow_url + subject.number, "temporal"));
+// Every link of a subject stands in the row under its name: its GitHub issue, and for a dataset its workflow in
+// Temporal and the crops of its newest round.
+function subjectLinks(subject, entries) {
+  const repo = subject.kind === "dataset" ? S.meta.datasets_repo : S.meta.buffers_repo, out = [];
+  if (subject.issue) out.push(ghIcon(repo, subject.issue, true) || `#${subject.issue}`);
+  if (subject.kind === "dataset" && S.meta.datasets_workflow_url) out.push(link(S.meta.datasets_workflow_url + subject.number, "temporal", "this dataset's workflow in the Temporal UI"));
   const round = [...entries].reverse().find(e => e.round)?.round;
-  if (subject.kind === "dataset" && round && repo && S.meta.gallery_branch) facts.append(link(`https://github.com/${repo}/tree/${S.meta.gallery_branch}/galleries/${subject.key}/${round}`, "crops of this round", "the crop gallery of this round, on GitHub"));
-  return facts;
+  if (subject.kind === "dataset" && round && repo && S.meta.gallery_branch) out.push(link(`https://github.com/${repo}/tree/${S.meta.gallery_branch}/galleries/${subject.key}/${round}`, "crops of this round", "the crop gallery of this round, on GitHub"));
+  return out;
 }
 async function specControls(subject) {  // what only a buffer spec has: edit and run, its datasets' files, revoke, its buffers
   const box = el("div"), again = () => viewSubject(subject.kind, subject.key, true);
@@ -2247,8 +2259,10 @@ async function viewSubject(kind, key, refresh) {
   const [timeline, run, extras] = await Promise.all([load(`/timeline/${kind}/${subject.number}`), api(`/run/${kind}/${subject.number}`).catch(() => null), kind === "buffer" ? specControls(subject) : null]);
   if (location.hash !== hash || turn !== subjectTurn) return;
   const entries = timeline?.entries || [];
-  const flow = lifecycle(S.meta.lines?.[kind], subject.stage, [...entries].reverse().map(e => e.stage));
-  const parts = [el("h2", {}, key), links, flowRow(kind, flow), subjectFacts(subject, run, entries)].filter(Boolean);
+  const flow = lifecycle(S.meta.lines?.[kind], subject.stage, [...entries].reverse().map(e => e.stage), subject.status === "working");
+  const more = subjectLinks(subject, entries), row = links || (more.length ? el("div", { class: "links" }) : null);
+  if (row) row.append(...more);
+  const parts = [el("h2", {}, key), row, flowRow(kind, flow)].filter(Boolean);
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
   if (subject.status === "working" && run && run.status !== "RUNNING") parts.push(el("div", { class: "notice" }, `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`));
   parts.push(actionBar(subject, null, kind === "buffer" ? ["go", "revoke"] : []), undelivered(subject, timeline?.actions || []));
@@ -2292,7 +2306,7 @@ function viewNeeds(arg, refresh) {
       cols: [
         { key: "kind", label: "what", cell: x => KIND_WORDS[x.kind] },
         { key: "key", label: "name", cell: x => el("a", { href: SUBJECT_HASH[x.kind](x.key) }, x.key) },
-        { key: "status", label: "state", cell: x => el("span", {}, statePill(x.status), " ", x.stage) },
+        { key: "status", label: "stage", cell: x => stagePill(x.stage) },
         { key: "updated", label: "since", cell: x => when(x.updated) },
         { label: "answer", wrap: true, cell: x => el("div", {}, actionBar(x, again, x.kind === "buffer" ? ["go", "revoke"] : []),
           ...(x.drops || []).map(record => el("div", { class: "notice" }, el("b", {}, record), " waits for its files in its incoming/ folder. ",

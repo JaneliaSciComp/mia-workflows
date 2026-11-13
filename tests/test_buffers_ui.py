@@ -284,3 +284,22 @@ def test_a_datasets_page_leads_with_its_links_then_its_preparation_workflow() ->
     assert '(subject.again ? "Start again" : "Start")' in PAGE and '"Prepare again"' not in PAGE
     assert "statePill(detail ? detail.row.state" not in PAGE
     assert "const [links = null, ...cards] = " in PAGE
+
+
+def test_a_subjects_page_says_where_it_stands_with_its_lifecycle_alone() -> None:
+    """No status pill, no "waiting on you", no "workflow running" under the line: every link of a subject stands
+    in the row under its name, and a table names a subject's stage, not a status word."""
+    assert "subjectFacts" not in PAGE and "waiting on you" not in PAGE and '"workflow " +' not in PAGE
+    assert "statePill(subject.status)" not in PAGE and 'statePill(x.status), " ", x.stage' not in PAGE
+    assert PAGE.count("stagePill(x.stage)") == 3  # the specs, the requests and Needs you
+    assert "subjectLinks(subject, entries)" in PAGE
+
+
+def test_a_lifecycle_marks_the_step_a_round_is_working_at() -> None:
+    """While a round is in progress the current step says so; a stage that waits, or one off the line, does not."""
+    line = ["new", "testing", "review", "done"]
+    working, waiting, stopped = lifecycle(
+        [line, "testing", [], True], [line, "review", [], False], [line, "needs-human", ["testing"], True]
+    )
+    assert '<li class="now busy" aria-current="step" title="a round is in progress">' in working
+    assert "busy" not in waiting and "busy" not in stopped

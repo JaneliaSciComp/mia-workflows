@@ -734,6 +734,11 @@ sort. Then `issue` (a GitHub mark linking the issue; empty without one), then `a
 alone in a table, the mark and `#<issue>` on the subject's own page, with a tooltip saying that the issue is a
 copy of the timeline. No link to GitHub is spelled out in words.
 
+**A subject's page says where it stands with its lifecycle.** Under the name comes one row with every link (a
+dataset's own, its GitHub issue, its workflow in Temporal, its round's crops), then the line of stages; the step a
+round is working at is marked (`subject.status === "working"`). There is no status word on the page or in a
+table: a table shows the stage as a pill, and the buttons say whose turn it is.
+
 **A button with more to enter ends in an ellipsis.** *Reject…* opens a dialog for the feedback and sends nothing
 until some is typed; the dialog hangs off the body, so a redraw of the view behind it keeps what was typed.
 
