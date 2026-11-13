@@ -358,3 +358,12 @@ def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> N
     patterns = ["*/u937.yaml", "*/bcss.yaml"]
     assert _glob(patterns, "datasets/2D/confocal/u937.yaml") and _glob(patterns, "datasets/bcss.yaml")
     assert not _glob(patterns, "datasets/2D/confocal/not-u937.yaml") and not _glob(patterns, "datasets/u937.yaml.bak")
+
+
+def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked() -> None:
+    """With nothing ticked the list offers Select all and Clear selection and says nothing more. With a tick, a
+    box of its own colour says how many datasets are selected and offers Prepare and Create buffer."""
+    assert '"Select all")' in PAGE and "Select all matching" not in PAGE
+    assert "tick the datasets to prepare first" not in PAGE
+    assert 'class: "chosen", hidden: true' in PAGE and ".chosen[hidden]{display:none}" in PAGE
+    assert "box.hidden = !CHOSEN.size" in PAGE and '"Create buffer")' in PAGE

@@ -64,6 +64,10 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
 .actions textarea{flex:1 1 100%;max-width:80ch;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .btn.danger{border-color:var(--warn);color:var(--warn)}
+.chosen{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:4px 10px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-soft);font-size:13px}
+.chosen[hidden]{display:none}
+.chosen b{font-weight:600}
+.chosen .btn{background:var(--surface)}
 .btn.danger:disabled{border-color:var(--axis);color:var(--muted)}
 dialog.ask{width:min(560px,calc(100vw - 32px));border:1px solid var(--ring);border-radius:8px;background:var(--surface);color:var(--fg);padding:16px 16px 6px}
 dialog.ask::backdrop{background:rgba(11,11,11,.4)}
@@ -1551,10 +1555,10 @@ function createBuffer(container, yaml, blocker) {
 }
 // `again` (the Datasets list's ticks): every ticked dataset gets a round, also one that is prepared or that stopped;
 // its value is how many of them are prepared or in a round already. Without it only what is not prepared is asked for.
-function prepareButton(container, all, blocker, done, again) {
+function prepareButton(container, all, blocker, done, again, text) {  // `text`: the button's word, where the count stands beside it
   // a request takes at most PREP_MAX datasets: a longer list is prepared in parts, the first PREP_MAX now
   const todo = all.slice(0, PREP_MAX), why = blocker;
-  const label = all.length > PREP_MAX ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets` : `Prepare these ${num(todo.length)} datasets`;
+  const label = all.length > PREP_MAX ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets` : text || `Prepare these ${num(todo.length)} datasets`;
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }), onclick: async e => {
     if (!confirm(`Start preparing ${todo.length} datasets?${again ? ` ${again} of them are prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
@@ -1726,13 +1730,15 @@ function viewDatasetList(arg, params) {
       select.value = DS_FILTER[name];
     }
   };
-  const prepare = el("span"), chosen = el("span", { class: "small" });
-  const spec = el("button", { type: "button", class: "btn", title: BUTTON_HELP.specFrom, onclick: () => specFromDatasets([...CHOSEN]) });
+  // what can be done with the ticked datasets: a box of its own, shown only while something is ticked
+  const prepare = el("span"), count = el("b");
+  const spec = el("button", { type: "button", class: "btn", title: BUTTON_HELP.specFrom, onclick: () => specFromDatasets([...CHOSEN]) }, "Create buffer");
+  const box = el("span", { class: "chosen", hidden: true }, count, prepare, spec);
   const showChosen = () => {
-    chosen.textContent = CHOSEN.size ? `${num(CHOSEN.size)} selected` : "";
-    prepareButton(prepare, [...CHOSEN], CHOSEN.size ? null : "tick the datasets to prepare first", sent => sent.forEach(id => { CHOSEN.delete(id); SETTLED.delete(id); }), SETTLED.size);
-    spec.disabled = !CHOSEN.size;
-    spec.textContent = CHOSEN.size ? `New buffer from these ${num(CHOSEN.size)} datasets` : "New buffer from these datasets";
+    box.hidden = !CHOSEN.size;
+    if (!CHOSEN.size) return;
+    count.textContent = `${num(CHOSEN.size)} ${CHOSEN.size === 1 ? "dataset" : "datasets"} selected`;
+    prepareButton(prepare, [...CHOSEN], null, sent => sent.forEach(id => { CHOSEN.delete(id); SETTLED.delete(id); }), SETTLED.size, "Prepare");
   };
   const ticked = (row, on) => { if (on && !PREPARABLE(row)) SETTLED.add(row.id); else SETTLED.delete(row.id); showChosen(); };
   const selectAll = el("button", { type: "button", class: "btn", title: `ticks every dataset the search and the filters match, on every page, at most ${PREP_MAX}`, onclick: async () => {
@@ -1743,7 +1749,7 @@ function viewDatasetList(arg, params) {
     for (const id of found.ids.slice(0, PREP_MAX)) { CHOSEN.add(id); if (!preparable.has(id)) SETTLED.add(id); }
     if (found.ids.length > PREP_MAX) banner(`${num(found.ids.length)} datasets match; the first ${PREP_MAX} are selected, since a request takes at most ${PREP_MAX}.`);
     list.reload();
-  } }, "Select all matching");
+  } }, "Select all");
   const clear = el("button", { type: "button", class: "btn", title: BUTTON_HELP.clearSelection, onclick: () => { CHOSEN.clear(); SETTLED.clear(); list.reload(); } }, "Clear selection");
   const list = pagedTable("datasets", { source: pageOf("/catalog/datasets", "rows", filters), sort: "dataset", search: "search id, title, modality, licence",
     tools: Object.values(selects), empty: "No dataset matches these filters.",
@@ -1768,7 +1774,7 @@ function viewDatasetList(arg, params) {
     ] });
   root.replaceChildren(el("h2", {}, "Datasets"),
     el("p", { class: "small" }, "Every dataset of the catalog and what is known about it. Open one for its record, crops, decisions, cache and timeline. Tick datasets to prepare them in one request, or to start a buffer spec from them."),
-    el("div", { class: "actions" }, selectAll, clear, chosen, prepare, spec), list);
+    el("div", { class: "actions" }, selectAll, clear, box), list);
 }
 // what a dataset's own page shows besides its state, buttons and timeline (GET /catalog/datasets/<record>)
 function datasetCards(d) {

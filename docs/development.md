@@ -697,7 +697,8 @@ Each tab is one kind of thing, and each thing has one page:
 - **Needs you** reads `/needs`: everything that waits on a person, with the buttons that answer it.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
   download, staged artifacts and buffers; filters by state, modality, dims and licence. Every row has a tick (the
-  header's ticks the page, *Select all matching* every page). The ticked are prepared in one request (one
+  header's ticks the page, *Select all* every page). While something is ticked, a box says how many datasets are
+  selected and offers *Prepare* and *Create buffer*. The ticked are prepared in one request (one
   `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a spec that
   selects exactly them (`specFromDatasets`: one `*/<id>.yaml` glob per dataset in `select.paths`). `#datasets?state=<state>` opens the list with a filter set.
 - **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`,
