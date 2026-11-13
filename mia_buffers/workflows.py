@@ -1902,7 +1902,6 @@ class MiaPrep:
             "prep_admit", state.issue, event.event_id, seconds=600, result_type=PrepPins
         )
         await self._stage("requested")
-        why: dict[str, str] = {}  # records settled as needs-human at the nudge -> what the nudge said
         for record in pins.records:  # one at a time: each may open an issue in the datasets repo
             try:
                 outcome = await self._act("prep_nudge", state.round_id, record, result_type=PrepOutcome)
@@ -1915,8 +1914,7 @@ class MiaPrep:
                 state.settled[record] = outcome.outcome
             elif outcome.outcome in PREP_HUMAN:  # mia-data will not get to it without a human
                 state.settled[record] = "needs-human"
-                why[record] = outcome.outcome + (f": {outcome.note}" if outcome.note else "")
-        try:  # best effort: the outcomes stay in the state, and the final stage names what needs a human
+        try:  # best effort: the outcomes stay in the state, and the final stage names the records that need a human
             await self._act("comment_prep", state.issue, state.round_id, state.outcomes)
         except ActivityError as error:
             workflow.logger.error("issue #%d: could not post the outcomes: %s", state.issue, error_message(error))
@@ -1935,14 +1933,11 @@ class MiaPrep:
         stuck = [record for record in pins.records if state.settled.get(record) not in ("prepared", *legacy)]
         if not stuck:
             return await self._stage("done", "prepared: " + (", ".join(f"`{r}`" for r in prepared) or "none"))
-        humans = [
-            f"`{record}`" + (f" ({why[record]})" if record in why else "")
-            for record in stuck
-            if state.settled.get(record) == "needs-human"
-        ]
+        humans = [f"`{record}`" for record in stuck if state.settled.get(record) == "needs-human"]
         waiting = [f"`{record}` ({last.get(record, 'unprepared')})" for record in stuck if record not in state.settled]
+        why = "the outcomes table or its dataset's page says why"
         detail = "; ".join(
-            ([f"needs a human on its dataset's page: {', '.join(humans)}"] if humans else [])
+            ([f"needs a human, {why}: {', '.join(humans)}"] if humans else [])
             + ([f"not prepared after {pins.timeout_days:g} days: {', '.join(waiting)}"] if waiting else [])
         )
         await self._stage("needs-human", detail)
