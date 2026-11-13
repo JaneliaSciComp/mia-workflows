@@ -29,7 +29,6 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, permanent_errors
 from autodev.jobs import JobSpec
-from autodev.review import WRITE_PERMISSIONS
 from mia_core import autonomy
 from mia_core.assets import raw_asset
 from mia_core.config import manifest_path
@@ -85,7 +84,7 @@ from .models import (
 )
 from .poll import run_poll
 from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
-from .seed import ID_RE, MARKER_RE, ROOT_RE
+from .seed import ID_RE
 from .status import render_binding, render_crops_table, render_judge_comment, render_links, render_stage
 
 if TYPE_CHECKING:
@@ -215,7 +214,10 @@ class Activities:
     ):
         self.cfg, self.gh_data, self.gh_snippets, self.gh_catalog = cfg, gh_data, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
-        self.registry = Registry.from_config(cfg.service) if cfg.service else None  # buffer-api, when configured
+        if cfg.service is None:
+            raise ValueError("mia-data needs a `service` section: buffer-api holds its stages and timelines")
+        self.registry = Registry.from_config(cfg.service)  # buffer-api: stages, timelines, actions, budgets
+        self.page_url = cfg.service.url.rstrip("/")
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))
         # ponytail: in memory, so a worker restart re-sends each PR once (the workflow dedupes by pr_state)
         self._sent: dict[int, tuple] = {}  # poll: PR number -> the (head, state, merge, needs_human) last signalled
@@ -284,43 +286,19 @@ class Activities:
 
     async def _post(
         self, issue: int, body: str, marker: str, *, round_id: str | None = None, stage: str | None = None
-    ) -> str | None:
-        """Write what a round has to say about its dataset: a stage, a text (once per marker), or both.
-
-        With buffer-api configured this is the subject's stage and a timeline entry, a required write, and no
-        GitHub call: the mirror copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7).
-        Without one (a dev set-up) it is the label swap and the comment on the issue; that returns its URL."""
-        if (registry := self.registry) is None:
-            if stage:
-                await self._swap_label(issue, stage)
-            return await self._comment_once(self.gh_data, issue, body, marker) if body else None
+    ) -> None:
+        """Write what a round has to say about its dataset: a stage, a text (once per marker), or both. It is the
+        subject's stage and a timeline entry in the registry, a required write, and no GitHub call: the mirror
+        copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7)."""
         write = functools.partial(
-            registry.append_entry, "dataset", issue, body=body, marker=marker, round_id=round_id, stage=stage
+            self.registry.append_entry, "dataset", issue, body=body, marker=marker, round_id=round_id, stage=stage
         )
-        try:
-            await asyncio.to_thread(write)
-        except RegistryError as err:
-            if err.status != 404:
-                raise
-            # ponytail: a label's round on an issue `adopt-issues` never saw: adopted here from its marker
-            # (spec webapp-actions §11 step 2; slice E, second deploy).
-            match = MARKER_RE.match((await self.gh_data.get_issue(issue)).get("body") or "")
-            if not match:
-                raise ValueError(f"issue #{issue} has no record marker: it is not a dataset") from None
-            try:
-                await asyncio.to_thread(registry.adopt_subject, "dataset", issue, match.group(1))
-            except RegistryError as taken:
-                if taken.status == 409:  # a second issue for one record: its round has nowhere to write
-                    raise ValueError(f"issue #{issue}: {taken.message}; a dataset has one issue") from None
-                raise
-            await asyncio.to_thread(write)
-        return None
+        await asyncio.to_thread(write)
 
     async def _action(self, number: int, event_id: str) -> dict | None:
         """The action whose id is this event id, with its `subject` and the subject's `actions`; None when the
-        event is not an action (a GitHub label event, or no buffer-api). An action of another subject is an error."""
-        if (registry := self.registry) is None:
-            return None
+        event is not an action (a signal the workflow made itself). An action of another subject is an error."""
+        registry = self.registry
         action = await asyncio.to_thread(registry.action, event_id)
         if action is None:
             return None
@@ -330,16 +308,6 @@ class Activities:
         if found is None:
             raise ValueError(f"dataset #{number} is not in the registry")
         return {**action, "subject": found["subject"], "actions": found["actions"]}
-
-    async def _swap_label(self, issue: int, stage: str) -> None:
-        """Leave `data:<stage>` as the issue's only stage label (the path without buffer-api; else the mirror's)."""
-        gh, want = self.gh_data, self.cfg.label(stage)
-        current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
-        for other in STAGES:
-            if (name := self.cfg.label(other)) in current and name != want:
-                await gh.remove_label(issue, name)
-        if want not in current:
-            await gh.add_labels(issue, [want])
 
     def _round_dir(self, round_id: str) -> Path:
         """state_dir/rounds/<round_id>: the round's record, downloads entry, pins and bindings (never mounted)."""
@@ -428,30 +396,22 @@ class Activities:
     @activity.defn(name="admit")
     @mia_permanent_errors
     async def admit(self, issue: int, event_id: str) -> Pins:
-        """Pin the round: the record id from the issue's first-line marker, record_commit from the downloads
-        state (or the catalog's main when the record was never downloaded: a buffer opened the issue and its jobs
-        fetch on demand), snippets main, and the harness checkout. Written once to state_dir/rounds/<round_id>/;
-        a retry returns the same pins."""
+        """Pin the round: the record is the subject's key, record_commit comes from the downloads state (or the
+        catalog's main when the record was never downloaded: its jobs fetch on demand), then snippets main and the
+        harness checkout. The round is charged to whoever asked for it: the root its `go` carries, else the
+        dataset itself. Written once to state_dir/rounds/<round_id>/; a retry returns the same pins."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
         if (round_dir / "pins.json").is_file():
             return Pins(**json.loads((round_dir / "pins.json").read_text()))
-        if (action := await self._action(issue, event_id)) is not None:
-            # started from the page, or by a worker for a request: the record is the subject's key and the round
-            # is charged to whoever asked for it (spec webapp-actions §4.2, §6); no issue is read
-            record_id = action["subject"]["key"]
-            if not ID_RE.fullmatch(record_id):
-                raise ValueError(f"dataset #{issue} has no valid record id: {record_id!r}")
-            root = action["payload"].get("root") or self.cfg.root_of(issue)
-        else:  # ponytail: a label's round, deleted with them (slice E, second deploy)
-            body = (await self.gh_data.get_issue(issue)).get("body") or ""
-            match = MARKER_RE.match(body)
-            if not (match and ID_RE.fullmatch(match.group(1))):
-                raise ValueError(f"issue #{issue} has no valid record marker on its first line")
-            record_id = match.group(1)
-            root_marker = ROOT_RE.search(body)  # a buffer or prep opened the issue: its request is the root
-            root = root_marker.group(1) if root_marker else self.cfg.root_of(issue)
+        action = await self._action(issue, event_id)
+        if action is None:
+            raise ValueError(f"event {event_id} is not an action: a round is started by one")
+        record_id = action["subject"]["key"]
+        if not ID_RE.fullmatch(record_id):
+            raise ValueError(f"dataset #{issue} has no valid record id: {record_id!r}")
+        root = action["payload"].get("root") or self.cfg.root_of(issue)
         entry = (await catalog.downloaded(self.gh_catalog)).get(record_id)
         if entry is None:
             entry = {"record_commit": await self.gh_catalog.get_ref_sha("main"), "downloaders": []}
@@ -505,11 +465,8 @@ class Activities:
         supersedes: str | None = None,
     ) -> AssessmentWritten:
         """Write the verdict as an assessment in the registry, then ask `authorized()` over everything written about
-        the subject; an approve also names its assessment on the dataset row. No registry: nothing to record, the
-        verdict alone authorizes."""
+        the subject; an approve also names its assessment on the dataset row."""
         registry = self.registry
-        if registry is None:
-            return AssessmentWritten("", True, "no registry")
         row = new_assessment(
             gate=gate,
             subject_kind=subject_kind,
@@ -608,13 +565,11 @@ class Activities:
             path / "verdict.json",
             json.dumps({"assessment": row, "judge": dataclasses.asdict(verdict), "cost_usd": cost}, indent=1),
         )
-        assessment_id = ""
-        if self.registry is not None:  # shadow never blocks: a registry outage is logged, the round goes on
-            registry = self.registry
-            written = await asyncio.to_thread(
-                best_effort, lambda: registry.put_assessment(row), f"{round_id}: judge assessment", log
-            )
-            assessment_id = row["id"] if written else ""
+        registry = self.registry  # shadow never blocks: a registry outage is logged, the round goes on
+        written = await asyncio.to_thread(
+            best_effort, lambda: registry.put_assessment(row), f"{round_id}: judge assessment", log
+        )
+        assessment_id = row["id"] if written else ""
         comment = render_judge_comment(
             gate,
             verdict.verdict,
@@ -642,9 +597,9 @@ class Activities:
 
     @activity.defn(name="reserve")
     async def reserve(self, root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
-        """Charge a job to its root before it launches; a refusal names the cap. Without a registry or a root (a
-        round from before the root pins) there is no budget to check."""
-        if self.registry is None or not root:
+        """Charge a job to its root before it launches; a refusal names the cap. Without a root there is no
+        budget to check."""
+        if not root:
             return Reservation(True, "no budget")
         caps = self.cfg.autonomy.caps()
         out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
@@ -654,7 +609,7 @@ class Activities:
     @activity.defn(name="settle")
     async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
         """Close the job's reservation with what it cost and moved; an accounting write never fails a round."""
-        if self.registry is None or not root:
+        if not root:
             return
         registry = self.registry
         await asyncio.to_thread(
@@ -677,8 +632,8 @@ class Activities:
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         round_id = state.round_id if state else None
-        if round_id and (registry := self.registry):  # the dataset's row: what buffers and requests read
-            await asyncio.to_thread(self._report_dataset, registry, issue, round_id, stage)
+        if round_id:  # the dataset's row: what buffers and requests read
+            await asyncio.to_thread(self._report_dataset, self.registry, issue, round_id, stage)
         if not round_id:
             await self._post(issue, "", "", stage=stage)
             return
@@ -713,22 +668,21 @@ class Activities:
         body = self._clean(body) + (f"\n\n{render_binding(binding_path, binding_hash)}" if binding_path else "")
         if repo == "snippets":
             return await self._comment_once(self.gh_snippets, issue, f"{body}\n\n{full_marker}", full_marker)
-        return await self._post(issue, f"{body}\n\n{full_marker}", full_marker)
+        await self._post(issue, f"{body}\n\n{full_marker}", full_marker)
+        return None
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
-        """Remove a human label we won't act on and say why, once per event (busy `go`, stray `approve`, ...)."""
+        """Refuse an action we won't act on and say why, once per event (busy `go`, stray `approve`, ...); an event
+        that is no action gets the entry alone."""
         actions = (*HUMAN_LABELS, "cancel")  # every action a person can send
         if label not in {self.cfg.label(kind) for kind in actions} or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
         said = f"Ignoring `{label}`: {self._clean(reason)}"
         if await self._action(issue, event_id) is not None:  # a click: the page shows the reason against it
-            assert self.registry is not None  # _action found the action there
             await asyncio.to_thread(self.registry.refuse_action, event_id, self._clean(reason))
             said = f"Refused `{label.partition(':')[2]}`: {self._clean(reason)}"
-        else:  # ponytail: a label's round (slice E, second deploy)
-            await self.gh_data.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
         await self._post(issue, f"{said}\n\n{marker}", marker)
 
@@ -924,8 +878,7 @@ class Activities:
         the binding.yaml in `workspace`, read as untrusted since the job could write there."""
         if not ID_RE.fullmatch(record):
             raise ValueError(f"bad record id {record!r}")
-        if (registry := self.registry) is None:
-            return
+        registry = self.registry
         try:
             binding = yaml.safe_load(read_untrusted(Path(workspace), "binding.yaml", 1 << 20) or "")
         except yaml.YAMLError:
@@ -1107,8 +1060,6 @@ class Activities:
         """After a repair: every quarantined staged artifact of the record gets a `policy:repair` approve (the newest
         assessment, so buffers may reuse it) and its quarantine mark cleared. Best effort: the publication stands."""
         registry = self.registry
-        if registry is None:
-            return
         try:
             assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
             for asset in assets:
@@ -1134,13 +1085,11 @@ class Activities:
     @activity.defn(name="revoke_dataset")
     @mia_permanent_errors
     async def revoke_dataset(self, issue: int, round_id: str, actor: str, event_id: str) -> Revocation:
-        """`data:revoke` (spec autonomous-gates §6): a reject assessment superseding the dataset's approve, a reject
+        """A revoke (spec autonomous-gates §6): a reject assessment superseding the dataset's approve, a reject
         and a quarantine mark on every staged artifact of the record, the dataset row flipped to `revoked`, and
         `revoked.json` written last beside the manifest (the folder is no longer prepared; nothing is deleted).
         A retry reads the marker and returns what the first run recorded."""
         registry = self.registry
-        if registry is None:
-            raise ValueError("data:revoke needs buffer-api's registry (`service` in mia.yaml)")
         pins = self._pins(round_id)
         record, folder = pins.record, self._dataset_dir(round_id, pins)
         marker = folder / REVOKED_FILE
@@ -1198,39 +1147,23 @@ class Activities:
     @activity.defn(name="read_feedback")
     @mia_permanent_errors
     async def read_feedback(self, issue: int, since: str | None, until: str) -> str:
-        """The reviewer's comments on the data issue after `since` (the set's report) and up to `until` (the
-        reject), by people with write access, the bot's own left out: what goes to the agent fixing the snippet
-        (spec §14). Neutralized and capped; "(no details)" when there are none."""
-        if (registry := self.registry) is not None:
-            # the note each reject action in the window carries (spec webapp-actions §6); the workflow passes
-            # the reject's own `at` as `until`, which is why an action's time is stored exactly as it was sent
-            found = await asyncio.to_thread(registry.timeline, "dataset", issue)
-            after, upto = _when(since), _when(until)
+        """The reviewer's feedback: the note of each reject action after `since` (the set's report) and up to
+        `until` (the reject; the workflow passes the action's own `at`, which is why an action's time is stored
+        exactly as it was sent). It goes to the agent fixing the snippet (spec §14). Neutralized and capped;
+        "(no details)" when there is none."""
+        found = await asyncio.to_thread(self.registry.timeline, "dataset", issue)
+        after, upto = _when(since), _when(until)
 
-            def in_window(action: dict) -> bool:
-                acted = _when(action["at"])
-                return bool(acted and upto and (after is None or after < acted) and acted <= upto)
+        def in_window(action: dict) -> bool:
+            acted = _when(action["at"])
+            return bool(acted and upto and (after is None or after < acted) and acted <= upto)
 
-            actions = (found or {}).get("actions", [])
-            rejects = [action for action in actions if action["action"] == "reject" and in_window(action)]
-            if rejects:
-                notes = [
-                    f"{action['actor']} wrote:\n{_text(action['payload'].get('note'), 8000)}"
-                    for action in rejects
-                    if action["payload"].get("note")
-                ]
-                return self._clean("\n\n".join(notes))[:16000] or "(no details)"
-        # ponytail: a label's round: no action in the window, so the feedback is the comments (slice E, second deploy)
-        comments, permission = [], {}
-        for comment in await self.gh_data.issue_comments(issue):
-            login, at = (comment.get("user") or {}).get("login"), comment.get("created_at") or ""
-            if not login or login == self.bot or not ((since or "") < at <= until):
-                continue
-            if login not in permission:
-                permission[login] = await self.gh_data.permission(login)
-            if permission[login] in WRITE_PERMISSIONS:
-                comments.append(f"{login} wrote:\n{_text(comment.get('body'), 8000)}")
-        return self._clean("\n\n".join(comments))[:16000] or "(no details)"
+        notes = [
+            f"{action['actor']} wrote:\n{_text(action['payload'].get('note'), 8000)}"
+            for action in (found or {}).get("actions", [])
+            if action["action"] == "reject" and in_window(action) and action["payload"].get("note")
+        ]
+        return self._clean("\n\n".join(notes))[:16000] or "(no details)"
 
     @activity.defn(name="open_snippet_issue")
     @mia_permanent_errors
@@ -1277,13 +1210,9 @@ class Activities:
             {key: record.get(key) for key in ("title", "imaging", "data", "technical")}, sort_keys=False
         )
         draft = draft or {}
-        # the dataset's page, not its issue: a dataset started from the page may have no issue yet, and its
-        # number is not an issue number (spec webapp-actions §4.1, §9); without buffer-api, the issue
-        if self.cfg.service is not None:
-            page = f"{self.cfg.service.url.rstrip('/')}/#datasets/{quote(pins.record, safe='')}"
-            data_link = f"[{pins.record}]({page})"
-        else:
-            data_link = f"[{github_cfg.data_repo}#{issue}](https://github.com/{github_cfg.data_repo}/issues/{issue})"
+        # the dataset's page, not its issue: a dataset may have no issue yet, and its number is not an issue
+        # number (spec webapp-actions §4.1, §9)
+        data_link = f"[{pins.record}]({self.page_url}/#datasets/{quote(pins.record, safe='')})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}

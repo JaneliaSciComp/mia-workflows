@@ -13,9 +13,6 @@ from .status import safe_text
 
 MARKER = "<!-- mia-data:record={} -->"
 MARKER_RE = re.compile(r"<!-- mia-data:record=(\S+) -->")  # matched only at the start of a body
-# ponytail: a label's round: the root marker a buffer or a request wrote on line 2 of the issue it opened
-# (slice E, second deploy); a round started by an action is charged to the root its action carries
-ROOT_RE = re.compile(r"<!-- mia-data:root=(\S+) -->")
 
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")
 

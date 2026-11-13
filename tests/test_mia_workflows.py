@@ -1074,7 +1074,8 @@ def pr(n, ref, sha, state="open", repo="o/snippets"):
 
 def _poll(tmp_path, data, snip):
     fc = FakeClient()
-    return Activities(make_cfg(tmp_path), data, snip, None, None, bot="bot", client=fc), fc
+    cfg = make_cfg(tmp_path, service={"url": "http://svc.example.org:8765"})
+    return Activities(cfg, data, snip, None, None, bot="bot", client=fc), fc
 
 
 async def test_poll_sets_status_for_non_snippet_pr(tmp_path):

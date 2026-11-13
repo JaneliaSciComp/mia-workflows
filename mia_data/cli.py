@@ -388,11 +388,10 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     activities = Activities(
         cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=bot, client=client
     )
-    mirror = []  # the dataset issues' mirror (spec webapp-actions §7); without buffer-api there is nothing to copy
-    if activities.registry is not None:
-        labels, openers = {"dataset": (cfg.label, STAGES)}, {"dataset": dataset_issue(cfg, clients[2])}
-        pages = {"dataset": dataset_page(cfg)}
-        mirror = [Mirror(clients[0], activities.registry, bot, labels, openers, pages).mirror]
+    # the dataset issues' mirror (spec webapp-actions §7)
+    labels, openers = {"dataset": (cfg.label, STAGES)}, {"dataset": dataset_issue(cfg, clients[2])}
+    pages = {"dataset": dataset_page(cfg)}
+    mirror = [Mirror(clients[0], activities.registry, bot, labels, openers, pages).mirror]
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
