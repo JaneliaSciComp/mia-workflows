@@ -1354,6 +1354,7 @@ function ghIcon(repo, n, numbered) {  // in a table the mark alone; on a subject
   if (!repo || !n) return "";
   return el("a", { class: "gh", href: `https://github.com/${repo}/issues/${n}`, target: "_blank", rel: "noopener", title: `GitHub issue #${n}: a read-only copy of the timeline`, "aria-label": `GitHub issue ${n}` }, ghMark(), numbered ? `#${n}` : null);
 }
+const bufferCount = ids => ids?.length ? num(ids.length) : "";  // a table says how many buffers; the dataset's page lists them
 const bufferLinks = ids => { const span = el("span"); (ids || []).forEach((b, i) => span.append(i ? " " : "", bufferLink(b))); return span; };
 
 // ---- a table paged by the server: a header click sorts, the box searches, the pager moves, and each asks the
@@ -1540,7 +1541,7 @@ const PLAN_COLS = [
   { key: "state", label: "state", title: "preparation, then the raw cache's state, then \"staged\" when a pyramid of it exists for this geometry",
     cell: x => { const pills = el("span", { class: "pills" }, statePill(x.prepared)); if (x.raw) pills.append(" ", assetPill(x.raw.state)); if (x.staged_here) pills.append(" ", pill("staged", "pool")); if (x.quarantined) pills.append(" ", assetPill("quarantined")); return pills; } },
   { key: "raw", label: "raw cache", num: true, cell: x => x.raw?.bytes ? fmtBytes(x.raw.bytes) : "" },
-  { key: "buffers", label: "buffers", cell: x => bufferLinks(x.buffers) },
+  { key: "buffers", label: "buffers", num: true, cell: x => bufferCount(x.buffers) },
   { key: "bytes", label: "size", num: true, cell: x => x.bytes ? fmtBytes(x.bytes) : "" },
   { key: "weight", label: "weight", num: true, cell: x => x.weight ? pct(x.weight) : "" },
   { label: "split", cell: splitText },
@@ -1701,7 +1702,7 @@ function viewDatasetList(arg, params) {
       { key: "bytes", label: "size", num: true, cell: x => x.bytes ? fmtBytes(x.bytes) : "" },
       { key: "raw", label: "raw cache", num: true, cell: x => x.raw?.bytes ? fmtBytes(x.raw.bytes) : "" },
       { key: "staged", label: "staged", num: true, cell: x => x.staged ? num(x.staged) : "" },
-      { key: "buffers", label: "buffers", cell: x => bufferLinks(x.buffers) },
+      { key: "buffers", label: "buffers", num: true, cell: x => bufferCount(x.buffers) },
       { key: "updated", label: "updated", cell: x => when(x.updated_at) },
     ] });
   root.replaceChildren(el("h2", {}, "Datasets"),
@@ -1753,7 +1754,7 @@ function datasetCards(d) {
       { label: "files", cell: a => folderLink(roots.staged_root, data(a).levels_key && `${data(a).levels_key}/${row.id}/${a.key}`) },
       { key: "state", label: "state", cell: a => { const pills = el("span", { class: "pills" }, assetPill(data(a).state)); if (data(a).quarantined) pills.append(" ", assetPill("quarantined")); return pills; } },
       { key: "bytes", label: "bytes", num: true, cell: a => data(a).bytes ? fmtBytes(data(a).bytes) : "" }, { key: "last_used", label: "last used", cell: a => when(data(a).last_used) },
-      { key: "buffers", label: "buffers", cell: a => bufferLinks(a.refs) }, { key: "levels_key", label: "levels key", cell: a => el("code", {}, data(a).levels_key || "") },
+      { key: "buffers", label: "buffers", num: true, cell: a => bufferCount(a.refs) }, { key: "levels_key", label: "levels key", cell: a => el("code", {}, data(a).levels_key || "") },
       { label: "binding", cell: a => el("code", {}, short(data(a).binding_hash, 10)) }, { label: "harness", cell: a => el("code", {}, short(data(a).harness_commit, 10)) },
     ] })));
   cards.push(card("Buffers", "Each buffer whose pool holds this dataset, the newest first.", pagedTable("dataset-buffers:" + row.id, { source: pageOf("/buffers", "buffers", () => ({ record: row.id })), search: false, empty: "In no buffer's pool.", cols: [
@@ -1905,7 +1906,7 @@ async function viewCache() {
     { key: "state", label: "state", cell: a => { const td = el("span", { class: "pills" }, assetPill(data(a).state)); if (data(a).quarantined) td.append(" ", assetPill("quarantined")); return td; } },
     { key: "bytes", label: "bytes", num: true, cell: a => data(a).bytes ? fmtBytes(data(a).bytes) : "" },
     { key: "last_used", label: "last used", cell: a => when(data(a).last_used) },
-    { key: "buffers", label: "buffers", cell: a => bufferLinks(a.refs) },
+    { key: "buffers", label: "buffers", num: true, cell: a => bufferCount(a.refs) },
   ];
   const dataset = [{ key: "dataset", label: "dataset", cell: a => datasetLink(a.record) }, { label: "issue", cell: a => ghIcon(repo, a.issue) }];
   const job = { key: "job", label: "job", cell: a => data(a).job ? el("code", {}, data(a).job) : "" };
