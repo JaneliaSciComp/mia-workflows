@@ -269,6 +269,38 @@ def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     assert "turn !== subjectTurn" in PAGE
 
 
+def test_the_page_asks_which_hosts_a_run_lacks_before_it_starts() -> None:
+    """A start action first asks the service which hosts the run needs that the policy lacks."""
+    assert ("POST", "/hosts/missing") in requested_paths() and resolve("POST", "/hosts/missing") == "read"
+    assert PAGE.count("askHosts(") >= 3
+    for body in (
+        "{ records: [subject.key] }",
+        "{ prep: subject.number }",
+        "{ spec: subject.key }",
+        "{ records: todo }",
+    ):
+        assert body in PAGE
+
+
+def test_the_hosts_dialog_offers_approve_start_anyway_and_cancel() -> None:
+    """The dialog lists the hosts with Select all; Approve and start waits for a ticked host."""
+    for text in (
+        "Approve and start",
+        "Start without approving",
+        "Select all",
+        "Hosts to approve",
+        "approveButton.disabled = ",
+    ):
+        assert text in PAGE
+    for key in ("approveHosts:", "startUnapproved:", "cancelHosts:"):
+        assert key in PAGE
+
+
+def test_an_approval_travels_with_the_start_action() -> None:
+    """The approved hosts ride on the start action itself; the page has no route of its own to approve them."""
+    assert "approve_hosts" in PAGE and '"/hosts/approve"' not in PAGE
+
+
 def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
     """Reject has more to enter: its button ends in an ellipsis and opens a dialog for the feedback. No feedback box
     sits beside the buttons, and a rejection with nothing typed cannot be sent."""

@@ -1562,15 +1562,18 @@ function prepareButton(container, all, blocker, done, again, text) {  // `text`:
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }), onclick: async e => {
     if (!confirm(`Start preparing ${todo.length} datasets?${again ? ` ${again} of them are prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
-    e.target.disabled = true;
+    askHosts({ records: todo }, hosts => start(e.target, hosts));
+  } }, label));
+  async function start(button, hosts) {
+    button.disabled = true;
     // more than 25 records need the count written into the request: the confirmation above is that
     const yaml = toPrepYaml(todo, S.ref, S.meta.catalog_repo) + (again == null ? "" : "again: true\n") + (todo.length > 25 ? `max_records: ${todo.length}\n` : "");
     try {
-      const action = await api("/prep", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: yaml, key: newKey() }) });
+      const action = await api("/prep", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: yaml, key: newKey(), ...(hosts.length ? { approve_hosts: hosts } : {}) }) });
       if (done) done(todo);
       location.hash = "#find/" + action.number;
-    } catch (err) { banner(err.status === 422 ? `The request was refused: ${err.message}` : `Not started (${err.status || "network error"}): ${err.message}`); e.target.disabled = false; }
-  } }, label));
+    } catch (err) { banner(err.status === 422 ? `The request was refused: ${err.message}` : `Not started (${err.status || "network error"}): ${err.message}`); button.disabled = false; }
+  }
 }
 
 // ---- the plan's table: the datasets the spec's selection admits, one page at a time (POST /plan with `page`).
@@ -2095,6 +2098,9 @@ const BUTTON_HELP = {
   clearSelection: "Untick every dataset.",
   sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
   cancelReject: "Close this without sending anything.",
+  approveHosts: "Allow jobs to download from the ticked hosts, then start.",
+  startUnapproved: "Start with the policy as it is. A dataset on one of these hosts stops and needs a person; a buffer waits for that dataset's files to be copied in by hand, or refuses its job.",
+  cancelHosts: "Close this without starting anything.",
   showChange: "Redraw the page with what changed; what you typed here is dropped.",
 };
 const ACTION_HELP = {
@@ -2219,6 +2225,42 @@ function askReject(subject, send) {
   document.body.append(box);
   box.showModal();
 }
+// Before a run starts, the service says which hosts it needs that the csub policy lacks (`run`: {records}, {prep} or
+// {spec}). `send(hosts)` is called once: [] when nothing is missing or the person starts without approving, the ticked
+// hosts on "Approve and start". On Cancel, and when the check fails, it is not called.
+async function askHosts(run, send) {
+  let missing;
+  try { missing = (await api("/hosts/missing", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(run) })).hosts; }
+  catch (e) { banner(`Hosts not checked (${e.status || "network error"}): ${e.message}. Nothing was started.`); return; }
+  if (!missing.length) return send([]);
+  const ticks = missing.map(() => el("input", { type: "checkbox" }));
+  const all = el("input", { type: "checkbox", "aria-label": "select all hosts" });
+  const approveButton = el("button", { type: "submit", class: "btn", value: "approve", title: BUTTON_HELP.approveHosts }, "Approve and start");
+  const refresh = () => { approveButton.disabled = !ticks.some(tick => tick.checked); all.checked = ticks.every(tick => tick.checked); };
+  all.addEventListener("change", () => { ticks.forEach(tick => { tick.checked = all.checked; }); refresh(); });
+  ticks.forEach(tick => tick.addEventListener("change", refresh));
+  const rows = missing.map((m, n) => el("label", { class: "row" }, ticks[n], " ", el("span", { class: "mono" }, m.host), " ",
+    el("span", { class: "small", title: m.records.join(", ") }, `${m.records.length} dataset(s)`)));
+  const box = el("dialog", { class: "ask", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
+    el("h2", { id: "askTitle" }, "Hosts to approve"),
+    el("p", { class: "small" }, "Jobs of this deployment may download from an approved host from then on."),
+    el("label", {}, all, " Select all"), ...rows,
+    el("div", { class: "actions" }, approveButton,
+      el("button", { type: "submit", class: "btn", value: "start", title: BUTTON_HELP.startUnapproved }, "Start without approving"),
+      el("button", { type: "submit", class: "btn", value: "cancel", title: BUTTON_HELP.cancelHosts }, "Cancel"))));
+  refresh();
+  box.addEventListener("close", () => {
+    if (box.returnValue === "approve") send(missing.filter((m, n) => ticks[n].checked).map(m => m.host));
+    else if (box.returnValue === "start") send([]);
+    box.remove();
+  });
+  document.body.append(box);
+  box.showModal();
+}
+// what the service is asked about before this subject's action starts a run; null for the actions that start none
+const hostsRun = (subject, action) => action === "go" && subject.kind === "dataset" ? { records: [subject.key] }
+  : action === "go" && subject.kind === "prep" ? { prep: subject.number }
+  : action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? { spec: subject.key } : null;
 function actionBar(subject, after, skip) {  // `skip`: actions that have their own control on the page (a spec's go, revoke)
   const bar = el("div", { class: "actions" });
   const offered = ACTION_ORDER.filter(a => subject.actions.includes(a) && !(skip || []).includes(a));
@@ -2240,6 +2282,8 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
       };
       if (action === "reject") return askReject(subject, note => send({ note }));
       if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
+      const run = hostsRun(subject, action);
+      if (run) return askHosts(run, hosts => send(hosts.length ? { approve_hosts: hosts } : {}));
       send({});
     } }, asked && asked.action === action ? sending : word));
   }
