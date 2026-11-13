@@ -344,3 +344,17 @@ def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
     assert "ghIcon(meta.buffers_repo, spec.issue, true)" in body and "SUBJECT_HASH.buffer(spec.key)" in body
     assert "Object.entries(roots)" not in body and "all buffers" not in body
     assert 'buffer: "Buffer workflow:"' in PAGE
+
+
+def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> None:
+    """Every row of the Datasets list has a tick, prepared or not. The ticked that still need it can be prepared
+    in one request, and all of them can open New buffer as a spec that selects exactly them: each by a glob on
+    its record's file name, which no other record's path matches."""
+    from mia_buffers.select import _glob
+
+    assert "select: { chosen: CHOSEN, id: row => row.id, onchange: " in PAGE and "can: PREPARABLE" not in PAGE
+    assert "function specFromDatasets(ids)" in PAGE and "ids.map(id => `*/${id}.yaml`)" in PAGE
+    assert "title: BUTTON_HELP.specFrom" in PAGE
+    patterns = ["*/u937.yaml", "*/bcss.yaml"]
+    assert _glob(patterns, "datasets/2D/confocal/u937.yaml") and _glob(patterns, "datasets/bcss.yaml")
+    assert not _glob(patterns, "datasets/2D/confocal/not-u937.yaml") and not _glob(patterns, "datasets/u937.yaml.bak")
