@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 
@@ -8,6 +9,7 @@ import yaml
 from mia_buffers.hosts import HostCheck
 from mia_core.hosts import generate_policy
 from mia_data.config import NetworkCfg
+from tests.test_buffers_config import make_cfg
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +29,7 @@ def check(tmp_path) -> HostCheck:
         network=NetworkCfg(package_hosts=["pypi.org"], redirect_hosts={"data.example.org": ["cdn.example.net"]}),
         storage_root=tmp_path / "storage",
         rounds_dir=tmp_path / "rounds",
+        own_hosts=("buffer-api.internal.example", "temporal.internal.example"),
     )
 
 
@@ -78,6 +81,39 @@ def test_a_bindings_needs_skip_manual_bindings_unreadable_bindings_and_folders_o
         "data.example.org": ["rec-a"],
         "pypi.org": ["rec-a"],
     }
+
+
+NEVER_APPROVED = ["https://buffer-api.internal.example:8443/a", "http://10.1.2.3/a", "https://127.0.0.1/a"]
+
+
+def test_an_ip_literal_and_the_deployments_own_hosts_are_left_out_and_the_records_other_hosts_kept(tmp_path):
+    hosts = check(tmp_path)
+    urls = [*NEVER_APPROVED, "http://temporal.internal.example:7233/a", "https://data.example.org/a"]
+    expected = {"cdn.example.net": ["rec-a"], "data.example.org": ["rec-a"], "pypi.org": ["rec-a"]}
+    assert hosts.for_records({"rec-a": {"data": {"download_url": urls}}}) == expected
+    (hosts.storage_root / "rec-a").mkdir(parents=True)
+    (hosts.storage_root / "rec-a" / "binding.yaml").write_text(yaml.safe_dump({"raw": [{"urls": urls}]}))
+    assert hosts.for_bindings({"rec-a": "rec-a"}) == expected
+
+
+@pytest.mark.parametrize("host", ["buffer-api.internal.example", "temporal.internal.example", "10.1.2.3", "::1"])
+def test_check_refuses_an_ip_literal_and_the_deployments_own_hosts_though_needed(tmp_path, host):
+    with pytest.raises(ValueError, match=re.escape(host)):
+        check(tmp_path).check([host], {host: ["rec-a"]})
+
+
+def test_from_config_names_the_deployments_own_hosts(tmp_path):
+    cfg = make_cfg(
+        tmp_path,
+        service={"url": "https://Buffer-API.internal.example:8443"},
+        temporal={"address": "temporal.internal.example:7233", "ui_url": "https://temporal-ui.internal.example/"},
+    )
+    assert HostCheck.from_config(cfg).own_hosts == (
+        "buffer-api.internal.example",
+        "temporal-ui.internal.example",
+        "temporal.internal.example",
+    )
+    assert HostCheck.from_config(make_cfg(tmp_path)).own_hosts == ("127.0.0.1", "localhost")
 
 
 def test_the_pool_is_the_plans_in_pool_rows(tmp_path):

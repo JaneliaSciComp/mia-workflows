@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import tomllib
 from pathlib import Path
@@ -102,9 +103,11 @@ def test_a_base_that_is_a_symlink_inside_the_policy_dir_is_refused(tmp_path, ope
     assert [path.name for path in directory.iterdir()] == [POLICY_NAME]
 
 
-@pytest.mark.parametrize("host", ["*.example.org", "Data.Example.org", "data.example.org.", "data.example.org:443"])
+@pytest.mark.parametrize(
+    "host", ["*.example.org", "Data.Example.org", "data.example.org.", "data.example.org:443", "10.1.2.3", "::1"]
+)
 def test_an_unapprovable_host_is_refused_before_anything_is_written(base, policy_dir, host):
-    with pytest.raises(PolicyError, match=host.replace("*", r"\*")):
+    with pytest.raises(PolicyError, match=re.escape(host)):
         approve(base, policy_dir, [host])
     assert not (policy_dir / APPROVALS_NAME).exists()
     assert generate_policy(base, policy_dir).exists()

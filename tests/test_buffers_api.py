@@ -2001,6 +2001,7 @@ def _checking(tmp_path):
         network=NetworkCfg(package_hosts=[]),
         storage_root=tmp_path / "storage",
         rounds_dir=tmp_path / "rounds",
+        own_hosts=("buffer-api.internal.example", "temporal.internal.example"),
     )
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", hosts=check)
     urls = {"rec-a": "https://data.example.org/a.zip", "rec-b": "https://zenodo.org/b.zip"}
@@ -2261,6 +2262,54 @@ def test_a_requests_go_approves_its_hosts(tmp_path, _home):
     assert status == 202
     assert _bodies(s, "prep", number)[0] == "**Hosts approved:** `data.example.org` by `page`"
     assert _approvals(s)[0]["kind"] == "prep" and len(gateway.sent) == 1
+
+
+def test_a_buffers_hosts_are_those_its_bindings_name_that_its_catalog_records_also_name(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    number, plan = _at_plan_review(s, tmp_path)
+    rows = [{"id": record, "admitted": True, "fit": {"ok": True}} for record in ("rec-a", "rec-z")]
+    plan.write_text(json.dumps({"rows": rows}))
+    binding = {"raw": [{"urls": ["https://data.example.org/x", "https://exfil.example.net/y"]}]}
+    (tmp_path / "storage" / "rec-a" / "binding.yaml").write_text(yaml.safe_dump(binding))  # rewritten by a job
+    s.ledger.put_dataset("rec-z", {"folder": "rec-z"})  # in no synced catalog
+    (tmp_path / "storage" / "rec-z").mkdir()
+    (tmp_path / "storage" / "rec-z" / "binding.yaml").write_text(yaml.safe_dump(binding))
+    assert _missing(s, {"spec": SPEC_NAME})[:2] == (
+        200,
+        {"hosts": [{"host": "data.example.org", "records": ["rec-a"]}]},
+    )
+    revision = s.ledger.subject("buffer", SPEC_NAME)["revision"]
+    status, out, _ = act(
+        s, SPEC_ACTIONS, {"action": "approve", "revision": revision, "approve_hosts": ["exfil.example.net"]}
+    )
+    assert status == 422 and "exfil.example.net" in out["error"]
+    assert _approvals(s) == [] and gateway.sent == [] and len(_bodies(s, "buffer", number)) == 1
+    assert (
+        act(s, SPEC_ACTIONS, {"action": "approve", "revision": revision, "approve_hosts": ["data.example.org"]})[0]
+        == 202
+    )
+
+
+@pytest.mark.parametrize(
+    "url, host",
+    [
+        ("https://buffer-api.internal.example:8443/a.zip", "buffer-api.internal.example"),
+        ("http://temporal.internal.example:7233/a.zip", "temporal.internal.example"),
+        ("http://10.1.2.3/a.zip", "10.1.2.3"),
+        ("https://127.0.0.1/a.zip", "127.0.0.1"),
+    ],
+)
+def test_an_ip_literal_and_the_deployments_own_hosts_are_never_offered_or_approved(tmp_path, _home, url, host):
+    s, gateway = _starting(tmp_path)
+    record = {"id": "rec-x", "data": {"download_url": [url, "https://x.example.org/a.zip"]}}
+    assert worker(s, "PUT", f"/records/{REF_A}", {"records": [{"path": "rec-x.yaml", "record": record}]})[0] == 200
+    assert _missing(s, {"records": ["rec-x"]})[:2] == (
+        200,
+        {"hosts": [{"host": "x.example.org", "records": ["rec-x"]}]},
+    )
+    status, out, _ = act(s, "/datasets/rec-x/actions", {"action": "go", "approve_hosts": [host]})
+    assert status == 422 and host in out["error"]
+    assert _approvals(s) == [] and s.ledger.subject("dataset", "rec-x") is None and gateway.sent == []
 
 
 def test_two_approvals_at_once_both_land(tmp_path, _home):

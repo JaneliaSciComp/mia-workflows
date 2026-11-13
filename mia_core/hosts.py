@@ -8,6 +8,7 @@ or another. Every generation checks where the policy directory is before it writ
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import json
 import os
 import re
@@ -27,6 +28,15 @@ _approval_lock = threading.Lock()
 
 class PolicyError(RuntimeError):
     """The policy cannot be generated or the approvals cannot be read; the message names the file or key."""
+
+
+def is_ip_literal(host: str) -> bool:
+    """Whether the host is an IPv4 or IPv6 address rather than a name."""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
 
 
 def missing_hosts(hosts: list[str], patterns: list[str]) -> list[str]:
@@ -94,8 +104,8 @@ def approve_hosts(
     writable: Sequence[Path] = (),
 ) -> list[str]:
     """Append an approval line for each host not yet approved, regenerate the policy, return the hosts added."""
-    if bad := [host for host in hosts if not HOST_RE.fullmatch(host)]:
-        raise PolicyError(f"not an approvable hostname (lowercase, exact, no port): {', '.join(bad)}")
+    if bad := [host for host in hosts if not HOST_RE.fullmatch(host) or is_ip_literal(host)]:
+        raise PolicyError(f"not an approvable hostname (lowercase, exact, no port, not an IP): {', '.join(bad)}")
     with _approval_lock:
         _check_placement(base_policy, policy_dir, writable)
         _read_base(base_policy)

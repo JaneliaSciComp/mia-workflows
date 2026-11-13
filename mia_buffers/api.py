@@ -1005,20 +1005,22 @@ class BufferService:
                 return found[1]
         return None
 
+    def _catalog_records(self, records: list[str]) -> dict[str, dict]:
+        """Record id -> its synced catalog entry, for those of the records a synced catalog holds."""
+        return {record: row for record in records if (row := self._catalog_record(record)) is not None}
+
     def _needed(self, *, records: list[str] | None = None, prep: int | None = None, spec: str | None = None) -> Needed:
         """The hosts the named catalog records, a request's records or a buffer's planned pool need (host -> the
-        record ids that need it)."""
+        record ids that need it). A buffer's host is one its published binding names that its record's synced
+        catalog entry also names: a binding lies under a root a job can mount read-write."""
         if self.hosts is None:
             raise HttpError(503, "this service has no csub policy to check hosts against")
         if prep is not None:
             records = self._request_records(str(prep))
         if records is not None:
-            catalog = {}
-            for record in records:
-                if (row := self._catalog_record(record)) is None:
-                    raise HttpError(404, f"{record!r} is not a record of a synced catalog")
-                catalog[record] = row
-            return self.hosts.for_records(catalog)
+            if missing := [record for record in records if self._catalog_record(record) is None]:
+                raise HttpError(404, f"{missing[0]!r} is not a record of a synced catalog")
+            return self.hosts.for_records(self._catalog_records(records))
         if spec is None:
             raise HttpError(422, "give records, prep or spec")
         subject = self.ledger.subject("buffer", spec)
@@ -1036,7 +1038,10 @@ class BufferService:
         except (OSError, ValueError):
             raise HttpError(409, f"buffer {spec!r} has no plan to read") from None
         folders = {record: (self.ledger.dataset(record) or {}).get("folder") for record in pool}
-        return self.hosts.for_bindings({record: folder for record, folder in folders.items() if folder})
+        bound = self.hosts.for_bindings({record: folder for record, folder in folders.items() if folder})
+        named = self.hosts.for_records(self._catalog_records(pool))
+        kept = {host: [record for record in ids if record in named.get(host, [])] for host, ids in bound.items()}
+        return {host: ids for host, ids in kept.items() if ids}
 
     def _hosts_missing(self, *, query: dict[str, str], body: bytes) -> Response:
         """The hosts a run needs that the csub policy lacks. A read route: it writes nothing."""
