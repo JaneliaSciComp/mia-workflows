@@ -356,7 +356,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 <header>
   <div class="eyebrow">user guide · training on a buffer</div>
   <h1>Training on a MIA buffer</h1>
-  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file, and it defines both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalization, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process.</p>
+  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file, and it defines both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalisation, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process.</p>
   <p>Everything a person does is a button on this page: plan a buffer, run it, approve it, cancel it. Every step the system takes is an entry in the spec's timeline, which its page shows as it happens. <a href="#needs">Needs you</a> lists whatever is waiting for a person. The page needs no login: anyone who can reach it can press its buttons.</p>
 </header>
 
@@ -489,7 +489,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td>tick it on the Datasets tab and <b>Prepare</b>, or prepare what a new buffer's plan needs; then a new round later</td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer not approved)</td><td>the round is staged but not approved</td><td>press <i>Approve</i> on the spec's page (it is listed under <i>Needs you</i>)</td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer needs a human)</td><td>the buffer's latest event is <code>needs-human</code>: a degraded rebuild or a round that stopped</td><td>read the newest entry of the spec's timeline; the buffer serves again once the round writes <code>approved</code> or <code>ready</code></td></tr>
-<tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorized to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
+<tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorised to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
 <tr><td>410 buffer retired</td><td>the buffer was retired: by <i>Retire</i>, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
 <tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td><i>Cancel the round</i> on the spec's page; if that gets no answer, <i>Force stop</i>, then <i>Plan</i> again</td></tr>
@@ -537,7 +537,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="28" y="176">specs · requests: copies</text>
 <rect class="b" x="20" y="225" width="175" height="55" rx="4"/>
 <text class="t" x="28" y="245">mia-snippets</text>
-<text class="s" x="28" y="261">readers · tensorizers · harness</text>
+<text class="s" x="28" y="261">readers · tensorisers · harness</text>
 <rect class="b" x="20" y="305" width="175" height="55" rx="4"/>
 <text class="t" x="28" y="325">mia-agentic-search</text>
 <text class="s" x="28" y="341">catalog records, pinned by commit</text>
@@ -1080,7 +1080,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="ea" x1="370" y1="254" x2="620" y2="254" marker-end="url(#f6)"/>
 <text class="l" x="495" y="247" text-anchor="middle">128 descriptors · seq, volume, plane, centre_nm</text>
 <rect class="note" x="630" y="264" width="210" height="32" rx="3"/>
-<text class="s" x="638" y="277">reads the pyramid, runs the tensorizer</text>
+<text class="s" x="638" y="277">reads the pyramid, runs the tensoriser</text>
 <text class="s" x="638" y="290">img, bbox, label → prefetch queue</text>
 <line class="ed" x1="620" y1="312" x2="370" y2="312" marker-end="url(#f6)"/>
 <text class="l" x="495" y="305" text-anchor="middle">each call is a heartbeat; last_seen drives idle</text>
@@ -1952,7 +1952,7 @@ async function viewBuffer(root, id, refresh) {
       card("Recipe", "What this buffer was built with, and what it serves.", status ? kv([
         ["spec", spec ? el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.key) : cfg.spec_name], ["spec hash", code(cfg.spec_hash, 12)], ["catalog commit", code(cfg.catalog_ref, 12)],
         ["pyramid levels", (cfg.levels || []).join(", ")], ["patch size (px)", num(cfg.patch)], ["channels", String(cfg.channels ?? "")],
-        ["tensorizer", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} at harness ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
+        ["tensoriser", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} at harness ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
         ["plan hash", code(cfg.plan_hash, 12)], ["split fractions", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
         ["servable volumes", servableText(status.servable)], ["volumes registered", num(status.volumes)], ["empty answers allowed", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
         (status.quarantined || []).length ? ["quarantined", el("span", { class: "pills" }, assetPill("quarantined"), " " + status.quarantined.join(", "))] : null,
