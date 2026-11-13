@@ -250,7 +250,12 @@ def test_a_base_that_cannot_be_written_records_no_approval(tmp_path, policy_dir)
 
 @pytest.mark.parametrize(
     "text",
-    ['[broker]\nallowed_hosts = "zenodo.org"\n', "[broker]\nallowed_hosts = [1]\n", '[broker]\nnote = "\U0001f600"\n'],
+    [
+        '[broker]\nallowed_hosts = "zenodo.org"\n',
+        "[broker]\nallowed_hosts = [1]\n",
+        '[broker]\nnote = "\U0001f600"\n',
+        'broker = "x"\n',
+    ],
 )
 def test_a_base_the_policy_cannot_be_built_from_is_a_policy_error(tmp_path, policy_dir, text):
     odd = tmp_path / "operator" / "odd.toml"
@@ -261,6 +266,38 @@ def test_a_base_the_policy_cannot_be_built_from_is_a_policy_error(tmp_path, poli
     with pytest.raises(PolicyError):
         approve(odd, policy_dir, ["a.example.org"])
     assert not (policy_dir / POLICY_NAME).exists() and not (policy_dir / APPROVALS_NAME).exists()
+
+
+def refuse_to_publish(text: str, directory: Path) -> None:
+    raise PermissionError(13, "Permission denied")
+
+
+def test_an_approval_whose_publish_fails_is_taken_back(base, policy_dir, monkeypatch):
+    approve(base, policy_dir, ["a.example.org"])
+    approvals = policy_dir / APPROVALS_NAME
+    before = approvals.read_bytes()
+    real_publish = hosts_module._publish
+    monkeypatch.setattr(hosts_module, "_publish", refuse_to_publish)
+    with pytest.raises(PolicyError, match="Permission denied"):
+        approve(base, policy_dir, ["b.example.org"])
+    assert approvals.read_bytes() == before
+    with pytest.raises(PolicyError, match="Permission denied"):
+        generate_policy(base, policy_dir)
+    monkeypatch.setattr(hosts_module, "_publish", real_publish)
+    assert approve(base, policy_dir, ["b.example.org"]) == ["b.example.org"]
+    assert [json.loads(line)["host"] for line in approvals.read_text().splitlines()] == [
+        "a.example.org",
+        "b.example.org",
+    ]
+    assert "b.example.org" in allowed_patterns(policy_dir)
+
+
+def test_a_first_approval_whose_publish_fails_leaves_no_approvals_file(base, policy_dir, monkeypatch):
+    generate_policy(base, policy_dir)
+    monkeypatch.setattr(hosts_module, "_publish", refuse_to_publish)
+    with pytest.raises(PolicyError, match="Permission denied"):
+        approve(base, policy_dir, ["a.example.org"])
+    assert not (policy_dir / APPROVALS_NAME).exists()
 
 
 def test_a_base_that_cannot_be_read_records_no_approval(tmp_path, policy_dir):

@@ -109,26 +109,50 @@ def approve_hosts(
     writable: Sequence[Path] = (),
 ) -> list[str]:
     """Append an approval line for each host not yet approved, regenerate the policy, return the hosts added. The
-    policy for the known and the new hosts is rendered first, so a failed approval records nothing."""
+    policy for the known and the new hosts is rendered first, and an append whose generation then fails is cut
+    back off, so a failed approval records nothing."""
     if bad := [host for host in hosts if not HOST_RE.fullmatch(host) or is_ip_literal(host)]:
         raise PolicyError(f"not an approvable hostname (lowercase, exact, no port, not an IP): {', '.join(bad)}")
     with _approval_lock:
         _check_placement(base_policy, policy_dir, writable)
-        policy_dir.mkdir(parents=True, exist_ok=True)
-        known = approved_hosts(policy_dir)
-        added = list(dict.fromkeys(host for host in hosts if host not in known))
-        _render(base_policy, known + added)
+        path = policy_dir / APPROVALS_NAME
+        try:
+            policy_dir.mkdir(parents=True, exist_ok=True)
+            known = approved_hosts(policy_dir)
+            added = list(dict.fromkeys(host for host in hosts if host not in known))
+            _render(base_policy, known + added)
+            before = path.read_bytes() if path.exists() else None
+        except OSError as error:
+            raise PolicyError(f"cannot read the approvals in {policy_dir}: {error.strerror or error}") from error
         now = datetime.now(UTC).isoformat()
         lines = [json.dumps({"host": host, "at": now, "by": by, "kind": kind, "number": number}) for host in added]
-        if lines:
-            path = policy_dir / APPROVALS_NAME
-            text = path.read_text() if path.exists() else ""
-            with path.open("a") as approvals:  # a hand edit may have left the last line without its newline
-                approvals.write(
-                    ("\n" if text and not text.endswith("\n") else "") + "".join(f"{line}\n" for line in lines)
-                )
-        generate_policy(base_policy, policy_dir, writable)
+        try:
+            if lines:
+                with path.open("a") as approvals:  # a hand edit may have left the last line without its newline
+                    approvals.write(
+                        ("\n" if before and not before.endswith(b"\n") else "") + "".join(f"{line}\n" for line in lines)
+                    )
+            generate_policy(base_policy, policy_dir, writable)
+        except BaseException as error:
+            # ponytail: a generation that published and then failed on its re-read leaves the host in broker.toml
+            # until the next generation; regenerate after the take-back if that ever matters
+            if lines:
+                _take_back(path, None if before is None else len(before))
+            if isinstance(error, OSError):
+                raise PolicyError(f"cannot record the approvals in {policy_dir}: {error.strerror or error}") from error
+            raise
         return added
+
+
+def _take_back(path: Path, size: int | None) -> None:
+    """Cut the approvals file back to `size` bytes, or remove it when it did not exist (None); best effort."""
+    try:
+        if size is None:
+            path.unlink(missing_ok=True)
+        else:
+            os.truncate(path, size)
+    except OSError:
+        pass
 
 
 def _scalar(value: object, key: str) -> str:
@@ -182,6 +206,8 @@ def _publish(text: str, policy_dir: Path) -> None:
 def _render(base_policy: Path, approved: list[str]) -> str:
     """The policy text: the base with each approved host it lacks added to allowed_hosts, checked to read back."""
     merged = _read_base(base_policy)
+    if not isinstance(merged.get("broker", {}), dict):
+        raise PolicyError(f"base policy {base_policy}: broker is not a table")
     allowed = merged.get("broker", {}).get("allowed_hosts", [])
     if not (isinstance(allowed, list) and all(isinstance(host, str) for host in allowed)):
         raise PolicyError(f"base policy {base_policy}: broker.allowed_hosts is not a list of strings")
@@ -199,12 +225,15 @@ def _render(base_policy: Path, approved: list[str]) -> str:
 def generate_policy(base_policy: Path, policy_dir: Path, writable: Sequence[Path] = ()) -> Path:
     """Write `<policy_dir>/broker.toml`: the base with each approved host it lacks added to allowed_hosts."""
     _check_placement(base_policy, policy_dir, writable)
-    policy_dir.mkdir(parents=True, exist_ok=True)
-    while True:
-        approved = approved_hosts(policy_dir)
-        _publish(_render(base_policy, approved), policy_dir)
-        if approved_hosts(policy_dir) == approved:
-            return policy_dir / POLICY_NAME
+    try:
+        policy_dir.mkdir(parents=True, exist_ok=True)
+        while True:
+            approved = approved_hosts(policy_dir)
+            _publish(_render(base_policy, approved), policy_dir)
+            if approved_hosts(policy_dir) == approved:
+                return policy_dir / POLICY_NAME
+    except OSError as error:
+        raise PolicyError(f"cannot write the policy in {policy_dir}: {error.strerror or error}") from error
 
 
 def allowed_patterns(policy_dir: Path) -> list[str]:
