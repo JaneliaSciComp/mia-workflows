@@ -116,6 +116,20 @@ def test_exec_passes_the_service_name(tmp_path, fake, monkeypatch):  # noqa: F81
     assert argv[1:3] == ["-m", "mia_buffers.cli"] and kw["env"]["MIA_SERVICE"] == "mia-buffers"
 
 
+def test_exec_uses_the_services_broker_when_it_is_running(tmp_path, fake, monkeypatch):  # noqa: F811
+    s = make_stack_v2(tmp_path)
+    monkeypatch.setattr(cli, "load_manifest", lambda _: s.manifest)
+    assert cli.main(["exec", "mia-data", "status"]) == 0
+    env = fake.calls[-1][1]["env"]
+    assert env.get("CSUB_TRANSPORT") != "unix" and env.get("CSUB_SOCKET") != f"{tmp_path}/scratch/me/mia-data/csub.sock"
+    sock = tmp_path / "scratch/me/mia-data/csub.sock"
+    sock.parent.mkdir(parents=True)
+    sock.touch()
+    assert cli.main(["exec", "mia-data", "status"]) == 0
+    env = fake.calls[-1][1]["env"]
+    assert env["CSUB_TRANSPORT"] == "unix" and env["CSUB_SOCKET"] == str(sock)
+
+
 def test_init_token_writes_once_with_mode_600(tmp_path, fake, monkeypatch, capsys):  # noqa: F811
     s = make_stack_v2(tmp_path)
     (tmp_path / "token").unlink()

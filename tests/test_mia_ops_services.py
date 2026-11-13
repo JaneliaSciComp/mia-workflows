@@ -1,10 +1,14 @@
 """mia_ops.services against a fake tmux / temporal CLI: subprocess.run is replaced by a recorder."""
 
+import shlex
 import subprocess
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from mia_core.config import CsubCfg
 from mia_ops import services
 from mia_ops.manifest import Manifest
 from mia_ops.services import Stack, Temporal
@@ -26,8 +30,8 @@ def write_configs(tmp_path, address="localhost:7233"):
     )
 
 
-def write_mia_yaml(tmp_path, address="localhost:7233", token_mode=0o600, local_root=None):
-    """mia.yaml in the new shape; `local_root=""` leaves the key out."""
+def write_mia_yaml(tmp_path, address="localhost:7233", token_mode=0o600, local_root=None, csub=None):
+    """mia.yaml in the new shape; `local_root=""` leaves the key out; `csub` is the text of a csub block."""
     (tmp_path / "token").write_text("t" * 64)
     (tmp_path / "token").chmod(token_mode)
     (tmp_path / "harness").mkdir(exist_ok=True)
@@ -46,7 +50,7 @@ def write_mia_yaml(tmp_path, address="localhost:7233", token_mode=0o600, local_r
         "  snippets: {app: autodev, github: {repo: o/s2}}\n"
         "  mia-data: {app: mia-data, github: {data_repo: o/d}, temporal: {namespace: mia-data}}\n"
         "  mia-buffers: {app: mia-buffers, github: {buffers_repo: o/b, datasets_repo: o/d}, "
-        "temporal: {namespace: mia-buffers}}\n"
+        "temporal: {namespace: mia-buffers}}\n" + (f"csub: {csub}\n" if csub else "")
     )
     return tmp_path / "mia.yaml"
 
@@ -64,6 +68,7 @@ def make_stack(tmp_path, managed=True, address="localhost:7233"):
     return Stack(
         Manifest(
             sandbox_dir=tmp_path / "sandbox",
+            csub=CsubCfg(base_policy=tmp_path / ".config/csub/broker.toml", policy_dir=tmp_path / "csub-policy"),
             temporal={"managed": managed, "state_dir": tmp_path / "temporal"},
             services={
                 "autodev": {"app": "autodev", "config": tmp_path / "autodev.yaml"},
@@ -89,6 +94,9 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(services.shutil, "which", lambda name: "/usr/bin/temporal")
     monkeypatch.setattr(services.time, "sleep", lambda s: None)
     monkeypatch.setenv("USER", "me")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".config/csub").mkdir(parents=True)
+    (tmp_path / ".config/csub/broker.toml").write_text('[sandbox]\nallowed_hosts = ["github.com"]\n')
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     monkeypatch.setattr(services, "require_local_dir", lambda p: p.mkdir(parents=True, exist_ok=True))
 
@@ -404,6 +412,7 @@ def make_buffers_stack(tmp_path, url="http://buffer-host.example.org:8765"):
     return Stack(
         Manifest(
             sandbox_dir=tmp_path / "sandbox",
+            csub=CsubCfg(base_policy=tmp_path / ".config/csub/broker.toml", policy_dir=tmp_path / "csub-policy"),
             temporal={"managed": True, "state_dir": tmp_path / "temporal"},
             services={"mia-buffers": {"app": "mia-buffers", "config": tmp_path / "mia_buffers.yaml"}},
         )
@@ -531,3 +540,77 @@ def test_mia_buffers_app_mounts_include_the_lock_directory(tmp_path, fake):
     s = make_stack_v2(tmp_path)
     cfg = s.services["mia-buffers"].cfg
     assert ("--rw", cfg.paths.local_root / "locks") in services.APPS["mia-buffers"].extra_mounts(cfg)
+
+
+# ---- the generated policy
+
+
+def broker_command(fake):
+    return next(c[-1] for c in tmux_calls(fake, "new-session") if "csub-broker" in c[-1])
+
+
+def test_up_generates_the_policy_and_starts_the_broker_on_it(tmp_path, fake):
+    stack = make_stack_v2(tmp_path)
+    services.service_up(stack.service("mia-data"), stack, Temporal(stack))
+    policy = tmp_path / "state/csub/broker.toml"
+    assert f"--policy {policy} --serve" in broker_command(fake)
+    assert tomllib.loads(policy.read_text()) == tomllib.loads((tmp_path / ".config/csub/broker.toml").read_text())
+
+
+def test_up_refuses_a_policy_dir_outside_home(tmp_path, fake, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    outside = tmp_path / "elsewhere/csub"
+    stack = make_stack_v2(tmp_path, csub=f"{{policy_dir: {outside}}}")
+    with pytest.raises(SystemExit, match=r"csub\.policy_dir.*home"):
+        services.service_up(stack.service("mia-data"), stack, Temporal(stack))
+    assert not tmux_calls(fake, "new-session") and not outside.exists()
+
+
+@pytest.mark.parametrize("where", ["state/mia-data", "w", "store", "staged"])
+def test_up_refuses_a_policy_dir_a_worker_can_write(tmp_path, fake, where):
+    stack = make_stack_v2(tmp_path, csub=f"{{policy_dir: {tmp_path}/{where}/csub}}")
+    with pytest.raises(SystemExit, match=r"csub\.policy_dir"):
+        services.service_up(stack.service("mia-data"), stack, Temporal(stack))
+    assert not tmux_calls(fake, "new-session")
+
+
+def test_writable_mounts_are_the_rw_binds_of_every_worker(tmp_path, fake):
+    stack = make_stack_v2(tmp_path)
+    temporal = Temporal(stack)
+    for svc in stack.services.values():
+        services.service_up(svc, stack, temporal)
+    writable = services.writable_mounts(stack)
+    workers = [c[-1] for c in tmux_calls(fake, "new-window") if "sandbox-run.sh" in c[-1]]
+    assert len(workers) == len(stack.services)
+    for command in workers:
+        words = shlex.split(command)
+        rw = [Path(words[i + 1]) for i, word in enumerate(words) if word == "--rw"]
+        assert rw and set(rw) <= set(writable)
+
+
+def test_up_refuses_a_policy_dir_that_holds_the_base_policy(tmp_path, fake):
+    base = tmp_path / ".config/csub/broker.toml"
+    before = base.read_bytes()
+    stack = make_stack_v2(tmp_path, csub=f"{{policy_dir: {tmp_path}/.config/csub}}")
+    with pytest.raises(SystemExit, match=r"csub\.policy_dir.*csub\.base_policy|csub\.base_policy.*csub\.policy_dir"):
+        services.service_up(stack.service("mia-data"), stack, Temporal(stack))
+    assert base.read_bytes() == before and not tmux_calls(fake, "new-session")
+
+
+def test_up_refuses_a_missing_base_policy(tmp_path, fake):
+    (tmp_path / ".config/csub/broker.toml").unlink()
+    stack = make_stack_v2(tmp_path)
+    with pytest.raises(SystemExit, match=r"csub\.base_policy"):
+        services.service_up(stack.service("mia-data"), stack, Temporal(stack))
+
+
+def test_up_on_a_running_service_regenerates_the_policy(tmp_path, fake):
+    stack = make_stack_v2(tmp_path)
+    svc = stack.service("mia-data")
+    services.service_up(svc, stack, Temporal(stack))
+    policy = tmp_path / "state/csub/broker.toml"
+    policy.unlink()
+    services.service_up(svc, stack, Temporal(stack))
+    assert policy.exists()
