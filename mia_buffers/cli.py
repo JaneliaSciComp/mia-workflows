@@ -369,7 +369,7 @@ async def cmd_assets_sync(cfg: Config, args: argparse.Namespace) -> int:
 
 
 async def cmd_datasets_sync(cfg: Config, args: argparse.Namespace) -> int:
-    """Ask buffer-api to rescan mia-data's published datasets and reconcile its registry."""
+    """Ask buffer-api to rescan the datasets mia-data prepared and reconcile its registry."""
     try:
         with Registry.from_config(cfg.service) as registry:
             counts = registry.sync_datasets()
@@ -457,7 +457,7 @@ def main(argv: list[str] | None = None) -> int:
         command.set_defaults(func=_serve if name == "serve" else _deployment)
     for name, help_text in (
         ("catalog", "the catalog repo's records"),
-        ("datasets", "mia-data's published datasets"),
+        ("datasets", "the datasets mia-data prepared"),
         ("assets", "the raw and staged roots (one cache keeper pass: syncs, stale builds, evictions)"),
     ):
         group = sub.add_parser(name, help=f"sync {help_text} into buffer-api's registry")

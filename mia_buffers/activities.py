@@ -676,7 +676,7 @@ class Activities:
             path = self.cfg.paths.storage_root / folder
             note = (
                 f"the dataset is `done` but `{path}` has no binding.yaml with a matching manifest.json: "
-                "run it again from its page so mia-data publishes both"
+                "run it again from its page so mia-data saves both"
             )
             return DatasetIssue(number, stage, False, note, folder), False
         if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
@@ -911,7 +911,7 @@ class Activities:
             return BindingInfo(
                 False,
                 errors=[
-                    f"no prepared dataset at {dataset_dir}: mia-data publishes binding.yaml with a matching manifest.json"
+                    f"no prepared dataset at {dataset_dir}: mia-data saves binding.yaml with a matching manifest.json"
                     " (the dataset is not data:done)"
                 ],
             )

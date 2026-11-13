@@ -67,7 +67,7 @@ def _place_preview(crop_dir: Path, crop_id: str, previews: Sequence[Path]) -> No
 
 def _assert_same(dest: Path, files: dict, crop_id: str) -> None:
     if _hashes(dest) != files:
-        raise Conflict(f"{crop_id} is already published with different checksums")
+        raise Conflict(f"{crop_id} is already saved with different checksums")
 
 
 def check_owner(dataset_dir: Path, record: str) -> None:

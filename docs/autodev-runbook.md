@@ -165,6 +165,6 @@ names what is missing); P4 see the plan.
    the first time its dataset has something to say.
 5. `pixi run mia exec mia-data test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.
-6. Buttons on a dataset's page: *Start* starts a round; *Approve* publishes the crops under review (and merges
+6. Buttons on a dataset's page: *Start* starts a round; *Approve* saves the crops under review (and merges
    the snippet PR that made them); *Reject…* asks for your feedback and sends it to the agent fixing the snippet,
    and the next crops come back for review; *Cancel the round* ends a round in progress.

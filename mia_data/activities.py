@@ -1078,7 +1078,7 @@ class Activities:
                     verdict="approve",
                     by="policy:repair",
                     at=now,
-                    summary=f"repaired by {round_id}: {record} was published again",
+                    summary=f"repaired by {round_id}: {record} was saved again",
                 )
                 await asyncio.to_thread(registry.put_assessment, approve)
                 release = {"quarantined": False, "repaired_at": now, "repaired_by": round_id}

@@ -472,7 +472,7 @@ async def test_match_crops_review_approve_publishes_that_set(env):
         f"/w/i7-e11/verify-{SHA}-1",
         f"/w/i7-e11/crop-{SHA}-1",
     )  # read back for publishing
-    assert "16 crops published" in m.of("set_stage")[-1][2]
+    assert "16 crops saved" in m.of("set_stage")[-1][2]
     owners = ["mia-data i7-e11 smoke", "mia-data i7-e11 crop"]
     assert [a[2] for a in m.of("take_lock")] == owners and [a[2] for a in m.of("release_lock")] == owners
     smoke_lock, crop_lock = ["raw", "rec-1", owners[0]], ["raw", "rec-1", owners[1]]
@@ -480,7 +480,7 @@ async def test_match_crops_review_approve_publishes_that_set(env):
     report = m.of("comment")[0][0]
     assert "table" in report and "axes from conversion.json" in report and "1234 bytes" in report
     done = m.of("set_stage")[-1]
-    assert done[0] == "done" and "**Totals:** 16 crops published" in done[2]  # the gallery table went up at review
+    assert done[0] == "done" and "**Totals:** 16 crops saved" in done[2]  # the gallery table went up at review
     assert m.of("comment")[0][3] == "/s/binding-1.yaml"  # the test report carries the matched binding
     assert not m.of("refuse_label")
 
@@ -559,7 +559,7 @@ async def test_a_set_with_at_least_half_verified_is_reviewed_and_published(env):
     async with started(env, m) as h:
         await approve_review(h, m)
         await idle(h, m, "done")
-    assert m.of("publish_crops")[0][1] == 12 and "12 crops published" in m.of("set_stage")[-1][2]
+    assert m.of("publish_crops")[0][1] == 12 and "12 crops saved" in m.of("set_stage")[-1][2]
 
 
 async def test_a_small_raw_is_cropped_not_judged(env):
@@ -621,7 +621,7 @@ async def test_rollover_in_review_then_approve(env, monkeypatch):
     assert (await h.describe()).run_id != h.first_run_id
     assert m.stages == ["matching", "testing", "review", "done"] and len(m.of("admit")) == 1
     assert [a.seed for a in m.jobs() if a.n_crops] == [st.seed + "-t"]
-    assert "16 crops published" in m.of("set_stage")[-1][2]  # the workspaces outlive the rollover
+    assert "16 crops saved" in m.of("set_stage")[-1][2]  # the workspaces outlive the rollover
 
 
 async def test_test_crop_failure_never_produces(env):
@@ -755,7 +755,7 @@ async def test_develop_happy_path(env):
     assert st.snippet_issue == 100 and st.pr is None and st.pins.snippets_commit == MC and st.snippet_name == "new-snip"
     assert [(t.sha, t.ok, t.tree_sha, bool(t.approved_at)) for t in st.tests] == [(H1, True, "T", True)]
     assert [a[2] for a in m.of("set_stage") if a[0] == "review"] == [f"**Snippet PR:** {PR_URL}\n"]
-    assert "16 crops published" in m.of("set_stage")[-1][2]
+    assert "16 crops saved" in m.of("set_stage")[-1][2]
 
 
 async def test_revise_new_head_retests(env):
@@ -1399,7 +1399,7 @@ async def test_an_approve_the_policy_refuses_publishes_nothing(env):
         await idle(h, m, "needs-human")
     assert "publish_crops" not in m.names()
     assert m.of("set_stage")[-1][1] == (
-        "approve recorded as as-1, but publication is not authorized: rejected by human:bob at t: wrong channel"
+        "approve recorded as as-1, but saving the crops is not authorized: rejected by human:bob at t: wrong channel"
     )
 
 
@@ -1457,7 +1457,7 @@ async def test_revoke_with_nothing_published_is_refused(env):
         await idle(h, m, "needs-human")
         await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
         await until(lambda: m.of("refuse_label"))
-    assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this dataset has published no crops")
+    assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this dataset has no saved crops")
     assert len(m.of("revoke_dataset")) == 1
 
 

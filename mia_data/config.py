@@ -36,20 +36,23 @@ STAGES = {
     "testing": ("fbca04", "mia-data: making the crops to review"),
     "review": ("1d76db", "mia-data: waiting for review"),
     "merging": ("1d76db", "mia-data: crops approved; autodev is merging the snippet PR"),
-    "done": ("5319e7", "mia-data: crops published"),
+    "done": ("5319e7", "mia-data: crops saved"),
     "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
     "cancelled": ("cccccc", "mia-data: the round was cancelled"),
 }
 HUMAN_LABELS = {  # the actions a person takes
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
-    "approve": ("0e8a16", "Approve the crops under review: they are published (a snippet PR merges first)"),
+    "approve": (
+        "0e8a16",
+        "Approve the crops under review: they are saved to the dataset's folder (a snippet PR merges first)",
+    ),
     "reject": (
         "d93f0b",
         "Reject the crops under review: your feedback goes to the agent fixing the snippet",
     ),
     "revoke": (
         "b60205",
-        "Revoke this dataset's published crops: buffers that drew from it are degraded, nothing is deleted",
+        "Revoke this dataset's saved crops: buffers that drew from it are degraded, nothing is deleted",
     ),
 }
 STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done")

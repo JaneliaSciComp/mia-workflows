@@ -500,7 +500,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
 <tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td><i>Cancel the round</i> on the spec's page; if that gets no answer, <i>Force stop</i>, then <i>Plan</i> again</td></tr>
 <tr><td><code>needs-human</code> whose entry starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then press the button again</td></tr>
-<tr><td><code>needs-human</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a publication that succeeds repairs it</td></tr>
+<tr><td><code>needs-human</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a round that saves its crops repairs it</td></tr>
 </table></div>
 
 <h2>Words the pages use</h2>
@@ -552,7 +552,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="hd" x="262" y="56">one host · mia.yaml · local disk for locks and SQLite</text>
 <rect class="b" x="280" y="66" width="175" height="55" rx="4"/>
 <text class="t" x="288" y="86">mia-data worker</text>
-<text class="s" x="288" y="102">match · smoke · crops · publish</text>
+<text class="s" x="288" y="102">match · smoke · crops · save</text>
 <rect class="b" x="280" y="140" width="175" height="55" rx="4"/>
 <text class="t" x="288" y="160">mia-buffers worker</text>
 <text class="s" x="288" y="176">plan · fetch · stage · keeper</text>
@@ -633,9 +633,9 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 </figure>
 
 <h2>2. Two workflows around shared resources</h2>
-<p>In the figure, data preparation runs along the top and buffering along the bottom. Everything they share sits in the middle: the registry, the raw cache, the staged artifacts, the published crops and the lock directory. Solid arrows are the workflow, read left to right. Dashed arrows say which resource a step reads or writes, and the columns line up so that each dashed arrow stays in its own lane.</p>
+<p>In the figure, data preparation runs along the top and buffering along the bottom. Everything they share sits in the middle: the registry, the raw cache, the staged artifacts, the saved crops and the lock directory. Solid arrows are the workflow, read left to right. Dashed arrows say which resource a step reads or writes, and the columns line up so that each dashed arrow stays in its own lane.</p>
 <figure>
-<svg viewBox="0 0 960 630" role="img" aria-label="Three bands: data preparation steps on top, shared resources in the middle (locks, raw cache, staged artifacts, published crops, registry), buffering steps below; solid arrows join each pipeline's steps left to right, dashed arrows show which step reads or writes which resource, and a preparation request on the left reaches up from buffering to the dataset's round.">
+<svg viewBox="0 0 960 630" role="img" aria-label="Three bands: data preparation steps on top, shared resources in the middle (locks, raw cache, staged artifacts, saved crops, registry), buffering steps below; solid arrows join each pipeline's steps left to right, dashed arrows show which step reads or writes which resource, and a preparation request on the left reaches up from buffering to the dataset's round.">
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <!-- bands -->
 <rect class="band" x="20" y="30" width="920" height="140" rx="6"/>
@@ -658,12 +658,12 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <rect class="b" x="410" y="58" width="150" height="90" rx="4"/>
 <text class="t" x="418" y="78">crops · review</text>
 <text class="s" x="418" y="96">one set, verified, shown; Approve</text>
-<text class="s" x="418" y="110">publishes it, Reject loops (fig. 3b);</text>
+<text class="s" x="418" y="110">saves it, Reject loops (fig. 3b);</text>
 <text class="s" x="418" y="124">downloads land in the raw cache</text>
 <path class="ea" d="M545 58 V44 H425 V58" marker-end="url(#f2)"/>
 <text class="l" x="552" y="40">Reject: fix, then new crops</text>
 <rect class="bs" x="595" y="58" width="150" height="90" rx="4"/>
-<text class="t" x="603" y="78">publish</text>
+<text class="t" x="603" y="78">save</text>
 <text class="s" x="603" y="96">the reviewed crops, binding.yaml</text>
 <text class="s" x="603" y="110">and a manifest naming the</text>
 <text class="s" x="603" y="124">binding: this is "prepared"</text>
@@ -714,7 +714,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <rect class="b" x="410" y="478" width="150" height="100" rx="4"/>
 <text class="t" x="418" y="498">stage</text>
 <text class="s" x="418" y="516">cache read-only, no network;</text>
-<text class="s" x="418" y="530">the worker publishes the</text>
+<text class="s" x="418" y="530">the worker saves the</text>
 <text class="s" x="418" y="544">pyramid by rename</text>
 <rect class="bs" x="595" y="478" width="150" height="100" rx="4"/>
 <text class="t" x="603" y="498">register</text>
@@ -754,7 +754,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="ed" x1="370" y1="348" x2="430" y2="478" marker-end="url(#f2)"/>
 <text class="l" x="408" y="396" text-anchor="start">reads</text>
 <line class="ed" x1="485" y1="478" x2="485" y2="348" marker-end="url(#f2)"/>
-<text class="l" x="491" y="440">publishes by rename</text>
+<text class="l" x="491" y="440">saves by rename</text>
 <line class="ed" x1="670" y1="478" x2="670" y2="348" marker-end="url(#f2)"/>
 <text class="l" x="676" y="418">binding hash</text>
 <line class="ed" x1="730" y1="478" x2="820" y2="348" marker-start="url(#f2)" marker-end="url(#f2)"/>
@@ -766,20 +766,20 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <path class="ea" d="M60 478 V460 H30 V103 H40" marker-end="url(#f2)"/>
 <text class="l" transform="rotate(-90 12 300)" x="12" y="300" text-anchor="middle">a preparation request sends each dataset a go</text>
 </svg>
-<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is published together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The smoke job and the trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
+<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is saved together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The smoke job and the trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
 </figure>
 
 <h2>3. How a dataset becomes prepared</h2>
-<p>A dataset is <b>prepared</b> when mia-data has published a binding and a manifest for it. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer. The only place preparation stops is a <code>needs-human</code> stage.</p>
+<p>A dataset is <b>prepared</b> when mia-data has saved a binding and a manifest for it. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer. The only place preparation stops is a <code>needs-human</code> stage.</p>
 <figure>
-<svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: a dataset's round in mia-data runs from Start to done and publishes a binding; the registry row moves from unprepared through in-progress to prepared; the buffer plans over prepared rows, and a preparation request bridges unprepared datasets to mia-data.">
+<svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: a dataset's round in mia-data runs from Start to done and saves a binding; the registry row moves from unprepared through in-progress to prepared; the buffer plans over prepared rows, and a preparation request bridges unprepared datasets to mia-data.">
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="36">mia-data · a dataset's round</text>
 <rect class="b" x="20" y="48" width="110" height="40" rx="8"/><text class="t" x="75" y="73" text-anchor="middle">Start</text>
 <rect class="b" x="160" y="48" width="130" height="40" rx="8"/><text class="t" x="225" y="73" text-anchor="middle">match · smoke</text>
 <rect class="b" x="320" y="48" width="150" height="40" rx="8"/><text class="t" x="395" y="73" text-anchor="middle">crops · review</text>
 <path class="ea" d="M450 48 V34 H340 V48" marker-end="url(#f2)"/><text class="l" x="395" y="30" text-anchor="middle">Reject → fix → new crops (fig. 3b)</text>
-<rect class="bs" x="500" y="48" width="150" height="40" rx="8"/><text class="t" x="575" y="73" text-anchor="middle">publish · done</text>
+<rect class="bs" x="500" y="48" width="150" height="40" rx="8"/><text class="t" x="575" y="73" text-anchor="middle">save · done</text>
 <line class="e" x1="130" y1="68" x2="160" y2="68" marker-end="url(#f2)"/>
 <line class="e" x1="290" y1="68" x2="320" y2="68" marker-end="url(#f2)"/>
 <line class="e" x1="470" y1="68" x2="500" y2="68" marker-end="url(#f2)"/><text class="l" x="485" y="100" text-anchor="middle">Approve</text>
@@ -810,14 +810,14 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="l" x="410" y="262" text-anchor="middle">"not prepared": out of the pool,</text>
 <text class="l" x="410" y="276" text-anchor="middle">listed under its own heading</text>
 </svg>
-<figcaption><b>Figure 3.</b> The registry row is derived state. mia-data writes it as its stages change, and <code>datasets sync</code> rebuilds it from the published files. A buffer never asks mia-data for a dataset. A preparation request does that instead: it sends each of its datasets a <code>go</code> through buffer-api, charged to the request, and follows the rows until each dataset is <code>prepared</code> or <code>needs-human</code>; then the request is <code>done</code>. Hand-placed bindings do not count as prepared. There is no <code>ineligible</code> state, because a size or licence verdict taken here would bind every buffer that ever asks. Each buffer's plan takes that verdict instead.</figcaption>
+<figcaption><b>Figure 3.</b> The registry row is derived state. mia-data writes it as its stages change, and <code>datasets sync</code> rebuilds it from the saved files. A buffer never asks mia-data for a dataset. A preparation request does that instead: it sends each of its datasets a <code>go</code> through buffer-api, charged to the request, and follows the rows until each dataset is <code>prepared</code> or <code>needs-human</code>; then the request is <code>done</code>. Hand-placed bindings do not count as prepared. There is no <code>ineligible</code> state, because a size or licence verdict taken here would bind every buffer that ever asks. Each buffer's plan takes that verdict instead.</figcaption>
 </figure>
 
 <h3 style="font-size:16px;font-weight:600;margin:28px 0 6px">3b. The review loop</h3>
-<p>Every set of crops waits at <code>review</code>, including a set made from a snippet PR. <i>Approve</i> on the dataset's page publishes the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are published under the merge commit. <i>Reject</i> sends the feedback typed with it to the agent. When the round is following a PR, the feedback goes as <code>/revise</code> on that PR. Otherwise it goes as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves.</p>
-<p>Every verdict is written to the registry as an assessment before anything acts on it. A judge, a second model that reads the same gallery, can look at each set first: in shadow mode its verdict is recorded beside the person's and decides nothing, and the <a href="#decisions">Decisions</a> tab shows how often the two agree. <i>Revoke</i> at any later time withdraws a published set: its artifacts are quarantined, the buffers that drew from it unregister the dataset, and <i>Run again</i> on the dataset's page repairs it.</p>
+<p>Every set of crops waits at <code>review</code>, including a set made from a snippet PR. <i>Approve</i> on the dataset's page saves the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are saved under the merge commit. <i>Reject</i> sends the feedback typed with it to the agent. When the round is following a PR, the feedback goes as <code>/revise</code> on that PR. Otherwise it goes as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves.</p>
+<p>Every verdict is written to the registry as an assessment before anything acts on it. A judge, a second model that reads the same gallery, can look at each set first: in shadow mode its verdict is recorded beside the person's and decides nothing, and the <a href="#decisions">Decisions</a> tab shows how often the two agree. <i>Revoke</i> at any later time withdraws a saved set: its artifacts are quarantined, the buffers that drew from it unregister the dataset, and <i>Run again</i> on the dataset's page repairs it.</p>
 <figure>
-<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Start, match and smoke, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are published.">
+<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Start, match and smoke, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are saved.">
 <defs><marker id="f3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="18">mia-data · the dataset's stages</text>
 <rect class="b" x="20" y="44" width="100" height="40" rx="8"/><text class="t" x="70" y="69" text-anchor="middle">Start</text>
@@ -825,13 +825,13 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <rect class="b" x="310" y="44" width="150" height="40" rx="8"/><text class="t" x="385" y="63" text-anchor="middle">crops · verify</text><text class="s" x="385" y="77" text-anchor="middle">the set, its gallery</text>
 <rect class="bs" x="490" y="44" width="130" height="40" rx="8"/><text class="t" x="555" y="69" text-anchor="middle">review</text>
 <rect class="b" x="650" y="44" width="120" height="40" rx="8"/><text class="t" x="710" y="69" text-anchor="middle">merging</text>
-<rect class="bs" x="800" y="44" width="140" height="40" rx="8"/><text class="t" x="870" y="63" text-anchor="middle">done</text><text class="s" x="870" y="77" text-anchor="middle">crops published</text>
+<rect class="bs" x="800" y="44" width="140" height="40" rx="8"/><text class="t" x="870" y="63" text-anchor="middle">done</text><text class="s" x="870" y="77" text-anchor="middle">crops saved</text>
 <line class="e" x1="120" y1="64" x2="150" y2="64" marker-end="url(#f3b)"/>
 <line class="e" x1="280" y1="64" x2="310" y2="64" marker-end="url(#f3b)"/><text class="l" x="295" y="100" text-anchor="middle">matched</text>
 <line class="e" x1="460" y1="64" x2="490" y2="64" marker-end="url(#f3b)"/><text class="l" x="475" y="100" text-anchor="middle">≥ half verified</text>
 <line class="ea" x1="620" y1="64" x2="650" y2="64" marker-end="url(#f3b)"/><text class="l" x="635" y="100" text-anchor="middle">Approve, PR head:</text><text class="lm" x="635" y="113" text-anchor="middle">/approve &lt;head&gt;</text>
 <line class="ea" x1="770" y1="64" x2="800" y2="64" marker-end="url(#f3b)"/><text class="l" x="785" y="100" text-anchor="middle">autodev merges</text>
-<path class="ea" d="M555 44 V28 H870 V44" marker-end="url(#f3b)"/><text class="l" x="712" y="24" text-anchor="middle">Approve, matched binding: publish</text>
+<path class="ea" d="M555 44 V28 H870 V44" marker-end="url(#f3b)"/><text class="l" x="712" y="24" text-anchor="middle">Approve, matched binding: save</text>
 <!-- mia-snippets lane -->
 <text class="hd" x="20" y="170">mia-snippets · autodev</text>
 <rect class="b" x="150" y="190" width="130" height="44" rx="8"/><text class="t" x="215" y="209" text-anchor="middle">snippets issue</text><text class="s" x="215" y="224" text-anchor="middle">autodev takes it</text>
@@ -847,7 +847,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="l" x="570" y="248" text-anchor="middle">no PR yet: an issue to supersede the snippet</text>
 <line class="ed" x1="650" y1="212" x2="800" y2="212" marker-end="url(#f3b)"/><text class="l" x="725" y="206" text-anchor="middle">revision limit,</text><text class="l" x="725" y="228" text-anchor="middle">PR closed</text>
 </svg>
-<figcaption><b>Figure 3b.</b> There are two loops, and both end in the reviewer's approve. The inner loop belongs to autodev and has no person in it: a head whose crops fail verification receives the report as <code>/revise</code>, and the next head is tested again. The outer loop belongs to the reviewer: they reject with feedback, the agent revises, new crops are made, and the set comes back to review. Rejecting a matched binding starts a PR where there was none, through an issue asking autodev to supersede the binding's snippet, and from there it is the same loop. autodev merges only on the worker's <code>/approve</code> of the exact head whose crops the reviewer approved, and the published crops are those files under the merge commit. One rare case is not drawn: a merge whose snippet tree differs from the approved head's, because someone pushed more commits, makes its own set and goes back through review. The loop stops at autodev's revision limit, after five heads in one round, or when the PR is closed. mia-snippets is the one repository whose issues and pull requests drive anything: autodev works there.</figcaption>
+<figcaption><b>Figure 3b.</b> There are two loops, and both end in the reviewer's approve. The inner loop belongs to autodev and has no person in it: a head whose crops fail verification receives the report as <code>/revise</code>, and the next head is tested again. The outer loop belongs to the reviewer: they reject with feedback, the agent revises, new crops are made, and the set comes back to review. Rejecting a matched binding starts a PR where there was none, through an issue asking autodev to supersede the binding's snippet, and from there it is the same loop. autodev merges only on the worker's <code>/approve</code> of the exact head whose crops the reviewer approved, and the saved crops are those files under the merge commit. One rare case is not drawn: a merge whose snippet tree differs from the approved head's, because someone pushed more commits, makes its own set and goes back through review. The loop stops at autodev's revision limit, after five heads in one round, or when the PR is closed. mia-snippets is the one repository whose issues and pull requests drive anything: autodev works there.</figcaption>
 </figure>
 
 <h2>4. From a click to a stage</h2>
@@ -968,7 +968,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <h2>6. Sourcing one dataset</h2>
 <p>Once a round is running, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the two phases shown in figure 6, a fetch and a stage. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
 <figure>
-<svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, fetch what is missing into the raw cache, stage offline into a build directory, publish by rename, register the volumes, release the lock.">
+<svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, fetch what is missing into the raw cache, stage offline into a build directory, save by rename, register the volumes, release the lock.">
 <defs><marker id="f4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <rect class="b" x="20" y="40" width="150" height="56" rx="4"/>
 <text class="ts" x="28" y="62">binding + pins →</text><text class="ts" x="28" y="79">artifact id</text>
@@ -999,14 +999,14 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="618" y="92">writes .building-&lt;id&gt;-…</text>
 <line class="e" x1="685" y1="96" x2="685" y2="140" marker-end="url(#f4)"/>
 <rect class="b" x="610" y="140" width="150" height="56" rx="4"/>
-<text class="t" x="618" y="162">worker publishes</text><text class="s" x="618" y="179">verify stage.json, add the</text>
+<text class="t" x="618" y="162">worker saves</text><text class="s" x="618" y="179">verify stage.json, add the</text>
 <text class="s" x="618" y="192">artifact block, rename to &lt;id&gt;</text>
 <line class="e" x1="685" y1="196" x2="685" y2="250" marker-end="url(#f4)"/>
 <rect class="bs" x="610" y="250" width="150" height="56" rx="4"/>
 <text class="t" x="618" y="272">register volumes</text><text class="s" x="618" y="289">split from the plan row</text>
 <text class="s" x="618" y="302">refs to the artifact and the raw</text>
 <line class="e" x1="170" y1="275" x2="610" y2="275" marker-end="url(#f4)"/>
-<text class="l" x="390" y="268" text-anchor="middle">yes: read the published stage.json and register</text>
+<text class="l" x="390" y="268" text-anchor="middle">yes: read the saved stage.json and register</text>
 <rect class="note" x="790" y="40" width="150" height="266" rx="4"/>
 <text class="hd" x="800" y="60">while locked</text>
 <text class="s" x="800" y="82">the lock is heartbeated</text>
@@ -1025,7 +1025,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="e" x1="760" y1="278" x2="790" y2="278" marker-end="url(#f4)"/>
 <text class="l" x="775" y="271" text-anchor="middle">release</text>
 </svg>
-<figcaption><b>Figure 6.</b> Fetch and stage are two phases per dataset, so one slow download never holds up the others. The stage job runs with the cache read-only: <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker publishes it. The one exception to "no network" is a URL that the fetch could not get as a whole file, and for that URL alone the stage job stays online. A published pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
+<figcaption><b>Figure 6.</b> Fetch and stage are two phases per dataset, so one slow download never holds up the others. The stage job runs with the cache read-only: <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker saves it. The one exception to "no network" is a URL that the fetch could not get as a whole file, and for that URL alone the stage job stays online. A saved pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
 </figure>
 
 <h2>7. The cache and its keeper</h2>
@@ -1249,7 +1249,7 @@ const PILL_HELP = {
   "in-progress": "The preparation pipeline is working on it; the stage column or the dataset's page says where it is.",
   "unprepared": "Nobody has asked for this dataset to be prepared.",
   "needs-human": "Stopped. The newest entry of its timeline says what it needs from a person.",
-  "revoked": "Withdrawn by a person after publication (Revoke): nothing is selected or reused from it; Run again on its page repairs it.",
+  "revoked": "Withdrawn by a person after its crops were saved (Revoke): nothing is selected or reused from it; Run again on its page repairs it.",
   // a cache directory or a staged pyramid
   "cached": "The dataset's raw files are in the shared cache and no job is writing them; a buffer checks them against its binding before reusing them.",
   "fetching": "A fetch job is downloading the dataset's raw files into the cache.",
@@ -1283,7 +1283,7 @@ const PILL_HELP = {
   "testing": "Making the sample crops a reviewer will look at.",
   "review": "Sample crops are ready; the dataset's page waits for a reviewer to approve or reject them.",
   "merging": "The crops were approved; the reader's pull request is being merged.",
-  "done": "The dataset is prepared: its crops and binding are published.",
+  "done": "The dataset is prepared: its crops and binding are saved.",
   // odds and ends
   "stale": "This consumer has not been seen for longer than expected.",
 };
@@ -1389,7 +1389,7 @@ const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) },
 const cropPng = (d, id, name) => `/crops/${encodeURIComponent(d.folder)}/${encodeURIComponent(id)}/${name}.png`;
 const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src = cropPng(d, d.previews[0], "overlay");
   return tipOn(el("a", { href: src, target: "_blank", rel: "noopener" }, el("img", { class: "thumb", src, loading: "lazy", alt: "crop overlay" })),
-    [{ t: `${plural(d.crops || d.previews.length, "crop")} published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
+    [{ t: `${plural(d.crops || d.previews.length, "crop")} saved · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
 // a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
 const folderLink = (root, folder, text, title) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, text || "files", title) : "";
 // how every table names a dataset: its id links to its page; its GitHub issue (a read-only log) is a small mark
@@ -1795,7 +1795,7 @@ function datasetCards(d) {
     link(rec.landing_url, "source"), rec.doi ? link(`https://doi.org/${rec.doi}`, `doi ${rec.doi}`) : null,
     d.path && meta.catalog_repo ? link(`https://github.com/${meta.catalog_repo}/blob/${d.ref}/${d.path.split("/").map(encodeURIComponent).join("/")}`, "catalog record", "this dataset's record in the catalog repository on GitHub") : null,
     !d.subject ? ghIcon(meta.datasets_repo, row.issue, true) || null : null,
-    ds.folder && roots.storage_root ? el("span", {}, "published crops ", folderLink(roots.storage_root, ds.folder)) : null);
+    ds.folder && roots.storage_root ? el("span", {}, "saved crops ", folderLink(roots.storage_root, ds.folder)) : null);
   const cards = [links];
   if (!row.in_catalog) cards.push(el("div", { class: "notice" }, "This dataset's record is not in the newest synced catalog: only what the registry holds is shown."));
   if (d.record) cards.push(card("Record", null, el("p", {}, el("b", {}, rec.title || row.id)), rec.description ? el("p", { class: "small" }, rec.description) : null, kv([
@@ -1806,13 +1806,13 @@ function datasetCards(d) {
   ])));
   cards.push(card("Preparation", "What mia-data made of it: a binding to a reader, and reviewed crops.", kv([
     ["state", el("span", { class: "pills" }, statePill(row.state))], ["stage", row.stage], ["reason", ds.reason],
-    ["crops published", ds.crops == null ? "" : num(ds.crops)], ["published", ds.published_at ? when(ds.published_at) : ""],
+    ["crops saved", ds.crops == null ? "" : num(ds.crops)], ["saved", ds.published_at ? when(ds.published_at) : ""],
     ["binding", ds.binding_hash ? el("span", {}, code(ds.binding_hash, 12), ds.binding_commit ? " at snippets " : "", code(ds.binding_commit, 10)) : ""],
     ds.revoked_at ? ["revoked", el("span", {}, when(ds.revoked_at), ds.revoked_by ? ` by ${ds.revoked_by}` : "")] : null,
     ["updated", when(row.updated_at)],
     ["preparation requests", d.requests.length ? el("span", {}, ...d.requests.flatMap((r, i) => [i ? " " : "", el("a", { href: SUBJECT_HASH.prep(r.key) }, r.key)])) : "none named it"],
   ])));
-  if (ds.folder && (ds.previews || []).length) cards.push(card("Crops", `${num(ds.crops || ds.previews.length)} published; the first ${num(ds.previews.length)} with their annotation overlay. Click one to open it.`,
+  if (ds.folder && (ds.previews || []).length) cards.push(card("Crops", `${num(ds.crops || ds.previews.length)} saved; the first ${num(ds.previews.length)} with their annotation overlay. Click one to open it.`,
     el("div", { class: "gallery" }, ...ds.previews.map(id => el("a", { href: cropPng(ds, id, "overlay"), target: "_blank", rel: "noopener", title: id }, el("img", { src: cropPng(ds, id, "overlay"), loading: "lazy", alt: `crop ${id} with its overlay` }))))));
   cards.push(card("Decisions", "Every verdict about this dataset, newest first: its crops and its staged artifacts, by a person or a judge.", pagedTable("dataset-decisions:" + row.id, {
     source: pageOf("/decisions", "assessments", () => ({ record: row.id })), search: false, empty: "No decision yet.", cols: [
@@ -1968,7 +1968,7 @@ async function viewBuffer(root, id, refresh) {
     ] })),
     status ? card("Dataset pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", pagedTable("buffer-pool:" + id, { source: pageOf(`/buffers/${e}/datasets`, "datasets"), sort: "dataset", empty: "No dataset in the pool yet.", cols: [
       { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) }, { label: "issue", cell: x => ghIcon(meta.datasets_repo, x.issue) },
-      { label: "files", title: "the dataset's published crops", cell: x => folderLink(roots.storage_root, x.folder) },
+      { label: "files", title: "the dataset's saved crops", cell: x => folderLink(roots.storage_root, x.folder) },
       { label: "staged", title: "the staged artifact this buffer draws from", cell: x => folderLink(roots.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)) },
       { label: "preview", cell: x => thumb(x) },
       { key: "status", label: "status", cell: x => statePill(x.status) }, { label: "reason", wrap: true, cell: x => x.reason || "" },
@@ -2119,12 +2119,12 @@ const BUTTON_HELP = {
 const ACTION_HELP = {
   dataset: {
     go: s => s.stage !== "new" ? "Start a new round of the preparation workflow from the beginning. After a stop it picks up the reader's open pull request, if there is one."
-      : s.again ? "Run the preparation workflow again: a new round makes more sample crops, which are published once you approve them."
+      : s.again ? "Run the preparation workflow again: a new round makes more sample crops, which are saved once you approve them."
       : "Start the preparation workflow: an agent matches the dataset to a reader, then sample crops are made for you to review.",
-    approve: "Publish the crops under review: the dataset becomes prepared and buffers can use it. If a new reader made them, its pull request is merged first.",
+    approve: "Save the crops under review: the dataset becomes prepared and buffers can use it. If a new reader made them, its pull request is merged first.",
     reject: "Send the crops back with your feedback: the agent fixes the reader, and new crops come back for review.",
-    revoke: "Withdraw this dataset's published crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Run again repairs it.",
-    cancel: "Stop the round in progress: its cluster jobs are killed and nothing is published.",
+    revoke: "Withdraw this dataset's saved crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Run again repairs it.",
+    cancel: "Stop the round in progress: its cluster jobs are killed and nothing is saved.",
   },
   buffer: {
     approve: s => s.stage === "plan-review" ? "Accept the plan and start the jobs: the pool's datasets are downloaded and converted, then the round stops for your approval."
@@ -2148,7 +2148,7 @@ const actionWord = (subject, action) => action === "approve" && subject.kind ===
   : action === "go" && subject.kind === "buffer" ? "Plan" : action === "dropped" ? "Files are in place"  // a spec's own controls
   : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {
-  revoke: "Revoke this dataset's published crops? Buffers that drew from it are degraded; nothing is deleted.",
+  revoke: "Revoke this dataset's saved crops? Buffers that drew from it are degraded; nothing is deleted.",
   retire: "Retire this buffer? Training jobs reading it are refused and its staged data is released.",
   cancel: s => s.kind === "prep" ? "Cancel the request's round in progress? The dataset rounds it started are stopped too."
     : "Cancel the round in progress? Its cluster jobs are killed and the work so far is not kept.",

@@ -167,8 +167,8 @@ verdict on the same subject (`Ledger.agreement`); `mia judge eval <gate> <dir>` 
 set (`mia exec mia-data collect-judge-set <dir>` builds the crops set from human-reviewed rounds on disk).
 
 **Revocation deletes nothing and stops everything.** `revoke` on a dataset (the page's *Revoke*) is accepted once
-the dataset has published crops: the activity looks for `manifest.json` in the dataset folder, and a dataset that
-never published has the action refused. The `revoke_dataset` activity writes a `reject` assessment superseding the
+the dataset has saved crops: the activity looks for `manifest.json` in the dataset folder, and a dataset with
+none has the action refused. The `revoke_dataset` activity writes a `reject` assessment superseding the
 dataset's approve and one per staged artifact of the record, marks those artifact rows `quarantined`
 (`quarantined_at`, `quarantined_by`), flips the dataset row to `revoked` (`sync_datasets` never merges over it)
 and writes `revoked.json` beside the manifest last, so the folder is not prepared whatever else is on disk; the
@@ -179,7 +179,7 @@ whatever the buffer's workflow or the keeper have done yet. The keeper holds a q
 quarantined volumes, sends the `revoked` signal: the buffer unregisters those volumes, fails the dataset with the
 reason and serves on at its floor, or ends in needs-human below it (*Retire* stops it altogether). A board approve
 never writes over an artifact whose newest assessment is a reject: only a repair supersedes a revocation. A new
-`go` on the dataset whose publication succeeds removes `revoked.json`, writes a `policy:repair` approve on each
+`go` on the dataset that saves its crops removes `revoked.json`, writes a `policy:repair` approve on each
 quarantined artifact of the record and clears their quarantine marks, and the next stage write makes the row
 prepared again. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
 page's *Revoke the ticked*; records not in the buffer are ignored), rejects and quarantines those records'
@@ -362,7 +362,7 @@ key the running service does not know gets 422 on `PUT /buffers/<id>`.
 ## A dataset round
 
 [`mia-data-workflow.md`](mia-data-workflow.md) walks through a dataset's round: match, smoke, crops, review,
-publication, and the snippet PR loop.
+saving, and the snippet PR loop.
 
 ## A buffer round
 
@@ -378,7 +378,7 @@ sandbox bypasses its proxy for loopback names, and inside it they point at the s
 `mia_core.hosts` generates from the operator's `csub.base_policy` plus `<policy_dir>/approved-hosts.jsonl` (one line per
 host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the hosts
 the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request) or its
-published bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
+saved bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
 pool), their `network.redirect_hosts` targets and the package hosts. Ticked hosts travel as `approve_hosts` on a
 dataset's `go`, filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other
 action carrying a non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender,
@@ -410,7 +410,7 @@ names its `agent.allow_hosts` plus the exact hosts its broker's policy allows, a
    sourcing; a new `go` with an edited spec plans again.
 4. **Sourcing.** The buffer is created in buffer-api (id = round id, `i<number>-e<action id>`). Per dataset, in
    parallel (`sourcing.parallel` stage jobs at a time, heaviest first): the binding is read from
-   `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data published for
+   `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data saved for
    it (`mia_data.publish.prepared_row`, the registry's rule too); the raw files are fetched and the pyramid staged
    (see "The cache"); then every volume is registered. `read_stage` registers what the job left with the registry
    (`PUT assets/staged/<staged dir>` with the binding hash it was built from, `PUT assets/raw/<record>` from
@@ -496,10 +496,10 @@ env digest and plan digest. A pyramid on disk is reused only when all of them ma
 derives samples changes plan digests, so every volume restages; a buffer that re-registers a volume under a new
 artifact loses its frozen eval lists by design.
 
-**Publish by rename.** A stage job writes `<staged root>/<levels key>/<record>/.building-<artifact>-<job key>`,
+**Save by rename.** A stage job writes `<staged root>/<levels key>/<record>/.building-<artifact>-<job key>`,
 never the final directory. When `stage.json` says `ok`, the worker checks that its `artifact` block (written by
 the harness: every input the artifact id hashes) names this job's artifact id, refuses a build with no block or a
-foreign id, then renames the build to `<artifact>`. The published directory is never written again. A rebuild
+foreign id, then renames the build to `<artifact>`. The saved directory is never written again. A rebuild
 lands under the same id through the same rename; a retry that finds the final directory reuses it.
 
 **Dataset statuses** during sourcing: `pending`, `waiting-dataset`, `waiting-lock`, `fetching`, `staging`,
@@ -576,7 +576,7 @@ today's draws.
 root) and lists the missing ones, which `draw`, `next` and `split` skip. The keeper signals `degraded(records,
 reason, buffer)`. The workflow asks buffer-api which of those records are still missing (`missing_records`; a
 re-send for one rebuilt, rebuilding or failed is ignored) and stages them again from the raw cache, under the
-same artifact id, with a job key and build directory of their own; the publish sets the broken final directory
+same artifact id, with a job key and build directory of their own; the save sets the broken final directory
 aside as `.building-stale-*`. The rebuild runs alongside the ready loop: a `go` or a retire abandons it. The spec
 goes `needs-human` only if a weighting group falls below its floor; a record whose raw cache is gone fails.
 
@@ -590,7 +590,7 @@ no ready or idle buffer is refused at once: while datasets source with "N datase
 
 **Rebuilds of a shared artifact.** Two buffers whose datasets share an artifact both see it degraded; the first
 to take the raw lock rebuilds it. The second asks buffer-api again under the lock and registers the rebuilt
-pyramid as it is. A failed build next to a published artifact (not a rebuild of it) leaves that artifact's row
+pyramid as it is. A failed build next to a saved artifact (not a rebuild of it) leaves that artifact's row
 `ready`.
 
 ## Preparation requests

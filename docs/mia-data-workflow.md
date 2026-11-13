@@ -1,6 +1,6 @@
 # The mia-data workflow
 
-How a dataset in the MIA catalog becomes a set of verified, published image crops, and which component does
+How a dataset in the MIA catalog becomes a set of verified, saved image crops, and which component does
 each step. The setup checklist is the mia-data section of [`docs/autodev-runbook.md`](autodev-runbook.md); the
 registry, the action routes and the page are described in [`docs/development.md`](development.md).
 
@@ -32,7 +32,7 @@ flowchart TD
     review --> timeline
     review --> approve
     review --> reject
-    approve -->|matched binding| publish["publish the reviewed crops<br/>to paths.storage_root"]
+    approve -->|matched binding| publish["save the reviewed crops<br/>to paths.storage_root"]
     approve -->|snippet PR head: /approve| merge
     reject -->|matched binding: supersede the snippet| dev
     reject -->|snippet PR head: /revise with the feedback| pr
@@ -56,7 +56,7 @@ Every record of the synced [mia-agentic-search](https://github.com/AI-HHMI/mia-a
 the page's Datasets tab. A person starts work on one with *Start* on its page, or a preparation request starts
 several. From there a durable [Temporal](https://temporal.io) workflow owns the dataset: it runs cluster jobs,
 writes each result to the dataset's timeline, and waits, for hours or days, for a person to approve before
-anything is published. The result is a folder of 256×256 PNG crops per dataset, with matching label overlays,
+anything is saved. The result is a folder of 256×256 PNG crops per dataset, with matching label overlays,
 verified by a job that runs no snippet code, and a registry row that says the dataset is `prepared`.
 
 The pieces, and where they live:
@@ -125,14 +125,14 @@ required `mia-data/crops` commit status on that exact commit. A head whose crops
 matched binding's; one whose crops fail gets the report as a `/revise` on the PR, and autodev fixes it. Nobody
 merges the PR by hand: *Approve* on the dataset's page makes the worker post `/approve <head>` on the PR (stage
 `merging`), autodev merges, and if the merged snippet tree is the approved head's, the approved crops are
-published; otherwise the merge commit gets its own crops, reviewed again. If the round ends in `needs-human`
+saved; otherwise the merge commit gets its own crops, reviewed again. If the round ends in `needs-human`
 while the PR is still open (a lost job, a failed status write), *Run again* resumes that PR: the current head is
 tested again under a new round, and no second snippets issue is opened. A PR closed or merged by then means a new
 match. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
 `/approve` and `/revise` from the worker because its login is in autodev's `github.trusted_bots`), mia-snippets
 CI, the GitHub client.
 
-### 4. Crops, review and publication
+### 4. Crops, review and saving
 
 One set of crops per round. Two plain jobs at the pinned snippets commit: `harness crop --n 16`
 (`crops.per_round`) with the round's seed and `--existing` pointing at the dataset's current manifest, so a later
@@ -140,7 +140,7 @@ round adds crops rather than duplicating them; then `harness verify` and `harnes
 workspace that loads no snippet code. Verify checks each crop is a square 16-bit PNG of the crop edge (256, or
 the image's own extent when it is smaller: a small dataset is cropped whole, never refused) with matching labels
 and writes overlay PNGs. At least half of the set must verify (verify exits 1 whenever one crop fails, so its
-report is the judge); fewer ends the round `needs-human` with nothing published. The passing crops' `raw.png`
+report is the judge); fewer ends the round `needs-human` with nothing saved. The passing crops' `raw.png`
 and `overlay.png` are committed to the `galleries` branch of mia-workflow-data, and a timeline entry shows them
 with the binding and the agent's reasons. The stage is `review`, and the dataset is listed under *Needs you*.
 
@@ -157,21 +157,21 @@ not available.
 **Validation.** A person approves the set with *Approve* on the dataset's page, or rejects it with *Reject…*,
 which opens a dialog for the feedback. Either verdict carries the revision the page was showing, and buffer-api
 refuses one about a set that is not the newest. The verdict is recorded as an assessment in the registry (`by:
-human:<who>`), and the publication is authorized from the assessments on record, never from the click alone. On
+human:<who>`), and the save is authorized from the assessments on record, never from the click alone. On
 a reject the feedback goes to the agent: as `/revise` on the snippet PR when the round is following one, else in
 a new mia-snippets issue asking autodev to supersede the binding's snippet (a merged snippet is never edited).
 The next crops come back to `review`; the loop runs until an approve.
 
-**Revocation.** *Revoke* on the dataset's page, once it has published crops, withdraws them: a `reject`
+**Revocation.** *Revoke* on the dataset's page, once it has saved crops, withdraws them: a `reject`
 assessment supersedes the approve, every staged artifact of the record is quarantined and rejected, the registry
 row becomes `revoked` and `revoked.json` is written beside the manifest, so no buffer plans or reuses the dataset
 and the buffers that drew from it unregister its volumes (the keeper tells them). Nothing is deleted; the dataset
-ends in `needs-human` listing the artifacts and buffers, and *Run again* with a publication that succeeds repairs
+ends in `needs-human` listing the artifacts and buffers, and *Run again* with a round that saves its crops repairs
 it.
 
-**Publication.** The approve publishes the very crops that were reviewed: the worker reads the round's verify
+**Saving.** The approve saves the very crops that were reviewed: the worker reads the round's verify
 report back from its workspaces and copies every crop that passed into `paths.storage_root/<dataset>/<crop_id>/`
-by an idempotent publication activity (a retry never duplicates or overwrites), beside `binding.yaml`, and
+by an idempotent activity (a retry never duplicates or overwrites), beside `binding.yaml`, and
 rebuilds the dataset's `manifest.json`. The final entry carries the totals and links to the crops folder, its
 gallery and the round's workspace. The stage is `done` and the registry row `prepared`; *Run again* later starts
 another round and adds more crops.
@@ -207,7 +207,7 @@ only for the hosts in its binding, and the broker's policy is the ceiling: a hos
 the round before submission, with an entry naming it (a person can approve the host from the page when starting
 the run). Unreviewed snippet code from a PR head runs only inside
 job sandboxes, and the verify job that judges its output loads no snippet code. Merging a snippet needs a
-person's approve of the crops its exact head made, plus the required status; so does publishing them. The page's
+person's approve of the crops its exact head made, plus the required status; so does saving them. The page's
 buttons need no login: they can ask the workflow to act, and cannot write what a workflow found.
 
 ## Operating it

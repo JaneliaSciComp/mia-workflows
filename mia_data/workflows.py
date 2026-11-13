@@ -55,13 +55,13 @@ CANCEL = "data:cancel"  # an action only: there was never such a label
 NO_ROUND = "there is no round in progress to cancel"
 ROUND_ENDED = "the round ended before the cancel reached it"
 CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the round's activity in flight to answer
-NOTHING_TO_REVOKE = "nothing to revoke: this dataset has published no crops"
+NOTHING_TO_REVOKE = "nothing to revoke: this dataset has no saved crops"
 REVOKED = "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; running it again repairs it"
 BUSY = "busy, ignored: a round is already running. Cancel it first, or ask again once it has ended."
 NOT_REVIEW = "an approve or a reject counts only while the dataset is at `review`, for the set under review."
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
-NOT_AUTHORIZED = "approve recorded as {id}, but publication is not authorized: {why}"
+NOT_AUTHORIZED = "approve recorded as {id}, but saving the crops is not authorized: {why}"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then run it again"
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
@@ -765,9 +765,7 @@ class MiaDataDataset:
             "comment", state.issue, report, f"test {state.round_id} {sha}", "data", state.binding, state.binding_hash
         )
         if not test.ok:
-            return await self._finish(
-                "needs-human", "; ".join(["the crops failed; nothing is published", *failed_jobs])
-            )
+            return await self._finish("needs-human", "; ".join(["the crops failed; nothing is saved", *failed_jobs]))
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
         await self._judge_crops(test)  # in shadow: after the gate opens, so a human verdict is only queued, never held
@@ -922,7 +920,7 @@ class MiaDataDataset:
         )
         state.published = True
         extra = (
-            f"**Totals:** {len(published['published'])} crops published this round ({verify.ok_count} verified); "
+            f"**Totals:** {len(published['published'])} crops saved this round ({verify.ok_count} verified); "
             f"{published['total']} in the dataset\n"
         )
         await self._finish("done", extra=extra)
@@ -957,7 +955,7 @@ class MiaDataDataset:
         n_effective = n_crops if verify.n_effective is None else min(n_crops, verify.n_effective)
         needed = max(1, math.ceil(n_effective / 2))
         extra = (
-            f"{table}\n**Totals:** {len(published['published'])} new crops published this round "
+            f"{table}\n**Totals:** {len(published['published'])} new crops saved this round "
             f"({verify.ok_count} of {n_effective} passed); {published['total']} in the dataset\n"
         )
         if not job_succeeded(
@@ -966,7 +964,7 @@ class MiaDataDataset:
             return await self._finish(
                 "needs-human",
                 f"{describe_failure('crop', crop_job, verify.crop_errors)}; "
-                f"the {verify.ok_count} crops that passed are published",
+                f"the {verify.ok_count} crops that passed are saved",
                 extra,
             )
         if verify.ok_count >= needed:
@@ -974,7 +972,7 @@ class MiaDataDataset:
         await self._finish(
             "needs-human",
             f"only {verify.ok_count} of {n_effective} crops passed (at least {needed} "
-            f"needed); the ones that passed are published",
+            f"needed); the ones that passed are saved",
             extra,
         )
 
@@ -1090,7 +1088,7 @@ class MiaDataDataset:
         test.approved_at = event.at
         await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
         await self._stage(
-            "merging", f"the crops at `{test.sha}` are approved; autodev merges the snippet PR, then they are published"
+            "merging", f"the crops at `{test.sha}` are approved; autodev merges the snippet PR, then they are saved"
         )
 
     async def _revise_pr(self, event: LabelEvent) -> None:
@@ -1227,7 +1225,7 @@ class MiaDataDataset:
             )
             if not test.ok:
                 return await self._finish(
-                    "needs-human", "; ".join(["the merge commit's crops failed; nothing is published", *failed_jobs])
+                    "needs-human", "; ".join(["the merge commit's crops failed; nothing is saved", *failed_jobs])
                 )
             await self._stage("review")
             await self._refuse_queued(approves=False)
@@ -1255,7 +1253,7 @@ class MiaDataDataset:
             if not test.ok:
                 return await self._finish(
                     "needs-human",
-                    "; ".join(["the merge commit's crops failed; nothing is published", *failed_jobs]),
+                    "; ".join(["the merge commit's crops failed; nothing is saved", *failed_jobs]),
                 )
         state.pins = dataclasses.replace(state.pins, snippets_commit=merge_sha)
         await self._publish_set()
