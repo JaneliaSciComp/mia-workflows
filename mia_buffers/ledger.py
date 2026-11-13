@@ -38,7 +38,7 @@ BOARD_STATUSES = (
     "failed",
     "dropped",
 )
-EVENT_KINDS = (  # a buffer's lifecycle; `sourcing` and `staged` since the staged gate (spec §15)
+EVENT_KINDS = (  # a buffer's lifecycle
     "created",
     "planned",
     "sourcing",

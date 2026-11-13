@@ -771,7 +771,7 @@ class Activities:
     @activity.defn(name="prep_admit")
     @mia_permanent_errors
     async def prep_admit(self, issue: int, event_id: str) -> PrepPins:
-        """Pin a preparation request: the prep spec from the issue body's one ```yaml fence, the catalog at its ref
+        """Pin a preparation request: the prep spec its action carries, the catalog at its ref
         and the records it names (or its `select` admits there). Written once to state_dir/rounds/p<issue>-e<event>/
         with a plan.json of {id, path} rows and buffer-shaped pins, so nudge_dataset reads the records as it does a
         buffer round's; a retry returns the same pins."""

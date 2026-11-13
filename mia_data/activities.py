@@ -669,10 +669,11 @@ class Activities:
     async def set_stage(
         self, issue: int, stage: str, state: DatasetState | None = None, detail: str = "", extra: str = ""
     ) -> None:
-        """Swap the `data:<stage>` label and, within a round, post the stage's comment once.
+        """Write the dataset's stage: its registry row, the subject's stage and, within a round, the stage's
+        timeline entry, once.
 
-        The comment has the stage line, `detail` (neutralized), the caller's `extra` (crops table, totals, PR
-        link) and links to the folders to look at. Comments are never edited: each stage and result is a new one."""
+        The entry has the stage line, `detail` (neutralized), the caller's `extra` (crops table, totals, PR
+        link) and links to the folders to look at. Entries are never edited: each stage and result is a new one."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         round_id = state.round_id if state else None
