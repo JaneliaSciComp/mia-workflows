@@ -9,7 +9,7 @@ flowchart TD
     catalog[("mia-agentic-search<br/>catalog records")]
 
     subgraph page["the page (buffer-api)"]
-        go{{"Prepare / Run again"}}
+        go{{"Start / Run again"}}
         approve{{"Approve"}}
         reject{{"Reject… with feedback"}}
         timeline[("the dataset's timeline<br/>stages, crops, verdicts")]
@@ -53,7 +53,7 @@ flowchart TD
 ## Overview
 
 Every record of the synced [mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) catalog is a row on
-the page's Datasets tab. A person starts work on one with *Prepare* on its page, or a preparation request starts
+the page's Datasets tab. A person starts work on one with *Start* on its page, or a preparation request starts
 several. From there a durable [Temporal](https://temporal.io) workflow owns the dataset: it runs cluster jobs,
 writes each result to the dataset's timeline, and waits, for hours or days, for a person to approve before
 anything is published. The result is a folder of 256×256 PNG crops per dataset, with matching label overlays,
@@ -78,7 +78,7 @@ The pieces, and where they live:
 
 ### 1. Start
 
-*Prepare* on a dataset's page (`#datasets/<record>`) is a `go` sent to buffer-api's action route. The service
+*Start* on a dataset's page (`#datasets/<record>`) is a `go` sent to buffer-api's action route. The service
 checks it against the dataset's stage (`STAGE_ACTIONS` in `mia_data/config.py`), creates the dataset's subject on
 its first `go`, records the action and starts the dataset's `MiaDataDataset` workflow with the action as its
 signal. A preparation request (*Prepare these datasets*) sends the same `go` for each of its datasets, with the

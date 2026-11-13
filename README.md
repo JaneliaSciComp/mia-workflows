@@ -28,8 +28,8 @@ known gaps: [`docs/autodev-runbook.md`](docs/autodev-runbook.md). Design rationa
 
 mia-data is a dataset → binding → crops → human approval → published crops loop. Each dataset that
 [mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) has catalogued is started from the buffers
-page (*Prepare*); its issue in [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) is a
-copy of its timeline that the system writes and nothing reads. On *Prepare*, a Claude agent in a cluster
+page (*Start*); its issue in [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) is a
+copy of its timeline that the system writes and nothing reads. On *Start*, a Claude agent in a cluster
 sandbox matches the dataset to a reader snippet from [mia-snippets](https://github.com/JaneliaSciComp/mia-snippets)
 and writes a binding; plain harness jobs check it, cut the round's crops, verify them and show them on the
 dataset's page.

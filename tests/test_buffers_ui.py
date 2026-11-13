@@ -275,3 +275,12 @@ def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
     assert 'reject: "Reject…"' in PAGE and "showModal()" in PAGE
     assert "bar.append(note)" not in PAGE
     assert "Send rejection" in PAGE and "sendButton.disabled = !note.value.trim()" in PAGE
+
+
+def test_a_datasets_page_leads_with_its_links_then_its_preparation_workflow() -> None:
+    """Under the name come the dataset's links, then the lifecycle labelled as the preparation workflow, then the
+    buttons; the button that starts the workflow says Start, and no state pill stands between them."""
+    assert 'dataset: "Preparation workflow:"' in PAGE and "flowRow(kind, " in PAGE
+    assert '(subject.again ? "Start again" : "Start")' in PAGE and '"Prepare again"' not in PAGE
+    assert "statePill(detail ? detail.row.state" not in PAGE
+    assert "const [links = null, ...cards] = " in PAGE

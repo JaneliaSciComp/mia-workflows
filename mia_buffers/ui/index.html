@@ -76,6 +76,8 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 /* a lifecycle: a kind's stages as boxes joined by arrows, the current one filled; a stage off the line (needs-human,
    cancelled) hangs under the step its round stopped at, or stands apart when no step is known */
 .flow{list-style:none;display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 0;padding:0;margin:2px 0 12px;font-size:12.5px}
+.flowrow{display:flex;flex-wrap:wrap;align-items:flex-start;gap:0 10px}
+.flowlabel{line-height:30px;font-size:12.5px;font-weight:500;color:var(--fg2);white-space:nowrap}
 .flow li{display:grid;grid-template-columns:auto auto;position:relative}
 .flow li+li::before{content:"";grid-area:1/1;align-self:center;width:18px;height:1px;margin:0 5px;background:var(--axis)}
 .flow li+li::after{content:"";position:absolute;left:16px;top:10px;width:6px;height:6px;border:solid var(--axis);border-width:1px 1px 0 0;transform:rotate(45deg)}
@@ -631,7 +633,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <!-- top boxes -->
 <rect class="b" x="40" y="58" width="150" height="90" rx="4"/>
 <text class="t" x="48" y="78">a dataset's round</text>
-<text class="s" x="48" y="96">Prepare on its page,</text>
+<text class="s" x="48" y="96">Start on its page,</text>
 <text class="s" x="48" y="110">or a preparation request</text>
 <text class="s" x="48" y="124">ends at done</text>
 <rect class="b" x="225" y="58" width="150" height="90" rx="4"/>
@@ -756,10 +758,10 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <h2>3. How a dataset becomes prepared</h2>
 <p>A dataset is <b>prepared</b> when mia-data has published a binding and a manifest for it. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer. The only place preparation stops is a <code>needs-human</code> stage.</p>
 <figure>
-<svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: a dataset's round in mia-data runs from Prepare to done and publishes a binding; the registry row moves from unprepared through in-progress to prepared; the buffer plans over prepared rows, and a preparation request bridges unprepared datasets to mia-data.">
+<svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: a dataset's round in mia-data runs from Start to done and publishes a binding; the registry row moves from unprepared through in-progress to prepared; the buffer plans over prepared rows, and a preparation request bridges unprepared datasets to mia-data.">
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="36">mia-data · a dataset's round</text>
-<rect class="b" x="20" y="48" width="110" height="40" rx="8"/><text class="t" x="75" y="73" text-anchor="middle">Prepare</text>
+<rect class="b" x="20" y="48" width="110" height="40" rx="8"/><text class="t" x="75" y="73" text-anchor="middle">Start</text>
 <rect class="b" x="160" y="48" width="130" height="40" rx="8"/><text class="t" x="225" y="73" text-anchor="middle">match · smoke</text>
 <rect class="b" x="320" y="48" width="150" height="40" rx="8"/><text class="t" x="395" y="73" text-anchor="middle">crops · review</text>
 <path class="ea" d="M450 48 V34 H340 V48" marker-end="url(#f2)"/><text class="l" x="395" y="30" text-anchor="middle">Reject → fix → new crops (fig. 3b)</text>
@@ -801,10 +803,10 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <p>Every set of crops waits at <code>review</code>, including a set made from a snippet PR. <i>Approve</i> on the dataset's page publishes the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are published under the merge commit. <i>Reject</i> sends the feedback typed with it to the agent. When the round is following a PR, the feedback goes as <code>/revise</code> on that PR. Otherwise it goes as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves.</p>
 <p>Every verdict is written to the registry as an assessment before anything acts on it. A judge, a second model that reads the same gallery, can look at each set first: in shadow mode its verdict is recorded beside the person's and decides nothing, and the <a href="#decisions">Decisions</a> tab shows how often the two agree. <i>Revoke</i> at any later time withdraws a published set: its artifacts are quarantined, the buffers that drew from it unregister the dataset, and <i>Run again</i> on the dataset's page repairs it.</p>
 <figure>
-<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Prepare, match and smoke, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are published.">
+<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Start, match and smoke, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are published.">
 <defs><marker id="f3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="18">mia-data · the dataset's stages</text>
-<rect class="b" x="20" y="44" width="100" height="40" rx="8"/><text class="t" x="70" y="69" text-anchor="middle">Prepare</text>
+<rect class="b" x="20" y="44" width="100" height="40" rx="8"/><text class="t" x="70" y="69" text-anchor="middle">Start</text>
 <rect class="b" x="150" y="44" width="130" height="40" rx="8"/><text class="t" x="215" y="69" text-anchor="middle">match · smoke</text>
 <rect class="b" x="310" y="44" width="150" height="40" rx="8"/><text class="t" x="385" y="63" text-anchor="middle">crops · verify</text><text class="s" x="385" y="77" text-anchor="middle">the set, its gallery</text>
 <rect class="bs" x="490" y="44" width="130" height="40" rx="8"/><text class="t" x="555" y="69" text-anchor="middle">review</text>
@@ -876,7 +878,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 </figure>
 <div class="tw"><table>
 <tr><th>subject</th><th>its page</th><th>action route</th><th>actions</th></tr>
-<tr><td>dataset</td><td><code>#datasets/&lt;record&gt;</code></td><td><code>POST /datasets/&lt;record&gt;/actions</code></td><td><code>go</code> (<i>Prepare</i>, <i>Run again</i>), <code>approve</code>, <code>reject</code> with a note, <code>revoke</code>, <code>cancel</code></td></tr>
+<tr><td>dataset</td><td><code>#datasets/&lt;record&gt;</code></td><td><code>POST /datasets/&lt;record&gt;/actions</code></td><td><code>go</code> (<i>Start</i>, <i>Run again</i>), <code>approve</code>, <code>reject</code> with a note, <code>revoke</code>, <code>cancel</code></td></tr>
 <tr><td>buffer spec</td><td><code>#specs/&lt;name&gt;</code></td><td><code>POST /specs</code> · <code>POST /specs/&lt;name&gt;/actions</code></td><td><code>go</code> with <code>plan_first</code> (<i>Plan</i>), <code>approve</code> (<i>Run</i> at the plan, <i>Approve</i> at the board), <code>keep</code>, <code>retire</code>, <code>revoke</code>, <code>dropped</code> (<i>Files are in place</i>), <code>cancel</code>, <code>stop</code></td></tr>
 <tr><td>preparation request</td><td><code>#requests/&lt;key&gt;</code></td><td><code>POST /prep</code> · <code>POST /prep/&lt;number&gt;/actions</code></td><td><code>go</code>, <code>cancel</code>, <code>stop</code></td></tr>
 </table></div>
@@ -1785,6 +1787,9 @@ function datasetCards(d) {
 // It shows where on the line the object is, not the path its round took: a round can skip a step or return to one.
 // A stage off the line (needs-human, cancelled) hangs under the step the round stopped at, which is the newest
 // stage of `history` (newest first) that is on the line; with none, it stands apart at the end.
+// On a dataset's page the line is named for what it is: the workflow that prepares the dataset.
+const FLOW_LABELS = { dataset: "Preparation workflow:" };
+const flowRow = (kind, flow) => flow && FLOW_LABELS[kind] ? el("div", { class: "flowrow" }, el("span", { class: "flowlabel" }, FLOW_LABELS[kind]), flow) : flow;
 function lifecycle(line, stage, history) {
   if (!line || !stage) return null;
   const off = !line.includes(stage), at = line.indexOf(off ? (history || []).find(s => line.includes(s)) : stage);
@@ -2136,7 +2141,7 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
   if (asked) { clearTimeout(askedTimer); askedTimer = setTimeout(refreshShown, asked.wait_s * 1000 + 300); }
   for (const action of offered) {
     const word = action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
-      : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Prepare again" : "Prepare") : "Run") : ACTION_WORDS[action] || action;
+      : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
     const sending = action === "reject" ? "Rejecting…" : word + "…";  // Reject… already ends in the dots of "more to enter"
     // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
     const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
@@ -2228,12 +2233,13 @@ async function viewSubject(kind, key, refresh) {
   const [subject, detail] = await Promise.all([load(`/subjects/${kind}/${encodeURIComponent(key)}`, true), kind === "dataset" ? load(`/catalog/datasets/${encodeURIComponent(key)}`, true) : null]);
   if (location.hash !== hash || turn !== subjectTurn) return;  // the reader moved on, or a later load started, while this loaded
   const about = detail ? datasetCards(detail) : [];
-  const again = !!detail && detail.row.state !== "unprepared";  // Prepare, or Prepare again: the same word before and after the click
-  if (!subject) {  // nothing was ever asked of it on this page: the first Prepare creates it
+  const [links = null, ...cards] = about;  // a dataset's links stand right under its name, its cards at the end
+  const again = !!detail && detail.row.state !== "unprepared";  // Start, or Start again: the same word before and after the click
+  if (!subject) {  // nothing was ever asked of it on this page: the first Start creates it
     const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again };
     const missing = kind === "dataset" ? (detail ? null : "No dataset with this id in the newest catalog or the registry.") : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
-    root.replaceChildren(...[el("h2", {}, key), missing ? null : lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new"), el("div", { class: "facts" }, statePill(detail ? detail.row.state : "not started")), actionBar(fresh),
-      missing ? el("div", { class: "empty" }, missing) : null, ...about].filter(Boolean));
+    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new")), actionBar(fresh),
+      missing ? el("div", { class: "empty" }, missing) : null, ...cards].filter(Boolean));
     return;
   }
   shownSubject.number = subject.number;
@@ -2242,12 +2248,12 @@ async function viewSubject(kind, key, refresh) {
   if (location.hash !== hash || turn !== subjectTurn) return;
   const entries = timeline?.entries || [];
   const flow = lifecycle(S.meta.lines?.[kind], subject.stage, [...entries].reverse().map(e => e.stage));
-  const parts = [el("h2", {}, key), ...(flow ? [flow] : []), subjectFacts(subject, run, entries)];
+  const parts = [el("h2", {}, key), links, flowRow(kind, flow), subjectFacts(subject, run, entries)].filter(Boolean);
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
   if (subject.status === "working" && run && run.status !== "RUNNING") parts.push(el("div", { class: "notice" }, `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`));
   parts.push(actionBar(subject, null, kind === "buffer" ? ["go", "revoke"] : []), undelivered(subject, timeline?.actions || []));
   if (extras) parts.push(extras);
-  parts.push(...about);
+  parts.push(...cards);
   if (kind === "prep") parts.push(card("Datasets of this request", "Each dataset the request names, with where its preparation stands.", pagedTable("request-datasets:" + key, {
     source: pageOf("/catalog/datasets", "rows", () => ({ request: subject.number })), sort: "dataset", empty: "This request names no dataset: one that selects by rule lists what it admitted in its timeline.", cols: [
       { key: "dataset", label: "dataset", cell: x => { const a = datasetLink(x.id); a.title = x.title || x.id; return a; } }, { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },

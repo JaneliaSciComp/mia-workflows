@@ -156,10 +156,10 @@ names what is missing); P4 see the plan.
    `mia restart mia-data` (needed after a config change; wait for running rounds to finish first). `mia down`
    with no service stops everything, Temporal last; naming a service never touches Temporal.
 4. `pixi run mia exec mia-data init-labels` creates the `data:*` stage labels the mirror sets. Datasets are
-   started from the buffers page (*Prepare*); an issue, a copy of the dataset's timeline, appears in the data repo
+   started from the buffers page (*Start*); an issue, a copy of the dataset's timeline, appears in the data repo
    the first time its dataset has something to say.
 5. `pixi run mia exec mia-data test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.
-6. Buttons on a dataset's page: *Prepare* starts a round; *Approve* publishes the crops under review (and merges
+6. Buttons on a dataset's page: *Start* starts a round; *Approve* publishes the crops under review (and merges
    the snippet PR that made them); *Reject…* asks for your feedback and sends it to the agent fixing the snippet,
    and the next crops come back for review; *Cancel the round* ends a round in progress.
