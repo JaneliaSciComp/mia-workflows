@@ -2,7 +2,8 @@
 
 **Status:** v0.4 · 2026-11-12 · approved by the user 2026-11-12 (as v0.3). v0.4 corrects §3 after a review: two
 generations at once are not harmless, and how they are made safe without a lock file; a `policy_dir` that
-holds the base policy is refused.
+holds the base policy is refused; the placement rules cover every worker-writable mount and are checked by
+every generation, not only by `mia up`.
 v0.3 names the page's entry points as they stand at 4a37504 (§6). v0.2 took the user's rulings
 on autodev and on csub (§2.1) and a reviewer's pass against the code: where the policy directory may live (§3),
 where a buffer's pool comes from (§4), which broker `mia exec` talks to (§3), and what the installed csub does
@@ -110,20 +111,23 @@ csub:
   policy_dir: <paths.state_root>/csub       # default; holds the two files above
 ```
 
-**Where `policy_dir` may be** (*my call*). `mia up` checks three things and exits with a message naming the
-path:
+**Where `policy_dir` may be** (*my call*). Three rules, stated once in the generating code and checked by every
+generation before it writes, whoever starts it. `mia up` and a `mia-buffers serve` started by hand both exit
+with a message naming the path:
 
 1. **It is under the user's home directory.** csub refuses any job mount under home or containing it, which is
    what keeps a job from mounting the directory and rewriting either file. The installed csub does not protect a
    policy's own directory, so a `policy_dir` under one of the base policy's `allowed_roots` could be mounted
    read-write by a job. Home is also where compute nodes already read the default policy, so per-job brokers can
    load the generated one.
-2. **It neither contains nor lies inside any service's `state_dir`.** A worker's sandbox binds its state dir
-   read-write; `policy_dir` is not mounted into any worker sandbox.
+2. **It neither contains nor lies inside any directory a worker sandbox binds read-write.** That is each
+   service's state dir, `work_root` and socket dir, and the roots its app mounts read-write: `storage_root`
+   for mia-data; `raw_root`, `staged_root` and the lock directory for mia-buffers. `mia up` checks the mounts
+   of every service, from the same list it builds the sandboxes with. buffer-api started by hand checks the
+   roots of its own config.
 3. **Its `broker.toml` is not the base policy.** A `policy_dir` of `~/.config/csub` passes the first two
    checks and would make the generated file the operator's own. Both paths are resolved before they are
-   compared, so a symlinked directory is caught. The generating function refuses this itself as well, before
-   it writes anything, so buffer-api cannot do it either.
+   compared, so a symlinked directory is caught.
 
 **Generation** is one function in `mia_core` (it imports nothing from the other packages), a pure function of
 the base policy and the approvals file:
@@ -313,7 +317,7 @@ A small change gets the tests that cover it; the full suite runs before a push.
 ## 11. Calls made without the user
 
 1. The paths live in a top-level `csub` block; `policy_dir` defaults to `<paths.state_root>/csub` (§3).
-2. `policy_dir` must be under home and apart from every service's state dir (§3).
+2. `policy_dir` must be under home, apart from every worker-writable mount, and not the base's own (§3).
 3. A small serializer with a round-trip check, not a new dependency (§3).
 4. Approved hosts are kept in an append-only file beside the policy, not in the ledger, so `mia up` can generate
    without buffer-api running (§3).

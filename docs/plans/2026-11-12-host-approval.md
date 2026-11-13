@@ -71,11 +71,13 @@ class PolicyError(RuntimeError): ...
 
 def missing_hosts(hosts: list[str], patterns: list[str]) -> list[str]
 def approved_hosts(policy_dir: Path) -> list[str]            # approval order, each host once; [] without a file
+def placement_problem(base_policy: Path, policy_dir: Path, writable: Sequence[Path] = ()) -> str | None
 def approve_hosts(
-    base_policy: Path, policy_dir: Path, hosts: list[str], *, by: str, kind: str, number: int
+    base_policy: Path, policy_dir: Path, hosts: list[str], *,
+    by: str, kind: str, number: int, writable: Sequence[Path] = (),
 ) -> list[str]                                               # the hosts it added; the policy is regenerated
 def dump_toml(data: dict) -> str
-def generate_policy(base_policy: Path, policy_dir: Path) -> Path   # the generated file's path
+def generate_policy(base_policy: Path, policy_dir: Path, writable: Sequence[Path] = ()) -> Path
 def allowed_patterns(policy_dir: Path) -> list[str]          # broker.allowed_hosts of the generated policy
 ```
 
@@ -88,9 +90,15 @@ def allowed_patterns(policy_dir: Path) -> list[str]          # broker.allowed_ho
 - `dump_toml` writes tables one or two deep holding strings, integers, floats, booleans and lists of strings;
   strings as `json.dumps` writes them. Anything else raises `PolicyError` naming the dotted key. Mark it
   `# ponytail:` (ceiling: the shapes a csub policy has; upgrade: `tomli-w`).
-- `generate_policy` and `approve_hosts` first refuse, with a `PolicyError` naming both paths, a `policy_dir`
-  whose `broker.toml` is the base policy itself: `(policy_dir / POLICY_NAME).resolve() == base_policy.resolve()`
-  (so a symlinked directory is caught too). This is the one place every writer passes through.
+- `placement_problem` is the one statement of where `policy_dir` may be (spec §3); it returns what is wrong,
+  naming the paths, or `None`. All paths are resolved first, so a symlinked directory is caught.
+  1. `(policy_dir / POLICY_NAME)` is the base policy itself.
+  2. `policy_dir` is not under `Path.home()`.
+  3. `policy_dir` contains, or lies inside, one of `writable`: the directories a worker sandbox binds
+     read-write, as the caller knows them.
+- `generate_policy` and `approve_hosts` call it before anything else and raise `PolicyError` with its text.
+  Every publisher passes through these two, so none can skip the checks; rules 1 and 2 need no input from
+  the caller.
 - `generate_policy`: parse the base (`PolicyError` naming the file when it is missing or not TOML); append to
   `broker.allowed_hosts` each approved host that `missing_hosts` says the base lacks; `dump_toml`; require
   `tomllib.loads(text) == merged` (`PolicyError` otherwise). The text starts with
@@ -104,7 +112,8 @@ def allowed_patterns(policy_dir: Path) -> list[str]          # broker.allowed_ho
     again. A generation that read older approvals and published last therefore catches up, and the policy on
     disk ends up holding every approval made before the last publish.
 
-- [ ] **Step 1: write the failing tests** in `tests/test_core_hosts.py`, with a `BASE` text that has the shapes
+- [ ] **Step 1: write the failing tests** in `tests/test_core_hosts.py`. An autouse fixture sets `HOME` to
+  `tmp_path`. Use a `BASE` text that has the shapes
   of a real policy (a `[broker]` table with `allowed_hosts = ["zenodo.org", "*.huggingface.co"]`, a string with a
   quote and a backslash, an integer, a float, a boolean, `[agents] claude = [...]`, `[queues.short]`):
   - `test_with_no_approvals_the_generated_policy_equals_the_base`: `tomllib.loads` of both are equal.
@@ -115,6 +124,9 @@ def allowed_patterns(policy_dir: Path) -> list[str]          # broker.allowed_ho
     `policy_dir` being the base's own directory and a symlink to it, for `generate_policy` and for
     `approve_hosts`; each raises `PolicyError`, the base is byte-for-byte unchanged, and no approvals file or
     temp file appears beside it.
+  - `test_a_policy_dir_outside_home_or_inside_a_writable_mount_is_refused`: for `generate_policy` and for
+    `approve_hosts`: a `policy_dir` outside the test's home; one inside a `writable` directory; one that
+    contains a `writable` directory. Each raises `PolicyError` naming the path and writes nothing.
   - `test_a_missing_or_invalid_base_is_an_error_and_writes_nothing`: `PolicyError` naming the base path; an
     earlier generated file keeps its bytes.
   - `test_a_value_the_writer_cannot_write_names_its_key`: a base with `when = 2026-01-01` under `[limits]` raises
@@ -171,9 +183,12 @@ path is and the two rules for `policy_dir`.
 `tests/test_mia_ops_cli.py`.
 
 **Interfaces:** consumes `generate_policy`, `PolicyError`, `Manifest.csub`. Produces
-`services.ensure_policy(stack: Stack) -> Path`: the three checks of spec §3, then `generate_policy`; each failure
-is a `sys.exit` naming `csub.policy_dir` or `csub.base_policy` and the path. Home is `Path.home().resolve()`.
-A `policy_dir` overlaps a state dir when either contains the other.
+`services.writable_mounts(stack: Stack) -> list[Path]`: for every service, what `service_up` binds read-write
+into its worker's sandbox: the state dir, `paths.work_root`, the socket dir (`svc.run`) and every `--rw` entry
+of `svc.app.extra_mounts(cfg)`. `service_up` builds its own mount list from the same source, so the two cannot
+drift. And `services.ensure_policy(stack: Stack) -> Path`:
+`generate_policy(base, policy_dir, writable_mounts(stack))`, a `PolicyError` becoming a `sys.exit` that names
+`csub.policy_dir` or `csub.base_policy`. The checks themselves are Task 1's.
 
 - `service_up` calls `ensure_policy` after its prerequisite checks and before the `is_running` return, so a
   second `mia up` regenerates. The broker's command becomes
@@ -188,7 +203,11 @@ A `policy_dir` overlaps a state dir when either contains the other.
   - `test_up_refuses_a_policy_dir_outside_home`: `csub.policy_dir` names a directory outside `tmp_path` (the
     test's home); `SystemExit` matching `csub.policy_dir` and `home`; no tmux session is started and nothing is
     created at that path.
-  - `test_up_refuses_a_policy_dir_inside_a_state_dir`: `csub: {policy_dir: <state_root>/mia-data/csub}`.
+  - `test_up_refuses_a_policy_dir_a_worker_can_write`: parametrized over `policy_dir` inside mia-data's state
+    dir, inside `work_root`, inside `storage_root` and inside mia-buffers' `staged_root` (each placed under the
+    test's home so only this rule can refuse it); `SystemExit` matching `csub.policy_dir`; no session started.
+  - `test_writable_mounts_are_the_rw_binds_of_every_worker`: every `--rw` path in each service's worker
+    command is in `writable_mounts(stack)`.
   - `test_up_refuses_a_policy_dir_that_holds_the_base_policy`: `csub: {policy_dir: <home>/.config/csub}`;
     `SystemExit` matching `csub.policy_dir` and `csub.base_policy`; the base's bytes are unchanged and no tmux
     session is started.
@@ -224,6 +243,7 @@ class HostCheck:
     network: NetworkCfg
     storage_root: Path
     rounds_dir: Path                         # <state_dir>/rounds, where a buffer round writes plan.json
+    writable: tuple[Path, ...] = ()          # this service's worker-writable roots, for placement_problem
 
     @classmethod
     def from_config(cls, cfg: Config) -> HostCheck
@@ -242,9 +262,13 @@ class HostCheck:
   `OSError` and `ValueError` out when the file is missing or not a plan.
 - `missing` keeps the hosts `missing_hosts(..., allowed_patterns(policy_dir))` returns.
 - `check` raises for a host that fails `HOST_RE`, is a GitHub host (`autodev.config.is_github_host`) or is not a
-  key of `needed`. `approve` is `mia_core.hosts.approve_hosts`; `PolicyError` goes to the caller.
+  key of `needed`. `approve` is `mia_core.hosts.approve_hosts` with `writable`; `PolicyError` goes to the caller.
+- `from_config` fills `writable` with the service's own `state_dir`, `work_root`, `storage_root`, `raw_root`,
+  `staged_root` and, when set, `local_root`. It is what buffer-api knows when it is started by hand; `mia up`
+  has already checked every service's mounts.
 
-- [ ] **Step 1: failing tests** in `tests/test_buffers_hosts.py` (a `check(tmp_path)` helper writes a base
+- [ ] **Step 1: failing tests** in `tests/test_buffers_hosts.py` (an autouse fixture sets `HOME` to `tmp_path`;
+  a `check(tmp_path)` helper writes a base
   policy allowing `zenodo.org` and `*.s3.amazonaws.com`, generates, and returns a `HostCheck` with
   `NetworkCfg(package_hosts=["pypi.org"], redirect_hosts={"data.example.org": ["cdn.example.net"]})`):
   - `test_a_records_needs_are_its_url_hosts_their_redirect_targets_and_the_package_hosts`: a record with
@@ -269,7 +293,9 @@ class HostCheck:
 **Interfaces:** consumes `HostCheck`. Produces:
 
 - `BufferService(..., hosts: HostCheck | None = None)`; `serve` passes `HostCheck.from_config(cfg)` and calls
-  `generate_policy` once before it listens (`SystemExit` with the `PolicyError`'s text).
+  `generate_policy(check.base_policy, check.policy_dir, check.writable)` once before it listens
+  (`SystemExit` with the `PolicyError`'s text). A `mia-buffers serve` started by hand therefore gets the same
+  placement checks as one started by `mia up`.
 - `class MissingBody(_Strict)`: `records: list[str] | None`, `prep: int | None`, `spec: str | None`; exactly one
   is given, else 422.
 - `BufferService._needed(self, *, records: list[str] | None = None, prep: int | None = None,
@@ -284,7 +310,8 @@ class HostCheck:
 - Route `("POST", r"^/hosts/missing$", "hosts_missing", "read")`. It answers
   `{"hosts": [{"host": ..., "records": [...]}]}` sorted by host.
 
-- [ ] **Step 1: failing tests**, with a helper `_checking(tmp_path)` that is `_acting` plus a `HostCheck` whose
+- [ ] **Step 1: failing tests**, with `HOME` set to `tmp_path` for them and a helper `_checking(tmp_path)` that
+  is `_acting` plus a `HostCheck` whose
   base policy allows `zenodo.org`, and records `rec-a` (`https://data.example.org/a.zip`) and `rec-b`
   (`https://zenodo.org/b.zip`):
   - `test_hosts_missing_lists_what_the_named_records_need_and_the_policy_lacks`:
@@ -296,6 +323,9 @@ class HostCheck:
     `binding.yaml` naming `https://data.example.org/x`; then the same with the plan file removed is 409.
   - `test_hosts_missing_without_a_policy_is_503` (the `_acting` service).
   - `test_hosts_missing_writes_nothing`: no approvals file exists afterwards.
+  - `test_serve_refuses_a_policy_dir_it_must_not_write`: beside the other `test_serve_refuses_*` tests, a
+    config whose `csub.policy_dir` is inside its `storage_root`; `SystemExit` naming the path, and nothing
+    is created there.
 - [ ] **Step 2:** run them; they fail on the route.
 - [ ] **Step 3:** implement.
 - [ ] **Step 4:** run `tests/test_buffers_api.py tests/test_buffers_ui.py`.
