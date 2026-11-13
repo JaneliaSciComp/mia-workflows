@@ -1858,8 +1858,9 @@ function lifecycle(line, stage, history, busy) {  // `busy`: a round is in progr
 // ---- buffers
 function servableText(servable) { const e = Object.entries(servable || {}); return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none"; }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
-// a buffer's lifecycle event as the issue's stage label: the inverse of mia_buffers.activities.STAGE_EVENTS
-const STAGE_OF = { created: "planning", planned: "plan-review", sourcing: "sourcing", approved: "sourcing", staged: "staged", ready: "ready", idle: "idle", retired: "retired", "needs-human": "needs-human" };
+// a buffer's lifecycle event as the issue's stage label: the inverse of mia_buffers.activities.STAGE_EVENTS.
+// `approved` is the approve at the staged gate: consumers draw from then on, so it reads as ready.
+const STAGE_OF = { created: "planning", planned: "plan-review", sourcing: "sourcing", staged: "staged", approved: "ready", ready: "ready", idle: "idle", retired: "retired", "needs-human": "needs-human" };
 const stageOf = ev => ev ? STAGE_OF[ev.kind] || ev.kind : "";
 function viewBuffers(id, refresh) {
   const root = $("buffersBody");
