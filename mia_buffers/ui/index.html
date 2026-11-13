@@ -2461,6 +2461,7 @@ async function viewFind(text) {  // the lookup box: an issue number, an issue UR
 const KIND_WORDS = { dataset: "dataset", buffer: "buffer spec", prep: "request" };
 const NEEDS_KINDS = [["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]];  // the "what" a person can narrow the list to
 let needsKind = "";  // the kind shown; kept while the list redraws itself, cleared by opening the tab
+let needsCounts = {};  // how many wait under each kind, as last heard: a redrawn button starts with its number
 function viewNeeds(arg, refresh) {
   const root = $("needsBody");
   if (keepTyping(root, refresh, () => viewNeeds("", true))) return;
@@ -2476,13 +2477,14 @@ function viewNeeds(arg, refresh) {
   };
   const kinds = el("div", { class: "toggles", role: "group", "aria-label": "Show" }, ...NEEDS_KINDS.map(([kind, word]) =>
     el("button", { type: "button", class: "btn", "aria-pressed": String(kind === needsKind), "data-kind": kind, "data-word": word, onclick: () => show(kind) }, word)));
-  const count = out => kinds.querySelectorAll("button").forEach(b => {  // each button says how many wait under it
-    const n = b.dataset.kind ? (out.kinds || {})[b.dataset.kind] : Object.values(out.kinds || {}).reduce((a, c) => a + c, 0);
+  const count = counts => kinds.querySelectorAll("button").forEach(b => {  // each button says how many wait under it
+    const all = Object.values(counts), n = b.dataset.kind ? counts[b.dataset.kind] : all.length ? all.reduce((a, c) => a + c, 0) : null;
     b.textContent = n == null ? b.dataset.word : `${b.dataset.word} ${num(n)}`;
   });
+  count(needsCounts);
   root.replaceChildren(el("h2", {}, "Needs you"), el("p", { class: "small" }, "Everything that waits on a person or has stopped, newest first, each with what it will take. Open one for its timeline."), kinds, failed,
     pagedTable("needs", { source: pageOf("/needs", "needs", () => needsKind ? { kind: needsKind } : {}), sort: "updated", dir: "desc", empty: needsKind ? "Nothing of this kind waits on you." : "Nothing waits on you.",
-      onPage: page => { count(page.out); failed.replaceChildren(...(page.out.failed || []).filter(a => a.subject).map(a => el("div", {}, el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.key), undelivered(a.subject, [a], again)))); },
+      onPage: page => { count(needsCounts = page.out.kinds || {}); failed.replaceChildren(...(page.out.failed || []).filter(a => a.subject).map(a => el("div", {}, el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.key), undelivered(a.subject, [a], again)))); },
       cols: [
         { key: "kind", label: "what", cell: x => KIND_WORDS[x.kind] },
         { key: "key", label: "name", cell: x => el("a", { href: SUBJECT_HASH[x.kind](x.key) }, x.key) },
