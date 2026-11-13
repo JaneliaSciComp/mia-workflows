@@ -62,7 +62,6 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .lookup{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg);width:24ch}
 .subject h2{margin:0 0 6px;font-size:18px;overflow-wrap:anywhere}
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
-.actions textarea{flex:1 1 100%;max-width:80ch;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .btn.danger{border-color:var(--warn);color:var(--warn)}
 .chosen{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:4px 10px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-soft);font-size:13px}
 .chosen[hidden]{display:none}
@@ -111,10 +110,10 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .md h3,.md h4,.md h5,.md h6{font-size:13.5px;margin-top:6px}
 .md .tablewrap{width:max-content;max-width:100%}
 
-/* filters: one row above everything, wraps on narrow screens; a <details> so the row folds to its summary line.
-   It sticks at the offset it already has at the top of the page (topbar plus the 14px gap), so scrolling never moves it;
-   the box-shadow fills that gap in the page colour while the content scrolls under. */
-.filterbox{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:8px 14px 12px;margin-bottom:10px;
+/* filters: one row above the plan, wraps on narrow screens; a <details> so the row folds to its summary line.
+   It sticks 14px under the topbar. The box-shadow fills that gap in the page colour while the content scrolls under,
+   and the top margin is as tall as the shadow, so at rest the shadow covers nothing above the box. */
+.filterbox{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:8px 14px 12px;margin:14px 0 10px;
   position:sticky;top:calc(var(--topbar-h,0px) + 14px);z-index:5;box-shadow:0 -14px 0 var(--bg)}
 .filterbox:not([open]){padding-bottom:8px}
 .filterbox summary{cursor:pointer;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);user-select:none;width:max-content}
@@ -134,6 +133,7 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
 .actions{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;margin-bottom:16px}
 .actions > div{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.actions:has(details[open]){align-items:flex-start}  /* an open fold is tall: the buttons beside it stay on its first line */
 
 /* KPI row */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:18px}
@@ -171,6 +171,7 @@ dl.kv dd{margin:0;overflow-wrap:anywhere;min-width:0}
 .health{font-size:13px;font-weight:500}
 .health.ok{color:var(--s3)} .health.bad{color:var(--warn)}
 .links{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin:4px 0 12px}
+.links a[aria-current="page"]{color:var(--fg);font-weight:600;text-decoration:none}
 
 /* table */
 .tablebar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
@@ -355,7 +356,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 <header>
   <div class="eyebrow">user guide · training on a buffer</div>
   <h1>Training on a MIA buffer</h1>
-  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file, and it defines both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalization, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process.</p>
+  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file, and it defines both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalisation, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process.</p>
   <p>Everything a person does is a button on this page: plan a buffer, run it, approve it, cancel it. Every step the system takes is an entry in the spec's timeline, which its page shows as it happens. <a href="#needs">Needs you</a> lists whatever is waiting for a person. The page needs no login: anyone who can reach it can press its buttons.</p>
 </header>
 
@@ -384,7 +385,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 </figure>
 
 <h2>Step 1. The spec</h2>
-<p><a href="#buffers/new">New buffer</a>, on the Buffers tab, builds a spec from its filters: dimensionality, modality, licence, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, and the weighting between datasets. Each change is planned against the catalog on the server, so the counts shown are the plan that spec produces.</p>
+<p><a href="#buffers/new">New buffer</a>, on the Buffers tab, builds a spec from its filters: dimensionality, licence, annotation source, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, and the weighting between datasets. Each change is planned against the catalog on the server, so the counts shown are the plan that spec produces.</p>
 <ul>
   <li><b>Where datasets leave</b> counts the datasets each rule removes. The last rule, <em>not prepared</em>, means a dataset fits the spec but no reader exists for its files yet; the other rules are the spec's own filters.</li>
   <li><b>Fitting datasets by modality</b> and <b>Weight share</b> show the composition of the pool and of the draws. The weighting temperature runs from uniform over modalities (0) to proportional to each dataset's capacity (1).</li>
@@ -488,7 +489,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td>tick it on the Datasets tab and <b>Prepare</b>, or prepare what a new buffer's plan needs; then a new round later</td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer not approved)</td><td>the round is staged but not approved</td><td>press <i>Approve</i> on the spec's page (it is listed under <i>Needs you</i>)</td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer needs a human)</td><td>the buffer's latest event is <code>needs-human</code>: a degraded rebuild or a round that stopped</td><td>read the newest entry of the spec's timeline; the buffer serves again once the round writes <code>approved</code> or <code>ready</code></td></tr>
-<tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorized to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
+<tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorised to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
 <tr><td>410 buffer retired</td><td>the buffer was retired: by <i>Retire</i>, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
 <tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td><i>Cancel the round</i> on the spec's page; if that gets no answer, <i>Force stop</i>, then <i>Plan</i> again</td></tr>
@@ -502,7 +503,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>dataset, record</td><td>one entry of the catalog: a published dataset with its files, licence, modality and annotations described. The code and the catalog say <em>record</em> for the entry and its id; the pages say <em>dataset</em>.</td></tr>
 <tr><td>prepared</td><td>a dataset with an approved reader and verified sample crops, produced by the preparation pipeline. Only prepared datasets enter a plan.</td></tr>
 <tr><td>spec, buffer, round</td><td>a spec is the YAML you save and run; a buffer is one served pool of crops built from it. A spec runs one round at a time; each round builds a buffer with a new id.</td></tr>
-<tr><td>stage, timeline</td><td>a spec, a dataset and a preparation request are each in one stage at a time, and the stage decides which buttons are offered. The timeline is the list of everything that happened to it, newest last.</td></tr>
+<tr><td>stage, timeline</td><td>a spec, a dataset and a preparation request are each in one stage at a time, and the stage decides which buttons are offered. The timeline is the list of everything that happened to it, newest first.</td></tr>
 <tr><td>weighting group</td><td>the datasets that share the first key of <code>weighting.over</code>, a modality for instance. <code>min_fraction</code> and the floors are per group.</td></tr>
 <tr><td>staged</td><td>converted: a dataset's volumes rewritten once as immutable OME-Zarr pyramids in the shared cache, reused by every buffer that needs the same geometry and plan.</td></tr>
 <tr><td>crop, level</td><td>a crop is one training window, served at each pyramid level the spec lists, all centred on the same point: level 1 is full resolution, level 2 half, and so on.</td></tr>
@@ -536,7 +537,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="28" y="176">specs · requests: copies</text>
 <rect class="b" x="20" y="225" width="175" height="55" rx="4"/>
 <text class="t" x="28" y="245">mia-snippets</text>
-<text class="s" x="28" y="261">readers · tensorizers · harness</text>
+<text class="s" x="28" y="261">readers · tensorisers · harness</text>
 <rect class="b" x="20" y="305" width="175" height="55" rx="4"/>
 <text class="t" x="28" y="325">mia-agentic-search</text>
 <text class="s" x="28" y="341">catalog records, pinned by commit</text>
@@ -724,7 +725,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="e" x1="190" y1="528" x2="225" y2="528" marker-end="url(#f2)"/>
 <line class="e" x1="375" y1="528" x2="410" y2="528" marker-end="url(#f2)"/>
 <line class="e" x1="560" y1="528" x2="595" y2="528" marker-end="url(#f2)"/>
-<text class="l" x="762" y="590" text-anchor="middle">every 30 min</text>
+<text class="l" x="762" y="590" text-anchor="middle">every keeper.minutes (30)</text>
 <!-- top → middle arrows -->
 <line class="ed" x1="300" y1="148" x2="300" y2="278" marker-start="url(#f2)" marker-end="url(#f2)"/>
 <text class="l" x="306" y="206">reads · writes</text>
@@ -955,7 +956,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <rect class="b" x="330" y="228" width="140" height="44" rx="10"/>
 <text class="t" x="400" y="247" text-anchor="middle">cancelled</text><text class="s" x="400" y="262" text-anchor="middle">Cancel, before ready</text>
 </svg>
-<figcaption><b>Figure 5.</b> The round stages before it asks to serve. The staged entry is the board: it lists each failed dataset with its error and each weighting group against <code>ready.min_fraction</code>. The approve accepts the board as it is, and the fraction accepted per group becomes that group's floor. buffer-api refuses consumers until the buffer is approved. The keeper, a scheduled pass every thirty minutes, watches ready buffers and retires a staged buffer that nobody approves. <i>Cancel the round</i> ends a round at any stage before <code>ready</code> and leaves the spec at <code>cancelled</code>. Every way out of a dead end is <i>Plan</i>. A <code>go</code> sent to the action route without <code>plan_first</code> does not wait at the plan; the page always sends it.</figcaption>
+<figcaption><b>Figure 5.</b> The round stages before it asks to serve. The staged entry is the board: it lists each failed dataset with its error and each weighting group against <code>ready.min_fraction</code>. The approve accepts the board as it is, and the fraction accepted per group becomes that group's floor. buffer-api refuses consumers until the buffer is approved. The keeper, a scheduled pass every <code>keeper.minutes</code> (30 unless set), watches ready buffers and retires a staged buffer that nobody approves. <i>Cancel the round</i> ends a round at any stage before <code>ready</code> and leaves the spec at <code>cancelled</code>. Every way out of a dead end is <i>Plan</i>. A <code>go</code> sent to the action route without <code>plan_first</code> does not wait at the plan; the page always sends it.</figcaption>
 </figure>
 
 <h2>6. Sourcing one dataset</h2>
@@ -1079,7 +1080,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="ea" x1="370" y1="254" x2="620" y2="254" marker-end="url(#f6)"/>
 <text class="l" x="495" y="247" text-anchor="middle">128 descriptors · seq, volume, plane, centre_nm</text>
 <rect class="note" x="630" y="264" width="210" height="32" rx="3"/>
-<text class="s" x="638" y="277">reads the pyramid, runs the tensorizer</text>
+<text class="s" x="638" y="277">reads the pyramid, runs the tensoriser</text>
 <text class="s" x="638" y="290">img, bbox, label → prefetch queue</text>
 <line class="ed" x1="620" y1="312" x2="370" y2="312" marker-end="url(#f6)"/>
 <text class="l" x="495" y="305" text-anchor="middle">each call is a heartbeat; last_seen drives idle</text>
@@ -1158,17 +1159,17 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
   ../.building-&lt;artifact&gt;-&lt;job&gt;/         <span class="c">a build in progress; swept by the keeper if abandoned</span>
 
 &lt;state_root&gt;/&lt;service&gt;/                 <span class="c">per worker: rounds/&lt;id&gt;/{spec, pins, plan, bindings}</span>
-  backups/ · archive/ · keeper/          <span class="c">registry copies every 30 min · retired buffers' draws · the catalog sync mark</span></pre>
+  backups/ · archive/ · keeper/          <span class="c">registry copies every keeper.minutes · retired buffers' draws · the catalog sync mark</span></pre>
 
 <h2>11. The page</h2>
 <p>buffer-api serves the page at <code>/</code>. The page holds no token: it reads the open routes, its buttons call the action routes, and it follows <code>/stream</code> to redraw what changed. Each tab is one kind of thing, and each thing has one page of its own. The search box in the header finds a dataset, a spec or a request by its name, its issue number or its issue URL.</p>
 <div class="tw"><table>
 <tr><th>tab</th><th>shows</th><th>reads</th></tr>
 <tr><td>Needs you</td><td>everything that waits on a person or is stuck, with the buttons that answer it, and the actions of the last day that were not delivered</td><td><code>/needs</code></td></tr>
-<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw download, staged artifacts and buffers; a tick per dataset and <i>Prepare these</i>. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
+<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw download, staged artifacts and buffers; a tick per dataset and <i>Prepare</i>. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
 <tr><td>Preparation</td><td>the preparation requests; a request's page lists its datasets with where each stands</td><td><code>/subjects/prep</code> · <code>/catalog/datasets</code></td></tr>
 <tr><td>Buffers</td><td>the specs and the buffers. <i>New buffer</i> designs a spec against a live plan. A spec's page has its buttons, its timeline and its buffers; a buffer's page has its board, volumes, consumers, daily usage and health line</td><td><code>/subjects/buffer</code> · <code>/buffers</code> · <code>POST /plan</code> · <code>/usage</code></td></tr>
-<tr><td>Cache</td><td>raw by dataset, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
+<tr><td>Cache</td><td>raw by dataset, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets/raw</code> · <code>/assets/staged</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
 <tr><td>Decisions</td><td>every verdict at a gate, newest first, with how often the judge and the person agree</td><td><code>/decisions</code></td></tr>
 <tr><td>Docs</td><td>the user guide (the loop from spec to training, as the person training a model sees it) and this architecture overview</td><td>nothing: static</td></tr>
 </table></div>
@@ -1201,6 +1202,7 @@ const PLAN_DEBOUNCE_MS = 300;
 const $ = id => document.getElementById(id);
 const fmt = n => n >= 1e6 ? (n/1e6).toFixed(n>=1e7?0:1)+"M" : n >= 1e3 ? (n/1e3).toFixed(n>=1e4?0:1)+"K" : String(n);
 const num = n => n == null || n === "" ? "" : Number(n).toLocaleString();
+const plural = (n, one) => `${num(n)} ${Number(n) === 1 ? one : one + "s"}`;  // "1 dataset", "2 datasets"
 const fmtBytes = b => { b = Number(b) || 0; for (const [s, u] of [[1e12,"TB"],[1e9,"GB"],[1e6,"MB"],[1e3,"KB"]]) if (b >= s) return (b/s).toFixed(1)+" "+u; return b+" B"; };
 const short = (s, n) => s ? String(s).slice(0, n || 8) : "";
 const pct = x => (x * 100).toFixed(x && x < 0.001 ? 3 : 1) + "%";
@@ -1225,7 +1227,7 @@ const PILL_HELP = {
   "licence not allowed": "The record's licence is not in the spec's licence allowlist.",
   "annotations required": "The spec requires annotations and the record has none.",
   "annotation types": "The record's annotation types (masks, boxes, points, …) are not among those the spec asks for.",
-  "annotation source": "The record's annotation source (manual, model, …) is not among those the spec asks for.",
+  "annotation source": "The record's annotation source (manual, proofread, automatic, …) is not among those the spec asks for.",
   "array below minimum": "The record's largest array has fewer voxels than the spec's where.min_size_voxels.",
   "no mia-data folder": "The record does not name exactly one modality family and one organism, which is how a prepared dataset's folder is named, so the preparation pipeline cannot place it.",
   "duplicate DOI": "Another record with the same DOI is already in the pool; dedup keeps the first.",
@@ -1313,8 +1315,8 @@ function ago(t) {
   const s = toEpoch(t); if (s == null) return "";
   const d = Date.now() / 1000 - s, a = Math.abs(d);
   if (a < 10) return "just now";
-  const [v, u] = a < 60 ? [a, "s"] : a < 3600 ? [a/60, "min"] : a < 86400 ? [a/3600, "h"] : [a/86400, "d"];
-  return d >= 0 ? `${Math.round(v)} ${u} ago` : `in ${Math.round(v)} ${u}`;
+  const [v, u] = a < 60 ? [a, "s"] : a < 3600 ? [a/60, "m"] : a < 86400 ? [a/3600, "h"] : [a/86400, "d"];
+  return d >= 0 ? `${Math.round(v)}${u} ago` : `in ${Math.round(v)}${u}`;
 }
 const when = t => { const s = toEpoch(t); return s == null ? "" : el("span", { title: new Date(s * 1000).toISOString() }, ago(t)); };
 
@@ -1350,7 +1352,7 @@ function hoverable(node, lines) { node.addEventListener("pointerenter", e => sho
 // ---- horizontal bars (the explorer's: single series, sequential hue)
 function barPath(x, y, w, h, r) { if (w <= r) return `M${x} ${y}h${w}v${h}h${-w}z`; return `M${x} ${y}h${w-r}a${r} ${r} 0 0 1 ${r} ${r}v${h-2*r}a${r} ${r} 0 0 1 ${-r} ${r}h${-(w-r)}z`; }
 function hbars(container, items, opts) {
-  if (!items.length) { container.replaceChildren(el("div", { class: "empty" }, opts.empty || "nothing to show")); return; }
+  if (!items.length) { container.replaceChildren(el("div", { class: "empty" }, opts.empty || "Nothing to show.")); return; }
   const W = 560, labelW = opts.labelW || 170, rowH = 26, barH = 16, pad = 8;
   const H = items.length * rowH + pad * 2;
   const max = Math.max(1e-12, ...items.map(i => i.value));
@@ -1381,7 +1383,7 @@ const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) },
 const cropPng = (d, id, name) => `/crops/${encodeURIComponent(d.folder)}/${encodeURIComponent(id)}/${name}.png`;
 const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src = cropPng(d, d.previews[0], "overlay");
   return tipOn(el("a", { href: src, target: "_blank", rel: "noopener" }, el("img", { class: "thumb", src, loading: "lazy", alt: "crop overlay" })),
-    [{ t: `${num(d.crops || d.previews.length)} crops published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
+    [{ t: `${plural(d.crops || d.previews.length, "crop")} published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
 // a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
 const folderLink = (root, folder, text, title) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, text || "files", title) : "";
 // how every table names a dataset: its id links to its page; its GitHub issue (a read-only log) is a small mark
@@ -1551,7 +1553,7 @@ function createBuffer(container, yaml, blocker) {
   if (!area.dataset.edited) area.value = yaml;
   const run = container.querySelector("button"), status = container.querySelector(".actions .small");
   run.disabled = !!blocker && !area.dataset.edited;  // an edited spec is judged by the service, not by the controls' plan
-  run.title = run.disabled ? blocker : "";
+  run.title = run.disabled ? blocker : BUTTON_HELP.plan;
   if (!status.textContent || status.dataset.blocker) { status.textContent = run.disabled ? blocker : ""; status.dataset.blocker = "1"; }
 }
 // `again` (the Datasets list's ticks): every ticked dataset gets a round, also one that is prepared or that stopped;
@@ -1560,11 +1562,11 @@ function prepareButton(container, all, blocker, done, again, text) {  // `text`:
   // a request takes at most PREP_MAX datasets: a longer list is prepared in parts, the first PREP_MAX now
   const todo = all.slice(0, PREP_MAX), why = blocker;
   let checking = false;  // a click while the host check or its dialog is open starts nothing
-  const label = all.length > PREP_MAX ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets` : text || `Prepare these ${num(todo.length)} datasets`;
+  const label = all.length > PREP_MAX ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets` : text || (todo.length === 1 ? "Prepare this dataset" : `Prepare these ${num(todo.length)} datasets`);
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }), onclick: async e => {
     if (checking) return;
-    if (!confirm(`Start preparing ${todo.length} datasets?${again ? ` ${again} of them are prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
+    if (!confirm(`Start preparing ${plural(todo.length, "dataset")}?${again ? ` ${again} of them ${again === 1 ? "is" : "are"} prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
     checking = true;
     askHosts({ records: todo }, hosts => start(e.target, hosts)).finally(() => { checking = false; });
   } }, label));
@@ -1680,10 +1682,10 @@ function renderDesigner() {  // the numbers over the whole plan, as the server s
   renderPlanMessages();
   const plan = S.plan, m = plan?.summary || {}, dims = m.dims || [];
   $("kpis").replaceChildren(
-    tile("Datasets that fit", plan ? num(m.fitting) : "—", plan ? `of ${num(plan.n_seen)} records seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
+    tile("Datasets that fit", plan ? num(m.fitting) : "—", plan ? `of ${plural(plan.n_seen, "record")} seen at ${short(plan.catalog_ref, 8)}` : "no plan yet", "hero"),
     tile("Prepared", num(m.prepared || 0), "the buffer's pool today"),
     tile("In progress", num(m.in_progress || 0), "mia-data is preparing them"),
-    tile("Unprepared", num(m.unprepared || 0), `${num(m.needs_human || 0)} need a human`),
+    tile("Unprepared", num(m.unprepared || 0), `${num(m.needs_human || 0)} ${m.needs_human === 1 ? "needs" : "need"} a human`),
     tile("Raw bytes", `${fmtBytes(m.bytes_pool || 0)} / ${fmtBytes(m.bytes_fitting || 0)}`, `the prepared pool now / every fitting dataset; ${fmtBytes(m.bytes_to_fetch || 0)} not in the raw cache`),
     tile("Dimensionalities", dims.length ? dims.join(" · ") : "none", dims.length > 1 ? "one buffer serves one: narrow dims" : "one buffer, one model", "text"),
     tile("Capacity", fmt(m.capacity || 0), "non-overlapping coarsest crops in the fitting datasets"),
@@ -1692,10 +1694,10 @@ function renderDesigner() {  // the numbers over the whole plan, as the server s
   const steps = (m.funnel || []).map(step => ({ label: step.label, value: step.value, sub: step.remaining == null ? undefined : `${num(step.remaining)} remain after this rule`,
     color: step.label === NOT_PREPARED ? "var(--s4)" : step.remaining == null ? "var(--s3)" : "var(--accent)" }));
   hbars($("funnel"), steps, { labelW: 165, aria: "Records removed per rule", empty: S.planError ? "no plan: see the message above the actions" : "planning…" });
-  hbars($("bymod"), m.by_modality || [], { labelW: 140, aria: "Fitting datasets by modality", empty: "no dataset fits this spec" });
-  hbars($("byweight"), (m.weight_by_modality || []).map(bar => ({ ...bar, text: pct(bar.value) })), { labelW: 140, aria: "Weight share by modality", empty: "no prepared dataset in the pool yet: weights cover prepared datasets only" });
+  hbars($("bymod"), m.by_modality || [], { labelW: 140, aria: "Fitting datasets by modality", empty: "No dataset fits this spec." });
+  hbars($("byweight"), (m.weight_by_modality || []).map(bar => ({ ...bar, text: pct(bar.value) })), { labelW: 140, aria: "Weight share by modality", empty: "No prepared dataset in the pool yet: weights cover prepared datasets only." });
   const heavy = m.heaviest || [];
-  $("top").replaceChildren(...(heavy.length ? heavy.map(x => el("li", {}, el("b", {}, pct(x.weight || 0)), el("span", { title: x.id }, `${x.id} · ${x.modality_group || "none"} · ${fmt(x.positions || 0)} positions · ${x.channels ?? "?"} ch`))) : [el("li", { class: "empty" }, "no prepared dataset in the pool yet")]));
+  $("top").replaceChildren(...(heavy.length ? heavy.map(x => el("li", {}, el("b", {}, pct(x.weight || 0)), el("span", { title: x.id }, `${x.id} · ${x.modality_group || "none"} · ${fmt(x.positions || 0)} positions · ${x.channels ?? "?"} ch`))) : [el("li", { class: "empty" }, "No prepared dataset in the pool yet.")]));
   renderActions();
 }
 function viewDesigner() {
@@ -1744,7 +1746,7 @@ function viewDatasetList(arg, params) {
   const showChosen = () => {
     box.hidden = !CHOSEN.size;
     if (!CHOSEN.size) return;
-    count.textContent = `${num(CHOSEN.size)} ${CHOSEN.size === 1 ? "dataset" : "datasets"} selected`;
+    count.textContent = `${plural(CHOSEN.size, "dataset")} selected`;
     prepareButton(prepare, [...CHOSEN], null, sent => sent.forEach(id => { CHOSEN.delete(id); SETTLED.delete(id); }), SETTLED.size, "Prepare");
   };
   const ticked = (row, on) => { if (on && !PREPARABLE(row)) SETTLED.add(row.id); else SETTLED.delete(row.id); showChosen(); };
@@ -1803,7 +1805,7 @@ function datasetCards(d) {
     ["binding", ds.binding_hash ? el("span", {}, code(ds.binding_hash, 12), ds.binding_commit ? " at snippets " : "", code(ds.binding_commit, 10)) : ""],
     ds.revoked_at ? ["revoked", el("span", {}, when(ds.revoked_at), ds.revoked_by ? ` by ${ds.revoked_by}` : "")] : null,
     ["updated", when(row.updated_at)],
-    ["requests", d.requests.length ? el("span", {}, ...d.requests.flatMap((r, i) => [i ? " " : "", el("a", { href: SUBJECT_HASH.prep(r.key) }, r.key)])) : "none named it"],
+    ["preparation requests", d.requests.length ? el("span", {}, ...d.requests.flatMap((r, i) => [i ? " " : "", el("a", { href: SUBJECT_HASH.prep(r.key) }, r.key)])) : "none named it"],
   ])));
   if (ds.folder && (ds.previews || []).length) cards.push(card("Crops", `${num(ds.crops || ds.previews.length)} published; the first ${num(ds.previews.length)} with their annotation overlay. Click one to open it.`,
     el("div", { class: "gallery" }, ...ds.previews.map(id => el("a", { href: cropPng(ds, id, "overlay"), target: "_blank", rel: "noopener", title: id }, el("img", { src: cropPng(ds, id, "overlay"), loading: "lazy", alt: `crop ${id} with its overlay` }))))));
@@ -1816,7 +1818,8 @@ function datasetCards(d) {
     ] })));
   const raw = d.raw_asset;
   cards.push(card("Cache", "Its download in the raw cache, and each staged artifact: this dataset staged for one crop geometry by one recipe.",
-    raw ? kv([["raw download", el("span", { class: "pills" }, assetPill(data(raw).state), " ", data(raw).bytes ? fmtBytes(data(raw).bytes) : "", " · last used ", when(data(raw).last_used), " · ", folderLink(roots.raw_root, raw.key), " ", bufferLinks(raw.refs))]])
+    raw ? kv([["raw download", el("span", { class: "pills" }, assetPill(data(raw).state), ...[data(raw).bytes ? fmtBytes(data(raw).bytes) : "", data(raw).last_used ? el("span", {}, "last used ", when(data(raw).last_used)) : "", folderLink(roots.raw_root, raw.key)]
+        .filter(Boolean).flatMap((part, i) => [i ? " · " : " ", part]), " ", bufferLinks(raw.refs))]])
       : el("div", { class: "small" }, "Not in the raw cache."),
     pagedTable("dataset-staged:" + row.id, { source: pageOf("/assets/staged", "assets", () => ({ record: row.id })), sort: "last_used", dir: "desc", search: false, empty: "Not staged yet.", cols: [
       { key: "artifact", label: "artifact", cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)) },
@@ -1839,7 +1842,7 @@ function datasetCards(d) {
 // A stage off the line (needs-human, cancelled) hangs under the step the round stopped at, which is the newest
 // stage of `history` (newest first) that is on the line; with none, it stands apart at the end.
 // The line is named for what it is: the workflow that prepares a dataset, builds a buffer, or carries a request.
-const FLOW_LABELS = { dataset: "Preparation workflow:", buffer: "Buffer workflow:", prep: "Request workflow:" };
+const FLOW_LABELS = { dataset: "Preparation workflow:", buffer: "Buffer workflow:", prep: "Preparation request workflow:" };
 const flowRow = (kind, flow) => flow && FLOW_LABELS[kind] ? el("div", { class: "flowrow" }, el("span", { class: "flowlabel" }, FLOW_LABELS[kind]), flow) : flow;
 function lifecycle(line, stage, history, busy) {  // `busy`: a round is in progress at the current step
   if (!line || !stage) return null;
@@ -1856,8 +1859,9 @@ function lifecycle(line, stage, history, busy) {  // `busy`: a round is in progr
 // ---- buffers
 function servableText(servable) { const e = Object.entries(servable || {}); return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none"; }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
-// a buffer's lifecycle event as the issue's stage label: the inverse of mia_buffers.activities.STAGE_EVENTS
-const STAGE_OF = { created: "planning", planned: "plan-review", sourcing: "sourcing", approved: "sourcing", staged: "staged", ready: "ready", idle: "idle", retired: "retired", "needs-human": "needs-human" };
+// a buffer's lifecycle event as the issue's stage label: the inverse of mia_buffers.activities.STAGE_EVENTS.
+// `approved` is the approve at the staged gate: consumers draw from then on, so it reads as ready.
+const STAGE_OF = { created: "planning", planned: "plan-review", sourcing: "sourcing", staged: "staged", approved: "ready", ready: "ready", idle: "idle", retired: "retired", "needs-human": "needs-human" };
 const stageOf = ev => ev ? STAGE_OF[ev.kind] || ev.kind : "";
 function viewBuffers(id, refresh) {
   const root = $("buffersBody");
@@ -1868,11 +1872,11 @@ function viewBuffers(id, refresh) {
       { key: "key", label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.key) },
       { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
       { key: "status", label: "stage", cell: x => stagePill(x.stage) },
-      { label: "waits for", cell: x => x.status === "waiting" || x.status === "stuck" ? x.actions.filter(a => a !== "stop" && a !== "cancel").join(", ") : "" },
+      { label: "waits for", cell: x => x.status === "waiting" || x.status === "stuck" ? x.actions.filter(a => a !== "stop" && a !== "cancel").map(a => actionWord(x, a)).join(", ") : "" },
       { key: "updated", label: "updated", cell: x => when(x.updated) },
     ] })),
     card("Buffers", "One row per buffer a run built, the newest spec first and its newest round first; an older round is superseded by the newest. Open one for its events, pool, volumes, consumers and usage.",
-      pagedTable("buffers", { source: pageOf("/buffers", "buffers"), empty: "No buffers yet: start with New buffer.",
+      pagedTable("buffers", { source: pageOf("/buffers", "buffers"), empty: "No buffer yet: start with New buffer.",
         rowAttrs: b => ({ class: "click" + (b.superseded_by ? " superseded" : ""), title: b.superseded_by ? `superseded by ${b.superseded_by}, its spec's newest round` : "",
           onclick: e => { if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id); } }),
         cols: [
@@ -1883,12 +1887,12 @@ function viewBuffers(id, refresh) {
           { key: "volumes", label: "volumes", num: true, cell: b => num(b.volumes) },
           { key: "missing", label: "missing", num: true, cell: b => b.missing ? pill(num(b.missing), "warn", [{ b: "missing", t: PILL_HELP.missing + " These are volumes registered to the buffer whose pyramid the last scan did not find." }]) : "0" },
           { label: "servable", cell: b => servableText(b.servable) },
-          { key: "consumers_seen", label: "consumer seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
+          { key: "consumers_seen", label: "consumer last seen", cell: b => b.consumers_seen ? when(b.consumers_seen) : "never" },
           { key: "draws_today", label: "draws today", num: true, cell: b => num(b.draws_today) },
         ] })));
 }
 function sparkline(days) {
-  if (!days.length) return el("div", { class: "empty" }, "no draws recorded yet");
+  if (!days.length) return el("div", { class: "empty" }, "No draw recorded yet.");
   const W = 560, H = 130, left = 40, right = 8, top = 10, bottom = 22, plotW = W - left - right, plotH = H - top - bottom;
   const max = Math.max(1, ...days.map(d => Math.max(d.draws || 0, d.empty || 0)));
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Crops drawn per day, and requests answered empty per day" });
@@ -1900,7 +1904,7 @@ function sparkline(days) {
     svg.append(svgEl("rect", { x, y: top + plotH - h, width: bw, height: h, fill: "var(--accent)", rx: 2 }));
     if (d.empty) svg.append(svgEl("rect", { x: x + bw / 2 - 1, y: top + plotH - he, width: 2, height: he, fill: "var(--warn)" }));
     const hit = svgEl("rect", { x: left + slot * i, y: top, width: slot, height: plotH + bottom, fill: "transparent" }); svg.append(hit);
-    hoverable(hit, [{ b: d.day, t: "" }, { k: "var(--accent)", b: num(d.draws || 0), t: " crops drawn" }, { k: "var(--warn)", b: num(d.empty || 0), t: " requests answered empty" }, { t: `${num(d.consumers || 0)} consumers` }]);
+    hoverable(hit, [{ b: d.day, t: "" }, { k: "var(--accent)", b: num(d.draws || 0), t: " crops drawn" }, { k: "var(--warn)", b: num(d.empty || 0), t: d.empty === 1 ? " request answered empty" : " requests answered empty" }, { t: plural(d.consumers || 0, "consumer") }]);
   });
   for (const [i, anchor] of [[0, "start"], [days.length - 1, "end"]]) { const l = svgEl("text", { x: i ? W - right : left, y: H - 6, "text-anchor": anchor, class: "tick" }); l.textContent = days[i].day; svg.append(l); }
   return el("div", {}, el("div", { class: "legend" }, el("span", {}, el("i", { style: "background:var(--accent)" }), "crops drawn"), el("span", {}, el("i", { style: "background:var(--warn)" }), "requests answered empty (204)")), svg);
@@ -1910,7 +1914,7 @@ function healthLine(usage) {
   const h = usage.last_hour || {}, total = (h.requests ?? h.draws ?? 0) + (h.empty || 0), limit = usage.max_empty_fraction ?? 0.05;
   if (!total) return el("div", { class: "health" }, `no requests in the last hour (degraded above ${pct(limit)} empty)`);
   const frac = (h.empty || 0) / total, bad = frac > limit;
-  return el("div", { class: "health " + (bad ? "bad" : "ok") }, `${bad ? "degraded" : "healthy"}: ${pct(frac)} of the last hour's ${num(total)} requests were empty (limit ${pct(limit)})`);
+  return el("div", { class: "health " + (bad ? "bad" : "ok") }, `${bad ? "degraded" : "healthy"}: ${pct(frac)} of the last hour's ${plural(total, "request")} ${total === 1 ? "was" : "were"} empty (limit ${pct(limit)})`);
 }
 async function viewBuffer(root, id, refresh) {
   const hash = location.hash, e = encodeURIComponent(id);
@@ -1940,24 +1944,24 @@ async function viewBuffer(root, id, refresh) {
     !status && evs.length ? el("div", { class: "notice" }, "Not sourced yet: a buffer is registered when sourcing starts, after ", el("b", {}, "Run"), " on its spec's page. Until then it has only its events.") : null,
     !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
     el("section", { class: "grid2" },
-      card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", ...(status ? [healthLine(usage), sparkline(days.slice(-60))] : [el("div", { class: "empty" }, "not sourced yet")]),
-        retired ? pagedTable("buffer-usage:" + id, { source: pageOf(`/usage/${e}`, "days", null, true), search: false, empty: "no usage rows", cols: [
+      card("Usage", "Crops drawn per day, and the requests answered empty (different units: one request draws n crops).", ...(status ? [healthLine(usage), sparkline(days.slice(-60))] : [el("div", { class: "empty" }, "Not sourced yet.")]),
+        retired ? pagedTable("buffer-usage:" + id, { source: pageOf(`/usage/${e}`, "days", null, true), search: false, empty: "No usage yet.", cols: [
           { key: "day", label: "day", cell: d => d.day }, { key: "draws", label: "draws", num: true, cell: d => num(d.draws) },
           { key: "consumers", label: "consumers", num: true, cell: d => num(d.consumers) }, { key: "empty", label: "empty", num: true, cell: d => num(d.empty) },
         ] }) : null),
       card("Recipe", "What this buffer was built with, and what it serves.", status ? kv([
         ["spec", spec ? el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.key) : cfg.spec_name], ["spec hash", code(cfg.spec_hash, 12)], ["catalog commit", code(cfg.catalog_ref, 12)],
         ["pyramid levels", (cfg.levels || []).join(", ")], ["patch size (px)", num(cfg.patch)], ["channels", String(cfg.channels ?? "")],
-        ["tensorizer", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} at harness ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
+        ["tensoriser", cfg.recipe ? `${cfg.recipe.tensorizer || cfg.tensorizer || ""} at harness ${short(cfg.recipe.harness_commit, 10)}` : cfg.tensorizer],
         ["plan hash", code(cfg.plan_hash, 12)], ["split fractions", Object.entries(cfg.splits || {}).map(([k, v]) => `${k} ${v}`).join(" · ")],
         ["servable volumes", servableText(status.servable)], ["volumes registered", num(status.volumes)], ["empty answers allowed", cfg.max_empty_fraction != null ? pct(cfg.max_empty_fraction) : null],
         (status.quarantined || []).length ? ["quarantined", el("span", { class: "pills" }, assetPill("quarantined"), " " + status.quarantined.join(", "))] : null,
-      ]) : el("div", { class: "empty" }, evs.length ? "not sourced yet" : "the buffer's status did not load"))),
-    card("Events", "What happened to this buffer, newest first.", pagedTable("buffer-events:" + id, { source: pageOf(`/buffers/${e}/events`, "events"), empty: "no events yet", cols: [
+      ]) : el("div", { class: "empty" }, evs.length ? "Not sourced yet." : "The buffer's status did not load."))),
+    card("Events", "What happened to this buffer, newest first.", pagedTable("buffer-events:" + id, { source: pageOf(`/buffers/${e}/events`, "events"), empty: "No event yet.", cols: [
       { key: "seq", label: "#", num: true, cell: x => num(x.seq) }, { key: "kind", label: "event", cell: x => statePill(x.kind) }, { key: "at", label: "when", cell: x => when(x.at) },
       { label: "detail", wrap: true, cell: x => x.detail || "" },
     ] })),
-    status ? card("Dataset pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", pagedTable("buffer-pool:" + id, { source: pageOf(`/buffers/${e}/datasets`, "datasets"), sort: "dataset", empty: "no dataset in the pool yet", cols: [
+    status ? card("Dataset pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", pagedTable("buffer-pool:" + id, { source: pageOf(`/buffers/${e}/datasets`, "datasets"), sort: "dataset", empty: "No dataset in the pool yet.", cols: [
       { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) }, { label: "issue", cell: x => ghIcon(meta.datasets_repo, x.issue) },
       { label: "files", title: "the dataset's published crops", cell: x => folderLink(roots.storage_root, x.folder) },
       { label: "staged", title: "the staged artifact this buffer draws from", cell: x => folderLink(roots.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)) },
@@ -1966,10 +1970,10 @@ async function viewBuffer(root, id, refresh) {
       { key: "job", label: "job", cell: x => x.job ? el("code", {}, x.job) : "" }, { key: "updated", label: "updated", cell: x => when(x.updated_at) },
     ] })) : null,
     status ? el("section", { class: "grid2" },
-      card("Volumes", `${num(status.volumes || 0)} registered, the most drawn from first.`, pagedTable("buffer-volumes:" + id, { source: pageOf(`/buffers/${e}/volumes`, "volumes"), sort: "draws", dir: "desc", empty: "no volume registered", cols: [
+      card("Volumes", `${num(status.volumes || 0)} registered, the most drawn from first.`, pagedTable("buffer-volumes:" + id, { source: pageOf(`/buffers/${e}/volumes`, "volumes"), sort: "draws", dir: "desc", empty: "No volume registered.", cols: [
         { key: "volume", label: "volume", cell: v => el("code", {}, v.id) }, { key: "draws", label: "draws", num: true, cell: v => num(v.draws) }, { key: "missing", label: "", cell: v => v.missing ? pill("missing", "warn") : "" },
       ] })),
-      card("Consumers", "The training jobs registered with this buffer.", pagedTable("buffer-consumers:" + id, { source: pageOf(`/buffers/${e}/consumers`, "consumers"), sort: "last_seen", dir: "desc", search: false, empty: "no consumer has registered", cols: [
+      card("Consumers", "The training jobs registered with this buffer.", pagedTable("buffer-consumers:" + id, { source: pageOf(`/buffers/${e}/consumers`, "consumers"), sort: "last_seen", dir: "desc", search: false, empty: "No consumer has registered.", cols: [
         { key: "name", label: "name", cell: c => c.name }, { key: "host", label: "host", cell: c => c.host }, { label: "pid", num: true, cell: c => String(c.pid ?? "") },
         { key: "rank", label: "rank", num: true, cell: c => c.rank == null ? "" : String(c.rank) }, { key: "split", label: "split", cell: c => c.split },
         { key: "last_seen", label: "last seen", cell: c => when(c.last_seen) }, { label: "", cell: c => c.stale ? pill("stale", "warn") : "" },
@@ -2034,7 +2038,7 @@ async function viewPreparation() {
   const root = $("prepBody"), hash = location.hash;
   const counts = el("div", { class: "links" });
   root.replaceChildren(
-    card("Requests", "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a new buffer's plan. Open one for its datasets, to cancel it or to run it again.",
+    card("Preparation requests", "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a new buffer's plan. Open one for its datasets, to cancel it or to run it again.",
       pagedTable("requests", { source: pageOf("/subjects/prep", "subjects"), sort: "updated", dir: "desc", empty: "No request yet.", cols: [
         { key: "key", label: "request", cell: x => el("a", { href: SUBJECT_HASH.prep(x.key) }, x.key) },
         { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
@@ -2044,7 +2048,7 @@ async function viewPreparation() {
     card("Datasets", "Where each dataset stands; each count opens the Datasets list filtered to it.", counts));
   const states = (await load("/catalog/datasets?limit=1", true))?.facets?.state || {};
   if (location.hash !== hash) return;
-  counts.replaceChildren(...[["in-progress", "in progress"], ["needs-human", "need a human"], ["prepared", "prepared"], ["revoked", "revoked"], ["unprepared", "not prepared"]]
+  counts.replaceChildren(...[["in-progress", "in progress"], ["needs-human", states["needs-human"] === 1 ? "needs a human" : "need a human"], ["prepared", "prepared"], ["revoked", "revoked"], ["unprepared", "unprepared"]]
     .map(([state, words]) => el("a", { href: "#datasets?state=" + state }, `${num(states[state] || 0)} ${words}`)));
 }
 
@@ -2134,12 +2138,18 @@ const ACTION_HELP = {
 const actionHelp = (subject, action) => { const help = ACTION_HELP[subject.kind]?.[action]; return typeof help === "function" ? help(subject) : help; };
 const ACTION_ORDER = ["approve", "reject", "keep", "go", "revoke", "retire", "cancel", "stop"];
 const ACTION_WORDS = { approve: "Approve", reject: "Reject…", keep: "Keep", go: "Run again", revoke: "Revoke", retire: "Retire", cancel: "Cancel the round", stop: "Force stop" };
+// the word on an action's button; the Buffers list names what a spec waits for by the same words
+const actionWord = (subject, action) => action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
+  : action === "go" && subject.kind === "buffer" ? "Plan" : action === "dropped" ? "Files are in place"  // a spec's own controls
+  : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {
-  revoke: "Revoke what this published? Buffers that drew from it are degraded; nothing is deleted.",
+  revoke: "Revoke this dataset's published crops? Buffers that drew from it are degraded; nothing is deleted.",
   retire: "Retire this buffer? Training jobs reading it are refused and its staged data is released.",
-  cancel: "Cancel the round in progress? Its cluster jobs are killed and the work so far is not kept.",
+  cancel: s => s.kind === "prep" ? "Cancel the request's round in progress? The dataset rounds it started are stopped too."
+    : "Cancel the round in progress? Its cluster jobs are killed and the work so far is not kept.",
   stop: "Force stop? Use it when Cancel gets no answer. The workflow is terminated and the buffers are retired; a cluster job already running is NOT killed, and a request's dataset rounds keep running.",
 };
+const actionConfirm = (subject, action) => { const text = ACTION_CONFIRM[action]; return typeof text === "function" ? text(subject) : text; };
 const UNDELIVERED_AFTER_S = 10;  // an action still pending this long was not delivered: the service died, or the answer was lost
 let shownSubject = null;  // {kind, key, number} of the subject page on screen: what the stream refetches
 let shownView = "";  // the view on screen, so the stream can refresh Needs you
@@ -2245,7 +2255,7 @@ async function askHosts(run, send) {
   all.addEventListener("change", () => { ticks.forEach(tick => { tick.checked = all.checked; }); refresh(); });
   ticks.forEach(tick => tick.addEventListener("change", refresh));
   const rows = missing.map((m, n) => el("label", { class: "row" }, ticks[n], " ", el("span", { class: "mono" }, m.host), " ",
-    el("span", { class: "small", title: m.records.join(", ") }, `${m.records.length} dataset(s)`)));
+    el("span", { class: "small", title: m.records.join(", ") }, `${m.records.length} ${m.records.length === 1 ? "dataset" : "datasets"}`)));
   const box = el("dialog", { class: "ask", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
     el("h2", { id: "askTitle" }, "Hosts to approve"),
     el("p", { class: "small" }, "Jobs of this deployment may download from an approved host from then on."),
@@ -2278,8 +2288,7 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
   if (asked) { clearTimeout(askedTimer); askedTimer = setTimeout(refreshShown, asked.wait_s * 1000 + 300); }
   let checking = false;  // a click while the host check or its dialog is open starts nothing
   for (const action of offered) {
-    const word = action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
-      : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
+    const word = actionWord(subject, action);
     const sending = action === "reject" ? "Rejecting…" : word + "…";  // Reject… already ends in the dots of "more to enter"
     // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
     const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
@@ -2290,7 +2299,7 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
         sendAction(subject, { action, key: newKey(), ...verdict, ...more }, after);
       };
       if (action === "reject") return askReject(subject, note => send({ note }));
-      if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
+      if (ACTION_CONFIRM[action] && !confirm(actionConfirm(subject, action))) return;
       const run = hostsRun(subject, action);
       if (run) {
         if (checking) return;
@@ -2338,11 +2347,11 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   if (subject.actions.includes("revoke")) {
     const records = board.filter(d => d.status === "servable").map(d => d.record);
     const ticks = el("div", { class: "ticks" }, ...records.map(r => el("label", { class: "inline" }, el("input", { type: "checkbox", value: r }), " " + r)));
-    box.append(card("Revoke datasets", "The ticked datasets leave this buffer: their volumes are unregistered and their staged pyramids quarantined.", records.length ? ticks : el("div", { class: "empty" }, "no dataset is being served"),
+    box.append(card("Revoke datasets", "The ticked datasets leave this buffer: their volumes are unregistered and their staged pyramids quarantined.", records.length ? ticks : el("div", { class: "empty" }, "No dataset is being served."),
       el("div", { class: "actions" }, el("button", { type: "button", class: "btn danger", title: BUTTON_HELP.revokeTicked, disabled: !!subject.asked, onclick: e => {
         const chosen = [...ticks.querySelectorAll("input:checked")].map(i => i.value);
         if (!chosen.length) return banner("Tick the datasets to revoke first.");
-        if (!confirm(ACTION_CONFIRM.revoke)) return;
+        if (!confirm("Revoke the ticked datasets? Their volumes leave this buffer and their staged pyramids are quarantined; nothing is deleted.")) return;
         e.target.disabled = true; sendAction(subject, { action: "revoke", records: chosen, key: newKey() }, again);
       } }, "Revoke the ticked"))));
   }
@@ -2380,7 +2389,7 @@ async function viewSubject(kind, key, refresh) {
   if (!subject) {  // nothing was ever asked of it on this page: the first Start creates it
     const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again };
     const missing = kind === "dataset" ? (detail ? null : "No dataset with this id in the newest catalog or the registry.") : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
-    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new")), actionBar(fresh),
+    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new")), missing ? null : actionBar(fresh),
       missing ? el("div", { class: "empty" }, missing) : null, ...cards].filter(Boolean));
     return;
   }
@@ -2407,7 +2416,7 @@ async function viewSubject(kind, key, refresh) {
   if (kind === "prep" && subject.data?.spec) parts.push(card("The request", "As it was filed.", el("pre", { class: "err" }, subject.data.spec)));
   const log = el("div", { class: "card" }, el("h2", {}, "Timeline"), el("div", { class: "sub" }, "What was asked and what each round did, newest first. The issue on GitHub is a copy of this."));
   for (const e of [...entries].reverse()) log.append(el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("div", { class: "md" }, ...markdown(e.body))));
-  if (!entries.length) log.append(el("div", { class: "empty" }, "nothing yet"));
+  if (!entries.length) log.append(el("div", { class: "empty" }, "Nothing yet."));
   parts.push(log);
   root.replaceChildren(...parts);
 }
@@ -2490,7 +2499,7 @@ function route() {
 }
 function renderTopbar() {
   const c = S.catalogs[0];
-  $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${num(c.count)} datasets · synced `, when(c.synced_at)) : "no catalog synced");
+  $("catref").replaceChildren(c ? el("span", { title: c.ref }, `catalog ${short(c.ref, 8)} · ${plural(c.count, "dataset")} · synced `, when(c.synced_at)) : "no catalog synced");
 }
 function setupFilterBox() {  // the fold is a per-viewer convenience, remembered in this browser
   const box = $("filterBox");
