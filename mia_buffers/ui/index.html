@@ -2034,7 +2034,7 @@ async function viewPreparation() {
   const root = $("prepBody"), hash = location.hash;
   const counts = el("div", { class: "links" });
   root.replaceChildren(
-    card("Requests", "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a new buffer's plan. Open one for its datasets, to cancel it or to run it again.",
+    card("Preparation requests", "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a new buffer's plan. Open one for its datasets, to cancel it or to run it again.",
       pagedTable("requests", { source: pageOf("/subjects/prep", "subjects"), sort: "updated", dir: "desc", empty: "No request yet.", cols: [
         { key: "key", label: "request", cell: x => el("a", { href: SUBJECT_HASH.prep(x.key) }, x.key) },
         { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
