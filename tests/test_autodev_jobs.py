@@ -19,6 +19,17 @@ async def test_submit_once_per_key(tmp_path):
     assert await fresh.submit("k1", spec) == "777" and len(fake.submitted) == 1
 
 
+async def test_a_spec_factory_may_be_sync_or_async(tmp_path):
+    fake = FakeCsub()
+
+    async def async_spec():
+        return JobSpec("j", "true", str(tmp_path / "ws"), 10)
+
+    assert await _jobs(tmp_path, fake).submit("k1", async_spec) == "777"
+    assert await _jobs(tmp_path, fake).submit("k2", lambda: JobSpec("j", "true", str(tmp_path / "ws"), 10)) == "777"
+    assert len(fake.submitted) == 2
+
+
 async def test_reattach_by_cwd(tmp_path):
     ws = tmp_path / "ws"
     fake = FakeCsub(

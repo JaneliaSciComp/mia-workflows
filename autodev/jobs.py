@@ -8,9 +8,10 @@ every file written by a sandboxed job is read back.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -74,18 +75,21 @@ class CsubJobs:
             self._client = self._factory()
         return self._client
 
-    async def submit(self, key: str, spec: JobSpec | Callable[[], JobSpec]) -> str:
+    async def submit(self, key: str, spec: JobSpec | Callable[[], JobSpec | Awaitable[JobSpec]]) -> str:
         """Submit at most once per key. Returns the job id.
 
         The id file is checked first; failing that, the broker is asked for a job already running in the
         spec's workspace (submitted before a crash, but never recorded). A callable `spec` is only built
-        when the id file is missing, so an expensive or environment-dependent spec is not built on reattach."""
+        when the id file is missing, so an expensive or environment-dependent spec is not built on reattach; the
+        callable may return a spec or an awaitable of one, which is awaited."""
         if not JOB_KEY_RE.fullmatch(key):
             raise ValueError(f"invalid job key {key!r}: want {JOB_KEY_RE.pattern}")
         id_file = self.id_dir / f"{key}.id"
         if id_file.exists():
             return id_file.read_text().strip()
-        spec = spec() if callable(spec) else spec
+        if callable(spec):
+            built = spec()
+            spec = await built if inspect.isawaitable(built) else built
         workspace = os.path.realpath(spec.workspace)
         running = [
             status

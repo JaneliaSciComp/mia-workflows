@@ -186,10 +186,11 @@ class AgentJobs:
         """Submit once per (issue, key, round); a retry returns the same job."""
         agent_cfg = self.cfg.agent
         job_key = f"issue-{issue}-{check_key(key)}-r{round_number}"
-        policy_hosts = (await asyncio.to_thread(self.jobs.client.probe)).allowed_hosts
-        allow_hosts = agent_hosts(agent_cfg.allow_hosts, policy_hosts)
 
-        def build_spec() -> jobs.JobSpec:  # built lazily: the API key env var is read only when no id file exists
+        async def build_spec() -> (
+            jobs.JobSpec
+        ):  # built lazily: the broker is probed and the API key read only when no id file exists
+            policy_hosts = (await asyncio.to_thread(self.jobs.client.probe)).allowed_hosts
             return jobs.JobSpec(
                 name=f"autodev-{issue}-r{round_number}",  # csub rejects names containing the username; session = deployment
                 command=job_script(self.cfg, workspace.base_sha),
@@ -197,7 +198,7 @@ class AgentJobs:
                 walltime_min=agent_cfg.walltime_min,
                 cpus=agent_cfg.cpus,
                 mem_mb=agent_cfg.mem_mb,
-                allow_hosts=allow_hosts,
+                allow_hosts=agent_hosts(agent_cfg.allow_hosts, policy_hosts),
                 agent="claude",
                 ro_mounts=[mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts],  # Config guarantees ":ro"
                 env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},

@@ -79,7 +79,7 @@ def test_log_tail_reads_claude_and_job_stderr(tmp_path):
 
 class FakeCsub:
     def __init__(self, states=("DONE",), existing=(), error=None, policy_hosts=()):
-        self.policy_hosts = list(policy_hosts)
+        self.policy_hosts, self.probes, self.probe_error = list(policy_hosts), 0, None
         self.submitted, self.states, self.existing, self.error = [], list(states), list(existing), error
         self.killed = []
 
@@ -91,6 +91,9 @@ class FakeCsub:
         return SimpleNamespace(job_id="777", walltime_min=spec["walltime_min"])
 
     def probe(self):
+        self.probes += 1
+        if self.probe_error:
+            raise self.probe_error
         return SimpleNamespace(allowed_hosts=list(self.policy_hosts))
 
     def kill(self, job_ids=None):
@@ -142,6 +145,24 @@ async def test_an_agent_job_names_its_configured_hosts_then_the_policys(tmp_path
     j = _jobs(tmp_path, fake, allow_hosts=["pypi.org"])
     await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
     assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "zenodo.org", "data.4tu.nl"]
+
+
+async def test_a_retry_does_not_probe_the_broker(tmp_path):
+    fake = FakeCsub()
+    j = _jobs(tmp_path, fake)
+    ws = Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7")
+    ref = await j.submit(7, K, 1, ws)
+    fake.probe_error = OSError("socket down")
+    assert await j.submit(7, K, 1, ws) == ref and fake.probes == 1
+
+
+async def test_a_failed_probe_on_a_first_submission_submits_nothing(tmp_path):
+    fake = FakeCsub()
+    fake.probe_error = OSError("socket down")
+    j = _jobs(tmp_path, fake)
+    with pytest.raises(OSError):
+        await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
+    assert fake.submitted == []
 
 
 async def test_past_the_cap_the_newest_policy_hosts_are_kept(tmp_path):
