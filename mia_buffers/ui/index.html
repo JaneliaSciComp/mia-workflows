@@ -72,6 +72,7 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 dialog.ask{width:min(560px,calc(100vw - 32px));border:1px solid var(--ring);border-radius:8px;background:var(--surface);color:var(--fg);padding:16px 16px 6px}
 dialog.ask::backdrop{background:rgba(11,11,11,.4)}
 dialog.ask h2{margin:0 0 4px;font-size:16px;font-weight:600}
+dialog.ask label{display:block;margin:4px 0}
 dialog.ask .mono{overflow-wrap:anywhere;margin-bottom:8px}
 dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0 0;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .specbox{width:100%;max-width:100ch;min-height:16em;font-family:var(--mono);font-size:12.5px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
@@ -1558,11 +1559,14 @@ function createBuffer(container, yaml, blocker) {
 function prepareButton(container, all, blocker, done, again, text) {  // `text`: the button's word, where the count stands beside it
   // a request takes at most PREP_MAX datasets: a longer list is prepared in parts, the first PREP_MAX now
   const todo = all.slice(0, PREP_MAX), why = blocker;
+  let checking = false;  // a click while the host check or its dialog is open starts nothing
   const label = all.length > PREP_MAX ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets` : text || `Prepare these ${num(todo.length)} datasets`;
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }), onclick: async e => {
+    if (checking) return;
     if (!confirm(`Start preparing ${todo.length} datasets?${again ? ` ${again} of them are prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
-    askHosts({ records: todo }, hosts => start(e.target, hosts));
+    checking = true;
+    askHosts({ records: todo }, hosts => start(e.target, hosts)).finally(() => { checking = false; });
   } }, label));
   async function start(button, hosts) {
     button.disabled = true;
@@ -2227,12 +2231,13 @@ function askReject(subject, send) {
 }
 // Before a run starts, the service says which hosts it needs that the csub policy lacks (`run`: {records}, {prep} or
 // {spec}). `send(hosts)` is called once: [] when nothing is missing or the person starts without approving, the ticked
-// hosts on "Approve and start". On Cancel, and when the check fails, it is not called.
+// hosts on "Approve and start". On Cancel, and when the check fails, it is not called. The promise settles when the
+// check has failed or the dialog has closed, whether or not `send` ran.
 async function askHosts(run, send) {
   let missing;
   try { missing = (await api("/hosts/missing", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(run) })).hosts; }
   catch (e) { banner(`Hosts not checked (${e.status || "network error"}): ${e.message}. Nothing was started.`); return; }
-  if (!missing.length) return send([]);
+  if (!missing.length) { send([]); return; }
   const ticks = missing.map(() => el("input", { type: "checkbox" }));
   const all = el("input", { type: "checkbox", "aria-label": "select all hosts" });
   const approveButton = el("button", { type: "submit", class: "btn", value: "approve", title: BUTTON_HELP.approveHosts }, "Approve and start");
@@ -2249,13 +2254,16 @@ async function askHosts(run, send) {
       el("button", { type: "submit", class: "btn", value: "start", title: BUTTON_HELP.startUnapproved }, "Start without approving"),
       el("button", { type: "submit", class: "btn", value: "cancel", title: BUTTON_HELP.cancelHosts }, "Cancel"))));
   refresh();
+  await new Promise(settle => {
   box.addEventListener("close", () => {
     if (box.returnValue === "approve") send(missing.filter((m, n) => ticks[n].checked).map(m => m.host));
     else if (box.returnValue === "start") send([]);
     box.remove();
+    settle();
   });
   document.body.append(box);
   box.showModal();
+  });
 }
 // what the service is asked about before this subject's action starts a run; null for the actions that start none
 const hostsRun = (subject, action) => action === "go" && subject.kind === "dataset" ? { records: [subject.key] }
@@ -2268,6 +2276,7 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
   // ones, so none can be pressed until the answer (or the end of the wait) reloads this
   const asked = subject.asked;
   if (asked) { clearTimeout(askedTimer); askedTimer = setTimeout(refreshShown, asked.wait_s * 1000 + 300); }
+  let checking = false;  // a click while the host check or its dialog is open starts nothing
   for (const action of offered) {
     const word = action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
       : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
@@ -2283,7 +2292,11 @@ function actionBar(subject, after, skip) {  // `skip`: actions that have their o
       if (action === "reject") return askReject(subject, note => send({ note }));
       if (ACTION_CONFIRM[action] && !confirm(ACTION_CONFIRM[action])) return;
       const run = hostsRun(subject, action);
-      if (run) return askHosts(run, hosts => send(hosts.length ? { approve_hosts: hosts } : {}));
+      if (run) {
+        if (checking) return;
+        checking = true;
+        return askHosts(run, hosts => send(hosts.length ? { approve_hosts: hosts } : {})).finally(() => { checking = false; });
+      }
       send({});
     } }, asked && asked.action === action ? sending : word));
   }

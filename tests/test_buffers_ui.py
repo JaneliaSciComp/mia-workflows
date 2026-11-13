@@ -301,6 +301,94 @@ def test_an_approval_travels_with_the_start_action() -> None:
     assert "approve_hosts" in PAGE and '"/hosts/approve"' not in PAGE
 
 
+HOSTS_DOM = """
+class FakeNode {
+  constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; this.listeners = {}; this.checked = false; this.disabled = false; }
+  setAttribute(name, value) { this.attrs[name] = value; }
+  set className(value) { this.attrs.class = value; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  fire(type) { (this.listeners[type] || []).forEach(fn => fn({})); }
+  append(...kids) { this.kids.push(...kids); }
+  remove() { body.kids = body.kids.filter(kid => kid !== this); }
+  showModal() {}
+  close(value) { this.returnValue = value; this.fire("close"); }
+}
+const body = new FakeNode("body");
+const document = { createElement: tag => new FakeNode(tag), body };
+const walk = (node, found = []) => { if (typeof node === "string") return found; found.push(node); node.kids.forEach(kid => walk(kid, found)); return found; };
+const textOf = node => typeof node === "string" ? node : node.kids.map(textOf).join("");
+const byText = (root, text) => walk(root).find(node => node.tag === "button" && textOf(node) === text);
+"""
+
+
+def hosts_dialog(scenarios: list[dict]) -> list[dict]:
+    """Run the page's `askHosts` under node with a fake DOM, `api` and `banner`: for each scenario (`hosts`, or
+    `fail: [status, message]`, then `steps` on the dialog) report what `send` got, the banner, the dialog and settling."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith("const el = "))
+    start = PAGE.index("async function askHosts(")
+    asking = PAGE[start : PAGE.index("// what the service is asked about", start)]
+    help_texts = PAGE[PAGE.index("const BUTTON_HELP = {") : PAGE.index("const ACTION_HELP = {")]
+    script = (
+        f"{HOSTS_DOM}\n{helpers}\n{help_texts}\nconst JSON_HEADERS = {{}};\nlet fake, banners = [];\n"
+        "const api = async () => { if (fake.fail) { const e = new Error(fake.fail[1]); e.status = fake.fail[0]; throw e; } return { hosts: fake.hosts || [] }; };\n"
+        "const banner = message => banners.push(message);\n"
+        f"{asking}\n"
+        'const scenarios = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
+        "(async () => { const out = [];\n"
+        "for (fake of scenarios) { banners = []; body.kids = []; const sent = []; let settled = false;\n"
+        "  const done = askHosts({ records: [] }, hosts => sent.push(hosts)).then(() => { settled = true; });\n"
+        "  await new Promise(r => setImmediate(r));\n"
+        "  const box = body.kids[0], seen = { shown: !!box };\n"
+        "  if (box) { const approve = byText(box, 'Approve and start'), ticks = walk(box).filter(n => n.attrs.type === 'checkbox');\n"
+        "    seen.rows = ticks.slice(1).length; seen.disabledAtStart = approve.disabled;\n"
+        "    for (const step of fake.steps) { if (step === 'all') { ticks[0].checked = true; ticks[0].fire('change'); }\n"
+        "      else if (typeof step === 'number') { ticks[step + 1].checked = true; ticks[step + 1].fire('change'); } else box.close(step); }\n"
+        "    seen.enabledAfterTicks = !approve.disabled; seen.allChecked = ticks[0].checked; seen.text = textOf(box); }\n"
+        "  await done;\n"
+        "  out.push({ ...seen, sent, banners, settled, removed: body.kids.length === 0 }); }\n"
+        "console.log(JSON.stringify(out)); })();\n"
+    )
+    done = subprocess.run([node, "-e", script], input=json.dumps(scenarios), capture_output=True, text=True, check=True)
+    return json.loads(done.stdout)
+
+
+def test_the_hosts_dialog_works_as_it_runs() -> None:
+    both = [{"host": "a.example.org", "records": ["rec-a"]}, {"host": "b.example.org", "records": ["rec-b", "rec-c"]}]
+    nothing, approved, one, anyway, cancelled, escaped, failed = hosts_dialog(
+        [
+            {"hosts": []},
+            {"hosts": both, "steps": ["all", "approve"]},
+            {"hosts": both, "steps": [1, "approve"]},
+            {"hosts": both, "steps": ["start"]},
+            {"hosts": both, "steps": ["cancel"]},
+            {"hosts": both, "steps": [""]},
+            {"fail": [503, "no broker"]},
+        ]
+    )
+    assert nothing["sent"] == [[]] and not nothing["shown"] and nothing["settled"]
+    assert approved["rows"] == 2 and approved["disabledAtStart"] is True
+    assert (
+        "a.example.org" in approved["text"] and "b.example.org" in approved["text"] and "Select all" in approved["text"]
+    )
+    assert approved["enabledAfterTicks"] and approved["allChecked"]
+    assert approved["sent"] == [["a.example.org", "b.example.org"]] and approved["removed"] and approved["settled"]
+    assert one["sent"] == [["b.example.org"]] and one["enabledAfterTicks"] and not one["allChecked"]
+    assert anyway["sent"] == [[]] and anyway["removed"] and anyway["settled"]
+    for closed in (cancelled, escaped):
+        assert closed["sent"] == [] and closed["removed"] and closed["settled"]
+    assert failed["sent"] == [] and failed["settled"] and not failed["shown"]
+    assert failed["banners"] == ["Hosts not checked (503): no broker. Nothing was started."]
+
+
+def test_a_second_click_during_the_host_check_starts_nothing() -> None:
+    """Both start buttons hold a flag from the click until `askHosts` settles."""
+    assert PAGE.count("if (checking) return;") == 2 and PAGE.count("checking = true;") == 2
+    assert PAGE.count("checking = false; })") == 2
+
+
 def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
     """Reject has more to enter: its button ends in an ellipsis and opens a dialog for the feedback. No feedback box
     sits beside the buttons, and a rejection with nothing typed cannot be sent."""
