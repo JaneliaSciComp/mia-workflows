@@ -7,7 +7,7 @@ import pytest
 import respx
 from autodev_helpers import API, K, R, agent_commit, make_cfg, make_origin, run_git
 from temporalio.common import WorkflowIDConflictPolicy
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
 from test_buffers_register import token_server  # noqa: F401  (fixture)
 
 from autodev.activities import Activities, neutralize
@@ -274,8 +274,9 @@ async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path,
     if want:
         assert (await observe).approved
     else:
-        with pytest.raises(ApplicationError, match="nothing to do"):
+        with pytest.raises(ApplicationError, match="nothing to do") as waiting:
             await observe
+        assert waiting.value.category == ApplicationErrorCategory.BENIGN  # a wait: the worker logs no traceback
 
 
 async def _prepared(tmp_path, gh, issue=7):
