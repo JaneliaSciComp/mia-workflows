@@ -62,7 +62,6 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .lookup{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg);width:24ch}
 .subject h2{margin:0 0 6px;font-size:18px;overflow-wrap:anywhere}
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
-.actions textarea{flex:1 1 100%;max-width:80ch;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .btn.danger{border-color:var(--warn);color:var(--warn)}
 .chosen{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:4px 10px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-soft);font-size:13px}
 .chosen[hidden]{display:none}
@@ -134,6 +133,7 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
 .actions{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;margin-bottom:16px}
 .actions > div{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.actions:has(details[open]){align-items:flex-start}  /* an open fold is tall: the buttons beside it stay on its first line */
 
 /* KPI row */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:18px}
