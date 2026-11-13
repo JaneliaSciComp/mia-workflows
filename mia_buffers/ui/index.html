@@ -111,6 +111,8 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .md blockquote>*{margin:0 0 4px}
 .md h3,.md h4,.md h5,.md h6{font-size:13.5px;margin-top:6px}
 .md .tablewrap{width:max-content;max-width:100%}
+.md img.crop{display:block;width:256px;max-width:100%;height:auto;border-radius:4px;background:var(--grid)}
+.md summary{cursor:pointer;color:var(--fg2);margin:4px 0}
 
 /* filters: one row above the plan, wraps on narrow screens; a <details> so the row folds to its summary line.
    It sticks 14px under the topbar. The box-shadow fills that gap in the page colour while the content scrolls under,
@@ -2169,8 +2171,18 @@ async function sendAction(subject, body, after) {  // the answer is shown by the
 }
 // ---- a timeline entry's markdown: the subset a round writes, built as DOM nodes. Nothing here is ever parsed as
 // HTML (a body can carry text from a sandboxed job), and only an http(s) URL becomes a link.
-function mdInline(text) {  // `code`, **bold**, *italic*, [text](url) and bare URLs
-  const out = [], token = /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]+/g;
+// A round's crops table names its images in the gallery repo on GitHub, which a browser cannot read. buffer-api
+// serves the same files from the round's workspace (`GET /gallery/…`), so such an image is a picture from this
+// origin. Any other image is a link: the page loads nothing from a host a timeline body names.
+const GALLERY_IMAGE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/blob\/[^/]+\/galleries\/[^/]+\/(i\d+-e\d+)\/([0-9a-f]{40})\/([A-Za-z0-9_-][A-Za-z0-9._-]*)\/(raw|overlay)\.png\?raw=true$/;
+function mdImage(alt, url) {
+  const m = GALLERY_IMAGE.exec(url);
+  if (!m) return link(url, alt || url);
+  const src = `/gallery/${m[1]}/${m[2]}/${m[3]}/${m[4]}.png`;
+  return el("a", { href: src, target: "_blank", rel: "noopener", title: `${m[4]} of crop ${m[3]}: click to open it` }, el("img", { class: "crop", src, loading: "lazy", alt: `${m[4]} of crop ${m[3]}` }));
+}
+function mdInline(text) {  // `code`, **bold**, *italic*, [text](url), ![alt](url) and bare URLs
+  const out = [], token = /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]+/g;
   let last = 0, m;
   while ((m = token.exec(text))) {
     out.push(text.slice(last, m.index)); last = m.index + m[0].length;
@@ -2178,17 +2190,18 @@ function mdInline(text) {  // `code`, **bold**, *italic*, [text](url) and bare U
     else if (m[3] != null) out.push(el("strong", {}, ...mdInline(m[3])));
     else if (m[4] != null) out.push(el("em", {}, ...mdInline(m[4])));
     else if (m[5] != null) out.push(link(m[6], m[5].includes("://") ? m[5] : mdInline(m[5])));
+    else if (m[8] != null) out.push(mdImage(m[7], m[8]));
     else out.push(link(m[0], m[0]));
   }
   out.push(text.slice(last));
   return out.filter(part => part !== "");
 }
-function markdown(text) {  // paragraphs, headings, fenced code, pipe tables, lists and quotes; comments (markers) are dropped
+function markdown(text) {  // paragraphs, headings, fenced code, pipe tables, lists, quotes and a <details> fold; comments (markers) are dropped
   // ponytail: a nested list is flattened into its parent and `---` is a paragraph; a real parser when a round writes more
   const lines = text.replace(/<!--[\s\S]*?-->/g, "").split("\n"), out = [];
-  const fence = /^\s*(`{3,}|~{3,})/, heading = /^(#{1,6})\s+(.*)$/, item = /^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/, rule = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  const fence = /^\s*(`{3,}|~{3,})/, heading = /^(#{1,6})\s+(.*)$/, item = /^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/, fold = /^<details><summary>(.*)<\/summary>\s*$/, rule = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
   const tableAt = i => lines[i].includes("|") && (lines[i + 1] || "").includes("|") && rule.test(lines[i + 1]);
-  const starts = i => !lines[i].trim() || fence.test(lines[i]) || heading.test(lines[i]) || lines[i].startsWith(">") || item.test(lines[i]) || tableAt(i);
+  const starts = i => !lines[i].trim() || fence.test(lines[i]) || heading.test(lines[i]) || lines[i].startsWith(">") || item.test(lines[i]) || tableAt(i) || fold.test(lines[i]);
   const cells = row => row.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map(cell => mdInline(cell.trim().replace(/\\\|/g, "|")));
   const broken = rows => rows.flatMap((row, n) => n ? [el("br"), ...mdInline(row)] : mdInline(row));  // a newline is a line break, as in an issue comment
   for (let i = 0; i < lines.length;) {
@@ -2199,6 +2212,11 @@ function markdown(text) {  // paragraphs, headings, fenced code, pipe tables, li
       for (i++; i < lines.length && !closes(lines[i]); i++) code.push(lines[i]);
       i++; out.push(el("pre", {}, el("code", {}, code.join("\n"))));
     } else if ((m = heading.exec(line))) { out.push(el("h" + Math.min(6, m[1].length + 2), {}, ...mdInline(m[2]))); i++; }
+    else if ((m = fold.exec(line))) {  // the one tag a round writes (a long crops table); shown open
+      const folded = [];
+      for (i++; i < lines.length && lines[i].trim() !== "</details>"; i++) folded.push(lines[i]);
+      i++; out.push(el("details", { open: true }, el("summary", {}, ...mdInline(m[1])), ...markdown(folded.join("\n"))));
+    }
     else if (tableAt(i)) {
       const head = cells(line), body = [];
       for (i += 2; i < lines.length && lines[i].includes("|"); i++) body.push(cells(lines[i]));

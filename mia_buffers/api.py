@@ -463,6 +463,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
     ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
+    ("GET", re.compile(r"^/gallery/i(\d+)-e(\d+)/([0-9a-f]{40})/([^/]+)/(raw|overlay)\.png$"), "gallery_png", "read"),
     ("POST", re.compile(r"^/plan$"), "plan", "read"),  # a POST only to carry the spec text; it writes nothing
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
     ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
@@ -518,6 +519,7 @@ class BufferService:
         *,
         token: str | None = None,
         storage_root: Path | None = None,
+        work_root: Path | None = None,
         raw_root: Path | None = None,
         staged_root: Path | None = None,
         locks: LockDir | None = None,
@@ -534,6 +536,7 @@ class BufferService:
         self.token = token  # None disables the worker check (tests, a dev service)
         self.stale_s = stale_s
         self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
+        self.work_root = work_root  # the rounds' job workspaces, for a round's crops before it publishes; None: none
         self.raw_root, self.staged_root = raw_root, staged_root  # the assets sync scans these; None skips one
         self.locks = locks  # the workers' lock files, shown read-only; None shows none
         self.archive_dir = archive_dir  # a retire writes the buffer's draws here; None keeps them (a dev service)
@@ -1540,6 +1543,31 @@ class BufferService:
             raise HttpError(404, "no such crop")
         return 200, data, {"Content-Type": "image/png", "Cache-Control": "public, max-age=3600"}
 
+    def _gallery_png(
+        self, issue: str, event: str, sha: str, crop_id: str, name: str, *, query: dict[str, str], body: bytes
+    ) -> Response:
+        """A crop of a dataset round that has published nothing yet (one at review), from the round's workspace
+        under work_root: raw.png as its crop job at snippets commit `sha` wrote it, overlay.png as its verify job
+        drew it, each from the newest attempt that has the file. The page shows them in the round's timeline."""
+        if self.work_root is None:
+            raise HttpError(503, "the service has no work_root")
+        if not UI_NAME_RE.match(crop_id):
+            raise HttpError(404, "no such crop")
+        round_rel = f"issue-{int(issue)}/i{issue}-e{event}"
+        job, rel = (
+            ("crop", f"crops/{crop_id}/raw.png") if name == "raw" else ("verify", f"preview/{crop_id}/overlay.png")
+        )
+        attempts = sorted(
+            (self.work_root / round_rel).glob(f"{job}-{sha}-*"),
+            key=lambda path: (len(path.name), path.name),
+            reverse=True,
+        )
+        for workspace in attempts:  # job output is untrusted: no symlink, nothing outside its workspace, a size cap
+            data = None if workspace.is_symlink() else read_untrusted(workspace, rel, CROP_PNG_LIMIT, binary=True)
+            if data is not None:
+                return 200, data, {"Content-Type": "image/png", "Cache-Control": "public, max-age=3600"}
+        raise HttpError(404, "no such crop")
+
     def _list_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         return 200, {"datasets": self.ledger.datasets(query.get("state"))}, {}
 
@@ -1998,6 +2026,7 @@ def serve(cfg: Config) -> None:
         ledger,
         token=token,
         storage_root=cfg.paths.storage_root,
+        work_root=cfg.paths.work_root,
         raw_root=cfg.paths.raw_root,
         staged_root=cfg.paths.staged_root,
         locks=LockDir(cfg.paths.local_root / "locks"),

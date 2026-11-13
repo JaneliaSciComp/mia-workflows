@@ -65,6 +65,7 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
     }
     assert ("POST", "/plan") in requested
     assert resolve("GET", "/crops/folder/crop/overlay.png") == "read"  # the thumbnails' <img src>, not an api() call
+    assert resolve("GET", f"/gallery/i1-e2/{'a' * 40}/crop/raw.png") == "read"  # a round's crops in its timeline
     for method, path in requested:
         assert resolve(method, path) in {"read", "consumer", "action"}, (method, path)
 
@@ -195,6 +196,27 @@ def test_a_link_to_github_carries_the_github_mark() -> None:
     assert "</svg> the PR</a>" in body
     assert "</svg> https://github.com/o/r/issues/4</a>" in body
     assert '<a href="https://github.com.evil.example/x" target="_blank" rel="noopener">https://github.com.evil' in body
+
+
+def test_a_rounds_crops_are_pictures_served_by_this_origin() -> None:
+    """A round's crops table names images in the gallery repo, which a browser cannot read: each one is shown from
+    buffer-api's own copy. Any other image is a link, never a picture loaded from somewhere else."""
+    sha = "c" * 40
+    gallery = f"https://github.com/o/data/blob/galleries/galleries/rec-1/i7-e99/{sha}/i7-e99-b0-000"
+    table, other = rendered(
+        "<details><summary>2 crops</summary>\n\n| raw | overlay | caption |\n|---|---|---|\n"
+        f"| ![raw]({gallery}/raw.png?raw=true) | ![overlay]({gallery}/overlay.png?raw=true) | i7-e99-b0-000 · z=3 |\n"
+        "\n</details>\n\nafter the fold",
+        "![logo](https://tracker.example/pixel.png) and ![raw](https://github.com/o/data/blob/galleries/x/raw.png?raw=true)",
+    )
+    local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
+    assert table.startswith('<details open=""><summary>2 crops</summary><div') and "<p>after the fold</p>" in table
+    assert "&lt;" not in table and "!" not in table and "github.com" not in table
+    for name in ("raw", "overlay"):
+        assert f'<a href="{local}/{name}.png" target="_blank" rel="noopener"' in table
+        assert f'<img class="crop" src="{local}/{name}.png" loading="lazy" alt="{name} of crop i7-e99-b0-000">' in table
+    assert "<img" not in other and "!" not in other
+    assert '<a href="https://tracker.example/pixel.png" target="_blank" rel="noopener">logo</a>' in other
 
 
 def test_a_github_issue_is_the_mark_with_a_tooltip() -> None:

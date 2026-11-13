@@ -440,6 +440,37 @@ def test_sync_datasets_route(tmp_path):
     assert worker.handle("POST", "/sync/datasets", {}, b"")[0] == 401
 
 
+def test_gallery_png_route_serves_a_rounds_crops_from_its_workspace(tmp_path):
+    """A round at review has published nothing: its crops are in its crop job's workspace, their overlays in its
+    verify job's, and the newest attempt that has the file is the one served."""
+    sha, round_id = "c" * 40, "i7-e99"
+    round_dir = tmp_path / "work" / "issue-7" / round_id
+    for attempt, raw in ((1, b"old"), (2, b"new")):
+        (round_dir / f"crop-{sha}-{attempt}" / "crops" / "c1").mkdir(parents=True)
+        (round_dir / f"crop-{sha}-{attempt}" / "crops" / "c1" / "raw.png").write_bytes(raw)
+    (round_dir / f"verify-{sha}-1" / "preview" / "c1").mkdir(parents=True)
+    (round_dir / f"verify-{sha}-1" / "preview" / "c1" / "overlay.png").write_bytes(b"overlay")
+    (round_dir / f"verify-{sha}-2" / "preview").mkdir(parents=True)  # the second attempt drew nothing for c1
+    (round_dir / f"crop-{sha}-2" / "crops" / "c2").symlink_to(round_dir / f"crop-{sha}-1" / "crops" / "c1")
+    (round_dir / f"crop-{sha}-3").symlink_to(round_dir / f"crop-{sha}-1")  # no workspace of the round's
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), work_root=tmp_path / "work")
+    status, body, headers = s.handle("GET", f"/gallery/{round_id}/{sha}/c1/raw.png", {}, b"")
+    assert (status, body, headers["Content-Type"]) == (200, b"new", "image/png")
+    assert s.handle("GET", f"/gallery/{round_id}/{sha}/c1/overlay.png", {}, b"")[1] == b"overlay"
+    for missing in (
+        f"/gallery/{round_id}/{sha}/c2/raw.png",  # a symlink
+        f"/gallery/{round_id}/{'d' * 40}/c1/raw.png",  # another snippets commit
+        f"/gallery/i8-e99/{sha}/c1/raw.png",  # another dataset
+        f"/gallery/{round_id}/{sha}/..%2F..%2Fc1/raw.png",
+        f"/gallery/{round_id}/{sha}/.hidden/raw.png",
+        f"/gallery/{round_id}/{sha}/c1/crop.json",
+        f"/gallery/..%2Fissue-7/{sha}/c1/raw.png",
+    ):
+        assert s.handle("GET", missing, {}, b"")[0] == 404, missing
+    without = BufferService(Ledger(tmp_path / "l2.sqlite"))
+    assert without.handle("GET", f"/gallery/{round_id}/{sha}/c1/raw.png", {}, b"")[0] == 503
+
+
 def test_crop_png_route_serves_storage_root_only(tmp_path):
     root = tmp_path / "crops"
     (root / "confocal-human-u937" / "c1").mkdir(parents=True)
