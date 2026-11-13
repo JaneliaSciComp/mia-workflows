@@ -54,7 +54,7 @@ from .explore import (
 )
 from .hosts import HostCheck, Needed
 from .jobspec import levels_key
-from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
+from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger, head_of
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
@@ -393,14 +393,18 @@ def _asset_haystack(row: dict) -> tuple:
 ROUND_REF_RE = re.compile(r"^i(\d+)-e")  # a round id starts a crop set's ref: i<subject number>-e<event>
 
 
-def _assessed_record(subject: dict, numbers: dict[int, str], artifacts: dict[str, str]) -> str | None:
-    """The dataset a decision is about: a staged artifact's record, or the dataset of the round a crop set came
-    from. A snippet PR's head (`pr_head`) belongs to no one dataset."""
+def _assessed_record(
+    subject: dict, numbers: dict[int, str], artifacts: dict[str, str], heads: dict[str, str]
+) -> str | None:
+    """The dataset a decision is about: a staged artifact's record, the dataset of the round a crop set came from,
+    or, for a snippet PR's head, the dataset whose crops were made from that head (`heads`: head -> record)."""
     ref = str(subject.get("ref") or "")
     if subject.get("kind") == "artifact":
         return artifacts.get(ref.rsplit("/", 1)[-1])
     if subject.get("kind") == "crop_set" and (found := ROUND_REF_RE.match(ref)):
         return numbers.get(int(found.group(1)))
+    if subject.get("kind") == "pr_head":
+        return heads.get(head_of(subject) or "")
     return None
 
 
@@ -1465,10 +1469,18 @@ class BufferService:
             for asset in self.ledger.assets("staged")
             if asset["data"]
         }
+        heads: dict[str, str] = {}  # a snippet PR head -> the dataset whose crop set was made from it
+        for row in rows if gate is None else self.ledger.assessments(limit=100_000):
+            subject = row.get("subject") or {}
+            if subject.get("kind") == "crop_set" and (head := head_of(subject)):
+                if record := _assessed_record(subject, numbers, artifacts, {}):
+                    heads.setdefault(head, record)
+        approved = {row["assessment"]: row["id"] for row in self.ledger.datasets() if row.get("assessment")}
         rejected: set[tuple] = set()  # subjects with a reject among the rows seen so far, which are the newer ones
         for row in rows:
             subject = row.get("subject") or {}
-            if record := _assessed_record(subject, numbers, artifacts):
+            # an approve names its dataset on the dataset's row, whatever it is recorded on
+            if record := _assessed_record(subject, numbers, artifacts, heads) or approved.get(row.get("id")):
                 row["record"] = record
             about = (subject.get("kind"), subject.get("ref"))
             if row.get("verdict") == "approve" and about in rejected:

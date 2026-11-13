@@ -1019,6 +1019,46 @@ def test_decisions_route_is_open_and_returns_agreement(tmp_path):
     assert call(s, "GET", "/decisions", {"gate": "vibes"})[0] == 422
 
 
+def test_a_persons_verdict_on_a_pr_heads_crops_names_its_dataset_and_meets_the_judges(tmp_path):
+    """A person's verdict on crops made from a snippet PR head is recorded on the head, the crop judge's on the crop
+    set: the table names the dataset on both, and the agreement pairs them."""
+    from mia_core.judge.policy import new_assessment
+
+    head = "16fe7340f499cbc4d8d70e8af069520fe7711d7e"
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    crop_set = f"i7-e11:i7-e11-{head[:12]}"
+    rows = [
+        new_assessment(
+            gate="crops", subject_kind="crop_set", subject_ref=crop_set, verdict="approve", by="judge", at=10.0
+        ),
+        new_assessment(gate="review", subject_kind="pr_head", subject_ref=head, verdict="approve", by="judge", at=11.0),
+        new_assessment(
+            gate="crops", subject_kind="pr_head", subject_ref=head, verdict="approve", by="human:page", at=12.0
+        ),
+    ]
+    for row in rows:
+        worker(s, "PUT", f"/assessments/{row['id']}", row)
+    out = call(s, "GET", "/decisions")[1]
+    assert [(row["by"], row["record"]) for row in out["assessments"]] == [
+        ("human:page", "rec-a"),
+        ("judge", "rec-a"),
+        ("judge", "rec-a"),
+    ]
+    crops = out["agreement"]["crops"]
+    assert (crops["judged"], crops["agree"], crops["pending"]) == (1, 1, 0) and crops["pairs"][0]["human"] == "approve"
+    only = call(s, "GET", "/decisions", {"gate": "review"})[1]["assessments"]  # one gate's rows still name the dataset
+    assert [row["record"] for row in only] == ["rec-a"]
+    mine = call(s, "GET", "/decisions", {"record": "rec-a"})[1]["assessments"]  # the dataset page's own list
+    assert len(mine) == 3
+    # a head no crop set was made from, with nothing to say whose it is, stays unnamed
+    other = new_assessment(
+        gate="crops", subject_kind="pr_head", subject_ref="ab" * 20, verdict="reject", by="human:page", at=13.0
+    )
+    worker(s, "PUT", f"/assessments/{other['id']}", other)
+    assert "record" not in call(s, "GET", "/decisions")[1]["assessments"][0]
+
+
 def test_budget_routes(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
     root = quote("o/buffers#7", safe="")

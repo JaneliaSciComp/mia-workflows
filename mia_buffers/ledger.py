@@ -13,6 +13,7 @@ import dataclasses
 import gzip
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -49,6 +50,18 @@ EVENT_KINDS = (  # a buffer's lifecycle
     "retired",
     "needs-human",
 )
+
+HEAD_RE = re.compile(r"[0-9a-f]{12}")
+
+
+def head_of(subject: dict) -> str | None:
+    """The snippets commit a verdict is about, as its first 12 hex digits: a crop set's ref ends with it, a snippet
+    PR head's ref begins with it. A person's verdict on the crops of a PR head is recorded on the head, the crop
+    judge's on the crop set, and this joins the two."""
+    kind, ref = subject.get("kind"), str(subject.get("ref") or "")
+    head = ref.rsplit("-", 1)[-1] if kind == "crop_set" else ref[:12] if kind == "pr_head" else ""
+    return head if HEAD_RE.fullmatch(head) else None
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS buffers (id TEXT PRIMARY KEY, config TEXT NOT NULL);
@@ -773,9 +786,11 @@ class Ledger:
     def agreement(self, gate: str, limit: int = 5000) -> dict:
         """How the judge and the humans agree at a gate (spec autonomous-gates §9): per subject with a judge
         assessment, its newest judge verdict against the newest human verdict; no human verdict yet is `pending`.
+        A person's verdict on a snippet PR head counts for the crop set made from that head (`head_of`).
         Returns {"judged", "agree", "disagree", "pending", "pairs": [{subject, judge, human, agree}]}."""
         newest_judge: dict[str, dict] = {}
         newest_human: dict[str, dict] = {}
+        on_head: dict[str, dict] = {}  # snippet PR head -> the newest human verdict recorded on it
         for row in self.assessments(gate=gate, limit=limit):  # newest first: the first seen per subject wins
             subject = row.get("subject") or {}
             key = f"{subject.get('kind')}:{subject.get('ref')}"
@@ -784,9 +799,13 @@ class Ledger:
                 newest_judge.setdefault(key, row)
             elif by.startswith("human:"):
                 newest_human.setdefault(key, row)
+                if subject.get("kind") == "pr_head" and (head := head_of(subject)):
+                    on_head.setdefault(head, row)
         pairs = []
         for key, judge in newest_judge.items():
             human = newest_human.get(key)
+            if human is None and key.startswith("crop_set:"):
+                human = on_head.get(head_of(judge["subject"]) or "")
             abstained = judge.get("verdict") == "escalate"  # the judge did not decide: neither agreement nor not
             pairs.append(
                 {
