@@ -1,7 +1,8 @@
 # MIA: approving data hosts from the page — Spec
 
-**Status:** v0.3 · 2026-11-12 · the description was approved by the user in chat 2026-11-12; this document is
-not yet approved. v0.3 names the page's entry points as they stand at 4a37504 (§6). v0.2 took the user's rulings
+**Status:** v0.4 · 2026-11-12 · approved by the user 2026-11-12 (as v0.3). v0.4 corrects §3 after a review: two
+generations at once are not harmless, and how they are made safe without a lock file.
+v0.3 names the page's entry points as they stand at 4a37504 (§6). v0.2 took the user's rulings
 on autodev and on csub (§2.1) and a reviewer's pass against the code: where the policy directory may live (§3),
 where a buffer's pool comes from (§4), which broker `mia exec` talks to (§3), and what the installed csub does
 and does not bound (§9).
@@ -133,9 +134,17 @@ There is no TOML writer in the environment. *My call:* a small serializer for th
 in step 3, over a new dependency. Marked `# ponytail:`.
 
 **Who generates.** `mia up <service>`, for every app, before it starts the broker; buffer-api when it starts and
-after each approval. Because generation is a pure function of two files and ends in a rename, two runs at once
-are harmless. No lock file is used (home may be NFS). buffer-api is the only appender to the approvals file and
-serializes its own appends in process.
+after each approval.
+
+**Two generations at once.** A rename alone is not enough: a generation that read the approvals before an append
+could publish after the one that read them later, and the newest approval would be missing from the policy. So:
+
+- buffer-api, the only appender, holds one in-process lock across an approval's append and its generation;
+- each generation writes to a temp file of its own, renames it into place, then reads the approvals again and
+  generates once more if they changed. Whichever generation publishes last has therefore seen every approval
+  made before it published.
+
+No lock file is used (home may be NFS).
 
 **The brokers.** `mia up` starts every service's broker as `csub-broker --policy <policy_dir>/broker.toml
 --serve <socket>`: one policy for the deployment (the user's ruling, §2.1).
