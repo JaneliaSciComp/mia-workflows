@@ -520,6 +520,28 @@ async def test_admit_without_downloads_entry_pins_main(tmp_path):
     assert downloads == {"record_commit": main_sha, "downloaders": []}
 
 
+async def test_a_folder_another_record_prepared_is_refused(tmp_path):
+    """Two catalog records can share a folder name; the one prepared first owns the folder."""
+    t = _setup(tmp_path)
+    state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
+    cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
+    dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"
+    dataset_dir.mkdir(parents=True)
+    binding_bytes = yaml.safe_dump({**BINDING, "record": "zenodo-1-rec-1"}).encode()
+    (dataset_dir / "binding.yaml").write_bytes(binding_bytes)
+    manifest = {"count": 2, "binding": {"sha256": hashlib.sha256(binding_bytes).hexdigest()}}
+    (dataset_dir / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ApplicationError, match="lm-human-rec-1 belongs to record zenodo-1-rec-1") as error:
+        await t.a.admit(1, "11")  # a new round stops at admission
+    assert error.value.non_retryable
+    with pytest.raises(ApplicationError, match="belongs to record zenodo-1-rec-1"):  # a round under way: at publish
+        await t.a.publish_crops(1, ROUND, str(cw), [_crop(cw, "c1", 0)], SNIP_SHA)
+    assert (dataset_dir / "binding.yaml").read_bytes() == binding_bytes and not (dataset_dir / "c1").exists()
+    seen = _registry_seen(t)
+    await t.a.set_stage(1, "needs-human", state)  # the other record's publication is not this one's
+    assert seen[0] == ("/datasets/rec-1", {"state": "needs-human", "data_stage": "needs-human", "issue": 1})
+
+
 async def test_publish_crops_publishes_the_binding(tmp_path):
     t = _setup(tmp_path)
     await t.a.admit(1, "99")

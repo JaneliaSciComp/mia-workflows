@@ -360,11 +360,14 @@ class Activities:
         """The registry row for the dataset at `stage`: prepared (with the manifest's facts) when its folder holds a
         binding and a manifest that matches it, else in-progress, or needs-human at that stage."""
         try:
-            dataset_dir = self._dataset_dir(round_id, self._pins(round_id))
+            pins = self._pins(round_id)
+            dataset_dir = self._dataset_dir(round_id, pins)
+            crop_publish.check_owner(dataset_dir, pins.record)
             if (dataset_dir / REVOKED_FILE).is_file():  # revoked stays revoked until a new publication
                 return {"state": "revoked", "data_stage": stage, "issue": issue}
             row = crop_publish.prepared_row(dataset_dir)
-        except (ValueError, OSError) as err:  # no derivable folder (unclear record) or unreadable: a state row only
+        except (ValueError, OSError, Conflict) as err:
+            # no derivable folder (unclear record), unreadable, or another record's folder: a state row only
             log.warning("round %s: no prepared lookup: %s", round_id, err)
             row = None
         if row:
@@ -399,7 +402,8 @@ class Activities:
         """Pin the round: the record is the subject's key, record_commit comes from the downloads state (or the
         catalog's main when the record was never downloaded: its jobs fetch on demand), then snippets main and the
         harness checkout. The round is charged to whoever asked for it: the root its `go` carries, else the
-        dataset itself. Written once to state_dir/rounds/<round_id>/; a retry returns the same pins."""
+        dataset itself. A record whose dataset folder is another record's is refused here. Written once to
+        state_dir/rounds/<round_id>/; a retry returns the same pins."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
@@ -421,6 +425,7 @@ class Activities:
         if path is None:
             raise ValueError(f"{record_id}: no record on main")
         record = await catalog.record(self.gh_catalog, path, entry["record_commit"])
+        crop_publish.check_owner(self.cfg.paths.storage_root / catalog.dataset_folder(record, record_id), record_id)
         pins = Pins(
             record_id,
             entry["record_commit"],
@@ -1040,6 +1045,7 @@ class Activities:
         timeout = activity.info().start_to_close_timeout if activity.in_activity() else None
         pins = self._pins(round_id)
         dataset_dir = self._dataset_dir(round_id, pins)
+        crop_publish.check_owner(dataset_dir, pins.record)
         revoked = (dataset_dir / REVOKED_FILE).is_file()
         published = await asyncio.to_thread(
             crop_publish.publish,
