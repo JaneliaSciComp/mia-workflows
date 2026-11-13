@@ -1313,8 +1313,8 @@ function ago(t) {
   const s = toEpoch(t); if (s == null) return "";
   const d = Date.now() / 1000 - s, a = Math.abs(d);
   if (a < 10) return "just now";
-  const [v, u] = a < 60 ? [a, "s"] : a < 3600 ? [a/60, "min"] : a < 86400 ? [a/3600, "h"] : [a/86400, "d"];
-  return d >= 0 ? `${Math.round(v)} ${u} ago` : `in ${Math.round(v)} ${u}`;
+  const [v, u] = a < 60 ? [a, "s"] : a < 3600 ? [a/60, "m"] : a < 86400 ? [a/3600, "h"] : [a/86400, "d"];
+  return d >= 0 ? `${Math.round(v)}${u} ago` : `in ${Math.round(v)}${u}`;
 }
 const when = t => { const s = toEpoch(t); return s == null ? "" : el("span", { title: new Date(s * 1000).toISOString() }, ago(t)); };
 
