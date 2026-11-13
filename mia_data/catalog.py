@@ -100,11 +100,19 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
+UNKNOWN_ORGANISM = "unknown"
+
+
+def organism_of(organisms: list) -> str:
+    """The one organism a record names; `unknown` when it names none, several, or one with no letters or digits."""
+    return str(organisms[0]) if len(organisms) == 1 and _slug(str(organisms[0])) else UNKNOWN_ORGANISM
+
+
 def dataset_folder(record: dict, record_id: str) -> str:
     """The dataset's folder name under storage_root: `{modality family}-{organism}-{name}`.
 
-    Raises ValueError where miao_layout would stop (family or organism unclear). `record_id` is the
-    trusted id (the record's own `id` field is not, see seed)."""
+    A record with no single organism is filed under `unknown`. Raises ValueError when the modality family is
+    unclear. `record_id` is the trusted id (the record's own `id` field is not, see seed)."""
     imaging = record.get("imaging") or {}
     modalities, organisms = imaging.get("modality") or [], imaging.get("organism") or []
     # The family of the first modality if it is unambiguous, else the family all modalities share.
@@ -113,10 +121,9 @@ def dataset_folder(record: dict, record_id: str) -> str:
         for subset in (modalities[:1], modalities)
     ]
     family = next((next(iter(candidates)) for candidates in family_sets if len(candidates) == 1), None)
-    if family is None or len(organisms) != 1 or not _slug(str(organisms[0])):
-        raise ValueError(
-            f"{record_id}: no dataset folder: modality {modalities} / organism {organisms} unclear (one of each needed)"
-        )
+    if family is None:
+        raise ValueError(f"{record_id}: no dataset folder: modality {modalities} unclear (one family needed)")
+    organism = organism_of(organisms)
     words = record_id.split("-")
     if len(words) > 2 and re.fullmatch(r"\d+", words[1]):  # accession prefix: zenodo-7142003-...
         words = words[2:]
@@ -128,4 +135,4 @@ def dataset_folder(record: dict, record_id: str) -> str:
         "cryoet",
     }
     name = _slug("-".join(word for word in words if word not in modality_words) or record_id)
-    return f"{family}-{ORGANISM_SHORT.get(organisms[0]) or _slug(str(organisms[0]))}-{name}"
+    return f"{family}-{ORGANISM_SHORT.get(organism) or _slug(organism)}-{name}"

@@ -72,21 +72,26 @@ async def test_downloaded_union_keeps_newest_and_both_downloaders(gh_catalog):
 @respx.mock
 @respx.mock
 @pytest.mark.parametrize(
-    "rid, folder",
+    "rid, organism, name",
     [
-        ("bbbc034-hipsc-nuclei-3d", "lm-human-bbbc034-hipsc-nuclei-3d"),  # as demo-native's dataset_dir
-        ("hf-pytc-zebrafinch-j0126-ffn-em", "em-taeniopygia-guttata-hf-pytc-zebrafinch-j0126-ffn"),
+        ("bbbc034-hipsc-nuclei-3d", "human", "bbbc034-hipsc-nuclei-3d"),  # as demo-native's dataset_dir
+        ("hf-pytc-zebrafinch-j0126-ffn-em", "taeniopygia-guttata", "hf-pytc-zebrafinch-j0126-ffn"),
         (
             "czcdp-10003-mpneumoniae-chloramphenicol-ribosomes-cryoet",
-            "em-mycoplasmoides-pneumoniae-mpneumoniae-chloramphenicol-ribosomes",
+            "mycoplasmoides-pneumoniae",
+            "mpneumoniae-chloramphenicol-ribosomes",
         ),
     ],
 )
-def test_dataset_folder_follows_miao_layout(rid, folder):
+def test_dataset_folder_follows_miao_layout(rid, organism, name):
     rec = yaml.safe_load((FIX / "records" / f"{rid}.yaml").read_text())
-    assert catalog.dataset_folder(rec, rid) == folder
-    with pytest.raises(ValueError):
-        catalog.dataset_folder({**rec, "imaging": {**rec["imaging"], "organism": []}}, rid)
+    family = "lm" if rid.startswith("bbbc034") else "em"
+    assert catalog.dataset_folder(rec, rid) == f"{family}-{organism}-{name}"
+    for organisms in ([], ["Homo sapiens", "Mus musculus"], ["?"]):  # none, several, no letters: filed as unknown
+        unclear = {**rec, "imaging": {**rec["imaging"], "organism": organisms}}
+        assert catalog.dataset_folder(unclear, rid) == f"{family}-unknown-{name}"
+    with pytest.raises(ValueError, match="modality .* unclear"):
+        catalog.dataset_folder({**rec, "imaging": {**rec["imaging"], "modality": ["other"]}}, rid)
 
 
 def test_render_issue_with_record_commit_only():

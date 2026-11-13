@@ -288,7 +288,7 @@ async def test_set_stage_needs_human_with_an_unclear_record_still_comments(tmp_p
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     seen = _registry_seen(t)
     record_file = t.cfg.paths.state_dir / "rounds" / ROUND / "record.yaml"
-    record_file.write_text(yaml.safe_dump({"imaging": {"modality": ["confocal"], "organism": []}}))  # no folder
+    record_file.write_text(yaml.safe_dump({"imaging": {"modality": ["other"], "organism": []}}))  # no folder
     await t.a.set_stage(1, "needs-human", state, "why")
     assert seen[0] == ("/datasets/rec-1", {"state": "needs-human", "data_stage": "needs-human", "issue": 1})
     (path, entry) = seen[1]

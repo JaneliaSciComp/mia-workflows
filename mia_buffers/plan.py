@@ -16,6 +16,8 @@ from pathlib import Path
 
 import yaml
 
+from mia_data.catalog import organism_of
+
 from .assume import channel_recipes, voxel_size
 from .select import Decision, decide_all
 from .spec import Spec
@@ -461,7 +463,7 @@ def build_plan(
             dims=f.dims,
             modality_group=f.modality_group,
             family=f.family,
-            organism=f.organisms[0] if f.organisms else None,
+            organism=organism_of(f.organisms),
             channels=largest.channels if largest else None,
             n_items=f.n_items,
             admitted=decision.admitted,
