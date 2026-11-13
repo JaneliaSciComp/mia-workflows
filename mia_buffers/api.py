@@ -1058,7 +1058,7 @@ class BufferService:
                 raise HttpError(404, f"no dataset {record!r} has been started")
             if self._catalog_record(record) is None:
                 raise HttpError(404, f"{record!r} is not a record of a synced catalog")
-            self._check_hosts(parsed, partial(self._needed, records=[record]))
+            self._check_hosts(parsed, partial(self._needed, records=[record]), "dataset", None)
             # a dataset whose registry row already names an issue keeps that number: its
             # workflow id, rounds and budget root are built from it
             known = (self.ledger.dataset(record) or {}).get("issue")
@@ -1099,6 +1099,7 @@ class BufferService:
             plan_first=parsed.plan_first,
             approve_hosts=parsed.approve_hosts,
         )
+        self._check_hosts(go, None, "buffer", None)  # a buffer's go starts no job of its own: refuse before saving
         return self._buffer_action(name, go, headers, create=True)
 
     def _spec_action(self, name: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
@@ -1159,11 +1160,11 @@ class BufferService:
             raise HttpError(422, f"not a preparation request: {error}") from None
         go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, approve_hosts=parsed.approve_hosts)
         needed = partial(self._needed, records=records)
-        self._check_hosts(go, needed)
         repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
         if repeat is not None and repeat["kind"] == "prep":  # a double click: the request filed by the first one
             subject = self.ledger.find_subjects(kind="prep", number=repeat["number"])[0]
         else:
+            self._check_hosts(go, needed, "prep", None)
             subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec})
         return self._act_on(subject, go, self._actor(headers, go), {"spec": parsed.spec}, needed)
 
@@ -1234,19 +1235,28 @@ class BufferService:
             if parsed.revision != subject["revision"]:
                 raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
 
-    def _check_hosts(self, parsed: ActionBody, needed: Callable[[], Needed] | None) -> None:
+    def _check_hosts(
+        self, parsed: ActionBody, needed: Callable[[], Needed] | None, kind: str, number: int | None
+    ) -> bool:
         """Refuse approve_hosts that cannot be approved here: the action starts no job (422), the service has no
-        policy (503), or a host is not one the run needs (422). Nothing is written."""
+        policy (503), the key was used for another action (409), or a host is not one the run needs (422).
+        Nothing is written. False when there is nothing to approve: no hosts, or a key that already carried this
+        action (the first try checked and approved them). `number` is None while the subject is not created."""
         if not parsed.approve_hosts:
-            return
+            return False
         if needed is None:
             raise HttpError(422, "approve_hosts goes with an action that starts jobs")
         if self.hosts is None:
             raise HttpError(503, "this service has no csub policy to approve hosts in")
+        if parsed.key and (seen := self.ledger.action_by_key(parsed.key)) is not None:
+            if (seen["kind"], seen["number"], seen["action"]) != (kind, number, parsed.action):
+                raise HttpError(409, f"the key {parsed.key!r} was used for another action")  # as Ledger.add_action
+            return False
         try:
             self.hosts.check(parsed.approve_hosts, needed())
         except ValueError as error:
             raise HttpError(422, str(error)) from None
+        return True
 
     def _act_on(
         self,
@@ -1259,11 +1269,13 @@ class BufferService:
         """Steps 1 to 6 of spec §5 for one subject: check the stage and the revision (`_accepts`), record the
         action, send it to Temporal, and settle it with its timeline entry. A key seen before is the same action
         sent again under its id, whatever the stage is by now. `approve_hosts` (only with `needed`, the hosts this
-        run needs) is checked, approved and written to the timeline before the action is recorded."""
+        run needs) is checked, approved and written to the timeline after every other refusal and before the
+        action is recorded."""
         kind, number = subject["kind"], subject["number"]
         self._accepts(subject, parsed)
-        if parsed.approve_hosts:
-            self._check_hosts(parsed, needed)
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal: no workflow can be started from it")
+        if self._check_hosts(parsed, needed, kind, number):
             assert self.hosts is not None  # _check_hosts answered 503 otherwise
             try:
                 added = self.hosts.approve(parsed.approve_hosts, by=actor, kind=kind, number=number)
@@ -1277,8 +1289,6 @@ class BufferService:
                     body=f"**Hosts approved:** {names} by `{neutralize(actor)}`",
                     marker=f"<!-- mia: hosts {time.time_ns()} -->",
                 )
-        if self.dispatcher is None:
-            raise HttpError(503, "this service has no way to Temporal: no workflow can be started from it")
         try:
             action, _ = self.ledger.add_action(kind, number, parsed.action, actor, key=parsed.key, payload=payload)
         except ValueError as error:

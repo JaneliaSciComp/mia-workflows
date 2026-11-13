@@ -2165,10 +2165,10 @@ def test_filing_a_request_approves_its_hosts(tmp_path, _home):
     assert len(s.ledger.find_subjects(kind="prep")) == 1
 
 
-def test_running_a_buffers_plan_approves_its_hosts(tmp_path, _home):
-    s, gateway = _starting(tmp_path)
+def _at_plan_review(s, tmp_path):
+    """A buffer subject at plan-review whose plan pools rec-a, bound to data.example.org: (number, plan path)."""
     number = s.ledger.create_subject("buffer", SPEC_NAME, data={"spec": SPEC_TEXT})["number"]
-    _, entry = s.ledger.append_entry("buffer", number, body="plan", marker="m1", round_id="i7-e1", stage="plan-review")
+    s.ledger.append_entry("buffer", number, body="plan", marker="m1", round_id="i7-e1", stage="plan-review")
     plan = tmp_path / "rounds" / "i7-e1" / "plan.json"
     plan.parent.mkdir(parents=True)
     plan.write_text(json.dumps({"rows": [{"id": "rec-a", "admitted": True, "fit": {"ok": True}}]}))
@@ -2176,12 +2176,68 @@ def test_running_a_buffers_plan_approves_its_hosts(tmp_path, _home):
     folder = tmp_path / "storage" / "rec-a"
     folder.mkdir(parents=True)
     (folder / "binding.yaml").write_text(yaml.safe_dump({"raw": [{"urls": ["https://data.example.org/x"]}]}))
+    return number, plan
+
+
+def test_running_a_buffers_plan_approves_its_hosts(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    number, _ = _at_plan_review(s, tmp_path)
     revision = s.ledger.subject("buffer", SPEC_NAME)["revision"]
     body = {"action": "approve", "revision": revision, "approve_hosts": ["data.example.org"]}
     assert act(s, SPEC_ACTIONS, {**body, "approve_hosts": ["other.example.org"]})[0] == 422
     assert act(s, SPEC_ACTIONS, body)[0] == 202
     assert _bodies(s, "buffer", number)[1] == "**Hosts approved:** `data.example.org` by `page`"
     assert _approvals(s)[0]["kind"] == "buffer" and len(gateway.sent) == 1
+
+
+def test_a_repeat_of_a_sent_approve_returns_the_first_action_though_the_plan_is_gone(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    number, plan = _at_plan_review(s, tmp_path)
+    revision = s.ledger.subject("buffer", SPEC_NAME)["revision"]
+    body = {"action": "approve", "revision": revision, "key": "k1", "approve_hosts": ["data.example.org"]}
+    first = act(s, SPEC_ACTIONS, body)[1]
+    plan.unlink()
+    status, again, _ = act(s, SPEC_ACTIONS, body)
+    assert (status, again["id"]) == (202, first["id"])
+    assert len(_approvals(s)) == 1 and len(_bodies(s, "buffer", number)) == 3 and len(gateway.sent) == 1
+
+
+def test_a_reused_key_approves_nothing(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    assert act(s, "/datasets/rec-b/actions", {"action": "go", "key": "k1"})[0] == 202
+    sent = len(gateway.sent)
+    status, out, _ = act(
+        s, "/datasets/rec-a/actions", {"action": "go", "key": "k1", "approve_hosts": ["data.example.org"]}
+    )
+    assert status == 409 and "k1" in out["error"]
+    assert _approvals(s) == [] and s.ledger.subject("dataset", "rec-a") is None and len(gateway.sent) == sent
+    subject = s.ledger.create_subject("dataset", "rec-a")  # and with a subject there: no approval entry either
+    again = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "k1", "approve_hosts": ["data.example.org"]})
+    assert again[0] == 409 and _approvals(s) == [] and _bodies(s, "dataset", subject["number"]) == []
+
+
+def test_a_service_with_no_way_to_temporal_approves_nothing(tmp_path, _home):
+    s, _ = _starting(tmp_path)
+    s.dispatcher = None
+    subject = s.ledger.create_subject("dataset", "rec-a")
+    status, _, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "approve_hosts": ["data.example.org"]})
+    assert status == 503 and _approvals(s) == [] and _bodies(s, "dataset", subject["number"]) == []
+
+
+def test_a_buffers_go_with_approve_hosts_is_refused_before_the_spec_is_saved(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    status, out, _ = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go", "approve_hosts": ["data.example.org"]})
+    assert status == 422 and "starts jobs" in out["error"]
+    assert s.ledger.subject("buffer", SPEC_NAME) is None and _approvals(s) == [] and gateway.sent == []
+
+
+def test_a_requests_go_approves_its_hosts(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    number = s.ledger.create_subject("prep", None, data={"spec": PREP_TEXT})["number"]
+    status, _, _ = act(s, f"/prep/{number}/actions", {"action": "go", "approve_hosts": ["data.example.org"]})
+    assert status == 202
+    assert _bodies(s, "prep", number)[0] == "**Hosts approved:** `data.example.org` by `page`"
+    assert _approvals(s)[0]["kind"] == "prep" and len(gateway.sent) == 1
 
 
 def test_two_approvals_at_once_both_land(tmp_path, _home):
