@@ -1567,7 +1567,9 @@ function prepareButton(container, all, blocker, done, again, text) {  // `text`:
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }), onclick: async e => {
     if (checking) return;
-    if (!confirm(`Start preparing ${plural(todo.length, "dataset")}?${again ? ` ${again} of them ${again === 1 ? "is" : "are"} prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
+    // the button says what a click starts; it asks only about what the button does not say: prepared datasets
+    // that get a new round, or more datasets than a request takes without its count written in
+    if ((again || todo.length > 25) && !confirm(`Start preparing ${plural(todo.length, "dataset")}?${again ? ` ${again} of them ${again === 1 ? "is" : "are"} prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
     checking = true;
     askHosts({ records: todo }, hosts => start(e.target, hosts)).finally(() => { checking = false; });
   } }, label));
