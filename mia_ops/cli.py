@@ -94,7 +94,8 @@ def cmd_attach(stack: Stack, args: argparse.Namespace) -> int:
 def cmd_exec(stack: Stack, args: argparse.Namespace) -> int:
     svc = stack.service(args.service)
     env = {**os.environ, **svc.env()}
-    if (sock := svc.run / "csub.sock").exists():  # the service's broker, on mia's policy
+    # the service's broker, on mia's policy; a broker killed with its session leaves its socket file behind
+    if is_running(svc.name) and (sock := svc.run / "csub.sock").exists():
         env |= {"CSUB_TRANSPORT": "unix", "CSUB_SOCKET": str(sock)}
     return subprocess.run([str(services.PY), "-m", svc.app.module, *args.args], env=env).returncode
 
