@@ -303,6 +303,7 @@ class PrepSpec(_Strict):
     catalog: CatalogRef
     records: list[str] = []
     select: Select | None = None
+    again: bool = False  # also give a new round to the datasets that are prepared or that stopped
     timeout_days: float = Field(default=14, gt=0)  # after this long, the request needs a human
     # each record costs an agent run: more than this many need the number written into the request
     max_records: int = Field(default=25, ge=1, le=MAX_PREP_RECORDS)

@@ -321,6 +321,7 @@ class PrepPins:
     timeout_days: float
     issue: int
     root: str = ""  # the root request every dataset it opens is charged to
+    again: bool = False  # prepared and stopped datasets get a new round too
 
 
 @dataclass

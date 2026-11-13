@@ -663,7 +663,7 @@ class Activities:
         is already working on it or has finished (see `_nudge`)."""
         return (await self._nudge(round_id, record))[0]
 
-    async def _nudge(self, round_id: str, record: str) -> tuple[DatasetIssue, bool]:
+    async def _nudge(self, round_id: str, record: str, again: bool = False) -> tuple[DatasetIssue, bool]:
         """nudge_dataset's work, and whether the dataset was started for the first time. The dataset's subject
         says where it stands; a dataset that needs a round gets a `go` sent to buffer-api with the worker token:
         actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
@@ -672,7 +672,7 @@ class Activities:
         registry, folder = self.registry, dataset_folder(self._record(round_id, record), record)
         subject = await asyncio.to_thread(registry.subject, "dataset", record)
         number, stage = (subject["number"], subject["stage"]) if subject else (0, "new")
-        if stage == "done":
+        if stage == "done" and not again:  # `again`: a dataset that is done gets a new round all the same
             path = self.cfg.paths.storage_root / folder
             note = (
                 f"the dataset is `done` but `{path}` has no binding.yaml with a matching manifest.json: "
@@ -757,7 +757,7 @@ class Activities:
         spec_hash, root = hashlib.sha256(text.encode()).hexdigest(), self.cfg.root_of(issue)
         buffer_pins = BufferPins(spec_hash, ref, "", "", root=root)
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(buffer_pins)))
-        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root)
+        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root, again=spec.again)
         write_atomic(round_dir / "prep.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the request admitted
         return pins
 
@@ -765,21 +765,27 @@ class Activities:
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
         """Hand one requested record to mia-data unless the registry already settled it (prepared or
-        needs-human); otherwise nudge_dataset, its result named for the request's entry."""
+        needs-human); otherwise nudge_dataset, its result named for the request's entry. A request that says
+        `again` hands those over too: the dataset gets a new round, and its row says `in-progress` at once, so
+        the request follows that round instead of settling on what the last one left."""
+        again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
         except RegistryError as error:  # best effort: the dataset issue tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        if (state := (row or {}).get("state")) in ("prepared", "needs-human"):
+        settled = (state := (row or {}).get("state")) in ("prepared", "needs-human")
+        if settled and not again:
             issue = (row or {}).get("issue")
-            return PrepOutcome(record, state, issue if isinstance(issue, int) else None)
-        found, created = await self._nudge(round_id, record)
-        if found.stage == "done":
-            outcome = "done-unpublished"
-        elif found.nudged:
+            return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
+        found, created = await self._nudge(round_id, record, again=again)
+        if settled and found.nudged:
+            await asyncio.to_thread(self.registry.put_dataset, record, state="in-progress")
+        if found.nudged:
             outcome = "opened" if created else "nudged"
-        else:  # data:go present already, or mia-data is working on it
+        elif found.stage == "done":
+            outcome = "done-unpublished"
+        else:  # mia-data is working on it, or it waits for a review
             outcome = "in-progress"
         return PrepOutcome(record, outcome, found.number, found.note)
 

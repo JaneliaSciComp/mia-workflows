@@ -1742,6 +1742,23 @@ async def test_prep_nudge_maps_where_the_dataset_stands(acts, gateway):
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "needs-human", 6)
 
 
+async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_too(acts, gateway):
+    """Without `again` a prepared dataset settles at once (the fixture's registry knows every record as prepared).
+    With it the dataset gets a new round, and its row says in-progress so that the request follows that round."""
+    prep_issue(acts, records=[U937, BCSS], again=True)
+    pins = await acts.prep_admit(8, "21")
+    assert pins.again is True
+    acts.registry.adopt_subject("dataset", 5, U937, stage="done")
+    acts.registry.put_dataset(BCSS, state="needs-human", issue=6)
+    acts.registry.adopt_subject("dataset", 6, BCSS, stage="needs-human")
+    assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "nudged", 5)
+    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
+    assert [sent[:3] for sent in gateway.sent] == [("dataset", 5, "go"), ("dataset", 6, "go")]
+    assert [acts.registry.dataset(record)["state"] for record in (U937, BCSS)] == ["in-progress", "in-progress"]
+    acts.registry.adopt_subject("dataset", 5, U937, stage="review")  # a round is under way: it is left to it
+    assert (await acts.prep_nudge(PREP_ROUND, U937)).outcome == "in-progress" and len(gateway.sent) == 2
+
+
 async def test_prep_status_reads_the_registry(acts):
     acts.registry.put_dataset(U937, state="needs-human")
     assert await acts.prep_status([U937, BCSS, "never-seen"]) == {
