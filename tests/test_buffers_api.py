@@ -1093,7 +1093,7 @@ def test_adopt_then_read_a_subject(tmp_path):
     status, row, _ = call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "stage": "review"})
     assert status == 200 and row["issue"] == 234
     status, row, _ = call(s, "GET", "/subjects/dataset/rec-a")
-    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "go", "reject"])
+    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "reject"])
     assert call(s, "GET", "/subjects/dataset/nope")[0] == 404
     assert call(s, "GET", "/subjects/widget/x")[0] == 404
     assert call(s, "PUT", "/subjects/dataset/235", payload={"key": "rec-b", "stage": "bogus"})[0] == 422
@@ -1389,7 +1389,7 @@ def test_a_sent_action_is_asked_until_its_workflow_answers(tmp_path):
 
 def test_what_ends_an_asked_action(tmp_path, monkeypatch):
     s, gateway = _acting(tmp_path)
-    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "needs-human"})
     asked = lambda: call(s, "GET", "/subjects/dataset/rec-a")[1]["asked"]  # noqa: E731
     assert asked() is None  # nothing was clicked
     # an entry of the workflow's, with no stage

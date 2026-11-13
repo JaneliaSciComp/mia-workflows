@@ -64,12 +64,30 @@ STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "matching": ("working", frozenset({"cancel"})),
     "developing": ("working", frozenset({"cancel"})),
     "testing": ("working", frozenset({"cancel"})),
-    "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),
+    "review": ("waiting", frozenset({"approve", "reject", "cancel"})),
     "merging": ("working", frozenset({"cancel"})),
     "done": ("done", frozenset({"go", "revoke"})),
     "needs-human": ("stuck", frozenset({"go", "revoke"})),
     "cancelled": ("done", frozenset({"go", "revoke"})),
 }
+
+
+def round_open(stage: str | None) -> bool:
+    """Whether a dataset at `stage` has a round open: working, or waiting for its review. This is what code asks
+    (the keeper before it evicts a raw cache, the planner before it offers a dataset for preparation); a
+    dataset's state is the word a person reads."""
+    return STAGE_ACTIONS.get(stage or "", ("",))[0] in ("working", "waiting")
+
+
+def dataset_state(stage: str, saved: bool) -> str:
+    """The word a person reads for a dataset at `stage`: `in-progress` while a round works by itself, `prepared`
+    once a round ended `done` with its crops saved, `needs-human` whenever a person has to act (a review, a stop,
+    a cancelled round, a `done` round that saved nothing)."""
+    if STAGE_ACTIONS.get(stage, ("",))[0] == "working":
+        return "in-progress"
+    return "prepared" if stage == "done" and saved else "needs-human"
+
+
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),
 }

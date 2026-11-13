@@ -467,24 +467,28 @@ class Ledger:
                 ).fetchall()
         return [{**json.loads(data), "id": record, "updated_at": updated} for record, data, updated in rows]
 
-    def in_progress_records(self) -> set[str]:
-        """Dataset ids whose state is in-progress: a prep job may be reading their raw cache."""
-        return {row["id"] for row in self.datasets("in-progress")}
-
     def sync_datasets(self, prepared: dict[str, dict], *, older_than: float | None = None) -> dict:
-        """Mark each given record prepared and drop prepared rows no longer given; other states are untouched,
-        and a `revoked` row is never merged over (the folder may still look prepared: a revocation deletes
-        nothing). With `older_than`, only rows last written before it are dropped: one written during the scan
-        stays."""
+        """Mark each given record prepared and drop prepared rows no longer given. A record whose last round did
+        not end `done` (one in a round, at review, stopped or cancelled) keeps its state and takes the folder's
+        facts only: its folder still holds the crops an earlier round saved. A `revoked` row is never merged over
+        (a revocation deletes nothing). With `older_than`, only rows last written before it are dropped: one
+        written during the scan stays."""
         now = time.time()
         kept = 0
         with self._transaction() as db:
             for record, fields in prepared.items():
-                state = db.execute("SELECT json_extract(data, '$.state') FROM datasets WHERE id = ?", (record,))
-                if (state.fetchone() or (None,))[0] == "revoked":
+                found = db.execute(
+                    "SELECT json_extract(data, '$.state'), json_extract(data, '$.data_stage') FROM datasets WHERE id = ?",
+                    (record,),
+                ).fetchone()
+                state, stage = found or (None, None)
+                if state == "revoked":
                     kept += 1
                     continue
-                self._merge_dataset(db, record, {**fields, "state": "prepared"}, now)
+                facts = {name: value for name, value in fields.items() if name != "state"}
+                if stage in (None, "done"):  # no round reported here, or its last one ended done: the folder decides
+                    facts |= {"state": "prepared", "reason": None}
+                self._merge_dataset(db, record, facts, now)
             rows = db.execute("SELECT id, updated_at FROM datasets WHERE json_extract(data, '$.state') = 'prepared'")
             stale = [
                 record

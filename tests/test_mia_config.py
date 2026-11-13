@@ -112,7 +112,26 @@ def test_every_dataset_stage_has_a_rule():
     assert set(STAGE_ACTIONS) == set(STAGES)
     for status, actions in STAGE_ACTIONS.values():
         assert status in STATUS_WORDS and actions <= {*HUMAN_LABELS, "cancel"}
-    assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "go", "cancel"}))
+    assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "cancel"}))  # a verdict, no new round
     # a round in progress is cancelled before anything else is asked of its dataset
     assert all(actions == {"cancel"} for status, actions in STAGE_ACTIONS.values() if status == "working")
     assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"go", "revoke"}))
+
+
+def test_a_datasets_state_is_what_a_person_reads_and_the_stage_decides_it():
+    from mia_data.config import STAGES, dataset_state, round_open
+
+    for stage in ("matching", "developing", "testing", "merging"):
+        assert dataset_state(stage, saved=True) == dataset_state(stage, saved=False) == "in-progress"
+    for stage in ("review", "needs-human", "cancelled"):  # a person has to act, saved crops of an earlier round or not
+        assert dataset_state(stage, saved=True) == "needs-human"
+    assert dataset_state("done", saved=True) == "prepared" and dataset_state("done", saved=False) == "needs-human"
+    # what code asks instead: is a round open? Review is one (a reject makes its crops again), a stop is not
+    assert [stage for stage in STAGES if round_open(stage)] == [
+        "matching",
+        "developing",
+        "testing",
+        "review",
+        "merging",
+    ]
+    assert not round_open(None) and not round_open("no such stage")

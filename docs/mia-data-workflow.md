@@ -197,8 +197,10 @@ issue's `data:<stage>` label. Nothing done to the issue reaches the system.
 
 `set_stage` writes the subject's stage, its timeline entry and the dataset's row (`PUT /datasets/<record>`), and
 the workflow waits for the write: the registry's stage is what buffer-api checks an action against. `prepared`
-means `binding.yaml` plus a `manifest.json` whose binding hash matches it; before that a dataset is `in-progress`
-or `needs-human`. `mia-buffers datasets sync` rebuilds the prepared rows from `storage_root`.
+means a round that ended `done` with `binding.yaml` plus a `manifest.json` whose binding hash matches it. Until
+then the row says `in-progress` while the round works by itself and `needs-human` whenever a person has to act,
+which includes `review`; a new round on a prepared dataset starts that over. `mia-buffers datasets sync` rebuilds
+the prepared rows from `storage_root`.
 
 ## Trust boundaries in one paragraph
 

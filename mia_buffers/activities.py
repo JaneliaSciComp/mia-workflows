@@ -42,6 +42,7 @@ from mia_data.activities import mia_permanent_errors
 from mia_data.binding import hosts as job_hosts
 from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
+from mia_data.config import round_open
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
 from mia_data.models import JobDone, LockTaken, Reservation
 from mia_data.publish import prepared_row
@@ -1651,14 +1652,17 @@ class Activities:
         if limit <= 0:
             return
         rows = (await asyncio.to_thread(registry.assets, kind))["assets"]
-        in_progress: set[str] = set()
-        if kind == "raw":  # a prep job may be reading the raw cache of a record mia-data is working on
-            in_progress = {row["id"] for row in await asyncio.to_thread(registry.datasets, "in-progress")}
+        in_round: set[str] = set()
+        if (
+            kind == "raw"
+        ):  # a job of an open round may be reading the record's raw cache; a rejected set is made again from it
+            datasets = await asyncio.to_thread(registry.datasets)
+            in_round = {row["id"] for row in datasets if round_open(row.get("data_stage"))}
         quarantine_s = self.cfg.autonomy.quarantine_days * 86400  # a revoked artifact is evidence for this long
         rules: dict[str, Any] = {
             "hold_s": hold_s,
             "now": now,
-            "in_progress": in_progress,
+            "in_round": in_round,
             "kind": kind,
             "quarantine_s": quarantine_s,
         }

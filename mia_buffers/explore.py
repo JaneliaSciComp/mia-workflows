@@ -11,6 +11,8 @@ from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from mia_data.config import round_open
+
 from .plan import NOT_PREPARED
 from .specmap import facts
 
@@ -288,7 +290,7 @@ def plan_view(
         known = datasets.get(row["id"]) or {}
         joined = {
             **row,
-            **{name: known.get(name) for name in ("issue", "folder", "crops", "raw", "url")},
+            **{name: known.get(name) for name in ("issue", "folder", "crops", "raw", "url", "stage")},
             "title": known.get("title") or "",
             "licence": known.get("licence"),
             "previews": known.get("previews") or [],
@@ -352,7 +354,8 @@ def plan_view(
         "to_prepare": sorted(
             row["id"]
             for row in fitting
-            if row.get("prepared") not in ("prepared", "in-progress")
+            if row.get("prepared") != "prepared"
+            and not round_open(row.get("stage"))  # in a round or at review: a request would start nothing
             and (not page.text or matches(page.text, _plan_haystack(row)))
         ),
     }

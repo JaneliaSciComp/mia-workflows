@@ -179,6 +179,14 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
     assert '$("down").replaceChildren(' in PAGE and "setInterval(checkHealth, HEALTH_MS)" in PAGE
 
 
+def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
+    from mia_data.config import STAGES, round_open
+
+    stages = re.search(r"const ROUND_OPEN = new Set\(\[([^\]]*)\]\)", PAGE)
+    assert stages and re.findall(r'"([a-z-]+)"', stages.group(1)) == [stage for stage in STAGES if round_open(stage)]
+    assert 'row.state !== "prepared" && !ROUND_OPEN.has(row.stage)' in PAGE
+
+
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
     stage, spec, plan, notes = rendered(
         "**Stage:** `buffer:planning`\n\n**Folders:** [Workspace](https://files.example/w) · [Staged](https://files.example/s)\n\n"

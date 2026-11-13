@@ -47,7 +47,7 @@ from mia_core.untrusted import write_atomic as write_atomic
 from . import catalog
 from . import publish as crop_publish
 from .binding import check_binding, hosts, record_urls
-from .config import HUMAN_LABELS, STAGES
+from .config import HUMAN_LABELS, STAGES, dataset_state
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
     SHA_RE,
@@ -355,26 +355,26 @@ class Activities:
         return self.cfg.paths.storage_root / catalog.dataset_folder(self._record(round_id), pins.record)
 
     def dataset_fields(self, issue: int, round_id: str, stage: str) -> dict:
-        """The registry row for the dataset at `stage`: prepared (with the manifest's facts) when its folder holds a
-        binding and a manifest that matches it, else in-progress, or needs-human at that stage."""
+        """The registry row for the dataset at `stage`: its state (`dataset_state`: the stage decides, and `done`
+        counts as prepared only when the folder holds a binding and a manifest that matches it), the manifest's
+        facts when the folder has them, and the reason when a `done` round saved nothing."""
         try:
             pins = self._pins(round_id)
             dataset_dir = self._dataset_dir(round_id, pins)
             crop_publish.check_owner(dataset_dir, pins.record)
-            if (dataset_dir / REVOKED_FILE).is_file():  # revoked stays revoked until a new publication
+            if (dataset_dir / REVOKED_FILE).is_file():  # revoked stays revoked until a new round saves its crops
                 return {"state": "revoked", "data_stage": stage, "issue": issue}
             row = crop_publish.prepared_row(dataset_dir)
+            why = f"`{dataset_dir.name}` holds no binding.yaml with a matching manifest.json"
         except (ValueError, OSError, Conflict) as err:
             # no derivable folder (unclear record), unreadable, or another record's folder: a state row only
             log.warning("round %s: no prepared lookup: %s", round_id, err)
-            row = None
-        if row:
-            row.pop("record")
-            fields = row
-        else:
-            # a cancelled round did not prepare the dataset: whatever follows it reads that as it reads a stop
-            fields = {"state": "needs-human" if stage in ("needs-human", "cancelled") else "in-progress"}
-        return {**fields, "data_stage": stage, "issue": issue}
+            row, why = None, str(err)
+        facts = {name: value for name, value in (row or {}).items() if name not in ("record", "state")}
+        unsaved = stage == "done" and row is None
+        reason = f"the round is `done` but its crops are not saved: {why}. Run it again." if unsaved else None
+        state = dataset_state(stage, saved=row is not None)
+        return {**facts, "state": state, "reason": reason, "data_stage": stage, "issue": issue}
 
     def _report_dataset(self, registry: Registry, issue: int, round_id: str, stage: str) -> None:
         """Put the dataset's row to the registry; never raises: a missing pins file, a catalog record of the wrong

@@ -46,10 +46,10 @@ def _quarantined(data: dict, quarantine_s: float, now: float) -> bool:
 
 
 def free_assets(
-    assets: list[dict], *, hold_s: float, now: float, in_progress: set[str], kind: str, quarantine_s: float = 0
+    assets: list[dict], *, hold_s: float, now: float, in_round: set[str], kind: str, quarantine_s: float = 0
 ) -> list[dict]:
     """The rows nothing needs: no buffer references them, they are `ready`, unused for `hold_s`, not under
-    quarantine, and (raw) no dataset of their record is being prepared. Least recently used first."""
+    quarantine, and (raw) their record has no round open (`in_round`). Least recently used first."""
     free = [
         row
         for row in assets
@@ -57,7 +57,7 @@ def free_assets(
         and (data := row.get("data") or {}).get("state") == "ready"
         and _last_used(data) + hold_s < now
         and not _quarantined(data, quarantine_s, now)
-        and not (kind == "raw" and row.get("key") in in_progress)
+        and not (kind == "raw" and row.get("key") in in_round)
     ]
     return sorted(free, key=lambda row: _last_used(row["data"]))
 
@@ -69,7 +69,7 @@ def plan_evictions(
     headroom_bytes: float,
     hold_s: float,
     now: float,
-    in_progress: set[str],
+    in_round: set[str],
     kind: str,
     demand_bytes: float = 0,
     quarantine_s: float = 0,
@@ -79,7 +79,7 @@ def plan_evictions(
     if quota_bytes <= 0:
         return []
     remaining, target, picked = live_bytes(assets), quota_bytes - max(headroom_bytes, demand_bytes), []
-    free = free_assets(assets, hold_s=hold_s, now=now, in_progress=in_progress, kind=kind, quarantine_s=quarantine_s)
+    free = free_assets(assets, hold_s=hold_s, now=now, in_round=in_round, kind=kind, quarantine_s=quarantine_s)
     for row in free:
         if remaining <= target:
             break

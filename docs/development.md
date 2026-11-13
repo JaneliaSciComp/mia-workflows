@@ -208,9 +208,16 @@ them on deploy. The autodev bot opens PRs here too; review them like any other.
 buffer-api's ledger (`<local_root>/service/buffers.sqlite`) is the registry both pipelines share. It holds:
 
 - one row per **dataset**: state `in-progress`, `needs-human`, `prepared` or `revoked`, with the folder, binding
-  hash and crop count of a prepared one. mia-data writes it as its stages change (`mia_core.registry.Registry`);
-  `datasets sync` rebuilds the prepared rows from `storage_root`, never merges over a `revoked` row and reports it
-  as `revoked_kept`;
+  hash and crop count of its saved crops. The state is the word a person reads, and the stage decides it
+  (`mia_data.config.dataset_state`): `in-progress` while a round works by itself, `needs-human` whenever a person
+  has to act (`review`, `needs-human`, `cancelled`, or a `done` round whose folder has no binding with a matching
+  manifest, with the row's `reason` saying so), `prepared` after a `done` round with its crops saved. A new round
+  on a prepared dataset takes it out of `prepared` until that round ends `done`. Code that asks whether a round
+  is open reads the stage (`round_open`: the keeper before it evicts a raw cache, the list of datasets a
+  request could prepare), never the state; the planner's pool is the `prepared` rows. mia-data writes the row
+  as its stages change (`mia_core.registry.Registry`); `datasets sync` rebuilds the prepared rows from
+  `storage_root` for records whose last round ended `done` or that have none, gives the others the folder's
+  facts only, never merges over a `revoked` row and reports it as `revoked_kept`;
 - the **catalog** records of each synced commit;
 - the **assets** (raw caches and staged artifacts), the **buffers** with their volumes, events, boards, consumers
   and draws;
@@ -622,8 +629,9 @@ registry state. `cancelled`: a person cancelled it.
 
 **What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or `needs-human`
 settles the record, unless the request says `again`: then the dataset is sent a `go` all the same, and its row is
-set to `in-progress` at once, so the request follows the new round instead of settling on what the last one left. Otherwise the dataset's subject says where it stands: one in a round or at review is left to
-it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
+set to `in-progress` at once, so the request follows the new round instead of settling on what the last one
+left. A dataset whose crops wait for a review is `needs-human`, so it settles too. Otherwise the dataset's
+subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
 any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity
 sends no second go. The outcome is `opened` for a dataset started for the first time and `nudged` otherwise, and

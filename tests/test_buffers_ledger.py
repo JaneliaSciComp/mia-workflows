@@ -125,6 +125,29 @@ def test_sync_datasets_keeps_in_progress_rows(tmp_path):
     assert led.dataset("stuck")["state"] == "needs-human" and led.dataset("new")["crops"] == 3
 
 
+def test_sync_datasets_marks_prepared_only_what_no_later_round_left_open(tmp_path):
+    """A folder with saved crops makes its record prepared unless a round after that save is open or stopped."""
+    led = Ledger(tmp_path / "l.sqlite")
+    for record, state, stage in (
+        ("rerun", "in-progress", "matching"),
+        ("review", "needs-human", "review"),
+        ("stopped", "needs-human", "needs-human"),
+        ("unsaved", "needs-human", "done"),  # its round ended done before the folder held a matching manifest
+    ):
+        led.put_dataset(record, {"state": state, "data_stage": stage, "reason": "why" if record == "unsaved" else None})
+    folders = {record: {"state": "prepared", "folder": f"f-{record}", "crops": 4} for record in ("rerun", "review")}
+    led.sync_datasets({**folders, "stopped": {"crops": 4}, "unsaved": {"crops": 4}, "found": {"crops": 4}})
+    states = {row["id"]: (row["state"], row.get("crops")) for row in led.datasets()}
+    assert states == {
+        "rerun": ("in-progress", 4),
+        "review": ("needs-human", 4),
+        "stopped": ("needs-human", 4),
+        "unsaved": ("prepared", 4),
+        "found": ("prepared", 4),
+    }
+    assert led.dataset("unsaved")["reason"] is None
+
+
 def test_put_volume_with_refs_is_atomic(tmp_path):
     led = Ledger(tmp_path / "l.sqlite")
     led.put_buffer("b", {})
@@ -221,13 +244,6 @@ def test_staged_last_used_comes_from_draws(tmp_path):
     ledger.put_asset("staged", "art1", {"last_used": after + 100})  # newer than every draw: kept
     ledger.sync_assets({("staged", "art1"): {"bytes": 1, "scanned_at": after}})
     assert ledger.asset("staged", "art1")["last_used"] == after + 100
-
-
-def test_in_progress_records(tmp_path):
-    ledger = Ledger(tmp_path / "l.sqlite")
-    ledger.put_dataset("busy", {"state": "in-progress"})
-    ledger.put_dataset("done", {"state": "prepared"})
-    assert ledger.in_progress_records() == {"busy"}
 
 
 def test_status_board_and_events(tmp_path):

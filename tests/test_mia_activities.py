@@ -249,10 +249,16 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     seen = _registry_seen(t)
     await t.a.set_stage(1, "matching", state)
-    assert seen[-2] == ("/datasets/rec-1", {"state": "in-progress", "data_stage": "matching", "issue": 1})
+    working = {"state": "in-progress", "reason": None, "data_stage": "matching", "issue": 1}
+    assert seen[-2] == ("/datasets/rec-1", working)
     assert seen[-1][0] == "/timeline/dataset/1" and seen[-1][1]["stage"] == "matching"  # then the stage itself
-    await t.a.set_stage(1, "needs-human", state)
-    assert seen[-2][1]["state"] == "needs-human"
+    for stage in ("needs-human", "review", "cancelled"):  # a person has to act
+        await t.a.set_stage(1, stage, state)
+        assert seen[-2][1]["state"] == "needs-human" and seen[-2][1]["reason"] is None
+    await t.a.set_stage(1, "done", state)  # done, and the folder holds nothing: not prepared, and the row says why
+    unsaved = seen[-2][1]
+    assert unsaved["state"] == "needs-human" and "its crops are not saved" in unsaved["reason"]
+    assert "`lm-human-rec-1` holds no binding.yaml with a matching manifest.json" in unsaved["reason"]
     dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"  # binding.yaml + a manifest that matches it
     dataset_dir.mkdir(parents=True)
     binding_bytes = yaml.safe_dump(BINDING).encode()
@@ -262,9 +268,14 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     await t.a.set_stage(1, "done", state)
     row = seen[-2][1]
     assert row["state"] == "prepared" and row["crops"] == 2 and row["binding_hash"] and row["folder"]
-    assert "record" not in row and row["issue"] == 1
+    assert "record" not in row and row["issue"] == 1 and row["reason"] is None
+    # a new round on the prepared dataset: its state follows the stage again, the folder's facts stay on the row
+    for stage, word in (("matching", "in-progress"), ("review", "needs-human"), ("needs-human", "needs-human")):
+        await t.a.set_stage(1, stage, state)
+        assert seen[-2][1]["state"] == word and seen[-2][1]["crops"] == 2
+    written = [path for path, _ in seen].count("/datasets/rec-1")
     await t.a.set_stage(1, "matching", None)  # no round: no dataset row, the stage alone
-    assert [path for path, _ in seen].count("/datasets/rec-1") == 3
+    assert [path for path, _ in seen].count("/datasets/rec-1") == written
     assert seen[-1] == ("/timeline/dataset/1", {"body": "", "marker": "", "round": None, "stage": "matching"})
     assert t.data.comments == {} and t.data.issues[1]["labels"] == []  # nothing goes to the issue from a round
 
@@ -290,7 +301,10 @@ async def test_set_stage_needs_human_with_an_unclear_record_still_comments(tmp_p
     record_file = t.cfg.paths.state_dir / "rounds" / ROUND / "record.yaml"
     record_file.write_text(yaml.safe_dump({"imaging": {"modality": [], "organism": []}}))  # no folder
     await t.a.set_stage(1, "needs-human", state, "why")
-    assert seen[0] == ("/datasets/rec-1", {"state": "needs-human", "data_stage": "needs-human", "issue": 1})
+    assert seen[0] == (
+        "/datasets/rec-1",
+        {"state": "needs-human", "reason": None, "data_stage": "needs-human", "issue": 1},
+    )
     (path, entry) = seen[1]
     assert path == "/timeline/dataset/1" and entry["stage"] == "needs-human" and "why" in entry["body"]
 
@@ -539,7 +553,10 @@ async def test_a_folder_another_record_prepared_is_refused(tmp_path):
     assert (dataset_dir / "binding.yaml").read_bytes() == binding_bytes and not (dataset_dir / "c1").exists()
     seen = _registry_seen(t)
     await t.a.set_stage(1, "needs-human", state)  # the other record's publication is not this one's
-    assert seen[0] == ("/datasets/rec-1", {"state": "needs-human", "data_stage": "needs-human", "issue": 1})
+    assert seen[0] == (
+        "/datasets/rec-1",
+        {"state": "needs-human", "reason": None, "data_stage": "needs-human", "issue": 1},
+    )
 
 
 async def test_publish_crops_publishes_the_binding(tmp_path):
