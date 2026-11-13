@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -51,41 +53,61 @@ def test_missing_groups_the_records_by_host(tmp_path):
     assert hosts.missing(hosts.for_records(records))["h.example.org"] == ["rec-a", "rec-b"]
 
 
-def test_a_bindings_needs_skip_manual_urls_and_unreadable_bindings(tmp_path):
+def test_a_record_naming_a_github_url_contributes_nothing(tmp_path):
+    records = {"rec-a": record("https://github.com/o/r/archive.zip"), "rec-b": record("https://h.example.org/b")}
+    needed = check(tmp_path).for_records(records)
+    assert needed["h.example.org"] == ["rec-b"]
+    assert "rec-a" not in {rec for recs in needed.values() for rec in recs}
+
+
+def test_a_bindings_needs_skip_manual_bindings_unreadable_bindings_and_folders_outside_the_root(tmp_path):
     hosts = check(tmp_path)
-    folder = hosts.storage_root / "rec-a"
-    folder.mkdir(parents=True)
-    binding = {
-        "raw": [{"urls": ["https://data.example.org/a.tif", "manual://drop/a"]}],
-        "labels": [{"urls": ["https://labels.example.org/a.png"]}],
-    }
-    (folder / "binding.yaml").write_text(yaml.safe_dump(binding))
+
+    def write(folder: str, urls: list[str]) -> None:
+        (hosts.storage_root / folder).mkdir(parents=True, exist_ok=True)
+        (hosts.storage_root / folder / "binding.yaml").write_text(yaml.safe_dump({"raw": [{"urls": urls}]}))
+
+    write("rec-a", ["https://data.example.org/a.tif"])
+    write("rec-m", ["https://m.example.org/a.tif", "manual://drop/a"])
+    write("../outside", ["https://out.example.org/a.tif"])
     (hosts.storage_root / "rec-b").mkdir()
     (hosts.storage_root / "rec-b" / "binding.yaml").write_text(": : not yaml [")
-    needed = hosts.for_bindings({"rec-a": "rec-a", "rec-b": "rec-b", "rec-c": "rec-c"})
-    assert needed == {
+    folders = {name: name for name in ("rec-a", "rec-m", "rec-b", "rec-c", "../outside")}
+    assert hosts.for_bindings(folders) == {
         "cdn.example.net": ["rec-a"],
         "data.example.org": ["rec-a"],
-        "labels.example.org": ["rec-a"],
         "pypi.org": ["rec-a"],
     }
 
 
 def test_the_pool_is_the_plans_in_pool_rows(tmp_path):
     hosts = check(tmp_path)
-    (hosts.rounds_dir / "i1-e2").mkdir(parents=True)
     rows = [
         {"id": "in", "admitted": True, "fit": {"ok": True}},
         {"id": "unfit", "admitted": True, "fit": {"ok": False}},
         {"id": "out", "admitted": False, "fit": {"ok": True}},
         {"id": "unread", "admitted": True, "fit": None},
     ]
+    (hosts.rounds_dir / "i1-e2").mkdir(parents=True)
     (hosts.rounds_dir / "i1-e2" / "plan.json").write_text(json.dumps({"rows": rows}))
     assert hosts.pool("i1-e2") == ["in"]
+
+
+@pytest.mark.parametrize("plan", [None, "[]", '{"nope": 1}', '{"rows": [1]}', "not json"])
+def test_a_plan_that_cannot_be_read_raises_value_error(tmp_path, plan):
+    hosts = check(tmp_path)
+    (hosts.rounds_dir / "i1-e2").mkdir(parents=True)
+    if plan is not None:
+        (hosts.rounds_dir / "i1-e2" / "plan.json").write_text(plan)
+    with pytest.raises(ValueError, match="i1-e2"):
+        hosts.pool("i1-e2")
     with pytest.raises(ValueError):
-        hosts.pool("../i1-e2")
-    with pytest.raises(OSError):
-        hosts.pool("i9-e9")
+        hosts.pool("../x")
+
+
+def test_importing_hosts_does_not_import_the_activities():
+    code = "import sys, mia_buffers.hosts; assert 'mia_buffers.activities' not in sys.modules"
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 @pytest.mark.parametrize(

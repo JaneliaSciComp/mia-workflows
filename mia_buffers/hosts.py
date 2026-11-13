@@ -11,13 +11,15 @@ import yaml
 
 from autodev.config import is_github_host
 from mia_core.hosts import HOST_RE, allowed_patterns, approve_hosts, missing_hosts
+from mia_core.untrusted import read_untrusted
 from mia_data.binding import network_hosts, record_urls
 from mia_data.config import NetworkCfg
 
-from .activities import ROUND_RE
 from .config import Config
 from .status import _in_pool
 
+BINDING_LIMIT = 1_000_000  # a binding is a few KB
+PLAN_LIMIT = 100_000_000  # a plan for a large catalog is several MB
 Needed = dict[str, list[str]]  # host -> the sorted ids of the records that need it
 
 
@@ -54,34 +56,46 @@ class HostCheck:
         )
 
     def for_records(self, records: dict[str, dict]) -> Needed:
-        """Hosts each catalog record's URLs need (record id -> catalog record)."""
-        return _group(
-            {record_id: network_hosts(record_urls(record), self.network) for record_id, record in records.items()}
-        )
+        """Hosts each catalog record's URLs need (record id -> catalog record); a record whose hosts cannot be
+        computed (a GitHub URL) contributes nothing."""
+        hosts_by_record = {}
+        for record_id, record in records.items():
+            try:
+                hosts_by_record[record_id] = network_hosts(record_urls(record), self.network)
+            except (ValueError, AttributeError, TypeError):
+                continue
+        return _group(hosts_by_record)
 
     def for_bindings(self, folders: dict[str, str]) -> Needed:
-        """Hosts each published binding's URLs need (record id -> its folder under storage_root)."""
+        """Hosts each published binding's URLs need (record id -> its folder under storage_root). A binding that
+        cannot be read, or names a manual:// URL (the worker sends it to the manual drop), contributes nothing."""
         hosts_by_record = {}
         for record_id, folder in folders.items():
+            text = read_untrusted(self.storage_root, f"{folder}/binding.yaml", BINDING_LIMIT)
+            if text is None:
+                continue
             try:
-                binding = yaml.safe_load((self.storage_root / folder / "binding.yaml").read_text())
+                binding = yaml.safe_load(text)
                 urls = [
                     str(url)
                     for array in (binding.get("raw") or []) + (binding.get("labels") or [])
                     for url in (array.get("urls") or [])
-                    if not str(url).startswith("manual://")
                 ]
-                hosts_by_record[record_id] = network_hosts(urls, self.network)
-            except (OSError, ValueError, yaml.YAMLError, AttributeError, TypeError):
-                continue  # no readable binding: it contributes nothing
+                if not any(url.startswith("manual://") for url in urls):
+                    hosts_by_record[record_id] = network_hosts(urls, self.network)
+            except (ValueError, yaml.YAMLError, AttributeError, TypeError):
+                continue
         return _group(hosts_by_record)
 
     def pool(self, round_id: str) -> list[str]:
-        """Ids of the in_pool rows of the round's plan.json."""
-        if not ROUND_RE.fullmatch(round_id):
-            raise ValueError(f"bad round id {round_id!r}")
-        plan = json.loads((self.rounds_dir / round_id / "plan.json").read_text())
-        return [row["id"] for row in plan["rows"] if _in_pool(row)]
+        """Ids of the in_pool rows of the round's plan.json; ValueError when it cannot be read as a plan."""
+        text = read_untrusted(self.rounds_dir, f"{round_id}/plan.json", PLAN_LIMIT)
+        try:
+            if text is None:
+                raise ValueError("no plan")
+            return [row["id"] for row in json.loads(text)["rows"] if _in_pool(row)]
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            raise ValueError(f"round {round_id!r} has no readable plan") from error
 
     def missing(self, needed: Needed) -> Needed:
         """The needed hosts the csub policy does not allow."""
