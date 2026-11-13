@@ -7,15 +7,15 @@ from the URLs it names.
 
 from __future__ import annotations
 
-import fnmatch
 import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from autodev.config import is_github_host
+from mia_core.hosts import missing_hosts as missing_hosts  # re-exported: importers use it from here
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config import Config, NetworkCfg
     from .models import Pins
 
 LABEL_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # = the harness's LABEL_KEY: it becomes labels/<key>.png.
@@ -88,20 +88,18 @@ def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins:
 
 def hosts(urls: list[str], cfg: Config) -> list[str]:
     """Exact hosts a job may reach: the URLs' hosts, their configured redirect targets, and the package hosts."""
+    return network_hosts(urls, cfg.network)
+
+
+def network_hosts(urls: list[str], network: NetworkCfg) -> list[str]:
+    """`hosts` over a network block alone."""
     url_hosts = {host for url in urls if (host := _host(url))}
-    redirects = {host.lower(): targets for host, targets in cfg.network.redirect_hosts.items()}
+    redirects = {host.lower(): targets for host, targets in network.redirect_hosts.items()}
     allowed = sorted(
         url_hosts
         | {target.lower() for host in url_hosts for target in redirects.get(host, [])}
-        | {host.lower() for host in cfg.network.package_hosts}
+        | {host.lower() for host in network.package_hosts}
     )
     if bad := [host for host in allowed if is_github_host(host)]:
         raise ValueError(f"GitHub hosts {bad} must never be granted to a job")
     return allowed
-
-
-def missing_hosts(hosts: list[str], patterns: list[str]) -> list[str]:
-    """Hosts no `csub probe` allowed_hosts pattern matches (csub/broker/resolve.py: check_hosts)."""
-    return [
-        host for host in hosts if not any(host == pattern or fnmatch.fnmatchcase(host, pattern) for pattern in patterns)
-    ]

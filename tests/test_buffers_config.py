@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from mia_buffers.config import HUMAN_LABELS, STAGES, Config, load_config
+from mia_buffers.config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES, Config, load_config
 
 
 def make_cfg(tmp_path: Path, **overrides) -> Config:
@@ -54,8 +54,9 @@ def test_labels_ids_and_markers(tmp_path):
         "idle",
         "retired",
         "needs-human",
+        "cancelled",
     }
-    assert set(HUMAN_LABELS) == {"go", "plan", "approve", "keep", "retire"}
+    assert set(HUMAN_LABELS) == {"go", "plan", "approve", "keep", "retire", "revoke"}
 
 
 def test_roots_accept_path_and_url_form(tmp_path):
@@ -172,3 +173,35 @@ def test_keeper_cfg_defaults(tmp_path):
     assert make_cfg(tmp_path).keeper.minutes == 30
     with pytest.raises(ValidationError):
         make_cfg(tmp_path, keeper={"minutes": 0})
+
+
+def test_every_label_description_fits_github():
+    """GitHub refuses a label description over 100 characters (422 on init-labels)."""
+    from mia_data.config import EXTRA_LABELS
+    from mia_data.config import HUMAN_LABELS as DATA_HUMAN
+    from mia_data.config import STAGES as DATA_STAGES
+
+    tables = [DATA_STAGES, DATA_HUMAN, STAGES, HUMAN_LABELS, PREP_STAGES, PREP_HUMAN_LABELS]
+    descriptions = [spec[1] for table in tables for spec in table.values()] + [
+        spec[1] for spec in EXTRA_LABELS.values()
+    ]
+    assert all(len(text) <= 100 for text in descriptions), [text for text in descriptions if len(text) > 100]
+
+
+def test_every_buffer_and_prep_stage_has_a_rule():
+    from mia_buffers.config import CANCELLABLE, PREP_STAGE_ACTIONS, STAGE_ACTIONS
+    from mia_data.config import STATUS_WORDS
+
+    assert set(STAGE_ACTIONS) == set(STAGES) and set(PREP_STAGE_ACTIONS) == {"new", *PREP_STAGES}
+    vocabulary = (set(HUMAN_LABELS) - {"plan"}) | {"dropped", "stop", "cancel"}  # plan is an option of go (§4.2)
+    for status, actions in [*STAGE_ACTIONS.values(), *PREP_STAGE_ACTIONS.values()]:
+        assert status in STATUS_WORDS and actions <= vocabulary
+    assert STAGE_ACTIONS["idle"] == ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"}))
+    assert PREP_STAGE_ACTIONS["requested"] == ("working", frozenset({"cancel", "stop"}))
+    # stop is offered exactly where closing the issue retired a buffer when a poller watched for that
+    live = {"planning", "plan-review", "sourcing", "staged", "ready", "idle"}
+    assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "stop" in actions} == live
+    # a round in progress takes cancel and nothing that starts or ends something else; a serving buffer no cancel
+    assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "cancel" in actions} == set(CANCELLABLE)
+    for status, actions in STAGE_ACTIONS.values():
+        assert status != "working" or actions <= {"cancel", "dropped", "stop"}

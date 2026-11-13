@@ -165,7 +165,7 @@ scaled, cropped, offset or need a transform. 103 records say annotations are pre
 `verification.annotations_verified` is false. A spec that requires annotations and a source passes these on the
 record's word; mia-data's binding is where the label is found and keyed, with the reasons written down. The
 binding is also where the `annotations.source` → label key mapping (manual, proofread, automatic) is settled, so a
-record with source `unknown` costs a human review at `data:review` rather than a planner rejection.
+record with source `unknown` costs a human review at the dataset's `review` stage rather than a planner rejection.
 
 ### 3.9 Identity
 

@@ -130,3 +130,9 @@ def test_state_dir_from_state_root_is_expanded(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = load_config(tmp_path / "mia.yaml", service="snippets")
     assert cfg.paths.state_dir.is_absolute() and cfg.paths.state_dir.name == "snippets"
+
+
+def test_judge_section_loads(tmp_path):
+    cfg = make_cfg(tmp_path, judge={"review": {"mode": "shadow"}})
+    assert cfg.judge.review.mode == "shadow" and cfg.judge.model == "opus"
+    assert make_cfg(tmp_path, judge={"review": {"mode": "shadow"}, "model": "sonnet"}).judge.model == "sonnet"

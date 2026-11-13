@@ -70,10 +70,12 @@ None of these touch `workflows.py`, so there is no replay risk.
    logs, buffer-api's ledger); put it under `/groups`, which is backed up, not under `/nrs`. `paths.local_root`
    is the exception: it holds the raw-cache locks and must be host-local disk, never NFS (`mia_core.locks`), so
    the VM needs a local scratch volume. The Temporal database is the other half; back up Postgres in Kubernetes.
-6. **Release procedure.** Tag, `git clone` into `releases/<tag>`, `pixi install`, `pixi run mia exec <service>
-   check` against production config, flip `current`, `mia restart <service>`. A worker restart mid-round is safe:
-   job submission is idempotent and `wait` reattaches by job id. Changes to `workflows.py` or `decide.py` still
-   need `workflow.patched()` for runs in flight ([`development.md`](development.md)).
+6. **Release procedure.** Tag, `git clone` into `releases/<tag>`, `pixi install`, `pixi run mia exec <service> check`
+   against production config, flip `current`, `mia restart <service>`. A broker reads the policy file it was started
+   with, so `mia restart` puts each service's broker on the generated csub policy (`--policy`, see
+   [`development.md`](development.md)). A worker restart mid-round is safe: job submission is idempotent and `wait`
+   reattaches by job id. Changes to `workflows.py` or `decide.py` still need `workflow.patched()` for runs in flight
+   ([`development.md`](development.md)).
 
 ## Open questions for the HPC team
 

@@ -286,9 +286,7 @@ def load_spec_text(text: str) -> Spec:
         if isinstance(data, dict) and "warnings" in data:
             raise SpecError("warnings is not a spec field")
         if isinstance(data, dict) and data.get("kind") == "preparation":
-            raise SpecError(
-                "this is a preparation request, not a buffer spec: it takes the prep:go label, not buffer:go"
-            )
+            raise SpecError("this is a preparation request, not a buffer spec: file it with Prepare, not Create buffer")
         return Spec.model_validate(data)
     except (yaml.YAMLError, ValidationError) as error:
         raise SpecError(str(error)) from error
@@ -305,6 +303,7 @@ class PrepSpec(_Strict):
     catalog: CatalogRef
     records: list[str] = []
     select: Select | None = None
+    again: bool = False  # also give a new round to the datasets that are prepared or that stopped
     timeout_days: float = Field(default=14, gt=0)  # after this long, the request needs a human
     # each record costs an agent run: more than this many need the number written into the request
     max_records: int = Field(default=25, ge=1, le=MAX_PREP_RECORDS)

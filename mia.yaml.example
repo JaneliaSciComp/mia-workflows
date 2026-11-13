@@ -1,91 +1,187 @@
-# Copy to mia.yaml (git-ignored), or point $MIA_CONFIG at a copy. The one config file for every service on this host.
-# Top-level sections are shared; `services.<name>` overlays them section by section (one level deep), so
-# services.mia-data.github.data_repo lands beside the shared github.auth. Each service gets deployment = its name
-# and paths.state_dir = <paths.state_root>/<name>. Secrets come from env / .env / key files, never from this file.
+# mia.yaml: the one config file for every service on this host.
+#
+# Copy this file to mia.yaml (git-ignored), or point $MIA_CONFIG at a copy. Top-level sections are shared by every
+# service; `services.<name>` overlays them section by section, one level deep, so services.mia-data.github.data_repo
+# lands beside the shared github.auth. Each service gets deployment = its name and paths.state_dir =
+# <paths.state_root>/<name>. Secrets come from the environment, .env or key files, never from this file.
 # `pixi run mia` runs each service as one tmux session named after it: a csub broker and a sandboxed worker.
-sandbox_dir: ../agentic-sandbox/scripts   # agentic-sandbox's scripts dir, relative to this repo
+#
+# Three sections bound three scopes. `limits` is per job: what one csub job may read, write and run for. `quota` is
+# per disk root: how much the shared caches may hold. `autonomy` is per request: what every job of one request adds up
+# to, plus the operator's switches. A number that is per job goes in limits, per root in quota, per request in
+# autonomy.
+
+# The agentic-sandbox checkout, relative to this repo: its scripts wrap every worker and job in a sandbox.
+sandbox_dir: ../agentic-sandbox/scripts
+
+# Temporal, the workflow engine. On a dev host `managed: true` makes `mia up` run a local dev server from
+# `state_dir` (SQLite: host-local disk, refused on a network fs; logs/ and bin/temporal live there too). For an
+# external Temporal, omit `managed` and `state_dir`. $TEMPORAL_ADDRESS overrides `address`. Each service names its
+# own namespace under `services`. `poll_minutes` is how often a round retries a lock or quota someone else holds.
 temporal:
-  managed: true                           # dev hosts: mia runs a local dev server (omit the section for an external Temporal)
-  state_dir: /scratch/mia/temporal        # managed only: temporal.db (SQLite: host-local disk, refused on a network
-                                          # fs), logs/, and bin/temporal if downloaded
-  address: localhost:7233                 # $TEMPORAL_ADDRESS overrides
-  poll_minutes: 2                         # namespace is per service, below
-  # ui_url: https://host.example.org:8443  # the Temporal web UI: the buffers page links each dataset's workflow
-github:                                   # shared: who the services act as, and the repos every service reads
-  auth: token                             # token: $GITHUB_TOKEN (run as yourself) | app: GitHub App (service account)
+  managed: true
+  state_dir: /scratch/mia/temporal
+  address: localhost:7233
+  poll_minutes: 2
+  # ui_url: https://host.example.org:8443   # the Temporal web UI; the buffers page links each dataset's workflow
+
+# GitHub: who the services act as, and the repos every service reads. `auth: token` runs as you with
+# $GITHUB_TOKEN (or `token_file` when the variable is unset: `mia up` needs the file because the sandbox masks
+# .env; `gh auth token > ~/.config/mia/token`, chmod 600). `auth: app` runs as a GitHub App service account and
+# needs `app_id`, `installation_id` and `private_key_path` (a PEM readable only by the service account).
+# `catalog_repo` holds the dataset records, `snippets_repo` the reader snippets. `trusted_bots` is deliberately not
+# shared: it would let the bot trigger autodev too (see services.mia-data).
+github:
+  auth: token
   token_env: GITHUB_TOKEN
-  token_file: null                        # auth: token, when $GITHUB_TOKEN is unset; `mia up` needs it (the sandbox
-                                          # masks .env): gh auth token > ~/.config/mia/token; chmod 600 it
-  app_id: null                            # auth: app
-  installation_id: null                   # auth: app
-  private_key_path: null                  # auth: app; PEM readable only by the service account, e.g. ~/.config/mia/app.pem
+  token_file: null
+  app_id: null
+  installation_id: null
+  private_key_path: null
   catalog_repo: AI-HHMI/mia-agentic-search
   snippets_repo: JaneliaSciComp/mia-snippets
-  # trusted_bots is not shared: it would let the bot trigger autodev too (see services.mia-data).
+
+# Where things live. `state_root/<service>` is each service's state_dir: trusted, never mounted into jobs, a shared
+# fs is fine. `local_root` must be host-local disk (refused on a network fs): locks/ and buffer-api's service/
+# state. The other roots are a path, or {path, url} with the Fileglancer (or other browser) URL of that folder, so
+# timeline entries can link the round's workspace and the dataset's crops. `work_root`: job workspaces and
+# snapshots, inside the csub policy's allowed_roots. `storage_root`: published crops; mia-buffers reads each
+# dataset's binding.yaml there. `raw_root`: the shared raw cache, raw_root/<record id>/, where humans drop files
+# under incoming/; defaults to <work_root>/_cache. `staged_root`: one NGFF pyramid per volume,
+# staged_root/<levels key>/<record id>/.
 paths:
-  state_root: ~/.local/state/mia          # <state_root>/<service> is each service's state_dir: trusted, never mounted
-                                          # into jobs; a shared fs is fine (buffer-api's SQLite ledger lives here for now)
-  local_root: /scratch/mia                # host-local disk: locks/, and service/ (reserved for buffer-api's state from
-                                          # milestone B); refused on a network fs
-  # a root is a path, or {path, url} with the Fileglancer (or other browser) URL of that folder:
-  # issue comments then link the round's workspace and the dataset's crops folder
-  work_root:                              # job workspaces and snapshots; inside the csub policy's allowed_roots
+  state_root: ~/.local/state/mia
+  local_root: /scratch/mia
+  work_root:
     path: /shared/TBD/mia/work
     url: https://fileglancer.example.org/browse/TBD/mia/work
-  storage_root:                           # published crops: <dataset folder>/binding.yaml is read here by mia-buffers
+  storage_root:
     path: /shared/TBD/mia/crops
     url: https://fileglancer.example.org/browse/TBD/mia/crops
-  # raw_root:                             # shared raw cache, raw_root/<record id>/; humans drop files under
-  #   path: /shared/TBD/mia/work/_cache   # raw_root/<record id>/incoming/. Default: <work_root>/_cache
+  # raw_root:
+  #   path: /shared/TBD/mia/work/_cache
   #   url: https://fileglancer.example.org/browse/TBD/mia/work/_cache
-  staged_root:                            # one NGFF pyramid per volume, staged_root/<levels key>/<record id>/
+  staged_root:
     path: /shared/TBD/mia/staged
     url: https://fileglancer.example.org/browse/TBD/mia/staged
+
+# The mia-snippets checkout the jobs run (`harness`). A round pins its commit and pixi.lock digest at admission.
 harness:
-  dir: /path/to/mia-snippets-checkout     # pinned per round by commit + pixi.lock digest
+  dir: /path/to/mia-snippets-checkout
+
+# Per job: what one csub job may read, write and run for. `job_bytes` caps a crop or stage job's input;
+# `stage_bytes` caps one staged artifact's uncompressed planned bytes and defaults to job_bytes. The fetch_* values
+# bound one fetch job and how many fetch attempts a dataset gets. Also here, outside the per-job rule:
+# `agent_max_budget_usd` (one match-agent run, default 5) and `max_pr_revisions` (one round, default 5).
 limits:
   job_bytes: 5e9
-  # stage_bytes: 2e9   # cap on one staged artifact's uncompressed planned bytes; defaults to job_bytes
+  # stage_bytes: 2e9
   job_walltime_min: 120
   fetch_bytes: 50e9
   fetch_walltime_min: 480
   fetch_attempts: 4
+
+# Hosts the sandbox lets jobs reach. `package_hosts` are the package indexes every job may use.
+# `redirect_hosts` is filled from the redirect probe: exact hosts, no patterns.
 network:
   package_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, repo.prefix.dev]
-  redirect_hosts: {}                      # filled from the redirect probe; exact hosts, no patterns
-service:                                  # the buffer-api (`mia-buffers serve`) and its clients
-  url: http://host.example.org:8765       # the port is required
-  token_file: ~/.config/mia/service-token # chmod 600
-quota:                                    # the buffers worker's keeper evicts free assets per root; 0 = unlimited
-  raw_bytes: 0                            # bytes under paths.raw_root; 0 = unlimited
-  staged_bytes: 0                         # bytes under paths.staged_root; 0 = unlimited
-  headroom_bytes: 200e9                   # a pass over quota evicts until usage is under quota minus this
-  hold_hours: 48                          # an asset unused this long is evictable; older .building-* dirs are removed
+  redirect_hosts: {}
+
+# csub's policy. `base_policy` is the operator's broker.toml: mia reads it and never writes it. `policy_dir` is where
+# mia keeps the policy it generates (default: <paths.state_root>/csub). Two rules for `policy_dir`: it is under the
+# home directory (csub lets no job mount anything there), and it neither contains nor lies inside any directory a
+# worker sandbox binds read-write (state dirs, work_root, storage_root, raw_root, staged_root, the lock directory).
+# Its broker.toml must not be the base policy itself.
+csub:
+  base_policy: ~/.config/csub/broker.toml
+  # policy_dir: ~/.local/state/mia/csub
+
+# buffer-api (`mia-buffers serve`) and its clients. The port is required in `url`. `token_file` holds the worker
+# token its write routes need (chmod 600; `mia init-token` creates it). buffer-api also reaches Temporal (the
+# `temporal.address` above): it starts the workflow that copies each dataset's, buffer's and request's timeline
+# to its GitHub issue, on mia-buffers' namespace and on that of the service whose app is mia-data.
+service:
+  url: http://host.example.org:8765
+  token_file: ~/.config/mia/service-token
+
+# Per disk root: how much the shared caches may hold. The buffers worker's keeper evicts free assets (unreferenced,
+# unused for `hold_hours`) until a root is under its quota minus `headroom_bytes`; 0 = unlimited. `raw_bytes` is
+# paths.raw_root, `staged_bytes` is paths.staged_root. Older .building-* directories are removed on the same pass.
+quota:
+  raw_bytes: 0
+  staged_bytes: 0
+  headroom_bytes: 200e9
+  hold_hours: 48
+
+# The keeper's schedule: `minutes` is both the SQLite backup cadence and how often MiaCacheKeeper runs
+# (`mia-buffers schedule`); `catalog_sync_hours` is how old the catalog's main head may get before it syncs it.
 keeper:
-  minutes: 30                             # SQLite backup cadence and the MiaCacheKeeper schedule (mia-buffers schedule)
-  catalog_sync_hours: 24                  # the keeper syncs the catalog's main head when older than this
-services:                                 # per service: app + the sections that differ, in the app's own shape
+  minutes: 30
+  catalog_sync_hours: 24
+
+# The judge (autonomous-gates spec §4, §9): a read-only Claude Code job that looks at the evidence of a gate (crop
+# galleries, a PR diff) and answers approve / reject / escalate. A `model` other than the authors' agent.model is a
+# precaution, not a rule.
+# Each gate has a mode: `off` (no judge runs), `shadow` (the verdict is recorded beside the person's and decides
+# nothing; the Decisions tab shows the agreement), `active` (the verdict authorizes). A gate goes active only after
+# its shadow numbers say so. `min_confidence`: under it the judge abstains and a human decides.
+judge:
+  model: opus
+  max_budget_usd: 2
+  walltime_min: 30
+  min_confidence: 0.6
+  crops: {mode: "off"}
+  review: {mode: "off"}
+
+# Per request, and the operator's switches (autonomous-gates spec). `pause`: `mia pause` and `mia resume` flip it;
+# every worker re-reads it before each job and a paused round stops at its next job. `quarantine_days`: a revoked
+# artifact is held this long before the keeper may evict it. `root`: what one request (a buffer spec, a preparation
+# request or a dataset, including the dataset rounds it starts) may spend in all. A request busy for `max_days` straight is
+# stopped; one idle that long starts a fresh budget. The concurrency cap makes a job wait; the others end the work.
+autonomy:
+  pause: false
+  quarantine_days: 30
+  root:
+    max_usd: 100
+    max_fetch_bytes: 500e9
+    max_jobs: 200
+    max_concurrent_jobs: 20
+    max_days: 14
+
+# One entry per service: its app and the sections that differ from the shared ones, in the app's own shape.
+services:
+
+  # autodev on this repo: GitHub issue to PR by Claude Code. `paths.work_root` is a plain path here (agent
+  # workspaces), not {path, url}. `protected_paths` the agent may not touch; `required_checks` are status contexts or
+  # check-run names that must be present and green before a merge; `trusted_bots` are GitHub App slugs whose `go`,
+  # `/approve` and `/revise` count. Under `agent`: the model, the job's shape (walltime <= 60 lands in the short
+  # queue; mem_mb under one slot keeps the job at 1 slot), the hosts it may reach, extra read-only mounts and PATH
+  # entries for its tests, how many revisions it gets, an optional `max_budget_usd` passed to claude -p, and
+  # `api_key_env` to bill an API key instead of a login.
   autodev:
     app: autodev
     temporal: {namespace: default}
-    paths: {work_root: /shared/TBD/autodev/work}   # autodev takes a plain path here, not {path, url}: agent workspaces
+    paths: {work_root: /shared/TBD/autodev/work}
     github:
       repo: JaneliaSciComp/mia-workflows
       base_branch: main
       protected_paths: [".github/"]
-      # required_checks: ["mia-data/crops"]   # status contexts / check-run names that must be present and green
-      # trusted_bots: [some-app]              # GitHub App slugs whose `go`, `/approve` and `/revise` count
+      # required_checks: ["mia-data/crops"]
+      # trusted_bots: [some-app]
     agent:
       model: sonnet
-      walltime_min: 60                    # <= 60 lands in the short queue
-      cpus: 1                             # Claude Code needs well under 1 GB; raise for repos with heavy tests
-      mem_mb: 4000                        # under one slot, so the job holds 1 slot (slots = max(cpus, mem/mem_per_slot))
+      walltime_min: 60
+      cpus: 1
+      mem_mb: 4000
+      # package hosts only: the exact hosts the broker's policy allows are added to each job
       allow_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, prefix.dev, repo.prefix.dev]
-      extra_mounts: []                    # e.g. ["/shared/TBD/tools:ro"]
-      path_prepend: []                    # e.g. ["/shared/TBD/tools/bin"] (a pixi binary for the agent's tests)
+      extra_mounts: []
+      path_prepend: []
       max_revisions: 3
-      # max_budget_usd: 5                 # passes --max-budget-usd to claude -p; unset = no cap
-      api_key_env: null                   # e.g. ANTHROPIC_API_KEY (service account billing the API instead of a login)
+      # max_budget_usd: 5
+      api_key_env: null
+
+  # autodev on mia-snippets: the same app writing reader snippets.
   snippets:
     app: autodev
     temporal: {namespace: default}
@@ -94,34 +190,45 @@ services:                                 # per service: app + the sections that
       repo: JaneliaSciComp/mia-snippets
       base_branch: main
       protected_paths: [".github/"]
+
+  # mia-data: dataset to published crops. `data_repo` receives one issue per dataset, a copy of its timeline that the
+  # system writes and nothing reads (datasets are started and steered from the buffers page). `crops`: the round's set
+  # (`per_round`, reviewed and, approved, published), the hand-run `test-pr` command's `test_per_round`, and how
+  # many crops per plane and per file. `gallery.branch` receives the crop galleries. `agent` is the match agent:
+  # its walltime is limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not
+  # accepted here. `evaluate` is a switch for the evaluate job after cropping; nothing runs behind it yet.
   mia-data:
     app: mia-data
     temporal: {namespace: mia-data}
     github:
       data_repo: JaneliaSciComp/mia-workflow-data
-      trusted_bots: []                    # GitHub App slugs whose data:go counts without write access, e.g. [mia-autodev]
     crops:
       size: 256
-      per_round: 16                       # the round's set: reviewed and, approved, published (one set per round)
-      test_per_round: 4                   # crops of the hand-run `test-pr` command only; a round makes per_round
+      per_round: 16
+      test_per_round: 4
       per_plane: 4
       per_file: 8
     gallery: {branch: galleries}
-    agent:                                # its walltime is limits.job_walltime_min; autodev's agent.allow_hosts,
-      model: sonnet                       # extra_mounts and api_key_env are not used by mia-data (config rejects them)
+    agent:
+      model: sonnet
       cpus: 1
       mem_mb: 4000
       path_prepend: []
-    # evaluate: {enabled: false}          # the evaluate job after cropping: a switch only, nothing runs yet
+    # evaluate: {enabled: false}
+
+  # mia-buffers: training buffers. `buffers_repo` receives one issue per buffer spec and per preparation request,
+  # a copy of its timeline (they are created and run on the page); `datasets_repo` is mia-data's issue repo.
+  # `sourcing`: stage jobs (`parallel`) and fetch jobs (`parallel_fetch`) in flight per buffer, the tensorizer under
+  # <harness.dir>/tensorizers/, and the frozen val and test list lengths.
   mia-buffers:
     app: mia-buffers
     temporal: {namespace: mia-buffers}
     github:
-      buffers_repo: JaneliaSciComp/mia-buffers   # one issue per buffer spec; humans add buffer:go / buffer:approve
-      datasets_repo: JaneliaSciComp/mia-workflow-data  # mia-data's issue repo: a dataset without a binding gets data:go there
+      buffers_repo: JaneliaSciComp/mia-buffers
+      datasets_repo: JaneliaSciComp/mia-workflow-data
     sourcing:
-      parallel: 4                         # stage jobs in flight per buffer
+      parallel: 4
       parallel_fetch: 2
-      tensorizer: muvit-2d                # under <harness.dir>/tensorizers/
-      val_size: 256                       # frozen val/test list lengths
+      tensorizer: muvit-2d
+      val_size: 256
       test_size: 256

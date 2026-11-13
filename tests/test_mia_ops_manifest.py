@@ -62,18 +62,10 @@ def test_load_manifest_invalid_file_exits(tmp_path):
         load_manifest(tmp_path / "mia.yaml")
 
 
-def test_load_manifest_env_default(tmp_path, monkeypatch):
-    p = tmp_path / "m.yaml"
-    p.write_text("services:\n  autodev: {app: autodev, config: autodev.yaml}\n")
-    monkeypatch.setenv("MIA_MANIFEST", str(p))
-    assert list(load_manifest().services) == ["autodev"]
-
-
-def test_load_manifest_prefers_mia_config_env(tmp_path, monkeypatch):
+def test_load_manifest_reads_mia_config_env(tmp_path, monkeypatch):
     p = tmp_path / "m.yaml"
     p.write_text("services:\n  autodev: {app: autodev, config: autodev.yaml}\n")
     monkeypatch.setenv("MIA_CONFIG", str(p))
-    monkeypatch.delenv("MIA_MANIFEST", raising=False)
     assert load_manifest().path == p
 
 
@@ -82,3 +74,12 @@ def test_load_manifest_resolves_a_relative_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     m = load_manifest("m.yaml")
     assert m.path.is_absolute() and m.path == (tmp_path / "m.yaml").resolve()
+
+
+def test_manifest_carries_the_csub_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / "mia.yaml"
+    path.write_text("paths: {state_root: /x/state}\ncsub: {base_policy: ~/b.toml}\nservices: {aa: {app: autodev}}\n")
+    manifest = load_manifest(path)
+    assert manifest.csub.base_policy == tmp_path / "b.toml"
+    assert str(manifest.csub.policy_dir) == "/x/state/csub"

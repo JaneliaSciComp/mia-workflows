@@ -6,24 +6,22 @@ import json
 import os
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError, WorkflowHistory
+from temporalio.client import WorkflowFailureError, WorkflowHistory
 from temporalio.exceptions import ApplicationError, CancelledError
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
-from test_buffers_config import make_cfg
 
 from mia_buffers import workflows
-from mia_buffers.activities import Activities
 from mia_buffers.models import (
     BindingInfo,
+    BoardAssessed,
     BufferPins,
     BufferState,
     DatasetIssue,
@@ -39,6 +37,8 @@ from mia_buffers.models import (
     QuotaCheck,
     RawStatus,
     RegisterResult,
+    RevokedArtifacts,
+    RevokedSignal,
     SourcingLimits,
     StagedSummary,
     StageJobArgs,
@@ -46,12 +46,10 @@ from mia_buffers.models import (
     fetch_job_key,
     job_key,
 )
-from mia_buffers.poll import run_poll
 from mia_buffers.workflows import MiaBuffer
-from mia_data.models import JobDone, LabelEvent, LockTaken
-from mia_data.publish import reindex
+from mia_data.models import JobDone, LabelEvent, LockTaken, Reservation
 
-PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64)
+PINS = BufferPins("s" * 64, "c" * 40, "h" * 40, "d" * 64, root="o/buffers#7")
 PLAN = PlanResult(
     True,
     [],
@@ -114,7 +112,16 @@ class Mocks:
         raw_ready=None,
         quota_after=None,
         missing=None,
+        paused=False,
+        reservations=None,
+        assess_refused=None,
+        revoke_targets_answer=None,
+        submit_error=None,
+        submit_gate=None,
+        retire_gate=None,
     ):
+        self.submit_gate = submit_gate  # an asyncio.Event: every submit waits for it, as a slow bsub would
+        self.retire_gate = retire_gate  # an asyncio.Event: retire_buffer waits for it, as a large archive would
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
         self.drops, self.states, self.refuse = drops or {}, states or {}, refuse or {}
@@ -130,6 +137,10 @@ class Mocks:
         self.board: list[tuple[str, str]] = []  # (record, status) as mark_dataset received them
         self.quota_after = quota_after or {}  # record -> the record whose fetch must be submitted before its quota
         self.missing = missing  # missing_records' answers in turn (the last repeats); default: every pool record
+        self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
+        self.assess_refused = assess_refused or {}  # record -> the policy's reason at the gate approve
+        self.revoke_targets_answer = revoke_targets_answer or []  # the records a buffer:revoke names
+        self.submit_error = submit_error  # a message: every stage submit raises it, non-retryable
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -198,6 +209,10 @@ class Mocks:
         @activity.defn(name="submit")
         async def submit(key: str, args: StageJobArgs) -> str:
             rec("submit", key, args)
+            if self.submit_error:
+                raise ApplicationError(self.submit_error, non_retryable=True)
+            if self.submit_gate:
+                await self.submit_gate.wait()
             return f"job-{key}"
 
         @activity.defn(name="read_stage")
@@ -224,6 +239,28 @@ class Mocks:
                 return RegisterResult(refused={f"{record}/v0.zarr": self.refuse[record]})
             return RegisterResult([f"{record}/v0.zarr"])
 
+        @activity.defn(name="assess_board")
+        async def assess_board(issue: int, round_id: str, buffer_id: str, verdict: str, by: str) -> BoardAssessed:
+            rec("assess_board", buffer_id, verdict, by)
+            return BoardAssessed(["as-1"], dict(self.assess_refused))
+
+        @activity.defn(name="unregister_volumes")
+        async def unregister_volumes(buffer_id: str, record: str) -> list[str]:
+            rec("unregister_volumes", buffer_id, record)
+            return [f"{record}/v0.zarr"]
+
+        @activity.defn(name="revoke_targets")
+        async def revoke_targets(issue: int, actor: str, until: str) -> list[str]:
+            rec("revoke_targets", actor, until)
+            return list(self.revoke_targets_answer)
+
+        @activity.defn(name="revoke_artifacts")
+        async def revoke_artifacts(
+            round_id: str, buffer_id: str, records: list[str], by: str, summary: str
+        ) -> RevokedArtifacts:
+            rec("revoke_artifacts", buffer_id, list(records), by)
+            return RevokedArtifacts(["as-r"], [f"{record}/v0.zarr" for record in records], list(records))
+
         return [
             admit,
             plan,
@@ -241,6 +278,10 @@ class Mocks:
             verify_drop,
             create_buffer,
             register_dataset,
+            assess_board,
+            unregister_volumes,
+            revoke_targets,
+            revoke_artifacts,
             *self.cache_acts(),
         ]
 
@@ -307,6 +348,8 @@ class Mocks:
         @activity.defn(name="retire_buffer")
         async def retire_buffer(round_id: str, buffer_id: str) -> dict:
             rec("retire_buffer", buffer_id)
+            if self.retire_gate:
+                await self.retire_gate.wait()
             return {"refs": 2, "draws": 5, "archive": f"/state/archive/{buffer_id}.draws.jsonl.gz"}
 
         @activity.defn(name="missing_records")
@@ -316,10 +359,28 @@ class Mocks:
                 return [d.record for d in self.plan.pool]
             return self.missing.pop(0) if len(self.missing) > 1 else self.missing[0]
 
+        @activity.defn(name="paused")
+        async def paused() -> bool:
+            rec("paused")
+            return turn({"p": self.paused}, "p", False)  # a list: answers in turn, the last repeats
+
+        @activity.defn(name="reserve")
+        async def reserve(root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
+            rec("reserve", root, reservation_id, kind, usd)
+            return turn(self.reservations, kind, Reservation(True))
+
+        @activity.defn(name="settle")
+        async def settle(root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
+            rec("settle", root, reservation_id, usd, fetched_bytes)
+
         @activity.defn(name="raw_ready")
         async def raw_ready(round_id: str, record: str) -> bool:
             rec("raw_ready", record)
             return self.raw_ready.get(record, True)
+
+        @activity.defn(name="kill_job")
+        async def kill_job(job_id: str) -> None:
+            rec("kill_job", job_id)
 
         return [
             take_lock,
@@ -336,6 +397,10 @@ class Mocks:
             retire_buffer,
             raw_ready,
             missing_records,
+            paused,
+            reserve,
+            settle,
+            kill_job,
         ]
 
     def await_act(self):
@@ -633,228 +698,6 @@ async def test_rollover_in_plan_review_then_approve(env, monkeypatch):
     assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"] and len(m.of("admit")) == 1
 
 
-# --- the poller -------------------------------------------------------------------------------
-
-
-class PollGH:
-    def __init__(self, issues, events=None, perms=None):
-        self.issues, self.events, self.perms = issues, events or {}, perms or {}
-        self.comments, self.removed, self.closed_at = {}, [], {}
-
-    def tokens(self):
-        return "tok"
-
-    async def list_issues(self, labels=None, state=None, **_):
-        return [
-            i
-            for i in self.issues.values()
-            if (not labels or labels in {x["name"] for x in i["labels"]})
-            and (state is None or i.get("state", "open") == state)
-        ]
-
-    async def add_labels(self, n, names):
-        self.issues[n]["labels"] += [{"name": x} for x in names]
-
-    async def label_event(self, n, label):
-        return self.events[(n, label)]
-
-    async def permission(self, login):
-        return self.perms.get(login, "none")
-
-    async def remove_label(self, n, name):
-        self.removed.append((n, name))
-        self.issues[n]["labels"] = [x for x in self.issues[n]["labels"] if x["name"] != name]
-
-    async def issue_comments(self, n):
-        return self.comments.get(n, [])
-
-    async def comment(self, n, body):
-        self.comments.setdefault(n, []).append({"body": body, "user": {"login": "bot"}, "html_url": "u"})
-        return self.comments[n][-1]
-
-    async def get_issue(self, n):
-        return self.issues[n]
-
-    async def last_closed_at(self, n):
-        return self.closed_at.get(n)
-
-
-class FakeClient:
-    def __init__(self, states, starts=None):
-        self.states, self.started, self.signals, self.terminated = states, [], [], []
-        self.starts = starts or {}  # workflow id -> start time of its running run
-        self.describe_run = lambda wid: f"run-{wid}"
-        self.statuses = {}  # workflow id -> status of its latest run, RUNNING when absent
-
-    async def start_workflow(self, wf, arg, **kw):
-        self.started.append((wf, arg, kw))
-
-    def get_workflow_handle(self, wid):
-        client = self
-
-        class Handle:
-            async def signal(self, name, arg=None, *, args=None):
-                client.signals.append((wid, name, tuple(args) if args is not None else arg))
-
-            async def query(self, name, result_type=None):
-                return client.states[wid]
-
-            async def terminate(self, reason=None):
-                if wid not in client.states:
-                    raise RPCError("workflow execution already completed", None, None)
-                client.terminated.append((wid, reason))
-
-            async def describe(self):
-                if wid not in client.states:
-                    raise RPCError("not found", RPCStatusCode.NOT_FOUND, b"")
-                return SimpleNamespace(
-                    start_time=client.starts.get(wid),
-                    status=client.statuses.get(wid, WorkflowExecutionStatus.RUNNING),
-                    run_id=client.describe_run(wid),
-                )
-
-        return Handle()
-
-
-def issue(n, *labels):
-    return {"number": n, "body": "", "labels": [{"name": x} for x in labels]}
-
-
-async def test_poll_delivers_labels_and_drops(tmp_path):
-    cfg = make_cfg(tmp_path)
-    at = "2026-10-24T10:00:00Z"
-    gh = PollGH(
-        issues={
-            1: issue(1, "buffer:new", "buffer:go"),
-            2: issue(2, "buffer:sourcing"),
-            3: issue(3, "buffer:ready"),
-            4: issue(4, "buffer:staged"),  # at the gate: a waiting dataset's drop is still delivered (spec §15)
-        },
-        events={(1, "buffer:go"): ("alice", "501", at)},
-        perms={"alice": "write"},
-    )
-    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
-    waiting.datasets = [
-        workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-drop"),
-        workflows.DatasetStatus("u937", "confocal", False, "servable"),
-    ]
-    ready = BufferState(
-        3, round_id="i3-e1", stage="ready", datasets=[workflows.DatasetStatus("x", "g", True, "waiting-drop")]
-    )
-    staged = BufferState(
-        4, round_id="i4-e2", stage="staged", datasets=[workflows.DatasetStatus("y", "g", True, "waiting-drop")]
-    )
-    client = FakeClient({cfg.workflow_id(2): waiting, cfg.workflow_id(3): ready, cfg.workflow_id(4): staged})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-    (cfg.paths.raw_root / "bcss" / "incoming").mkdir(parents=True)
-    (cfg.paths.raw_root / "bcss" / "incoming" / "a.zip").write_bytes(b"z")
-    (cfg.paths.raw_root / "x" / "incoming").mkdir(parents=True)  # empty: nothing to signal
-    (cfg.paths.raw_root / "y" / "incoming").mkdir(parents=True)
-    (cfg.paths.raw_root / "y" / "incoming" / "b.tif").write_bytes(b"t")
-    assert await run_poll(acts) == ["go #1"]  # the drop is not signalled on first sight (a copy may be running)
-    assert set(await run_poll(acts)) == {"dropped #2 bcss", "dropped #4 y"}
-    ((wf, state, kw),) = client.started
-    assert wf == "MiaBuffer" and state == BufferState(1) and kw["start_signal"] == "go"
-    assert kw["start_signal_args"] == [LabelEvent("go", "501", "alice", at)] and kw["id"] == cfg.workflow_id(1)
-    assert gh.removed == [(1, "buffer:go")]
-    assert set(client.signals) == {(cfg.workflow_id(2), "dropped", "bcss"), (cfg.workflow_id(4), "dropped", "y")}
-    assert await run_poll(acts) == []  # nothing new: the drop was signalled once
-    (cfg.paths.raw_root / "bcss" / "incoming" / "b.zip").write_bytes(b"z")
-    assert await run_poll(acts) == []  # a new file: seen, not yet stable
-    assert await run_poll(acts) == ["dropped #2 bcss"]  # once more
-
-
-async def test_poll_retires_a_closed_issue(tmp_path):
-    """Closing the issue is the retire: the workflow is terminated (frozen or not), the buffer released, the
-    label swapped, once; a closed issue with no workflow and no buffer just gets its label."""
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={2: issue(2, "buffer:sourcing"), 3: issue(3, "buffer:plan-review"), 4: issue(4, "buffer:ready")})
-    gh.issues[2]["state"] = gh.issues[3]["state"] = "closed"
-    states = {
-        cfg.workflow_id(n): BufferState(n, round_id=f"i{n}-e1", stage=s) for n, s in ((2, "sourcing"), (4, "ready"))
-    }
-    client = FakeClient(states)
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-
-    class Reg:
-        retired, events = [], []
-
-        def buffers(self):
-            return [{"id": "i2-e9", "latest_event": {"kind": "approved"}}, {"id": "i4-e1", "latest_event": None}]
-
-        def retire(self, buffer):
-            self.retired.append(buffer)
-            return {"refs": 1, "draws": 0, "archive": None}
-
-        def event(self, buffer, kind, **kw):
-            self.events.append((buffer, kind))
-
-    acts.registry = Reg()
-    expect = {f"terminated {cfg.workflow_id(2)}", "retired i2-e9", "closed #2", "closed #3"}
-    assert set(await run_poll(acts)) == expect
-    assert client.terminated == [(cfg.workflow_id(2), "issue closed")]
-    assert acts.registry.retired == ["i2-e9"] and acts.registry.events == [("i2-e9", "retired")]
-    assert {x["name"] for x in gh.issues[2]["labels"]} == {"buffer:retired"}
-    assert {x["name"] for x in gh.issues[3]["labels"]} == {"buffer:retired"}
-    assert {x["name"] for x in gh.issues[4]["labels"]} == {"buffer:ready"}  # open: untouched
-    assert "workflow stopped; retired `i2-e9`" in gh.comments[2][0]["body"]
-    assert "no workflow running" in gh.comments[3][0]["body"]
-    assert await run_poll(acts) == [] and len(gh.comments[2]) == 1  # the label is gone: nothing to do again
-
-
-async def test_poll_retires_an_issue_closed_and_reopened_within_one_interval(tmp_path):
-    """A close the poller never saw (the issue was reopened before the next pass) still retires the run it was
-    aimed at: an open live issue whose latest close is newer than its running workflow's start is retired, once."""
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={5: issue(5, "buffer:plan-review"), 6: issue(6, "buffer:ready")})
-    gh.closed_at = {5: "2026-10-28T12:08:29Z", 6: "2026-10-27T09:00:00Z"}  # 6 was closed before its run began
-    states = {
-        cfg.workflow_id(n): BufferState(n, round_id=f"i{n}-e1", stage=s) for n, s in ((5, "plan-review"), (6, "ready"))
-    }
-    starts = {cfg.workflow_id(n): datetime(2026, 10, 27, 19, 52, tzinfo=UTC) for n in (5, 6)}
-    client = FakeClient(states, starts)
-    client.statuses[cfg.workflow_id(5)] = WorkflowExecutionStatus.TERMINATED  # a pass that stopped half-way
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-
-    class Reg:
-        retired = []
-
-        def buffers(self):
-            return [
-                {"id": "i5-e1", "latest_event": {"kind": "planned"}},
-                {"id": "i6-e1", "latest_event": {"kind": "ready"}},
-            ]
-
-        def retire(self, buffer):
-            self.retired.append(buffer)
-            return {"refs": 0, "draws": 0, "archive": None}
-
-        def event(self, buffer, kind, **kw):
-            pass
-
-    acts.registry = Reg()
-    assert set(await run_poll(acts)) == {f"terminated {cfg.workflow_id(5)}", "retired i5-e1", "closed #5"}
-    assert client.terminated == [(cfg.workflow_id(5), "issue closed")] and acts.registry.retired == ["i5-e1"]
-    assert {x["name"] for x in gh.issues[5]["labels"]} == {"buffer:retired"}
-    assert {x["name"] for x in gh.issues[6]["labels"]} == {"buffer:ready"}  # closed before this run: untouched
-    assert "closed and reopened" in gh.comments[5][0]["body"]
-    assert await run_poll(acts) == []  # the label is gone: nothing to do again
-    # a later run of the same issue, closed again: said again (the once-guard is per run, not per issue)
-    gh.issues[5]["labels"], gh.issues[5]["state"] = [{"name": "buffer:sourcing"}], "closed"
-    client.starts[cfg.workflow_id(5)] = datetime(2026, 10, 29, tzinfo=UTC)
-    client.describe_run = lambda wid: f"run2-{wid}"
-    assert "closed #5" in await run_poll(acts) and len(gh.comments[5]) == 2
-
-
-async def test_poll_refuses_go_from_a_reader(tmp_path):
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={1: issue(1, "buffer:go")}, events={(1, "buffer:go"): ("eve", "7", "2026-10-24T10:00:00Z")})
-    client = FakeClient({})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-    assert await run_poll(acts) == [] and not client.started and gh.removed == [(1, "buffer:go")]
-    assert "does not have write access" in gh.comments[1][0]["body"]
-
-
 async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
     """read_binding found this binding's pyramid in the registry (an earlier round or buffer staged it): no
     workspace, no job; read_stage re-reads it and registration proceeds."""
@@ -872,12 +715,12 @@ async def test_a_pyramid_staged_earlier_is_registered_without_a_stage_job(env):
     assert len(servable) == 1 and "staged earlier" in servable[0]
 
 
-# --- milestone K: the staged gate (spec §15) ---------------------------------------------------------
+# --- the staged gate (spec §15) ---------------------------------------------------------
 
 TWO_GROUPS = PlanResult(
     True, [], [DatasetPlan("a", "TEM", 0.5, False), DatasetPlan("b", "SEM", 0.5, False)], 1, levels=[1], patch=64
 )
-NOT_GATE_TEXT = "`buffer:approve` counts only while the issue is in `buffer:plan-review` or `buffer:staged`"
+NOT_GATE_TEXT = "an approve counts only while the spec is at `plan-review` or `staged`"
 
 
 def staged_comments(m):
@@ -892,7 +735,7 @@ async def test_go_stages_then_waits_at_staged_and_approve_serves(env):
         await idle(h, m, "staged")  # opens as soon as nothing runs: u937 servable, bcss waiting for its drop
         staged = m.of("set_stage")[-1]
         assert m.stages == ["planning", "sourcing", "staged"]
-        assert "`u937` | servable" in staged[2] and "approve with `buffer:approve` to serve it as it is" in staged[1]
+        assert "`u937` | servable" in staged[2] and "approve to serve it as it is" in staged[1]
         await h.signal(MiaBuffer.dropped, "bcss")
         await until(lambda: any("`bcss` | servable" in c[0] for c in staged_comments(m)), m=m)  # the drop landed
         await idle(h, m, "staged")
@@ -1044,7 +887,7 @@ async def test_stale_approve_at_staged_is_refused(env):
         await h.signal(MiaBuffer.approve, ev("approve", "12", shift(staged_at, -60)))
         await until(lambda: m.of("refuse_label"), m=m)
         await asyncio.sleep(0.3)
-    assert "older than the staged comment" in " ".join(map(str, m.of("refuse_label")[-1]))
+    assert "older than the staged board" in " ".join(map(str, m.of("refuse_label")[-1]))
     assert m.stages[-1] == "staged"
 
 
@@ -1160,24 +1003,7 @@ async def test_go_after_ready_with_a_straggler_starts_a_new_round(env):
     assert not m.of("verify_drop")  # the straggler was abandoned, not dropped
 
 
-async def test_poll_signals_only_a_stable_listing(tmp_path):
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
-    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
-    waiting.datasets = [workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-drop")]
-    client = FakeClient({cfg.workflow_id(2): waiting})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-    incoming = cfg.paths.raw_root / "bcss" / "incoming"
-    incoming.mkdir(parents=True)
-    (incoming / "a.zip").write_bytes(b"part")
-    assert await run_poll(acts) == []  # first sight: the file may still be copying
-    (incoming / "a.zip").write_bytes(b"part two")  # grew: still copying
-    assert await run_poll(acts) == []
-    assert await run_poll(acts) == ["dropped #2 bcss"]  # unchanged for a whole pass: stable
-    assert await run_poll(acts) == []
-
-
-# --- milestone 4: datasets without a binding -----------------------------------------------------
+# --- datasets without a binding -----------------------------------------------------
 
 
 async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
@@ -1195,46 +1021,6 @@ async def test_timeout_drops_waiting_datasets_and_may_reach_ready(env):
     assert bcss.status == "dropped" and "after 6e-05 days" in bcss.reason and "waiting-drop" in bcss.reason
     assert m.of("comment_plan")[-1][1] == {"bcss": bcss.reason} and "needs-human" not in m.stages
     assert state.ready and dataset(state, "u937").status == "servable"
-
-
-async def test_poll_no_longer_watches_bindings(tmp_path):
-    """Milestone E: a buffer never waits on mia-data, so the poller sends no `dataset_update` for a pre-E round
-    still waiting: a published binding and an ineligible dataset issue both go unsignalled."""
-    cfg = make_cfg(tmp_path)
-    gh = PollGH(issues={2: issue(2, "buffer:sourcing")})
-    datasets = PollGH(issues={5: issue(5, "data:ineligible", "licence-excluded")})
-    waiting = BufferState(2, round_id="i2-e9", stage="sourcing")
-    waiting.datasets = [
-        workflows.DatasetStatus("u937", "confocal", False, "waiting-dataset", issue=4, folder="lm-u937"),
-        workflows.DatasetStatus("bcss", "histology-WSI", True, "waiting-dataset", issue=5, folder="lm-bcss"),
-    ]
-    client = FakeClient({cfg.workflow_id(2): waiting})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [], gh_datasets=datasets)
-    (cfg.paths.storage_root / "lm-u937").mkdir(parents=True)
-    (cfg.paths.storage_root / "lm-u937" / "binding.yaml").write_text("record: u937\n")
-    reindex(cfg.paths.storage_root / "lm-u937", {})
-    assert await run_poll(acts) == [] and client.signals == []
-
-
-async def test_poll_starts_a_prep_workflow_on_prep_go(tmp_path):
-    cfg = make_cfg(tmp_path)
-    at = "2026-10-26T10:00:00Z"
-    gh = PollGH(
-        issues={8: issue(8, "prep:go"), 9: issue(9, "prep:go")},
-        events={(8, "prep:go"): ("alice", "71", at), (9, "prep:go"): ("eve", "72", at)},
-        perms={"alice": "write"},
-    )
-    client = FakeClient({})
-    acts = Activities(cfg, gh, None, None, None, bot="bot", client=client, probe=lambda: [])
-    assert await run_poll(acts) == ["prep:go #8"]
-    ((wf, state, kw),) = client.started  # eve has no write access: her label is removed, nothing starts
-    assert (
-        wf == "MiaPrep"
-        and state == PrepState(8)
-        and kw["id"] == cfg.prep_workflow_id(8) == ("mia-buffers/o/buffers/prep-8")
-    )
-    assert kw["start_signal"] == "go" and kw["start_signal_args"] == [LabelEvent("go", "71", "alice", at)]
-    assert gh.removed == [(8, "prep:go"), (9, "prep:go")] and "does not have write access" in gh.comments[9][0]["body"]
 
 
 async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
@@ -1259,7 +1045,7 @@ async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
     assert dataset(state, "u937").status == "servable" and state.ready and m.stages[-1] == "ready"
 
 
-# --- milestone C: the raw-cache lock, the fetch phase, the offline stage ------------------------------
+# --- the raw-cache lock, the fetch phase, the offline stage ------------------------------
 
 ONLY_U937 = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
 U937_URL = "https://zenodo.org/u937.zip"
@@ -1612,7 +1398,7 @@ async def test_cache_keeper_runs_one_keep_pass(env):
     assert report == KeeperReport(scanned=2, evicted=["staged a"], over_quota={"raw": 5}) and passes == [False]
 
 
-# --- milestone D: auto-approve, the status board, the shared ticker, the ready-state loop -----------------------
+# --- auto-approve, the status board, the shared ticker, the ready-state loop -----------------------
 
 TWO = PlanResult(
     True,
@@ -1696,8 +1482,8 @@ async def test_a_lifecycle_label_without_a_ready_buffer_is_refused(env):
         await until(lambda: len(m.of("refuse_label")) == 2, m=m)
         assert (await h.describe()).status.name == "RUNNING"
     assert m.of("refuse_label") == [
-        ("buffer:retire", "this issue has no ready or idle buffer", "21"),
-        ("buffer:keep", "this issue has no ready or idle buffer", "22"),
+        ("buffer:retire", "this spec has no ready or idle buffer", "21"),
+        ("buffer:keep", "this spec has no ready or idle buffer", "22"),
     ]
     assert not m.of("admit") and not m.of("retire_buffer")
 
@@ -1915,7 +1701,7 @@ async def test_lifecycle_labels_outside_the_ready_loop_are_refused_at_once(env):
     assert not m.of("retire_buffer")
 
 
-# --- final fix pass ------------------------------------------------------------------------------
+# --- edge cases of a rebuild --------------------------------------------------------------------
 
 
 async def test_a_rebuild_another_buffer_finished_while_this_one_waited_is_reused(env):
@@ -2008,7 +1794,7 @@ async def test_a_lifecycle_label_while_sourcing_is_refused_at_once(env):
         m.gate.set()
         await ready(h, m)
     assert m.of("refuse_label") == [
-        ("buffer:keep", "1 datasets still sourcing; add `buffer:keep` again once they settle", "31")
+        ("buffer:keep", "1 datasets still sourcing; ask for `buffer:keep` again once they settle", "31")
     ]
 
 
@@ -2031,11 +1817,11 @@ async def test_replay_buffer_history_d_rebuild(env):
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
 
 
-# --- milestone E: preparation requests, and a buffer no longer waits on mia-data ------------------
+# --- preparation requests: a buffer never waits on mia-data -------------------------
 
 PREP_HISTORY = HISTORY.with_name("prep_history.json")
 PREP_E_HISTORY = HISTORY.with_name("buffer_history_e.json")
-NOT_PREPARED = "not prepared: request preparation with a prep:go issue"
+NOT_PREPARED = "not prepared: prepare it first (Prepare these datasets, on the page)"
 
 
 class PrepMocks:
@@ -2105,7 +1891,26 @@ class PrepMocks:
         async def refuse_label(issue: int, label: str, reason: str, event_id: str) -> None:
             rec("refuse_label", label, reason, event_id)
 
-        return [prep_admit, limits, set_prep_stage, prep_nudge, comment_prep, prep_status, refuse_label]
+        @activity.defn(name="paused")
+        async def paused() -> bool:
+            return False
+
+        @activity.defn(name="prep_cancel")
+        async def prep_cancel(issue: int, records: list[str]) -> list[str]:
+            rec("prep_cancel", issue, list(records))
+            return list(records)
+
+        return [
+            prep_admit,
+            limits,
+            set_prep_stage,
+            prep_nudge,
+            comment_prep,
+            prep_status,
+            refuse_label,
+            paused,
+            prep_cancel,
+        ]
 
     def of(self, name):
         return [c[1] for c in self.calls if c[0] == name]
@@ -2294,3 +2099,354 @@ async def test_replay_buffer_history_e(env):
             PREP_E_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-e-prep", PREP_E_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+# --- budgets and the pause ---------------------------------------------------------
+
+
+async def test_stage_and_fetch_jobs_are_reserved_and_settled_with_their_bytes(env):
+    m = Mocks(
+        plan=ONLY_U937,
+        raw={"u937": RawStatus(False, ["https://zenodo.org/f"])},
+        fetches={"u937": FetchResult(True, bytes_fetched=4096)},
+    )
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+    assert [a[2] for a in m.of("reserve")] == ["fetch", "stage"]
+    assert all(a[0] == "o/buffers#7" for a in m.of("reserve"))
+    assert [a[1] for a in m.of("reserve")] == [m.of("submit_fetch")[0][0], m.of("submit")[0][0]]
+    assert [(a[1], a[3]) for a in m.of("settle")] == [(m.of("reserve")[0][1], 4096), (m.of("reserve")[1][1], 0)]
+
+
+async def test_a_refused_reservation_fails_the_dataset_with_the_reason(env):
+    refused = Reservation(False, "root o/buffers#7: 200 jobs launched, max_jobs 200")
+    m = Mocks(plan=ONLY_U937, reservations={"stage": refused})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed" and "max_jobs 200" in dataset(state, "u937").reason
+    assert "submit" not in m.names()
+
+
+async def test_paused_stops_a_buffer_round_and_a_prep_round(env):
+    m = Mocks(plan=ONLY_U937, paused=True)
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+    assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "plan" not in m.names()
+
+
+# --- the gate approve is assessed per artifact ------------------------------------
+
+
+async def test_the_gate_approve_is_assessed_per_artifact_before_the_approved_event(env):
+    m = Mocks()
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await h.signal(MiaBuffer.dropped, "bcss")
+        await until(lambda: any("`bcss` | servable" in c[0] for c in staged_comments(m)), m=m)
+        await idle(h, m, "staged")
+        await approve_staged(h, m)
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("assess_board") == [("i7-e11", "approve", "human:alice")] and state.approved_by == "human:alice"
+    assert m.names().index("assess_board") < m.names().index("buffer_event")
+
+
+async def test_a_refused_artifact_is_unregistered_and_its_dataset_fails_at_the_approve(env):
+    m = Mocks(plan=TWO, assess_refused={"a": "rejected by human:bob at t: revoked"})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await approve_staged(h, m)
+        await idle(h, m, "ready")  # TWO's min_fraction is 0.5: b alone keeps the group at its floor
+        state = await h.query(MiaBuffer.status)
+    assert m.of("unregister_volumes") == [("i7-e11", "a")]
+    assert dataset(state, "a").status == "failed"
+    assert dataset(state, "a").reason == "refused: rejected by human:bob at t: revoked"
+    assert state.accepted == {"TEM": 0.5}
+
+
+async def test_every_artifact_refused_is_needs_human_not_ready(env):
+    m = Mocks(plan=ONLY_U937, assess_refused={"u937": "rejected by human:bob at t: revoked"})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await approve_staged(h, m)
+        await idle(h, m, "needs-human")
+    assert "buffer_event" not in m.names() and "refused" in m.of("set_stage")[-1][1]
+
+
+async def test_auto_approve_writes_no_assessment(env):
+    m = Mocks(plan=replace(ONLY_U937, auto_approve=True))
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "ready")
+        state = await h.query(MiaBuffer.status)
+    assert "assess_board" not in m.names() and state.approved_by == ""
+
+
+async def test_a_refused_staged_artifact_is_not_reused(env):
+    staged = BindingInfo(
+        True, "/s/u937.yaml", "bh", ["zenodo.org"], staged=True, artifact="art-u", refused="human:bob at t: revoked"
+    )
+    m = Mocks(plan=ONLY_U937, bindings={"u937": staged})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed"
+    assert dataset(state, "u937").reason == "staged artifact art-u is refused: human:bob at t: revoked"
+    assert "read_stage" not in m.names() and "submit" not in m.names()
+
+
+# --- the keeper's revoked signal ---------------------------------------------------
+
+
+async def test_a_revoked_signal_unregisters_the_record_and_serves_on_at_the_floor(env):
+    m = Mocks(plan=TWO)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        signal = RevokedSignal(["a"], ["a/v0.zarr"], "quarantined: a/v0.zarr", "i7-e11")
+        await h.signal(MiaBuffer.revoked, signal)
+        await until(lambda: any("serving without" in c[0] for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert m.of("unregister_volumes") == [("i7-e11", "a")]
+    assert dataset(state, "a").status == "failed" and dataset(state, "a").reason == "revoked: quarantined: a/v0.zarr"
+    assert state.stage == "ready" and any("serving without `a`" in c[0] for c in m.of("comment"))
+
+
+async def test_a_revoked_signal_below_the_floor_is_needs_human(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        signal = RevokedSignal(["u937"], ["u937/v0.zarr"], "quarantined: u937/v0.zarr", "i7-e11")
+        await h.signal(MiaBuffer.revoked, signal)
+        await idle(h, m, "needs-human")
+    assert "revoked" in m.of("set_stage")[-1][1] and m.of("unregister_volumes") == [("i7-e11", "u937")]
+
+
+# --- revoking records of a serving buffer ------------------------------------------
+
+
+async def test_buffer_revoke_label_quarantines_the_named_records_and_degrades_the_buffer(env):
+    m = Mocks(plan=TWO, revoke_targets_answer=["a", "zz"])
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.revoke, ev("revoke", "77", "2030-01-01T00:00:00Z"))
+        await until(lambda: any("serving without" in c[0] for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert m.of("revoke_targets") == [("alice", "2030-01-01T00:00:00Z")]
+    assert m.of("revoke_artifacts") == [("i7-e11", ["a"], "human:alice")]  # zz is not in the pool: dropped
+    assert m.of("unregister_volumes") == [("i7-e11", "a")] and dataset(state, "a").status == "failed"
+    assert dataset(state, "a").reason == "revoked: buffer:revoke by alice" and state.stage == "ready"
+
+
+async def test_buffer_revoke_without_revoke_lines_is_refused(env):
+    m = Mocks(plan=TWO)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.revoke, ev("revoke", "77", "2030-01-01T00:00:00Z"))
+        await until(lambda: m.of("refuse_label"), m=m)
+    assert m.of("refuse_label")[-1][:2] == ("buffer:revoke", workflows.NO_REVOKE_LINES)
+    assert "revoke_artifacts" not in m.names()
+
+
+async def test_buffer_revoke_outside_the_ready_loop_is_refused(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await idle(h, m, "plan-review")
+        await h.signal(MiaBuffer.revoke, ev("revoke", "77", "2030-01-01T00:00:00Z"))
+        await until(lambda: m.of("refuse_label"), m=m)
+    assert m.of("refuse_label")[-1][0] == "buffer:revoke" and "revoke_targets" not in m.names()
+
+
+# --- edge cases of the pause, budgets and revokes ------------------------------------------------
+
+
+async def test_a_pause_mid_round_stops_the_round_without_failing_its_datasets(env):
+    m = Mocks(plan=TWO, paused=[False, True])
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
+    assert {d.status for d in state.datasets} == {"pending"}  # mia resume, then buffer:go: nothing is marked failed
+
+
+async def test_a_failed_stage_submit_settles_its_reservation(env):
+    m = Mocks(plan=ONLY_U937, submit_error="csub refused the job")
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+    assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")] == [m.of("submit")[0][0]]
+
+
+async def test_a_concurrency_refusal_waits_and_tries_again(env):
+    busy = Reservation(False, "root o/buffers#7: 20 jobs running, max_concurrent_jobs 20", wait=True)
+    m = Mocks(plan=ONLY_U937, reservations={"stage": [busy, Reservation(True)]})
+    async with started(env, m, signal="go") as h:
+        await until(lambda: m.of("reserve"), m=m)
+        await env.sleep(timedelta(minutes=3))  # past the first wait (poll_minutes)
+        await idle(h, m, "staged")
+    assert [a[2] for a in m.of("reserve")] == ["stage", "stage"] and len(m.of("submit")) == 1
+
+
+async def test_a_superseded_buffer_still_unregisters_a_revoked_record(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.plan, ev("plan", "15"))
+        await idle(h, m, "plan-review")
+        signal = RevokedSignal(["u937"], ["u937/v0.zarr"], "quarantined: u937/v0.zarr", "i7-e11")
+        await h.signal(MiaBuffer.revoked, signal)
+        await until(lambda: m.of("unregister_volumes"), m=m)
+    assert m.of("unregister_volumes") == [("i7-e11", "u937")] and m.stages[-1] == "plan-review"
+    await until(lambda: any(a[:3] == ("i7-e11", "u937", "failed") for a in m.of("mark_dataset")), m=m)
+    assert any(a[3] == "revoked: quarantined: u937/v0.zarr" for a in m.of("mark_dataset"))  # the old board says why
+
+
+# --- cancel: a round in progress is ended before anything else is asked (spec webapp-actions §5) ---
+
+CANCEL_HISTORY = HISTORY.with_name("buffer_history_cancel.json")
+PREP_CANCEL_HISTORY = HISTORY.with_name("prep_history_cancel.json")
+
+
+async def cancelled_while_sourcing(h, m):
+    """A go round with u937's stage job running and bcss waiting for its files; cancel it."""
+    await until(lambda: m.of("await") and m.of("comment_drop"), m=m)
+    await h.signal(MiaBuffer.cancel, ev("cancel", "12"))
+    await idle(h, m, "cancelled")
+    m.gate.set()  # let the abandoned wait end
+
+
+async def test_cancel_while_sourcing_kills_the_jobs_releases_what_the_round_held_and_retires_its_buffer(env):
+    m = Mocks(gate=asyncio.Event(), gate_on="stage-u937")
+    async with started(env, m, signal="go") as h:
+        await cancelled_while_sourcing(h, m)
+        state = await h.query(MiaBuffer.status)
+        assert m.of("kill_job") == [(m.of("await")[0][0],)]  # the one job in flight, by its id
+        assert m.of("retire_buffer") == [("i7-e11",)] and state.retired  # nothing serves a cancelled round
+        assert [a[1] for a in m.of("settle")] == [a[0] for a in m.of("submit")]  # no reservation left open
+        names = m.names()
+        assert names.index("kill_job") < names.index("release_lock")  # one writer per raw cache
+        taken = {a[2] for a in m.of("take_lock")}  # a lock is re-taken after a slot wait: owners, not calls
+        assert {a[2] for a in m.of("release_lock")} == taken and taken  # every raw lock is released
+        assert {d.record: (d.status, d.reason) for d in state.datasets} == {
+            "u937": ("failed", "abandoned: the round was cancelled"),
+            "bcss": ("failed", "abandoned: the round was cancelled"),
+        }
+        assert m.of("set_stage")[-1][:2] == ("cancelled", "cancelled by alice") and not m.of("register_dataset")
+        await h.signal(MiaBuffer.go, ev("go", "13"))  # from `cancelled` a go starts over
+        await until(lambda: m.stages[-1:] == ["sourcing"] and m.of("create_buffer")[-1:] == [("i7-e13",)], m=m)
+    assert m.stages == ["planning", "sourcing", "cancelled", "planning", "sourcing"]
+    assert m.of("retire_buffer") == [("i7-e11",)] and not m.of("refuse_label")  # retired once, at the cancel
+
+
+async def test_cancel_at_the_plan_gate_ends_the_round_before_anything_was_fetched(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await idle(h, m, "plan-review")
+        await h.signal(MiaBuffer.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        planned_at = (await h.query(MiaBuffer.status)).planned_at
+        await h.signal(MiaBuffer.approve, ev("approve", "13", shift(planned_at, 5)))  # no plan under review now
+        await until(lambda: m.of("refuse_label"), m=m)
+    assert m.stages == ["planning", "plan-review", "cancelled"]
+    assert not m.of("kill_job") and not m.of("retire_buffer") and not m.of("create_buffer")
+    assert m.of("refuse_label")[0][0] == "buffer:approve"
+
+
+async def test_a_cancel_that_reaches_a_serving_buffer_is_refused_and_it_keeps_serving(env):
+    m = Mocks(plan=ONLY_U937)  # one dataset, no straggler: after the gate the run is in its serving loop
+    async with started(env, m, signal="go") as h:
+        await until(lambda: m.of("register_dataset"), m=m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.cancel, ev("cancel", "50"))
+        await until(lambda: m.of("refuse_label"), m=m)
+        assert m.of("refuse_label")[0][0] == "buffer:cancel" and "no round" in m.of("refuse_label")[0][1]
+        await h.signal(MiaBuffer.idle)  # the buffer is still served by this run: the keeper's idle reaches it
+        await idle(h, m, "idle")
+    assert "cancelled" not in m.stages and not m.of("kill_job") and not m.of("retire_buffer")
+
+
+async def test_cancel_inside_a_best_effort_step_still_ends_the_round(env):
+    """A go at `staged` starts a new round whose first step retires the staged buffer, best effort; the stage
+    still reads `staged`, so a cancel is accepted. It must not be caught there as a failed retire, which would let
+    the new round run on with no later cancel heard."""
+    m = Mocks(plan=ONLY_U937, retire_gate=asyncio.Event())
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "staged")
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await until(lambda: m.of("retire_buffer"), m=m)
+        await h.signal(MiaBuffer.cancel, ev("cancel", "16"))
+        await asyncio.sleep(0.3)
+        m.retire_gate.set()
+        await idle(h, m, "cancelled")
+        state = await h.query(MiaBuffer.status)
+    assert state.round_id == "i7-e15" and m.stages[-1] == "cancelled" and m.stages.count("staged") == 1
+
+
+async def test_cancel_while_a_stage_job_is_being_submitted_kills_the_job_that_was_submitted(env):
+    m = Mocks(plan=ONLY_U937, submit_gate=asyncio.Event(), gate=asyncio.Event(), gate_on="stage-u937")
+    async with started(env, m, signal="go") as h:
+        await until(lambda: m.of("submit"), m=m)
+        await h.signal(MiaBuffer.cancel, ev("cancel", "12"))
+        await asyncio.sleep(0.5)
+        assert "cancelled" not in m.stages  # not cancelled while the job's fate is unknown
+        m.submit_gate.set()  # the cluster has the job now
+        await idle(h, m, "cancelled")
+        m.gate.set()
+    key = m.of("submit")[0][0]
+    assert m.of("kill_job") == [(f"job-{key}",)] and [a[1] for a in m.of("settle")] == [key]
+    names = m.names()
+    assert names.index("kill_job") < names.index("release_lock")  # the lock outlives the job, never the reverse
+
+
+async def test_replay_buffer_history_cancel(env):
+    """A go round cancelled while a stage job ran and a dataset waited for its files. Re-record this one alone:
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_cancel"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = Mocks(gate=asyncio.Event(), gate_on="stage-u937")
+        async with started(env, m, signal="go") as h:
+            await cancelled_while_sourcing(h, m)
+            CANCEL_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("buffers-cancelled", CANCEL_HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+async def prep_cancelled(h, m):
+    """A request cancelled while it hands its second record to mia-data. That hand-over still sends its go, so
+    the cancel waits for it to answer: the dataset round it started is then one `prep_cancel` knows of."""
+    await until(lambda: len(m.of("prep_nudge")) == 2, m=m)
+    await h.signal(workflows.MiaPrep.cancel, ev("cancel", "22"))
+    await asyncio.sleep(0.3)
+    assert m.stages == ["requested"] and not m.of("prep_cancel")  # not while a go is on its way
+    m.gate.set()
+    await prep_settled(h, m, "cancelled")
+
+
+async def test_cancelling_a_request_cancels_the_dataset_rounds_it_started_and_a_go_runs_it_again(env):
+    m = PrepMocks(records=["a", "b"], slow=("b",))
+    async with prep_started(env, m) as h:
+        await prep_cancelled(h, m)
+        assert m.of("prep_cancel") == [(8, ["a", "b"])]  # the activity cancels only what this request started
+        assert m.of("set_prep_stage")[-1] == ("cancelled", "cancelled by alice")
+        await h.signal(workflows.MiaPrep.cancel, ev("cancel", "23"))  # nothing in progress now: refused
+        await until(lambda: m.of("refuse_label"), m=m)
+        assert m.of("refuse_label")[0][0] == "prep:cancel"
+        m.slow.clear()
+        await h.signal(workflows.MiaPrep.go, ev("go", "24"))
+        await until(lambda: m.stages[-1:] == ["requested"] and len(m.of("prep_admit")) == 2, m=m)
+    assert m.stages[:3] == ["requested", "cancelled", "requested"]
+
+
+async def test_replay_prep_history_cancel(env):
+    """A request cancelled mid-round. Re-record this one alone:
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_prep_history_cancel"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = PrepMocks(records=["a", "b"], slow=("b",))
+        async with prep_started(env, m) as h:
+            await prep_cancelled(h, m)
+            history = (await h.fetch_history()).to_json_dict()
+            PREP_CANCEL_HISTORY.write_text(json.dumps(_scrub(history), indent=1) + "\n")
+    history = WorkflowHistory.from_json("prep-cancelled", PREP_CANCEL_HISTORY.read_text())
+    await Replayer(workflows=[workflows.MiaPrep]).replay_workflow(history)

@@ -120,7 +120,7 @@ def test_sync_datasets_keeps_in_progress_rows(tmp_path):
     led.put_dataset("stuck", {"state": "needs-human", "issue": 2})
     led.put_dataset("old", {"state": "prepared", "folder": "f-old"})
     out = led.sync_datasets({"new": {"folder": "f-new", "crops": 3}})
-    assert out == {"prepared": 1, "demoted": 1}
+    assert out == {"prepared": 1, "demoted": 1, "revoked_kept": 0}
     assert led.dataset("old") is None and led.dataset("busy")["state"] == "in-progress"
     assert led.dataset("stuck")["state"] == "needs-human" and led.dataset("new")["crops"] == 3
 
@@ -372,3 +372,323 @@ def test_sync_assets_drops_a_raw_row_with_nothing_cached_that_the_scan_skipped(t
     assert "phantom" not in by_key
     assert by_key["wiped"]["state"] == "missing" and by_key["fetching"]["state"] == "fetching"
     assert counts == {"scanned": 0, "new": 0, "missing": 1, "dropped": 1}
+
+
+# --- assessments, budgets, revoked rows, quarantined volumes ------------------------
+
+
+def test_assessments_are_append_only_and_filterable(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    led = Ledger(tmp_path / "l.sqlite")
+    first = new_assessment(
+        gate="crops", subject_kind="crop_set", subject_ref="i7-e11:s", verdict="approve", by="human:a", at=10.0
+    )
+    second = new_assessment(
+        gate="staged", subject_kind="artifact", subject_ref="art1", verdict="reject", by="human:b", at=20.0
+    )
+    assert led.put_assessment(first) == first and led.put_assessment({**first, "verdict": "reject"}) == first
+    led.put_assessment(second)
+    assert [row["id"] for row in led.assessments()] == [second["id"], first["id"]]  # newest first
+    assert led.assessments(subject_kind="artifact", subject_ref="art1") == [second]
+    assert led.assessments(gate="crops") == [first] and led.assessment("nope") is None
+    assert led.assessments(limit=1) == [second]
+
+
+def test_reserve_enforces_the_caps_atomically_and_settles_once(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    caps = {"max_usd": 10, "max_fetch_bytes": 100, "max_jobs": 3, "max_concurrent_jobs": 2, "max_days": 14}
+    root = "o/buffers#7"
+    first = led.reserve(root, "job-1", "match", 6.0, caps, now=1000.0)
+    assert first["ok"] and first["usage"]["reserved_usd"] == 6.0 and first["usage"]["running"] == 1
+    assert led.reserve(root, "job-1", "match", 6.0, caps, now=1001.0)["usage"]["reserved_usd"] == 6.0  # a retry
+    over = led.reserve(root, "job-2", "match", 5.0, caps, now=1002.0)
+    assert not over["ok"]
+    assert over["reason"] == "root o/buffers#7: usd 6.00 reserved or spent + 5.00 would exceed max_usd 10"
+    assert led.reserve(root, "job-2", "stage", 0.0, caps, now=1002.0)["ok"]  # jobs: 2 running of 2
+    busy = led.reserve(root, "job-3", "stage", 0.0, caps, now=1003.0)
+    assert busy["reason"] == "root o/buffers#7: 2 jobs running, max_concurrent_jobs 2"
+    settled = led.settle(root, "job-1", usd=2.5)
+    assert (settled["reserved_usd"], settled["spent_usd"], settled["running"], settled["jobs"]) == (0.0, 2.5, 1, 2)
+    assert led.settle(root, "job-1", usd=2.5) == settled  # settling twice changes nothing
+    assert led.settle(root, "never", fetched_bytes=5) == settled  # an unknown reservation: a no-op
+    assert led.reserve(root, "job-3", "stage", 0.0, caps, now=1004.0)["ok"]
+    assert led.settle(root, "job-2", fetched_bytes=60)["fetched_bytes"] == 60
+    launched = led.reserve(root, "job-4", "fetch", 0.0, caps, now=1005.0)
+    assert launched["reason"] == "root o/buffers#7: 3 jobs launched, max_jobs 3"
+    assert led.settle(root, "job-3", usd=None)["spent_usd"] == 2.5  # a job reserved at 0 without a cost: nothing added
+    assert led.settle(root, "job-3", fetched_bytes=50) == led.budget(root)  # closed already: a no-op
+    roomy = {**caps, "max_jobs": 99}
+    assert led.reserve(root, "job-5", "fetch", 0.0, roomy, now=1006.0)["ok"]
+    assert led.settle(root, "job-5", fetched_bytes=50)["fetched_bytes"] == 110
+    bytes_over = led.reserve(root, "job-6", "fetch", 0.0, roomy, now=1007.0)
+    assert bytes_over["reason"] == "root o/buffers#7: 110 bytes fetched, over max_fetch_bytes 100"
+    old = led.reserve(root, "job-9", "stage", 0.0, {**roomy, "max_fetch_bytes": 1e9}, now=1000.0 + 15 * 86400)
+    assert old["ok"] and old["usage"]["epochs"] == 2 and old["usage"]["jobs"] == 1  # idle past max_days: a fresh epoch
+    assert led.budget("nobody") is None and [row["root"] for row in led.budgets()] == [root]
+
+
+def test_sync_datasets_never_touches_a_revoked_row(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_dataset("bad", {"state": "revoked", "revoked_by": "human:a"})
+    out = led.sync_datasets({"bad": {"folder": "f-bad"}, "good": {"folder": "f-good"}})
+    assert out == {"prepared": 1, "demoted": 0, "revoked_kept": 1}
+    assert led.dataset("bad")["state"] == "revoked" and "folder" not in led.dataset("bad")
+    assert led.dataset("good")["state"] == "prepared"
+
+
+def test_delete_volume_drops_its_frozen_rows_and_an_orphaned_ref(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {})
+    led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art1"), refs=[("staged", "art1"), ("raw", "rec")])
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art1"), refs=[("staged", "art1")])
+    led.extend_frozen("b", "val", [{"volume": "rec/a", "i": 0}, {"volume": "rec/b", "i": 1}])
+    assert led.delete_volume("b", "rec/a") and not led.delete_volume("b", "rec/a")
+    assert [v.id for v in led.volumes("b")] == ["rec/b"] and led.frozen("b", "val") == [{"volume": "rec/b", "i": 1}]
+    assert led.refs("staged", "art1") == ["b"]  # rec/b still lives in art1
+    assert led.delete_volume("b", "rec/b") and led.refs("staged", "art1") == []
+    assert led.volume_rows("b") == []
+
+
+def test_quarantined_volumes_are_those_whose_artifact_is_quarantined(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art1"))
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art2"))
+    led.put_asset("staged", "art1", {"quarantined": True, "quarantined_at": 1.0})
+    assert led.quarantined_volumes("b") == ["rec/a"]
+    assert led.volume_rows("b")[0] == {"id": "rec/a", "artifact": "art1", "record": "rec", "missing": False}
+
+
+def test_an_unknown_cost_keeps_the_reservation_as_spent(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    caps = {"max_usd": 10}
+    assert led.reserve("r", "job-1", "match", 5.0, caps, now=1.0)["ok"]
+    settled = led.settle("r", "job-1", usd=None)  # the report was unreadable: the reservation is what it cost
+    assert (settled["reserved_usd"], settled["spent_usd"]) == (0.0, 5.0)
+    assert led.reserve("r", "job-2", "match", 5.0, caps, now=2.0)["ok"]
+    assert not led.reserve("r", "job-3", "match", 1.0, caps, now=3.0)["ok"]  # 5 spent + 5 reserved: full
+
+
+def test_a_concurrency_refusal_asks_the_caller_to_wait(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    caps = {"max_concurrent_jobs": 1, "max_jobs": 1}
+    assert led.reserve("r", "job-1", "stage", 0.0, caps, now=1.0)["ok"]
+    busy = led.reserve("r", "job-2", "stage", 0.0, caps, now=2.0)
+    assert not busy["ok"] and busy["wait"] is True and "max_concurrent_jobs" in busy["reason"]
+    led.settle("r", "job-1")
+    full = led.reserve("r", "job-2", "stage", 0.0, caps, now=3.0)
+    assert not full["ok"] and full["wait"] is False and "max_jobs" in full["reason"]
+
+
+def test_an_idle_root_past_max_days_starts_a_new_epoch(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    caps = {"max_days": 14, "max_jobs": 2}
+    assert led.reserve("r", "job-1", "match", 1.0, caps, now=0.0)["ok"]
+    assert led.reserve("r", "job-2", "match", 1.0, caps, now=1.0)["ok"]
+    assert "max_jobs" in led.reserve("r", "job-3", "match", 1.0, caps, now=2.0)["reason"]
+    led.settle("r", "job-1", usd=1.0)
+    late = led.reserve("r", "job-3", "match", 1.0, caps, now=15 * 86400.0)
+    assert "15.0 days old" in late["reason"]  # job-2 still runs: the request is a runaway, not an old one
+    led.settle("r", "job-2", usd=1.0)
+    fresh = led.reserve("r", "job-3", "match", 1.0, caps, now=15 * 86400.0)
+    assert fresh["ok"] and fresh["usage"]["since"] == 15 * 86400.0 and fresh["usage"]["jobs"] == 1
+    assert fresh["usage"]["epochs"] == 2 and fresh["usage"]["spent_usd"] == 0.0
+
+
+def test_assessments_before_cursor_and_by_filter(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    led = Ledger(tmp_path / "l.sqlite")
+    rows = [
+        new_assessment(gate="crops", subject_kind="crop_set", subject_ref=f"s{i}", verdict="approve", by=by, at=at)
+        for i, (by, at) in enumerate([("human:a", 10.0), ("judge", 20.0), ("human:b", 30.0)])
+    ]
+    for row in rows:
+        led.put_assessment(row)
+    assert [r["by"] for r in led.assessments()] == ["human:b", "judge", "human:a"]
+    assert [r["by"] for r in led.assessments(before=rows[2]["id"])] == ["judge", "human:a"]
+    assert led.assessments(before=rows[2]["id"], limit=1) == [rows[1]]
+    assert led.assessments(by="judge") == [rows[1]] and led.assessments(before=rows[0]["id"]) == []
+
+
+def test_agreement_pairs_judge_with_newest_human(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    led = Ledger(tmp_path / "l.sqlite")
+
+    def put(ref, verdict, by, at):
+        led.put_assessment(
+            new_assessment(gate="crops", subject_kind="crop_set", subject_ref=ref, verdict=verdict, by=by, at=at)
+        )
+
+    put("s1", "reject", "human:a", 10.0)  # relabelled later: the newest human verdict counts
+    put("s1", "approve", "judge", 11.0)
+    put("s1", "approve", "human:a", 12.0)
+    put("s2", "approve", "judge", 20.0)  # no human yet
+    put("s3", "reject", "judge", 30.0)
+    put("s3", "approve", "human:b", 31.0)
+    put("s4", "approve", "human:c", 40.0)  # never judged: not a pair
+    put("s5", "escalate", "judge", 45.0)  # abstained: neither agreement nor disagreement
+    put("s5", "approve", "human:c", 46.0)
+    put("art", "approve", "judge", 50.0)  # another gate's row must not count here
+    led.put_assessment(
+        new_assessment(
+            gate="staged", subject_kind="artifact", subject_ref="art", verdict="approve", by="judge", at=51.0
+        )
+    )
+    out = led.agreement("crops")
+    assert (out["judged"], out["agree"], out["disagree"], out["abstain"], out["pending"]) == (5, 1, 1, 1, 2)
+    assert {pair["subject"]: pair["agree"] for pair in out["pairs"]}["crop_set:s5"] is None
+    by_subject = {pair["subject"]: pair for pair in out["pairs"]}
+    assert by_subject["crop_set:s1"]["agree"] is True and by_subject["crop_set:s1"]["human"] == "approve"
+    assert by_subject["crop_set:s3"] == {
+        "subject": "crop_set:s3",
+        "judge": "reject",
+        "human": "approve",
+        "agree": False,
+        "at": by_subject["crop_set:s3"]["at"],
+    }
+    assert by_subject["crop_set:s2"]["agree"] is None and "crop_set:s4" not in by_subject
+    assert led.agreement("staged")["judged"] == 1 and led.agreement("review") == {
+        "judged": 0,
+        "agree": 0,
+        "disagree": 0,
+        "abstain": 0,
+        "pending": 0,
+        "pairs": [],
+    }
+
+
+def test_adopt_subject_is_idempotent_and_keeps_a_written_stage(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    row = ledger.adopt_subject("dataset", 234, "rec-a", stage="review", data={"note": 1})
+    assert {name: row[name] for name in ("kind", "number", "key", "stage", "revision", "issue", "data")} == {
+        "kind": "dataset",
+        "number": 234,
+        "key": "rec-a",
+        "stage": "review",
+        "revision": 0,
+        "issue": 234,
+        "data": {"note": 1},
+    }
+    # until a workflow writes a stage, the label is the truth: a second adoption refreshes stage and data
+    assert ledger.adopt_subject("dataset", 234, "rec-a", stage="done")["stage"] == "done"
+    assert ledger.set_subject_stage("dataset", 234, "testing")["revision"] == 1
+    again = ledger.adopt_subject("dataset", 234, "rec-a", stage="new", data={"note": 2})
+    assert (again["stage"], again["revision"], again["data"]) == ("testing", 1, {})
+
+
+def test_subject_keys_are_unique_within_a_kind(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.adopt_subject("buffer", 8, "em pool")
+    with pytest.raises(ValueError, match="em pool"):
+        ledger.adopt_subject("buffer", 9, "em pool")
+    assert ledger.adopt_subject("prep", 9, "em pool")["number"] == 9  # another kind may hold the same key
+
+
+def test_find_subjects_by_issue_and_key(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.adopt_subject("dataset", 234, "rec-a")
+    ledger.adopt_subject("buffer", 234, "pool")
+    assert [row["kind"] for row in ledger.find_subjects(issue=234)] == ["buffer", "dataset"]
+    assert [row["number"] for row in ledger.find_subjects(key="pool")] == [234]
+    assert len(ledger.find_subjects()) == 2
+    assert ledger.subject("dataset", "rec-a")["number"] == 234 and ledger.subject("dataset", "nope") is None
+    assert ledger.set_subject_stage("dataset", 999, "new") is None
+
+
+def test_timeline_entries_are_once_per_marker_and_a_stage_always_moves(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    assert ledger.append_entry("dataset", 1, body="x", marker="m") is None  # no such subject
+    ledger.adopt_subject("dataset", 1, "rec-a")
+    subject, entry = ledger.append_entry(
+        "dataset", 1, body="testing\nm1", marker="m1", round_id="i1-e2", stage="testing"
+    )
+    assert (subject["stage"], subject["revision"]) == ("testing", 1)
+    assert {name: entry[name] for name in ("seq", "round", "stage", "body", "marker", "mirrored_at")} == {
+        "seq": 1,
+        "round": "i1-e2",
+        "stage": "testing",
+        "body": "testing\nm1",
+        "marker": "m1",
+        "mirrored_at": None,
+    }
+    ledger.append_entry("dataset", 1, body="review", marker="m2", stage="review")
+    # the round enters testing again: nothing is appended, the stage and the revision still move
+    subject, again = ledger.append_entry("dataset", 1, body="other text", marker="m1", stage="testing")
+    assert (subject["stage"], subject["revision"], again["seq"], again["body"]) == ("testing", 3, 1, "testing\nm1")
+    subject, none = ledger.append_entry("dataset", 1, stage="done")  # a stage with nothing to say
+    assert (subject["stage"], none) == ("done", None)
+    assert [row["seq"] for row in ledger.timeline("dataset", 1)] == [1, 2]
+
+
+def test_mark_mirrored_and_the_subjects_still_to_mirror(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.adopt_subject("dataset", 1, "rec-a")
+    ledger.adopt_subject("buffer", 8, "pool")
+    ledger.append_entry("dataset", 1, body="a", marker="a")
+    ledger.append_entry("buffer", 8, body="b", marker="b")
+    assert ledger.unmirrored_subjects() == [("buffer", 8), ("dataset", 1)]
+    assert ledger.mark_mirrored("buffer", 8, 1, "https://x/c1") and not ledger.mark_mirrored("buffer", 8, 9, None)
+    assert ledger.unmirrored_subjects() == [("dataset", 1)]
+    row = ledger.timeline("buffer", 8)[0]
+    assert row["comment_url"] == "https://x/c1" and row["mirrored_at"]
+    assert [row["number"] for row in ledger.find_subjects(kind="buffer", number=8)] == [8]
+
+
+# --- actions and the ids the registry issues (spec webapp-actions §4.1, §4.2) ---
+
+
+def test_new_subjects_get_numbers_from_the_clock_that_never_repeat(tmp_path, monkeypatch):
+    from mia_buffers import ledger as ledger_module
+
+    now = [ledger_module.NUMBER_EPOCH + 1000.5]
+    monkeypatch.setattr(ledger_module.time, "time", lambda: now[0])
+    ledger = Ledger(tmp_path / "l.sqlite")
+    first = ledger.create_subject("dataset", "rec-a", data={"x": 1})
+    assert (first["number"], first["issue"], first["stage"], first["data"]) == (1000, None, "new", {"x": 1})
+    assert ledger.create_subject("dataset", "rec-a")["number"] == 1000  # the key exists: the same subject
+    assert ledger.create_subject("buffer", "pool")["number"] == 1001  # one sequence for every kind, bumped
+    ledger.backup(tmp_path / "backup.sqlite")
+    assert ledger.create_subject("prep", "prep-x")["number"] == 1002
+    now[0] += 60  # the backup is restored a minute later: its counter is old, the clock is not
+    restored = Ledger(tmp_path / "backup.sqlite")
+    assert restored.create_subject("prep", "prep-y")["number"] == 1060
+    adopted = ledger.create_subject("dataset", "rec-b", number=234)  # a dataset whose GitHub issue is known
+    assert (adopted["number"], adopted["issue"]) == (234, 234)
+
+
+def test_an_action_is_recorded_once_per_key_and_settled_with_its_entry(tmp_path, monkeypatch):
+    from mia_buffers import ledger as ledger_module
+
+    now = [1_800_000_000.25]
+    monkeypatch.setattr(ledger_module.time, "time", lambda: now[0])
+    ledger = Ledger(tmp_path / "l.sqlite")
+    number = ledger.create_subject("dataset", "rec-a")["number"]
+    action, created = ledger.add_action("dataset", number, "go", "page", key="k1", payload={"root": "o/b#8"})
+    assert created and action["id"] == 1_800_000_000_250 and action["state"] == "pending"
+    assert (action["kind"], action["number"], action["action"], action["actor"]) == ("dataset", number, "go", "page")
+    assert action["payload"] == {"root": "o/b#8"} and action["at"].startswith("2027-01-15T08:00:00")
+    again, created = ledger.add_action("dataset", number, "go", "page", key="k1")
+    assert not created and again["id"] == action["id"]  # a repeat of the key is the same action
+    with pytest.raises(ValueError, match="k1"):
+        ledger.add_action("dataset", number, "approve", "page", key="k1")  # the key names another request
+    second, _ = ledger.add_action("dataset", number, "cancel", "page")  # the same millisecond: bumped
+    assert second["id"] == action["id"] + 1 and second["key"] is None
+    sent = ledger.settle_action(action["id"], "sent", entry=("**Action:** `go`", "<!-- action -->"))
+    assert sent["state"] == "sent" and [row["body"] for row in ledger.timeline("dataset", number)] == [
+        "**Action:** `go`"
+    ]
+    failed = ledger.settle_action(second["id"], "failed", "Temporal is away")
+    assert (failed["state"], failed["detail"]) == ("failed", "Temporal is away")
+    assert [row["id"] for row in ledger.actions("dataset", number)] == [action["id"], second["id"]]
+    assert ledger.action(action["id"])["state"] == "sent" and ledger.action(1) is None
+    assert ledger.settle_action(1, "sent") is None
+
+
+def test_subject_data_and_issue_can_be_written(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    number = ledger.create_subject("buffer", "pool", data={"spec": "a"})["number"]
+    assert ledger.set_subject_data("buffer", number, {"spec": "b"})["data"] == {"spec": "b"}
+    assert ledger.set_subject_issue("buffer", number, 77)["issue"] == 77
+    assert ledger.find_subjects(issue=77)[0]["key"] == "pool" and ledger.set_subject_issue("buffer", 1, 2) is None

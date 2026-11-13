@@ -24,6 +24,8 @@ def test_scan_storage_skips_dotdirs_and_duplicates(tmp_path, caplog):
     write_prepared(tmp_path / "b-second", "rec")
     write_prepared(tmp_path / ".tmp-hidden", "hidden")
     write_prepared(tmp_path / "stale", "stale", match=False)
+    write_prepared(tmp_path / "revoked", "revoked")
+    (tmp_path / "revoked" / "revoked.json").write_text('{"by": "human:a"}')  # a revocation: never prepared
     (tmp_path / "loose.txt").write_text("not a folder")
     with caplog.at_level(logging.WARNING):
         found = scan_storage(tmp_path)

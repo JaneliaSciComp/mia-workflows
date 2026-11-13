@@ -1,12 +1,13 @@
-"""The poller: one scheduled pass that turns GitHub state into workflow signals.
+"""The poller: one scheduled pass over the snippets repo's pull requests.
 
-Three jobs, each done per item so one bad issue or PR never skips the rest (the next poll retries it):
+autodev's surface is GitHub (spec webapp-actions §9), so what happens to a snippet PR a dataset round is waiting
+on is found by looking: this is the one GitHub poll left in the two pipelines, and it carries no human command.
+Two jobs, each done per PR so one bad PR never skips the rest (the next poll retries it):
 
-- deliver a `data:go` / `data:approve` / `data:reject` label on a dataset issue as a signal, starting the dataset
-  workflow if needed;
 - wake the dataset workflow whose snippet PR changed (head, state, merge, needs-human);
 - pass the `mia-data/crops` status on snippet PRs that add no snippet, so it never blocks them.
 
+Nothing here reads the data repo: a dataset is started and steered from the page (buffer-api's action routes).
 Runs as the `poll` activity (Activities.poll) and uses the activity object's clients and helpers.
 """
 
@@ -14,14 +15,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from autodev.review import WRITE_PERMISSIONS
-
-from .config import HUMAN_LABELS
-from .models import DatasetState, LabelEvent, PrUpdate
+from .models import PrUpdate
 
 if TYPE_CHECKING:
     from .activities import Activities
@@ -32,17 +29,8 @@ SNIPPET_ISSUE_RE = re.compile(r"<!-- mia-data: issue=(\d+) round=(i\d+-e\d+) -->
 
 
 async def run_poll(activities: Activities) -> list[str]:
-    """One pass over the data repo's labelled issues and the snippets repo's recent PRs. Returns a log of
-    what was done."""
+    """One pass over the snippets repo's recent PRs. Returns a log of what was done."""
     done: list[str] = []
-    for kind in HUMAN_LABELS:
-        label = activities.cfg.label(kind)
-        for issue in await activities.gh_data.list_issues(labels=label, state="open"):
-            try:
-                if await deliver_label(activities, kind, label, issue):
-                    done.append(f"{kind} #{issue['number']}")
-            except Exception:
-                log.exception("poll: issue #%s %s failed", issue["number"], label)
     recent = datetime.now(UTC) - timedelta(days=1)
     # ponytail: the first page (50 most recently updated PRs); paginate if more than 50 are active
     for pr_data in await activities.gh_snippets.list_prs(state="all"):
@@ -56,57 +44,6 @@ async def run_poll(activities: Activities) -> list[str]:
     if done:
         log.info("poll: %s", ", ".join(done))
     return done
-
-
-async def deliver_label(
-    activities: Any,
-    kind: str,
-    label: str,
-    issue: dict,
-    *,
-    workflow: str = "MiaDataDataset",
-    make_state: Callable[[int], Any] = DatasetState,
-    guard: Callable[[str, dict], str | None] | None = None,
-    workflow_id: Callable[[int], str] | None = None,
-) -> bool:
-    """Turn one human label on an issue into a signal, or remove it with a comment saying why not.
-
-    Only a person with write access, or a bot login listed in `github.trusted_bots` (the buffer worker, spec §6.2),
-    counts; `guard` may name a reason to refuse the label. The label is removed
-    only once Temporal has accepted the signal, so a crash in between leaves it for the next poll. Returns True
-    when a signal was delivered. mia-buffers reuses this with its own workflow, state and no guard, and for its
-    preparation requests with their own `workflow_id` (default: `cfg.workflow_id`)."""
-    cfg, gh_data, number = activities.cfg, activities.gh_data, issue["number"]
-    actor, event_id, labeled_at = await gh_data.label_event(number, label)
-    trusted = actor in getattr(cfg.github, "trusted_bots", [])
-    if not actor or not (trusted or await gh_data.permission(actor) in WRITE_PERMISSIONS):
-        await gh_data.remove_label(number, label)
-        marker = cfg.marker(f"ignored {label} {event_id}")
-        await activities._comment_once(
-            gh_data,
-            number,
-            f"Ignoring `{label}`: it was added by `{actor or 'unknown'}`, who does "
-            f"not have write access to this repository.\n\n{marker}",
-            marker,
-        )
-        return False
-    if not (event_id and labeled_at):
-        log.warning("poll: #%s %s: label event has no id or time", number, label)
-        return False
-    if guard and (reason := guard(kind, issue)):
-        await activities.refuse_label(number, label, reason, event_id)
-        return False
-    # start_signal: starts the workflow if needed and delivers the label as a signal either way
-    await activities.temporal.start_workflow(
-        workflow,
-        make_state(number),
-        id=(workflow_id or cfg.workflow_id)(number),
-        task_queue=cfg.task_queue,
-        start_signal=kind,
-        start_signal_args=[LabelEvent(kind, event_id, actor, labeled_at)],
-    )
-    await gh_data.remove_label(number, label)  # only once the signal is accepted
-    return True
 
 
 async def pass_status_without_snippet(activities: Activities, pr_data: dict) -> bool:

@@ -18,8 +18,10 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import quote
 
 import yaml
 from temporalio import activity
@@ -27,10 +29,15 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, permanent_errors
 from autodev.jobs import JobSpec
-from autodev.review import WRITE_PERMISSIONS
+from mia_core import autonomy
 from mia_core.assets import raw_asset
-from mia_core.locks import heartbeat_through, release_or_log, take_or_holder
-from mia_core.registry import Registry, best_effort
+from mia_core.config import manifest_path
+from mia_core.judge.evidence import build as build_evidence
+from mia_core.judge.evidence import evidence_digest, read_claude_json
+from mia_core.judge.policy import POLICY_VERSION, authorized, new_assessment
+from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
+from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
+from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_core.untrusted import text as _text
@@ -50,6 +57,7 @@ from .jobspec import (
     crop_job,
     harness_pin,
     harness_snapshot,
+    judge_job,
     lock_dir,
     match_job,
     match_prompt,
@@ -58,22 +66,26 @@ from .jobspec import (
     verify_job,
 )
 from .models import (
+    AssessmentWritten,
     DatasetState,
     GalleryResult,
     JobArgs,
     JobDone,
+    JudgeResult,
     LockTaken,
     MatchResult,
     Pins,
     PrUpdate,
+    Reservation,
+    Revocation,
     RoundLimits,
     SmokeResult,
     VerifyResult,
 )
 from .poll import run_poll
-from .publish import CROP_ID_RE, Conflict
-from .seed import ID_RE, MARKER_RE
-from .status import render_binding, render_crops_table, render_links, render_stage
+from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
+from .seed import ID_RE
+from .status import render_binding, render_crops_table, render_judge_comment, render_links, render_stage
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -138,6 +150,15 @@ def _job_json(workspace: str | Path, rel: str) -> Any:
     return _loads(read_untrusted(Path(workspace), rel, 1 << 20))
 
 
+def _when(iso: str | None) -> datetime | None:
+    """An ISO-8601 time as an aware datetime (GitHub's `Z`, or an offset; none given is UTC); None if unreadable."""
+    try:
+        parsed = datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def _fenced(text: str, lang: str = "") -> str:
     """`text` in a markdown code fence longer than any backtick run inside it."""
     fence = "`" * max(3, 1 + max(map(len, re.findall(r"`+", text)), default=0))
@@ -193,7 +214,10 @@ class Activities:
     ):
         self.cfg, self.gh_data, self.gh_snippets, self.gh_catalog = cfg, gh_data, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
-        self.registry = Registry.from_config(cfg.service) if cfg.service else None  # buffer-api, when configured
+        if cfg.service is None:
+            raise ValueError("mia-data needs a `service` section: buffer-api holds its stages and timelines")
+        self.registry = Registry.from_config(cfg.service)  # buffer-api: stages, timelines, actions, budgets
+        self.page_url = cfg.service.url.rstrip("/")
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))
         # ponytail: in memory, so a worker restart re-sends each PR once (the workflow dedupes by pr_state)
         self._sent: dict[int, tuple] = {}  # poll: PR number -> the (head, state, merge, needs_human) last signalled
@@ -230,6 +254,14 @@ class Activities:
             self.set_crop_status,
             self.tree_sha,
             self.adopt_pr_binding,
+            self.paused,
+            self.reserve,
+            self.settle,
+            self.assess,
+            self.revoke_dataset,
+            self.prepare_judge,
+            self.read_judge,
+            self.kill_job,
         ]
 
     # --- helpers -----------------------------------------------------------------------------
@@ -251,6 +283,31 @@ class Activities:
     async def _comment_once(self, gh: GitHub, number: int, body: str, marker: str) -> str | None:
         """Post the comment unless one with this marker exists. Returns the comment's URL (the earlier one, on a retry)."""
         return (await self._bot_comment(gh, number, marker) or await gh.comment(number, body)).get("html_url")
+
+    async def _post(
+        self, issue: int, body: str, marker: str, *, round_id: str | None = None, stage: str | None = None
+    ) -> None:
+        """Write what a round has to say about its dataset: a stage, a text (once per marker), or both. It is the
+        subject's stage and a timeline entry in the registry, a required write, and no GitHub call: the mirror
+        copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7)."""
+        write = functools.partial(
+            self.registry.append_entry, "dataset", issue, body=body, marker=marker, round_id=round_id, stage=stage
+        )
+        await asyncio.to_thread(write)
+
+    async def _action(self, number: int, event_id: str) -> dict | None:
+        """The action whose id is this event id, with its `subject` and the subject's `actions`; None when the
+        event is not an action (a signal the workflow made itself). An action of another subject is an error."""
+        registry = self.registry
+        action = await asyncio.to_thread(registry.action, event_id)
+        if action is None:
+            return None
+        if (action["kind"], action["number"]) != ("dataset", number):
+            raise ValueError(f"event {event_id} is not an action on dataset #{number}")
+        found = await asyncio.to_thread(registry.timeline, "dataset", number)
+        if found is None:
+            raise ValueError(f"dataset #{number} is not in the registry")
+        return {**action, "subject": found["subject"], "actions": found["actions"]}
 
     def _round_dir(self, round_id: str) -> Path:
         """state_dir/rounds/<round_id>: the round's record, downloads entry, pins and bindings (never mounted)."""
@@ -303,7 +360,10 @@ class Activities:
         """The registry row for the dataset at `stage`: prepared (with the manifest's facts) when its folder holds a
         binding and a manifest that matches it, else in-progress, or needs-human at that stage."""
         try:
-            row = crop_publish.prepared_row(self._dataset_dir(round_id, self._pins(round_id)))
+            dataset_dir = self._dataset_dir(round_id, self._pins(round_id))
+            if (dataset_dir / REVOKED_FILE).is_file():  # revoked stays revoked until a new publication
+                return {"state": "revoked", "data_stage": stage, "issue": issue}
+            row = crop_publish.prepared_row(dataset_dir)
         except (ValueError, OSError) as err:  # no derivable folder (unclear record) or unreadable: a state row only
             log.warning("round %s: no prepared lookup: %s", round_id, err)
             row = None
@@ -311,7 +371,8 @@ class Activities:
             row.pop("record")
             fields = row
         else:
-            fields = {"state": "needs-human" if stage == "needs-human" else "in-progress"}
+            # a cancelled round did not prepare the dataset: whatever follows it reads that as it reads a stop
+            fields = {"state": "needs-human" if stage in ("needs-human", "cancelled") else "in-progress"}
         return {**fields, "data_stage": stage, "issue": issue}
 
     def _report_dataset(self, registry: Registry, issue: int, round_id: str, stage: str) -> None:
@@ -335,19 +396,22 @@ class Activities:
     @activity.defn(name="admit")
     @mia_permanent_errors
     async def admit(self, issue: int, event_id: str) -> Pins:
-        """Pin the round: the record id from the issue's first-line marker, record_commit from the downloads
-        state (or the catalog's main when the record was never downloaded: a buffer opened the issue and its jobs
-        fetch on demand), snippets main, and the harness checkout. Written once to state_dir/rounds/<round_id>/;
-        a retry returns the same pins."""
+        """Pin the round: the record is the subject's key, record_commit comes from the downloads state (or the
+        catalog's main when the record was never downloaded: its jobs fetch on demand), then snippets main and the
+        harness checkout. The round is charged to whoever asked for it: the root its `go` carries, else the
+        dataset itself. Written once to state_dir/rounds/<round_id>/; a retry returns the same pins."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
         if (round_dir / "pins.json").is_file():
             return Pins(**json.loads((round_dir / "pins.json").read_text()))
-        match = MARKER_RE.match((await self.gh_data.get_issue(issue)).get("body") or "")
-        if not (match and ID_RE.fullmatch(match.group(1))):
-            raise ValueError(f"issue #{issue} has no valid record marker on its first line")
-        record_id = match.group(1)
+        action = await self._action(issue, event_id)
+        if action is None:
+            raise ValueError(f"event {event_id} is not an action: a round is started by one")
+        record_id = action["subject"]["key"]
+        if not ID_RE.fullmatch(record_id):
+            raise ValueError(f"dataset #{issue} has no valid record id: {record_id!r}")
+        root = action["payload"].get("root") or self.cfg.root_of(issue)
         entry = (await catalog.downloaded(self.gh_catalog)).get(record_id)
         if entry is None:
             entry = {"record_commit": await self.gh_catalog.get_ref_sha("main"), "downloaders": []}
@@ -362,6 +426,7 @@ class Activities:
             entry["record_commit"],
             await self.gh_snippets.get_ref_sha("main"),
             *await asyncio.to_thread(harness_pin, self.cfg),
+            root=root,
         )
         await asyncio.to_thread(harness_snapshot, self.cfg, pins.harness_commit)  # freeze the source now
         write_atomic(round_dir / "record.yaml", yaml.safe_dump(record, sort_keys=False))
@@ -379,6 +444,179 @@ class Activities:
             cfg.limits.job_walltime_min,
             cfg.limits.max_pr_revisions,
             cfg.temporal.poll_minutes,
+            cfg.limits.agent_max_budget_usd,
+            cfg.judge.crops.mode,
+            cfg.judge.max_budget_usd,
+        )
+
+    # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
+
+    @activity.defn(name="assess")
+    async def assess(
+        self,
+        issue: int,
+        round_id: str,
+        gate: str,
+        subject_kind: str,
+        subject_ref: str,
+        verdict: str,
+        by: str,
+        summary: str = "",
+        supersedes: str | None = None,
+    ) -> AssessmentWritten:
+        """Write the verdict as an assessment in the registry, then ask `authorized()` over everything written about
+        the subject; an approve also names its assessment on the dataset row."""
+        registry = self.registry
+        row = new_assessment(
+            gate=gate,
+            subject_kind=subject_kind,
+            subject_ref=subject_ref,
+            verdict=verdict,
+            by=by,
+            at=time.time(),
+            summary=summary,
+            supersedes=supersedes,
+        )
+        await asyncio.to_thread(registry.put_assessment, row)
+        rows = await asyncio.to_thread(lambda: registry.assessments(subject_kind=subject_kind, subject_ref=subject_ref))
+        auth = authorized(rows)
+        if verdict == "approve":
+            record = self._pins(round_id).record
+            await asyncio.to_thread(
+                best_effort, lambda: registry.put_dataset(record, assessment=row["id"]), f"{record}: assessment", log
+            )
+        return AssessmentWritten(row["id"], auth.ok, auth.reason)
+
+    # --- the judge: evidence in, an assessment out (spec autonomous-gates §4, §9) -------------------
+
+    @activity.defn(name="prepare_judge")
+    @mia_permanent_errors
+    async def prepare_judge(
+        self,
+        issue: int,
+        round_id: str,
+        gate: str,
+        crop_workspace: str,
+        verify_workspace: str,
+        verified: list[dict],
+        attempt: int = 1,
+        tag: str = "",
+    ) -> str:
+        """Make the crop judge's workspace, `<round workspace>/judge-crops[-<tag>]-<attempt>` (`tag`: the tested
+        commit, so every head of a round keeps its own evidence), with its evidence directory: the question, raw.png
+        and overlay.png of every verified crop, verify.json, the binding without the author's `reasons`, and the
+        record. Nothing from the match agent's workspace. Returns the workspace path."""
+        if gate != "crops":
+            raise ValueError(f"prepare_judge knows the crops gate, not {gate!r}")
+        workspace = self._make_workspace(issue, round_id, f"judge-{gate}" + (f"-{tag}" if tag else ""), attempt)
+        crop_dir = self._job_workspace(issue, round_id, crop_workspace)
+        verify_dir = self._job_workspace(issue, round_id, verify_workspace)
+        files = await asyncio.to_thread(gallery_files, crop_dir, verify_dir, verified)
+        binding = yaml.safe_load(files.pop("binding.yaml")) or {}
+        if isinstance(binding, dict):
+            binding.pop("reasons", None)  # the author arguing its case is not evidence (spec §4)
+        items: dict[str, bytes | Path] = {
+            **files,
+            "binding.yaml": yaml.safe_dump(binding, sort_keys=False).encode(),
+            "record.yaml": self._round_dir(round_id) / "record.yaml",
+        }
+        crops = "\n".join(f"- `{crop['crop_id']}`" for crop in verified) or "(no verified crop)"
+        question = f"{prompt_text(gate)}\n# The crops in this set\n\n{crops}\n"
+        author = self._round_workspace(issue, round_id) / "match-1"
+        await asyncio.to_thread(build_evidence, workspace, question, items, author_workspace=author)
+        return str(workspace)
+
+    @activity.defn(name="read_judge")
+    @mia_permanent_errors
+    async def read_judge(
+        self, issue: int, round_id: str, workspace: str, gate: str, subject_kind: str, subject_ref: str, mode: str
+    ) -> JudgeResult:
+        """Read the judge's claude.json, apply policy (serious issues only, the confidence floor), write the
+        assessment `by: judge` to the registry and `verdict.json` beside the evidence, and render the comment.
+        A missing or unreadable verdict is an `escalate` on record, never an error: shadow must not block."""
+        path = self._job_workspace(issue, round_id, workspace)
+        text, cost, model = read_claude_json(path)
+        try:
+            verdict = parse_verdict(text)
+        except ValueError as error:
+            verdict = Verdict("escalate", 0.0, (), f"unreadable verdict: {_text(str(error), 400)}")
+        max_suspect = self.cfg.judge.crops.max_suspect if gate == "crops" else None
+        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence, max_suspect)
+        findings = [
+            {"item": self._clean(f.item), "severity": f.severity, "note": self._clean(f.note)} for f in verdict.findings
+        ]
+        summary = self._clean(verdict.summary)
+        row = new_assessment(
+            gate=gate,
+            subject_kind=subject_kind,
+            subject_ref=subject_ref,
+            verdict=effective,
+            by="judge",
+            at=time.time(),
+            summary=summary,
+            findings=findings,
+            confidence=verdict.confidence,
+            evidence_digest=evidence_digest(path),
+            checks={"verify": self._pins(round_id).harness_commit, "why": why},
+            model=model or self.cfg.judge.model,
+            prompt_version=prompt_version(gate),
+        )
+        write_atomic(
+            path / "verdict.json",
+            json.dumps({"assessment": row, "judge": dataclasses.asdict(verdict), "cost_usd": cost}, indent=1),
+        )
+        registry = self.registry  # shadow never blocks: a registry outage is logged, the round goes on
+        written = await asyncio.to_thread(
+            best_effort, lambda: registry.put_assessment(row), f"{round_id}: judge assessment", log
+        )
+        assessment_id = row["id"] if written else ""
+        comment = render_judge_comment(
+            gate,
+            verdict.verdict,
+            effective,
+            why,
+            summary,
+            findings,
+            verdict.confidence,
+            row["model"],
+            row["prompt_version"],
+            POLICY_VERSION,
+            cost,
+            mode,
+        )
+        return JudgeResult(
+            verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings
+        )
+
+    # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
+
+    @activity.defn(name="paused")
+    async def paused(self) -> bool:
+        """Whether `autonomy.pause` is set in mia.yaml now (re-read: `mia pause` edits the file in place)."""
+        return await asyncio.to_thread(autonomy.paused, manifest_path())
+
+    @activity.defn(name="reserve")
+    async def reserve(self, root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
+        """Charge a job to its root before it launches; a refusal names the cap. Without a root there is no
+        budget to check."""
+        if not root:
+            return Reservation(True, "no budget")
+        caps = self.cfg.autonomy.caps()
+        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
+        ok = bool(out.get("ok"))
+        return Reservation(ok, "" if ok else str(out.get("reason", "")), wait=bool(out.get("wait")) and not ok)
+
+    @activity.defn(name="settle")
+    async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
+        """Close the job's reservation with what it cost and moved; an accounting write never fails a round."""
+        if not root:
+            return
+        registry = self.registry
+        await asyncio.to_thread(
+            best_effort,
+            lambda: registry.settle(root, reservation_id, usd=usd, fetched_bytes=fetched_bytes),
+            f"settle {reservation_id}",
+            log,
         )
 
     @activity.defn(name="set_stage")
@@ -386,24 +624,20 @@ class Activities:
     async def set_stage(
         self, issue: int, stage: str, state: DatasetState | None = None, detail: str = "", extra: str = ""
     ) -> None:
-        """Swap the `data:<stage>` label and, within a round, post the stage's comment once.
+        """Write the dataset's stage: its registry row, the subject's stage and, within a round, the stage's
+        timeline entry, once.
 
-        The comment has the stage line, `detail` (neutralized), the caller's `extra` (crops table, totals, PR
-        link) and links to the folders to look at. Comments are never edited: each stage and result is a new one."""
+        The entry has the stage line, `detail` (neutralized), the caller's `extra` (crops table, totals, PR
+        link) and links to the folders to look at. Entries are never edited: each stage and result is a new one."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         round_id = state.round_id if state else None
-        if round_id and (registry := self.registry):  # the registry row first: machines read it, GitHub may wait
-            await asyncio.to_thread(self._report_dataset, registry, issue, round_id, stage)
-        gh, want = self.gh_data, self.cfg.label(stage)
-        current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
-        for other in STAGES:
-            if (name := self.cfg.label(other)) in current and name != want:
-                await gh.remove_label(issue, name)
-        if want not in current:
-            await gh.add_labels(issue, [want])
+        if round_id:  # the dataset's row: what buffers and requests read
+            await asyncio.to_thread(self._report_dataset, self.registry, issue, round_id, stage)
         if not round_id:
+            await self._post(issue, "", "", stage=stage)
             return
+        gh = self.gh_data
         paths = self.cfg.paths
         links = {"Workspace": paths.link(self._round_workspace(issue, round_id))}
         if stage == "done":
@@ -414,7 +648,8 @@ class Activities:
             )
         marker = self.cfg.marker(f"stage {round_id} {stage}")
         parts = [render_stage(stage, self._clean(detail)), self._clean(extra) if extra else "", render_links(links)]
-        await self._comment_once(gh, issue, "\n".join(part for part in parts if part) + f"\n{marker}", marker)
+        body = "\n".join(part for part in parts if part) + f"\n{marker}"
+        await self._post(issue, body, marker, round_id=round_id, stage=stage)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
@@ -427,23 +662,29 @@ class Activities:
         binding_path: str | None = None,
         binding_hash: str | None = None,
     ) -> str | None:
-        """Post once per marker, on a data issue or (repo="snippets") a snippets issue or PR, with the binding
-        appended when one is given. Returns the comment's URL."""
+        """Post once per marker, with the binding appended when one is given: a comment on a snippets issue or PR
+        (repo="snippets"; returns its URL), or an entry of the dataset's timeline (returns None; see `_post`)."""
         full_marker = self.cfg.marker(marker)
         body = self._clean(body) + (f"\n\n{render_binding(binding_path, binding_hash)}" if binding_path else "")
-        return await self._comment_once(
-            self.gh_snippets if repo == "snippets" else self.gh_data, issue, f"{body}\n\n{full_marker}", full_marker
-        )
+        if repo == "snippets":
+            return await self._comment_once(self.gh_snippets, issue, f"{body}\n\n{full_marker}", full_marker)
+        await self._post(issue, f"{body}\n\n{full_marker}", full_marker)
+        return None
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
-        """Remove a human label we won't act on and say why, once per event (busy `go`, stray `approve`, ...)."""
-        if label not in {self.cfg.label(kind) for kind in HUMAN_LABELS} or not re.fullmatch(r"\d+", str(event_id)):
+        """Refuse an action we won't act on and say why, once per event (busy `go`, stray `approve`, ...); an event
+        that is no action gets the entry alone."""
+        actions = (*HUMAN_LABELS, "cancel")  # every action a person can send
+        if label not in {self.cfg.label(kind) for kind in actions} or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
-        await self.gh_data.remove_label(issue, label)
+        said = f"Ignoring `{label}`: {self._clean(reason)}"
+        if await self._action(issue, event_id) is not None:  # a click: the page shows the reason against it
+            await asyncio.to_thread(self.registry.refuse_action, event_id, self._clean(reason))
+            said = f"Refused `{label.partition(':')[2]}`: {self._clean(reason)}"
         marker = self.cfg.marker(f"refused {label} {event_id}")
-        await self._comment_once(self.gh_data, issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker)
+        await self._post(issue, f"{said}\n\n{marker}", marker)
 
     # --- jobs --------------------------------------------------------------------------------
 
@@ -492,6 +733,8 @@ class Activities:
         cfg = self.cfg
         if kind == "match":
             return match_job(cfg, args)
+        if kind == "judge":
+            return judge_job(cfg, args)
         existing = self._dataset_dir(args.round_id, args.pins) / "manifest.json" if args.existing else None
         existing = existing if existing and existing.is_file() else None
         if kind in ("smoke", "crop"):
@@ -535,10 +778,20 @@ class Activities:
 
     @activity.defn(name="await_job")
     async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
-        """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock."""
+        """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock.
+        A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3)."""
         heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
-        outcome = await self.jobs.wait(job_id, workspace, heartbeat)
+        try:
+            outcome = await self.jobs.wait(job_id, workspace, heartbeat)
+        except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
+            raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
         return JobDone(outcome.job_id, outcome.state, outcome.exit_code)
+
+    @activity.defn(name="kill_job")
+    async def kill_job(self, job_id: str) -> None:
+        """Kill a cluster job by id: the job of a round that was cancelled (spec webapp-actions §5). The wait on
+        it is cancelled by the workflow; a job that already ended is not an error to the runner."""
+        await asyncio.to_thread(self.jobs.client.kill, [job_id])
 
     # --- locks -------------------------------------------------------------------------------
 
@@ -579,7 +832,7 @@ class Activities:
         if kind == "needs_snippet":
             draft = _small_dict({key: outcome.get(key) for key in ("draft_binding", "what_fails", "tried")}, 32768)
             return MatchResult("needs_snippet", draft=draft or {"what_fails": "(the agent's draft was too large)"})
-        if kind != "matched":  # `ineligible` was an outcome until spec §12: size is the buffer plan's call, not ours
+        if kind != "matched":  # size is the buffer plan's call, not ours: no outcome says a dataset is too small
             return MatchResult("blocked", f"unknown match outcome {_text(kind, 100)!r}")
         binding, errors = await self._check_binding(
             read_untrusted(path, "binding.yaml", 1 << 20), round_id, pins, pins.snippets_commit
@@ -625,8 +878,7 @@ class Activities:
         the binding.yaml in `workspace`, read as untrusted since the job could write there."""
         if not ID_RE.fullmatch(record):
             raise ValueError(f"bad record id {record!r}")
-        if (registry := self.registry) is None:
-            return
+        registry = self.registry
         try:
             binding = yaml.safe_load(read_untrusted(Path(workspace), "binding.yaml", 1 << 20) or "")
         except yaml.YAMLError:
@@ -715,7 +967,13 @@ class Activities:
             return value if type(value) is int and value >= 0 else None
 
         return VerifyResult(
-            len(verified), n_crops, (errors + failed)[:20], verified, count("n"), count("bytes_fetched") or 0
+            len(verified),
+            n_crops,
+            (errors + failed)[:20],
+            verified,
+            count("n"),
+            count("bytes_fetched") or 0,
+            _texts(crop_report.get("errors"))[:10],
         )
 
     # --- publication -------------------------------------------------------------------------
@@ -780,9 +1038,12 @@ class Activities:
             raise ValueError(f"binding {binding} is not one of round {round_id}'s")
         withdrawn = withdrawn_snippets(await self._snapshot(sha))
         timeout = activity.info().start_to_close_timeout if activity.in_activity() else None
-        return await asyncio.to_thread(
+        pins = self._pins(round_id)
+        dataset_dir = self._dataset_dir(round_id, pins)
+        revoked = (dataset_dir / REVOKED_FILE).is_file()
+        published = await asyncio.to_thread(
             crop_publish.publish,
-            self._dataset_dir(round_id, self._pins(round_id)),
+            dataset_dir,
             crops_dir,
             verified,
             withdrawn,
@@ -790,25 +1051,119 @@ class Activities:
             binding=Path(binding) if binding else None,
             previews=previews,
         )
+        if revoked:  # a new publication repairs a revocation (spec autonomous-gates §6.5)
+            (dataset_dir / REVOKED_FILE).unlink(missing_ok=True)
+            await self._release_revoked(round_id, pins.record)
+        return published
+
+    async def _release_revoked(self, round_id: str, record: str) -> None:
+        """After a repair: every quarantined staged artifact of the record gets a `policy:repair` approve (the newest
+        assessment, so buffers may reuse it) and its quarantine mark cleared. Best effort: the publication stands."""
+        registry = self.registry
+        try:
+            assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
+            for asset in assets:
+                data = asset.get("data") or {}
+                if not data.get("quarantined"):
+                    continue
+                key, now = str(asset["key"]), time.time()
+                approve = new_assessment(
+                    gate="staged",
+                    subject_kind="artifact",
+                    subject_ref=key,
+                    verdict="approve",
+                    by="policy:repair",
+                    at=now,
+                    summary=f"repaired by {round_id}: {record} was published again",
+                )
+                await asyncio.to_thread(registry.put_assessment, approve)
+                release = {"quarantined": False, "repaired_at": now, "repaired_by": round_id}
+                await asyncio.to_thread(registry.put_asset, "staged", key, release)
+        except RegistryError as error:
+            log.warning("round %s: the revoked artifacts of %s were not released: %s", round_id, record, error)
+
+    @activity.defn(name="revoke_dataset")
+    @mia_permanent_errors
+    async def revoke_dataset(self, issue: int, round_id: str, actor: str, event_id: str) -> Revocation:
+        """A revoke (spec autonomous-gates §6): a reject assessment superseding the dataset's approve, a reject
+        and a quarantine mark on every staged artifact of the record, the dataset row flipped to `revoked`, and
+        `revoked.json` written last beside the manifest (the folder is no longer prepared; nothing is deleted).
+        A retry reads the marker and returns what the first run recorded."""
+        registry = self.registry
+        pins = self._pins(round_id)
+        record, folder = pins.record, self._dataset_dir(round_id, pins)
+        marker = folder / REVOKED_FILE
+        if marker.is_file():
+            return Revocation(**json.loads(marker.read_text())["revocation"])
+        if not (folder / "manifest.json").is_file():  # nothing was ever published here: nothing to withdraw
+            return Revocation("")
+        by, at = f"human:{actor}", time.time()
+        summary = f"data:revoke by {actor} (event {event_id})"
+        row = await asyncio.to_thread(registry.dataset, record) or {}
+        approve_id = row.get("assessment")
+        approve = await asyncio.to_thread(registry.assessment, approve_id) if approve_id else None
+        subject = approve["subject"] if approve else {"kind": "crop_set", "ref": f"{round_id}:revoked"}
+        reject = new_assessment(
+            gate="crops",
+            subject_kind=subject["kind"],
+            subject_ref=subject["ref"],
+            verdict="reject",
+            by=by,
+            at=at,
+            summary=summary,
+            supersedes=approve_id,
+        )
+        await asyncio.to_thread(registry.put_assessment, reject)
+        assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
+        artifacts: list[str] = []
+        for asset in assets:
+            if not asset.get("data"):
+                continue
+            key = str(asset["key"])
+            artifact_reject = new_assessment(
+                gate="staged", subject_kind="artifact", subject_ref=key, verdict="reject", by=by, at=at, summary=summary
+            )
+            await asyncio.to_thread(registry.put_assessment, artifact_reject)
+            quarantine = {"quarantined": True, "quarantined_at": at, "quarantined_by": by}
+            await asyncio.to_thread(registry.put_asset, "staged", key, quarantine)
+            artifacts.append(key)
+        buffers = sorted({str(ref) for asset in assets for ref in asset.get("refs") or []})
+        await asyncio.to_thread(
+            registry.put_dataset,
+            record,
+            state="revoked",
+            revoked_at=datetime.fromtimestamp(at, UTC).isoformat(),
+            revoked_by=by,
+            assessment=reject["id"],
+        )
+        revocation = Revocation(reject["id"], sorted(artifacts), buffers)
+        folder.mkdir(parents=True, exist_ok=True)
+        record_of = {"record": record, "by": by, "at": at, "issue": issue, "event_id": event_id}
+        write_atomic(marker, json.dumps({**record_of, "revocation": dataclasses.asdict(revocation)}, indent=1))
+        return revocation
 
     # --- snippet development -----------------------------------------------------------------
 
     @activity.defn(name="read_feedback")
     @mia_permanent_errors
     async def read_feedback(self, issue: int, since: str | None, until: str) -> str:
-        """The reviewer's comments on the data issue after `since` (the set's report) and up to `until` (the
-        reject), by people with write access, the bot's own left out: what goes to the agent fixing the snippet
-        (spec §14). Neutralized and capped; "(no details)" when there are none."""
-        comments, permission = [], {}
-        for comment in await self.gh_data.issue_comments(issue):
-            login, at = (comment.get("user") or {}).get("login"), comment.get("created_at") or ""
-            if not login or login == self.bot or not ((since or "") < at <= until):
-                continue
-            if login not in permission:
-                permission[login] = await self.gh_data.permission(login)
-            if permission[login] in WRITE_PERMISSIONS:
-                comments.append(f"{login} wrote:\n{_text(comment.get('body'), 8000)}")
-        return self._clean("\n\n".join(comments))[:16000] or "(no details)"
+        """The reviewer's feedback: the note of each reject action after `since` (the set's report) and up to
+        `until` (the reject; the workflow passes the action's own `at`, which is why an action's time is stored
+        exactly as it was sent). It goes to the agent fixing the snippet (spec §14). Neutralized and capped;
+        "(no details)" when there is none."""
+        found = await asyncio.to_thread(self.registry.timeline, "dataset", issue)
+        after, upto = _when(since), _when(until)
+
+        def in_window(action: dict) -> bool:
+            acted = _when(action["at"])
+            return bool(acted and upto and (after is None or after < acted) and acted <= upto)
+
+        notes = [
+            f"{action['actor']} wrote:\n{_text(action['payload'].get('note'), 8000)}"
+            for action in (found or {}).get("actions", [])
+            if action["action"] == "reject" and in_window(action) and action["payload"].get("note")
+        ]
+        return self._clean("\n\n".join(notes))[:16000] or "(no details)"
 
     @activity.defn(name="open_snippet_issue")
     @mia_permanent_errors
@@ -855,7 +1210,9 @@ class Activities:
             {key: record.get(key) for key in ("title", "imaging", "data", "technical")}, sort_keys=False
         )
         draft = draft or {}
-        data_link = f"[{github_cfg.data_repo}#{issue}](https://github.com/{github_cfg.data_repo}/issues/{issue})"
+        # the dataset's page, not its issue: a dataset may have no issue yet, and its number is not an issue
+        # number (spec webapp-actions §4.1, §9)
+        data_link = f"[{pins.record}]({self.page_url}/#datasets/{quote(pins.record, safe='')})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}

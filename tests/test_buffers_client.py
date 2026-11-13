@@ -47,6 +47,7 @@ def buffer_server(tmp_path, monkeypatch):
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     cfg = {**CFG, "tensorizer_params": {"normalize": "percentile", "scope": "volume"}}
     assert httpx.put(f"{base}/buffers/b", json=cfg).status_code == 200
+    assert httpx.post(f"{base}/buffers/b/events", json={"kind": "approved"}).status_code == 200  # may serve
     volume = {**body(), "normalize": {"lo": [0], "hi": [9]}}
     assert httpx.put(f"{base}/buffers/b/volumes/a", json=volume).status_code == 200
     yield base
@@ -57,14 +58,19 @@ def consumers(base):
     return httpx.get(f"{base}/buffers/b/status").json()["consumers"]
 
 
-def test_client_names_an_unapproved_buffer(buffer_server, tmp_path):
-    """A buffer at the staged gate answers 409: the client raises an error that says so, not a bare HTTP error."""
-    Ledger(tmp_path / "l.sqlite").add_event("b", "staged", issue=None, event_id=None, detail="")
+def test_client_names_the_reason_a_buffer_refuses_consumers(buffer_server, tmp_path):
+    """A 409 carries the service's reason (not approved, needs a human, no approved event): the client raises an
+    error that repeats it, not a bare HTTP error, since each reason has a different remedy."""
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.add_event("b", "staged", issue=None, event_id=None, detail="")
     c = BufferClient(buffer_server, "b")
-    with pytest.raises(BufferNotApproved, match="buffer b is not approved yet"):
+    with pytest.raises(BufferNotApproved, match=r"buffer b refused consumers \(409 buffer not approved\)"):
         c.register("train")
-    with pytest.raises(BufferNotApproved, match="not approved yet"):
+    with pytest.raises(BufferNotApproved, match="buffer not approved"):
         c.next("nobody", 1)
+    ledger.add_event("b", "needs-human", issue=None, event_id=None, detail="degraded")
+    with pytest.raises(BufferNotApproved, match=r"buffer b refused consumers \(409 buffer needs a human\)"):
+        c.register("train")
 
 
 def test_client_calls(buffer_server):

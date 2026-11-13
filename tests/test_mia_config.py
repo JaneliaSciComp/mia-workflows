@@ -58,13 +58,6 @@ def test_roots_take_a_path_or_a_path_with_browse_url(tmp_path):
     assert not hasattr(c, "storage")
 
 
-def test_trusted_bots_take_the_app_slug_and_add_the_bot_suffix(tmp_path):
-    cfg = make_cfg(tmp_path, github={"trusted_bots": ["mia-bot", "other[bot]"]})
-    assert cfg.github.trusted_bots == ["mia-bot[bot]", "other[bot]"]
-    with pytest.raises(ValidationError, match="trusted_bots"):
-        make_cfg(tmp_path, github={"trusted_bots": ["bad slug!"]})
-
-
 def test_load_config_by_service_name(tmp_path, monkeypatch):
     (tmp_path / "harness").mkdir()
     (tmp_path / "mia.yaml").write_text(
@@ -104,3 +97,22 @@ def test_shared_agent_hosts_still_refused_by_mia_data(tmp_path):
 
 def test_evaluate_is_off_by_default(tmp_path):
     assert make_cfg(tmp_path).evaluate.enabled is False
+
+
+def test_judge_section_loads(tmp_path):
+    cfg = make_cfg(tmp_path, judge={"crops": {"mode": "shadow"}})
+    assert cfg.judge.crops.mode == "shadow" and cfg.judge.model == "opus"
+    # the author's own model is allowed as the judge: a different one is a precaution, not a rule
+    assert make_cfg(tmp_path, judge={"crops": {"mode": "shadow"}, "model": "sonnet"}).judge.model == "sonnet"
+
+
+def test_every_dataset_stage_has_a_rule():
+    from mia_data.config import HUMAN_LABELS, STAGE_ACTIONS, STAGES, STATUS_WORDS
+
+    assert set(STAGE_ACTIONS) == set(STAGES)
+    for status, actions in STAGE_ACTIONS.values():
+        assert status in STATUS_WORDS and actions <= {*HUMAN_LABELS, "cancel"}
+    assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "go", "cancel"}))
+    # a round in progress is cancelled before anything else is asked of its dataset
+    assert all(actions == {"cancel"} for status, actions in STAGE_ACTIONS.values() if status == "working")
+    assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"go", "revoke"}))

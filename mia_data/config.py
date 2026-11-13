@@ -21,7 +21,7 @@ import yaml
 from pydantic import BaseModel, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR, AgentCfg, TemporalCfg, is_github_host, load_dotenv
-from mia_core.config import ServiceCfg, load_service_config, manifest_path
+from mia_core.config import AutonomyCfg, JudgeCfg, ServiceCfg, load_service_config, manifest_path
 
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
@@ -30,7 +30,7 @@ _ENV_OVERRIDES = {
 
 # stage -> (label color, description); labels are `data:<stage>`
 STAGES = {
-    "new": ("ededed", "mia-data: dataset issue seen"),
+    "new": ("ededed", "mia-data: nothing has run yet"),
     "matching": ("fbca04", "mia-data: matching the dataset to a snippet"),
     "developing": ("fbca04", "mia-data: agent writing a snippet"),
     "testing": ("fbca04", "mia-data: making the crops to review"),
@@ -38,14 +38,34 @@ STAGES = {
     "merging": ("1d76db", "mia-data: crops approved; autodev is merging the snippet PR"),
     "done": ("5319e7", "mia-data: crops published"),
     "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
+    "cancelled": ("cccccc", "mia-data: the round was cancelled"),
 }
-HUMAN_LABELS = {  # set by humans
+HUMAN_LABELS = {  # the actions a person takes
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
     "approve": ("0e8a16", "Approve the crops under review: they are published (a snippet PR merges first)"),
     "reject": (
         "d93f0b",
-        "Reject the crops under review: your comments since the review go to the agent fixing the snippet",
+        "Reject the crops under review: your feedback goes to the agent fixing the snippet",
     ),
+    "revoke": (
+        "b60205",
+        "Revoke this dataset's published crops: buffers that drew from it are degraded, nothing is deleted",
+    ),
+}
+STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done")
+# stage -> (status word, the actions it accepts); "working" means a round is in progress, and a round in progress
+# accepts only `cancel` (spec webapp-actions §5.1). buffer-api refuses any other action, the page offers only
+# these. The workflow stays the code that carries a round out.
+STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
+    "new": ("not started", frozenset({"go"})),
+    "matching": ("working", frozenset({"cancel"})),
+    "developing": ("working", frozenset({"cancel"})),
+    "testing": ("working", frozenset({"cancel"})),
+    "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),
+    "merging": ("working", frozenset({"cancel"})),
+    "done": ("done", frozenset({"go", "revoke"})),
+    "needs-human": ("stuck", frozenset({"go", "revoke"})),
+    "cancelled": ("done", frozenset({"go", "revoke"})),
 }
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),
@@ -64,7 +84,6 @@ class GitHubCfg(BaseModel):
     installation_id: int | None = None
     private_key_path: Path | None = None
     api_url: str = "https://api.github.com"
-    trusted_bots: list[str] = []  # GitHub App slugs whose `go` label counts without a permission lookup
 
 
 class PathsCfg(BaseModel):
@@ -114,6 +133,9 @@ class CropsCfg(BaseModel):
 
 
 class LimitsCfg(BaseModel):
+    """Per job: what one csub job may read, write and run for (plus one agent run's cost and one round's PR
+    revisions). Per disk root is `QuotaCfg`; per request is `AutonomyCfg` (mia_core.config)."""
+
     job_bytes: float = 5e9
     stage_bytes: float | None = None  # cap on one staged artifact's uncompressed planned bytes; None = job_bytes
     job_walltime_min: int = 120
@@ -144,6 +166,8 @@ class Config(BaseModel):
     deployment: str = "mia-data"
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg(namespace="mia-data")
+    autonomy: AutonomyCfg = AutonomyCfg()
+    judge: JudgeCfg = JudgeCfg()
     paths: PathsCfg
     gallery: GalleryCfg = GalleryCfg()
     crops: CropsCfg = CropsCfg()
@@ -172,11 +196,6 @@ class Config(BaseModel):
         github = self.github
         if github.auth == "app" and not (github.app_id and github.installation_id and github.private_key_path):
             raise ValueError("github.auth=app needs github.app_id, installation_id and private_key_path")
-        # the slug as GitHub shows the App, or the login it acts under ("<slug>[bot]"); stored as the login
-        slugs = [login.removesuffix("[bot]") for login in github.trusted_bots]
-        if bad := [slug for slug in slugs if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", slug)]:
-            raise ValueError(f"github.trusted_bots: {bad} must be GitHub App slugs")
-        github.trusted_bots = [f"{slug}[bot]" for slug in slugs]
         for attr in ("private_key_path", "token_file"):
             if getattr(github, attr):
                 setattr(github, attr, getattr(github, attr).expanduser())
@@ -236,6 +255,11 @@ class Config(BaseModel):
 
     def workflow_id(self, issue: int) -> str:
         return f"mia-data/{self.github.data_repo}/issue-{issue}"
+
+    def root_of(self, issue: int) -> str:
+        """The root request id a round of this issue is charged to: `<issue repo>#<issue>` (mia-buffers inherits
+        it with its own issue repo in `data_repo`)."""
+        return f"{self.github.data_repo}#{issue}"
 
     def marker(self, text: str) -> str:
         """The HTML comment hidden in our own GitHub comments so we can find them again."""

@@ -19,6 +19,17 @@ async def test_submit_once_per_key(tmp_path):
     assert await fresh.submit("k1", spec) == "777" and len(fake.submitted) == 1
 
 
+async def test_a_spec_factory_may_be_sync_or_async(tmp_path):
+    fake = FakeCsub()
+
+    async def async_spec():
+        return JobSpec("j", "true", str(tmp_path / "ws"), 10)
+
+    assert await _jobs(tmp_path, fake).submit("k1", async_spec) == "777"
+    assert await _jobs(tmp_path, fake).submit("k2", lambda: JobSpec("j", "true", str(tmp_path / "ws"), 10)) == "777"
+    assert len(fake.submitted) == 2
+
+
 async def test_reattach_by_cwd(tmp_path):
     ws = tmp_path / "ws"
     fake = FakeCsub(
@@ -99,3 +110,32 @@ async def test_recorded_id_skips_building_the_spec(tmp_path, monkeypatch):
     (j.cfg.paths.state_dir / "jobs").mkdir(parents=True)
     (j.cfg.paths.state_dir / "jobs" / f"issue-7-{K}-r1.id").write_text("444")
     assert (await j.submit(7, K, 1, Workspace(str(tmp_path), "a", "b"))).job_id == "444"
+
+
+async def test_wait_kills_the_job_when_the_heartbeat_loses_the_lock(tmp_path):
+    from mia_core.locks import LockLost
+
+    fake = FakeCsub(states=["RUN", "RUN", "DONE"])
+    beats = []
+
+    def heartbeat(state):
+        beats.append(state)
+        if len(beats) == 2:
+            raise LockLost("raw", "rec", "me")
+
+    with pytest.raises(LockLost):
+        await _jobs(tmp_path, fake).wait("777", str(tmp_path), heartbeat)
+    assert fake.killed == ["777"] and beats == ["RUN", "RUN"]
+
+
+async def test_wait_kills_even_when_the_lock_is_lost_on_the_terminal_poll(tmp_path):
+    from mia_core.locks import LockLost
+
+    fake = FakeCsub(states=["DONE"])
+
+    def heartbeat(state):
+        raise LockLost("raw", "rec", "me")
+
+    with pytest.raises(LockLost):
+        await _jobs(tmp_path, fake).wait("777", str(tmp_path), heartbeat)
+    assert fake.killed == ["777"]  # harmless on a finished job; the wait still fails, so nothing is read from it

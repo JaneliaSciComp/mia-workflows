@@ -108,7 +108,7 @@ def test_draw_frozen_is_without_replacement_and_weighted():
         out.append(d)
     assert len(out) == 6 and len(used) == 6 and [d["volume"] for d in out[:3]].count("a") >= 2
     assert capacity([a, b], "val") == 6 and capacity([a, b], "train") == 0
-    legacy = vol("c", splits={"val": (0,)})  # no samples: always one more, drawn as before
+    legacy = vol("c", splits={"val": (0,)})  # no samples: always one more
     assert capacity([a, b, legacy], "val") is None
     d = draw_frozen(random.Random(0), [a, b, legacy], "val", used, patch=256, levels=[1, 2, 4], channels=1)
     assert d is not None and d["volume"] == "c" and "candidate" not in d

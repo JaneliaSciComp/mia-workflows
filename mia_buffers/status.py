@@ -76,9 +76,9 @@ def render_drop_comment(
     ]
     lines += [
         "",
-        "Copy each file to a temporary name first and `mv` it into `incoming/` when the copy is complete: the poller "
-        "acts once the directory has been unchanged for a whole poll interval. Plain files only (no symlinks); the "
-        "worker verifies and stages them.",
+        "Copy the files into `incoming/`, then click *Files are in place* on the buffer spec's page (it is "
+        "refused while a file there changed in the last minute). Plain files only (no symlinks); the worker "
+        "verifies and stages them.",
         "",
     ]
     return "\n".join(lines) + render_links({"Incoming": incoming_link})
@@ -117,7 +117,7 @@ def render_staged(
         f"**Staged:** {served} of {len(datasets)} datasets servable.\n\n| dataset | outcome | detail |\n|---|---|---|\n"
         f"{rows}\n\nWeighting groups against ready.min_fraction {min_fraction:g}: {marks}.\n"
         f"Volumes servable per split: {splits or 'none'}. On disk: {summary.bytes / 1e6:.1f} MB.{waiting}\n\n"
-        "Next: approve with `buffer:approve` to serve it as it is, or edit the spec and add `buffer:go` again."
+        "Next: approve to serve it as it is, or edit the spec and run it again."
     )
 
 

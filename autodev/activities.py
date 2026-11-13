@@ -8,9 +8,14 @@ untrusted: read with bounds, never executed, and scrubbed of secrets and fake ma
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
+import json
 import logging
+import os
 import re
+import subprocess
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -19,14 +24,21 @@ from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import ApplicationError
 
+from mia_core.judge.comment import render_judge_comment
+from mia_core.judge.evidence import build as build_evidence
+from mia_core.judge.evidence import evidence_digest, fenced_text, read_claude_json
+from mia_core.judge.policy import POLICY_VERSION, new_assessment
+from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
+from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import SECRET_RE as SECRET_RE
 from mia_core.untrusted import neutralize as neutralize
+from mia_core.untrusted import write_atomic
 
-from .agent import log_tail, read_result, render_prompt
+from .agent import judge_dir, log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
-from .gitops import RejectedBundleError
+from .gitops import RejectedBundleError, git
 from .models import (
     AwaitInput,
     CommentInput,
@@ -35,6 +47,8 @@ from .models import (
     IssueInput,
     JobOutcome,
     JobRef,
+    JudgeInput,
+    JudgeOutcome,
     MergeInput,
     MergeResult,
     ObserveInput,
@@ -142,6 +156,7 @@ class Activities:
         self, cfg: Config, gh: GitHub, mirror: Mirror, jobs: AgentJobs, bot: str, client: Client | None = None
     ):
         self.cfg, self.gh, self.mirror, self.jobs, self.bot, self.client = cfg, gh, mirror, jobs, bot, client
+        self.registry = Registry.from_config(cfg.service) if cfg.service else None  # where assessments go
 
     @property
     def temporal(self) -> Client:
@@ -163,6 +178,9 @@ class Activities:
             self.merge_pr,
             self.report_failure,
             self.poll_issues,
+            self.prepare_judge,
+            self.submit_judge,
+            self.read_judge,
         ]
 
     async def _comment_once(self, number: int, body: str, marker: str) -> None:
@@ -287,6 +305,140 @@ class Activities:
         await self._comment_once(pr_number or request.issue, body, self.cfg.marker(markers[0]))
         return PrRef(pr_number, head_sha)
 
+    # --- the review judge (spec autonomous-gates §4.1, §9) ------------------------------------------
+
+    @activity.defn(name="prepare_judge")
+    @permanent_errors
+    async def prepare_judge(self, request: JudgeInput) -> str:
+        """Build the review judge's evidence under `<key>/judge-r<n>/evidence/`: the issue (title, body, the
+        comments of people with write access), the diff of the pushed head against its merge base with the base
+        branch, every changed file at the head, CONTRIBUTING.md and SPEC.md when the repo has them. All of it is
+        read from the worker's own mirror, never from the author's clone (its config, hooks and replace refs are the
+        author's); the bot's own comments (the author's summaries and log tails) stay out. Returns "" when
+        judge.review is off."""
+        if self.cfg.judge.review.mode == "off":
+            return ""
+        round_dir, head = Path(request.workspace.dir), request.head_sha
+        issue = await self.gh.get_issue(request.issue)
+        comments = await self.gh.issue_comments(request.issue)
+        logins = {login for comment in comments if (login := (comment.get("user") or {}).get("login"))} - {self.bot}
+        writers = {login for login in logins if await self.gh.permission(login) in WRITE_PERMISSIONS}
+        parts = [
+            f"# Issue #{request.issue}: {issue.get('title') or ''}",
+            "",
+            fenced_text("Issue body", issue.get("body") or ""),
+        ]
+        for comment in comments[:50]:
+            login = (comment.get("user") or {}).get("login")
+            if login in writers:
+                parts.append(fenced_text(f"A comment by {login}, who has write access", comment.get("body") or ""))
+        items: dict[str, bytes | Path] = {"issue.md": "\n".join(parts).encode()}
+        mirror, base_branch = self.mirror.path, self.cfg.github.base_branch
+
+        def show(name: str) -> bytes | None:
+            proc = subprocess.run(
+                ["git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "show", f"{head}:{name}"],
+                cwd=mirror,
+                capture_output=True,
+                env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"},
+            )
+            return proc.stdout if proc.returncode == 0 else None
+
+        def collect() -> dict[str, bytes]:
+            base = git("--no-replace-objects", "merge-base", f"refs/heads/{base_branch}", head, cwd=mirror)
+            diff = ["--no-replace-objects", "diff", "--no-ext-diff", "--no-textconv", "--no-color"]
+            out = {"diff.patch": git(*diff, base, head, cwd=mirror).encode()}
+            changed = [line for line in git(*diff, "--name-only", base, head, cwd=mirror).splitlines() if line][:64]
+            for name in [*changed, "CONTRIBUTING.md", "SPEC.md"]:
+                content = show(name)
+                if content is not None:  # a deleted file: the diff says so
+                    out[f"files/{name}" if name in changed else name] = content
+            return out
+
+        items.update(await asyncio.to_thread(collect))
+        items["ci.json"] = json.dumps({"status": "not awaited (shadow)"}).encode()
+        workspace = judge_dir(round_dir)
+        if workspace.is_symlink():
+            raise ValueError(f"{workspace} is a symlink; the judge workspace is the worker's alone")
+        await asyncio.to_thread(build_evidence, workspace, prompt_text("review"), items, author_workspace=round_dir)
+        return str(workspace)
+
+    @activity.defn(name="submit_judge")
+    @permanent_errors
+    async def submit_judge(self, request: SubmitInput) -> JobRef:
+        from csub import CsubError  # pixi-only dependency, imported where used (as in agent.csub_client)
+
+        try:
+            return await self.jobs.submit_judge(
+                request.issue, request.key, request.round, str(judge_dir(Path(request.workspace.dir)))
+            )
+        except CsubError as error:
+            if error.code in PERMANENT_CSUB:
+                raise ApplicationError(str(error), non_retryable=True) from error
+            raise
+
+    @activity.defn(name="read_judge")
+    @permanent_errors
+    async def read_judge(self, request: JudgeInput) -> JudgeOutcome:
+        """Read the judge's claude.json, apply policy, write the assessment (gate `review`, subject the head) and
+        `verdict.json`, and post the comment on the PR. In shadow the comment carries no `/approve` or `/revise`
+        line: it is a review for the human to read, never a command (spec §4.1)."""
+        workspace = judge_dir(Path(request.workspace.dir))
+        text, cost, model = read_claude_json(workspace)
+        try:
+            verdict = parse_verdict(text)
+        except ValueError as error:
+            verdict = Verdict("escalate", 0.0, (), f"unreadable verdict: {str(error)[:400]}")
+        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence)
+        findings = [
+            {"item": self._clean(f.item), "severity": f.severity, "note": self._clean(f.note)} for f in verdict.findings
+        ]
+        summary = self._clean(verdict.summary)
+        row = new_assessment(
+            gate="review",
+            subject_kind="pr_head",
+            subject_ref=request.head_sha,
+            verdict=effective,
+            by="judge",
+            at=time.time(),
+            summary=summary,
+            findings=findings,
+            confidence=verdict.confidence,
+            evidence_digest=evidence_digest(workspace),
+            checks={"ci": "not awaited (shadow)", "why": why},
+            model=model or self.cfg.judge.model,
+            prompt_version=prompt_version("review"),
+        )
+        write_atomic(
+            workspace / "verdict.json",
+            json.dumps({"assessment": row, "judge": dataclasses.asdict(verdict), "cost_usd": cost}, indent=1),
+        )
+        assessment_id = ""
+        if self.registry is not None:  # shadow never blocks: a registry outage is logged, the round goes on
+            registry = self.registry
+            written = await asyncio.to_thread(
+                best_effort, lambda: registry.put_assessment(row), f"issue #{request.issue}: judge assessment", log
+            )
+            assessment_id = row["id"] if written else ""
+        mode = self.cfg.judge.review.mode
+        body = render_judge_comment(
+            "review",
+            verdict.verdict,
+            effective,
+            why,
+            summary,
+            findings,
+            verdict.confidence,
+            row["model"],
+            row["prompt_version"],
+            POLICY_VERSION,
+            cost,
+            mode,
+        )
+        marker = self.cfg.marker(f"judge {request.head_sha}")
+        await self._comment_once(request.pr or request.issue, f"{body}\n{marker}", marker)
+        return JudgeOutcome(verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost)
+
     @activity.defn(name="observe_pr")
     @permanent_errors
     async def observe_pr(self, request: ObserveInput) -> PrSnapshot:
@@ -319,7 +471,9 @@ class Activities:
             frozenset(self.cfg.github.trusted_bots),
         )
         handled = handled_ids(comments, reviewers)
-        pending = [item for item in feedback(reviews, inline_comments, comments, reviewers) if item.id not in handled]
+        pending = [
+            item for item in feedback(reviews, inline_comments, comments, reviewers, head_sha) if item.id not in handled
+        ]
         is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
         return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)

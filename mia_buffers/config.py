@@ -15,38 +15,66 @@ from typing import ClassVar
 from pydantic import BaseModel, Field, model_validator
 
 from autodev.config import TemporalCfg
-from mia_core.config import KeeperCfg, QuotaCfg, ServiceCfg
+from mia_core.config import CsubCfg, KeeperCfg, QuotaCfg, ServiceCfg
 from mia_data import config as mia_data_config
 
 # stage -> (label color, description); labels are `buffer:<stage>` (spec §1)
 STAGES = {
-    "new": ("ededed", "mia-buffers: buffer issue seen"),
+    "new": ("ededed", "mia-buffers: spec saved, nothing has run yet"),
     "planning": ("fbca04", "mia-buffers: resolving the spec against the catalog"),
-    "plan-review": ("1d76db", "mia-buffers: plan posted, waiting for buffer:approve"),
+    "plan-review": ("1d76db", "mia-buffers: plan posted, waiting for Run on the page"),
     "sourcing": ("fbca04", "mia-buffers: staging datasets"),
-    "staged": ("1d76db", "mia-buffers: staged, waiting for buffer:approve"),
+    "staged": ("1d76db", "mia-buffers: staged, waiting for Approve on the page"),
     "ready": ("5319e7", "mia-buffers: the service is serving this buffer"),
     "idle": ("cccccc", "mia-buffers: no consumer for a while"),
     "retired": ("cccccc", "mia-buffers: staged data released"),
     "needs-human": ("d93f0b", "mia-buffers: stopped, needs a human"),
+    "cancelled": ("cccccc", "mia-buffers: the round was cancelled"),
 }
-HUMAN_LABELS = {  # set by humans; the poller delivers each as the workflow signal of the same name
+HUMAN_LABELS = {  # the actions a person takes, each the workflow signal of the same name
     "go": (
         "0e8a16",
-        "Plan and stage this buffer, then wait for buffer:approve (or run it again after editing the spec)",
+        "Plan and stage this buffer, then wait for an approve (or run it again after editing the spec)",
     ),
     "plan": ("0e8a16", "Plan this buffer and wait for approval before staging"),
     "approve": ("0e8a16", "Approve the plan; start sourcing"),
     "keep": ("0e8a16", "Keep this idle buffer; back to ready"),
     "retire": ("b60205", "Retire this buffer: release its staged data"),
+    "revoke": ("b60205", "Revoke the records the action names: their volumes leave"),
 }
-# a preparation request's stages and human label: `prep:<stage>` on an issue of the same repo (milestone E)
+# a preparation request's stages and its one action; its issue's stage label is `prep:<stage>`
 PREP_STAGES = {
     "requested": ("fbca04", "mia-buffers: the request's datasets are handed to mia-data"),
     "done": ("5319e7", "mia-buffers: every requested dataset is settled"),
     "needs-human": ("d93f0b", "mia-buffers: the request stopped, needs a human"),
+    "cancelled": ("cccccc", "mia-buffers: the request was cancelled"),
 }
 PREP_HUMAN_LABELS = {"go": ("0e8a16", "Prepare the datasets this request names")}
+# stage -> (status word, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
+# A round in progress (`working`) accepts `cancel`, what feeds it (`dropped`) and the force stop; a new go, a
+# revoke or a retire waits until it has ended or been cancelled. The workflow stays the code that carries a round
+# out, and two things a stage does not say stay its refusal: a `staged` buffer whose late datasets still have a
+# job running refuses a go, and a `ready` buffer rebuilding a lost volume abandons the rebuild on a go or retire.
+STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
+    "new": ("not started", frozenset({"go"})),
+    "planning": ("working", frozenset({"cancel", "stop"})),
+    "plan-review": ("waiting", frozenset({"approve", "go", "cancel", "stop"})),
+    "sourcing": ("working", frozenset({"cancel", "dropped", "stop"})),
+    "staged": ("waiting", frozenset({"approve", "go", "dropped", "cancel", "stop"})),
+    "ready": ("done", frozenset({"go", "revoke", "retire", "stop"})),
+    "idle": ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"})),
+    "retired": ("done", frozenset({"go"})),
+    "needs-human": ("stuck", frozenset({"go"})),
+    "cancelled": ("done", frozenset({"go"})),
+}
+CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")  # the buffer stages `cancel` ends a round at
+PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
+    "new": ("not started", frozenset({"go"})),  # a request has no `new` label: a subject before its first stage
+    "requested": ("working", frozenset({"cancel", "stop"})),
+    "done": ("done", frozenset({"go"})),
+    "needs-human": ("stuck", frozenset({"go"})),
+    "cancelled": ("done", frozenset({"go"})),
+}
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
     "MIA_BUFFERS_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy"),
@@ -99,16 +127,26 @@ class SourcingCfg(BaseModel):
     test_size: int = Field(default=256, ge=1)
 
 
+class PipelineCfg(BaseModel):
+    """Where another pipeline's workflows run: buffer-api starts and signals them (spec webapp-actions §5)."""
+
+    namespace: str
+    task_queue: str
+
+
 class Config(mia_data_config.Config):
     """The whole mia_buffers.yaml, validated."""
 
     deployment: str = "mia-buffers"
     github: GitHubCfg
     temporal: TemporalCfg = TemporalCfg(namespace="mia-buffers")
+    # mia-data's namespace and task queue; the mia.yaml loader fills it from the service whose app is mia-data
+    datasets_pipeline: PipelineCfg = PipelineCfg(namespace="mia-data", task_queue="mia-data")
     paths: PathsCfg
     service: ServiceCfg
     quota: QuotaCfg = QuotaCfg()
     keeper: KeeperCfg = KeeperCfg()
+    csub: CsubCfg = CsubCfg()
     sourcing: SourcingCfg = SourcingCfg()
 
     def label(self, stage: str) -> str:

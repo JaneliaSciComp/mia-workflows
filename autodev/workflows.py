@@ -7,6 +7,7 @@ its durable state in an `IssueInput` and hands that to continue_as_new when its 
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 
@@ -25,6 +26,8 @@ with workflow.unsafe.imports_passed_through():
         IssueInput,
         JobOutcome,
         JobRef,
+        JudgeInput,
+        JudgeOutcome,
         MergeInput,
         MergeResult,
         ObserveInput,
@@ -67,6 +70,7 @@ class IssueWorkflow:
         self.job_id: str | None = None
         self.last_error: str | None = None
         self.workspace: Workspace | None = None
+        self.judge_task: asyncio.Task[None] | None = None  # the review judge running beside the PR watch
 
     @workflow.query(name="status")
     def status(self) -> Status:
@@ -120,6 +124,7 @@ class IssueWorkflow:
                 FailureInput(state.issue, state.key, state.round, self.last_error, self.workspace),
                 budget=timedelta(hours=24),
             )
+            await self._settle_judge()
             return "failed"
 
     async def _run_round(self, feedback: Feedback | None) -> PrRef:
@@ -167,7 +172,54 @@ class IssueWorkflow:
         )
         if result.head_sha:  # pushed: a later observe/merge failure must not attach this round's log tail
             self.workspace = None
+            if workflow.patched("m-review-judge"):  # beside the PR watch, never ahead of a human's verdict
+                self.judge_task = asyncio.create_task(self._judge_review(result, workspace))
         return result
+
+    async def _settle_judge(self) -> None:
+        """Let a running review judge finish before the workflow ends or rolls over; it never fails the run."""
+        if self.judge_task is not None:
+            await self.judge_task
+            self.judge_task = None
+
+    async def _judge_review(self, result: PrRef, workspace: Workspace) -> None:
+        """The review judge over the pushed head (spec autonomous-gates §4.1, §9): evidence, a read-only job, the
+        assessment and a PR comment. Off: nothing. In shadow nothing here changes the round's course; a failed
+        job is an `escalate` on record, any other failure a comment, and the human's review is unaffected."""
+        state = self.state
+        assert result.head_sha
+        subject = JudgeInput(state.issue, state.key, state.round, workspace, result.pr, result.head_sha)
+        try:
+            judge_dir = await self._act("prepare_judge", subject, seconds=600, result_type=str)
+            if not judge_dir:
+                return
+            job = await self._act(
+                "submit_judge", SubmitInput(state.issue, state.key, state.round, workspace), result_type=JobRef
+            )
+            outcome = await workflow.execute_activity(
+                "await_agent",
+                AwaitInput(job.job_id, Workspace(judge_dir, workspace.base_sha, workspace.branch)),
+                result_type=JobOutcome,
+                task_queue=workflow.info().task_queue + "-await",
+                start_to_close_timeout=timedelta(minutes=job.walltime_min) + QUEUE_SLACK,
+                schedule_to_close_timeout=timedelta(minutes=job.walltime_min) + timedelta(hours=24),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            )
+            if outcome.state != "DONE" or outcome.exit_code not in (0, None):
+                await self._comment(
+                    result.pr or state.issue,
+                    f"The review judge's job {outcome.job_id} ended {outcome.state} (exit {outcome.exit_code}); "
+                    "its verdict is recorded as an escalation.",
+                    f"judge-failed {result.head_sha}",
+                )
+            await self._act("read_judge", subject, seconds=300, result_type=JudgeOutcome)  # records the escalate too
+        except ActivityError as error:
+            await self._comment(
+                result.pr or state.issue,
+                f"The review judge did not run to the end: {error_message(error)}. A human reviews as before.",
+                f"judge-failed {result.head_sha}",
+            )
 
     async def _watch_pr(self) -> str:
         """Watch the PR until it is merged or closed, running revision rounds and escalations as needed.
@@ -177,8 +229,8 @@ class IssueWorkflow:
         rolls over with continue_as_new when Temporal suggests it or the poll cap is hit."""
         state = self.state
         assert state.pr is not None  # a round opened the PR before _watch_pr runs
-        # ponytail: by_retry is False only when replaying runs started before this change; drop the old
-        # branches (workflow.deprecate_patch) once those have all rolled over.
+        # ponytail: by_retry is False only when replaying a history without the patch; drop those
+        # branches (workflow.deprecate_patch) once none is left.
         by_retry = workflow.patched("observe-by-retry")
         for _ in range(MAX_POLLS_PER_EXECUTION):
             self.phase = "REVIEW"
@@ -186,9 +238,11 @@ class IssueWorkflow:
             action, detail = decide(snapshot, state.handled, state.revisions, state.max_revisions, state.escalated)
             if action == DONE:
                 await self._act("set_stage", StageInput(state.issue, "done"))
+                await self._settle_judge()
                 return "merged"
             if action == CLOSED:
                 await self._act("set_stage", StageInput(state.issue, None))
+                await self._settle_judge()
                 return "closed"
             if action == MERGE:
                 merge = await self._act(
@@ -196,6 +250,7 @@ class IssueWorkflow:
                 )
                 if merge.merged:
                     await self._act("set_stage", StageInput(state.issue, "done"))
+                    await self._settle_judge()
                     return "merged"
                 await self._comment(
                     state.pr, f"Approved, but merging failed: {merge.message}", f"merge-failed {snapshot.head_sha}"
@@ -217,13 +272,14 @@ class IssueWorkflow:
                 await workflow.sleep(timedelta(minutes=state.poll_minutes))
             if workflow.info().is_continue_as_new_suggested():
                 break
+        await self._settle_judge()
         workflow.continue_as_new(state)
 
     async def _observe(self, by_retry: bool) -> PrSnapshot:
         state = self.state
         assert state.pr is not None  # see _watch_pr
         inp = ObserveInput(state.pr, state.handled, state.revisions, state.max_revisions, state.escalated)
-        if not by_retry:  # pre-change runs: same commands as before, but the "nothing to do" retries never expire
+        if not by_retry:  # a history without the patch: the "nothing to do" retries never expire
             return await self._act("observe_pr", inp, budget=None, result_type=PrSnapshot)
         poll = timedelta(minutes=state.poll_minutes)
         return await workflow.execute_activity(

@@ -16,32 +16,56 @@ import re
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
+from mia_core.hosts import PolicyError, generate_policy
+from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
-from mia_core.untrusted import read_untrusted
+from mia_core.untrusted import neutralize, read_untrusted
+from mia_data import config as mia_data_config
+from mia_data.models import LabelEvent
 
-from .config import Config
+from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
+from .dispatch import DispatchError
+from .explore import (
+    DATASET_FILTERS,
+    DATASET_SORTS,
+    PLAN_SORTS,
+    Page,
+    dataset_haystack,
+    dataset_row,
+    facets,
+    page_query,
+    paged,
+    plan_view,
+    record_row,
+)
+from .hosts import HostCheck, Needed
+from .jobspec import levels_key
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
-from .spec import SpecError, load_spec_text, spec_text_hash
+from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
+from .stream import Changes
 from .sync import scan_assets, scan_storage
 
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
-DATASET_STATES = ("in-progress", "prepared", "needs-human")  # no row = unprepared; `ineligible` ended with spec §12
+# no row = unprepared; `ineligible` ended with spec §12; `revoked` since autonomous-gates §6
+DATASET_STATES = ("in-progress", "prepared", "needs-human", "revoked")
 CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
 CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
 log = logging.getLogger(__name__)
@@ -55,10 +79,27 @@ UI_TYPES = {
 }
 EMPTY_WINDOW_S = 3600  # the usage route's "last hour"
 JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "application/json"})
-# a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers
-Response = tuple[int, dict | bytes | None, dict[str, str]]
+# a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers;
+# an iterator of bytes is streamed chunk by chunk until its reader leaves (`GET /stream`)
+Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
+# kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
+SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
+OFF_LINE = ("needs-human", "cancelled")  # where a round can end from any step: not steps of a lifecycle themselves
+# kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
+LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
+NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
+ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
+RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
+DROP_QUIET_S = 60  # `dropped` is refused while a file under incoming/ changed this recently
+# a key sent again this soon is the same click again (a retry after a lost answer) and is not checked a second
+# time; later it is a new decision about an old notice, and the stage table applies to it like to any click
+RETRY_WINDOW_S = 120
+# How long a sent action counts as asked while its workflow has written nothing: the page offers no button for that
+# long, then the stage's own again (a worker that is away must not hold a subject's buttons for ever).
+ASKED_WAIT_S = 60
 
-UNAPPROVED = ("created", "planned", "sourcing", "staged")  # latest events of a round no human has approved yet
+SERVING = ("approved", "ready", "idle")  # latest events under which consumers draw
+UNAPPROVED = ("created", "planned", "sourcing", "staged")  # a round not yet approved: only picks the 409 message
 
 
 class _Strict(BaseModel):
@@ -134,8 +175,29 @@ class RecordsBody(_Strict):
     records: list[RecordBody]
 
 
+class PlanPage(_Strict):
+    """The page of a plan's rows the designer asks for, with the toggles that narrow them (explore.plan_view)."""
+
+    limit: int = 50
+    offset: int = 0
+    sort: str | None = None
+    dir: str = "asc"
+    q: str = ""
+    fit_only: bool = False
+    prepared_only: bool = False
+    raw_cached: bool = False
+    staged_geom: bool = False
+
+
 class PlanBody(_Strict):
     spec: str  # the spec's YAML text
+    page: PlanPage | None = None  # with it: one page of joined rows and the plan's summary instead of every row
+
+
+class MissingBody(_Strict):
+    records: list[str] | None = None  # catalog record ids
+    prep: int | None = None  # a preparation request's number
+    spec: str | None = None  # a buffer spec's name
 
 
 class BoardBody(_Strict):
@@ -149,6 +211,204 @@ class EventBody(_Strict):
     issue: int | None = None
     event_id: str | None = None
     detail: str = ""
+
+
+class SubjectBody(_Strict):
+    kind: str
+    ref: str
+    source_digest: str = ""
+
+
+class AdoptBody(_Strict):
+    """An existing issue adopted as a subject: its key, the stage its label names, what its body carried."""
+
+    key: str
+    stage: str = "new"
+    data: dict = {}
+
+
+class EntryBody(_Strict):
+    """One write of a round: a stage, a timeline entry (text with the marker that makes it once-only), or both."""
+
+    body: str = ""
+    marker: str = ""
+    round: str | None = None
+    stage: str | None = None
+
+    @model_validator(mode="after")
+    def _something_to_write(self) -> EntryBody:
+        if bool(self.body) != bool(self.marker):
+            raise ValueError("an entry needs both its body and its marker")
+        if not self.body and self.stage is None:
+            raise ValueError("nothing to write: give a stage, an entry, or both")
+        return self
+
+
+class MirroredBody(_Strict):
+    comment_url: str | None = None
+
+
+class ActionBody(_Strict):
+    """One thing a person (or a worker for a request) asks of a subject (spec webapp-actions §4.2)."""
+
+    action: Literal["go", "approve", "reject", "revoke", "keep", "retire", "dropped", "cancel", "stop"]
+    key: str | None = None  # the sender's own name for this request: a repeat is the same action
+    revision: int | None = None  # approve, reject: the subject's revision the person was looking at
+    note: str = ""  # reject: the feedback for the agent
+    root: str | None = None  # a worker's go: the root request this round is charged to
+    actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
+    spec: str | None = None  # a buffer's or a request's go: the YAML text that runs (default: the stored one)
+    plan_first: bool = False  # a buffer's go: stop at the plan and wait for an approve before staging anything
+    records: list[str] = []  # a buffer's revoke: the records that leave it
+    record: str | None = None  # dropped: the dataset whose files are in place
+    approve_hosts: list[str] = []  # a start action: hosts the run needs that the person ticked (spec host-approval §5)
+
+
+class SpecBody(_Strict):
+    """A buffer spec saved under its name, and run when `action` is `go`; or a preparation request, always run."""
+
+    spec: str
+    action: Literal["go"] | None = None
+    plan_first: bool = False
+    key: str | None = None
+    approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person ticked
+
+
+class RefusalBody(_Strict):
+    state: Literal["refused"]
+    detail: str
+
+
+class IssueBody(_Strict):
+    issue: int
+
+
+class AssessmentBody(_Strict):
+    """One assessment as `mia_core.judge.policy.new_assessment` shapes it (spec autonomous-gates §5)."""
+
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())  # `model` is a field, not a namespace
+
+    id: str
+    gate: str
+    subject: SubjectBody
+    verdict: str
+    by: str
+    at: str
+    policy_version: int
+    confidence: float | None = None
+    findings: list[dict] = []
+    summary: str = ""
+    supersedes: str | None = None
+    evidence_digest: str = ""
+    checks: dict | None = None
+    model: str = ""
+    prompt_version: str = ""
+    coverage: dict | None = None
+
+
+class ReserveBody(_Strict):
+    reservation_id: str
+    kind: str
+    usd: float = 0.0
+    caps: dict[str, float] = {}
+
+
+class SettleBody(_Strict):
+    reservation_id: str
+    usd: float | None = None
+    fetched_bytes: int = 0
+    staged_bytes: int = 0
+
+
+def _data(name: str) -> Any:
+    """A sort key: the named field of a row's `data` (an asset without a row has none)."""
+    return lambda row: (row.get("data") or {}).get(name)
+
+
+# what a paged list may be sorted by: the name the page sends -> the row's value for it
+ASSET_SORTS = {
+    "dataset": lambda row: row.get("record"),
+    "artifact": lambda row: row["key"],
+    "state": _data("state"),
+    "bytes": _data("bytes"),
+    "last_used": _data("last_used"),
+    "buffers": lambda row: len(row.get("refs") or []),
+    "levels_key": _data("levels_key"),
+    "job": _data("job"),
+}
+LOCK_SORTS = {
+    name: (lambda row, name=name: row.get(name)) for name in ("kind", "key", "owner", "taken_at", "heartbeat_at")
+}
+
+
+def _field(name: str) -> Any:
+    """A sort key: the named field of a row."""
+    return lambda row: row.get(name)
+
+
+SUBJECT_SORTS = {name: _field(name) for name in ("key", "kind", "stage", "status", "updated", "number")}
+BUFFER_SORTS = {
+    "buffer": _field("id"),
+    "spec": lambda row: _spec_name(row),
+    "updated": lambda row: (row.get("latest_event") or {}).get("at"),
+    "volumes": _field("volumes"),
+    "missing": _field("missing"),
+    "consumers_seen": _field("consumers_seen"),
+    "draws_today": _field("draws_today"),
+}
+BOARD_SORTS = {
+    "dataset": _field("record"),
+    "status": _field("status"),
+    "job": _field("job"),
+    "updated": _field("updated_at"),
+}
+EVENT_SORTS = {name: _field(name) for name in ("seq", "kind", "at")}
+VOLUME_SORTS = {"volume": _field("id"), "draws": _field("draws"), "missing": _field("missing")}
+CONSUMER_SORTS = {name: _field(name) for name in ("name", "host", "split", "rank", "last_seen")}
+USAGE_SORTS = {name: _field(name) for name in ("day", "draws", "consumers", "empty")}
+ROUND_ID_RE = re.compile(r"^i(\d+)-e(\d+)$")  # a buffer's id: i<its spec's number>-e<the go that started the round>
+
+
+def _round_of(buffer: str) -> tuple[int, int]:
+    """(the spec's number, the round's event) of a buffer id; (0, 0) for an id that is not a round's."""
+    found = ROUND_ID_RE.match(buffer)
+    return (int(found.group(1)), int(found.group(2))) if found else (0, 0)
+
+
+def _spec_name(buffer: dict) -> str | None:
+    """What a buffer's spec is called: its spec's key, else the name its config recorded."""
+    return buffer.get("spec") or (buffer.get("config") or {}).get("spec_name")
+
+
+def _subject_haystack(row: dict) -> tuple:
+    return (row["key"], row["stage"], row["status"])
+
+
+def _asset_haystack(row: dict) -> tuple:
+    data = row.get("data") or {}
+    return (row["key"], row.get("record"), data.get("state"), data.get("job"), data.get("levels_key"))
+
+
+ROUND_REF_RE = re.compile(r"^i(\d+)-e")  # a round id starts a crop set's ref: i<subject number>-e<event>
+
+
+def _assessed_record(subject: dict, numbers: dict[int, str], artifacts: dict[str, str]) -> str | None:
+    """The dataset a decision is about: a staged artifact's record, or the dataset of the round a crop set came
+    from. A snippet PR's head (`pr_head`) belongs to no one dataset."""
+    ref = str(subject.get("ref") or "")
+    if subject.get("kind") == "artifact":
+        return artifacts.get(ref.rsplit("/", 1)[-1])
+    if subject.get("kind") == "crop_set" and (found := ROUND_REF_RE.match(ref)):
+        return numbers.get(int(found.group(1)))
+    return None
+
+
+def _prep_records(request: dict) -> list[str]:
+    """The records a preparation request's stored spec names; none when it selects by rule or does not parse."""
+    try:
+        return list(load_prep_text(str((request.get("data") or {}).get("spec") or "")).records)
+    except SpecError:
+        return []
 
 
 class HttpError(Exception):
@@ -198,6 +458,8 @@ ROUTES = [
     ("GET", re.compile(r"^/records$"), "records", "read"),
     ("GET", re.compile(r"^/catalogs$"), "catalogs", "read"),
     ("GET", re.compile(r"^/datasets$"), "list_datasets", "read"),
+    ("GET", re.compile(r"^/catalog/datasets$"), "catalog_datasets", "read"),
+    ("GET", re.compile(r"^/catalog/datasets/([^/]+)$"), "catalog_dataset", "read"),
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
     ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
@@ -205,12 +467,44 @@ ROUTES = [
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
     ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
     ("GET", re.compile(r"^/locks$"), "locks", "read"),
+    ("PUT", re.compile(r"^/assessments/([^/]+)$"), "put_assessment", "worker"),
+    ("GET", re.compile(r"^/assessments/([^/]+)$"), "get_assessment", "read"),
+    ("GET", re.compile(r"^/assessments$"), "list_assessments", "read"),
+    ("GET", re.compile(r"^/decisions$"), "decisions", "read"),
+    ("POST", re.compile(r"^/budgets/([^/]+)/reserve$"), "reserve", "worker"),
+    ("POST", re.compile(r"^/budgets/([^/]+)/settle$"), "settle", "worker"),
+    ("GET", re.compile(r"^/budgets/([^/]+)$"), "get_budget", "read"),
+    ("GET", re.compile(r"^/budgets$"), "list_budgets", "read"),
+    ("DELETE", re.compile(r"^/buffers/([^/]+)/volumes/([^/]+)$"), "delete_volume", "worker"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/volumes$"), "volumes", "read"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/consumers$"), "consumers", "read"),
     ("GET", re.compile(r"^/$"), "page", "read"),
     ("GET", re.compile(r"^/ui/([^/]+)$"), "ui", "read"),
     ("GET", re.compile(r"^/meta$"), "meta", "read"),
     ("GET", re.compile(r"^/usage/([^/]+)$"), "usage", "read"),
     ("PUT", re.compile(r"^/keeper$"), "put_keeper", "worker"),
     ("GET", re.compile(r"^/keeper$"), "keeper", "read"),
+    ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)$"), "adopt_subject", "worker"),
+    ("GET", re.compile(r"^/subjects/([a-z]+)$"), "list_subjects", "read"),
+    ("GET", re.compile(r"^/subjects/([a-z]+)/(.+)$"), "get_subject", "read"),
+    ("GET", re.compile(r"^/needs$"), "needs", "read"),
+    ("GET", re.compile(r"^/lookup$"), "lookup", "read"),
+    ("GET", re.compile(r"^/stream$"), "stream", "read"),
+    ("POST", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "append_entry", "worker"),
+    ("GET", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "timeline", "read"),
+    ("PUT", re.compile(r"^/timeline/([a-z]+)/(\d+)/(\d+)$"), "mark_mirrored", "worker"),
+    # the routes the page's buttons call: no token; JSON from this origin only (`_guard_action`)
+    ("POST", re.compile(r"^/datasets/([^/]+)/actions$"), "dataset_action", "action"),
+    ("POST", re.compile(r"^/specs$"), "put_spec", "action"),
+    ("POST", re.compile(r"^/specs/([^/]+)/actions$"), "spec_action", "action"),
+    ("POST", re.compile(r"^/prep$"), "file_prep", "action"),
+    ("POST", re.compile(r"^/prep/(\d+)/actions$"), "prep_action", "action"),
+    ("GET", re.compile(r"^/actions/(\d+)$"), "get_action", "read"),
+    ("PUT", re.compile(r"^/actions/(\d+)$"), "refuse_action", "worker"),
+    ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)/issue$"), "set_subject_issue", "worker"),
+    ("GET", re.compile(r"^/health$"), "health", "read"),
+    ("GET", re.compile(r"^/run/([a-z]+)/(\d+)$"), "run_status", "read"),
+    ("POST", re.compile(r"^/hosts/missing$"), "hosts_missing", "read"),
 ]
 
 
@@ -230,8 +524,13 @@ class BufferService:
         archive_dir: Path | None = None,
         meta: dict | None = None,
         ui_dir: Path | None = None,
+        dispatcher: Any = None,
+        hosts: HostCheck | None = None,
     ):
         self.ledger = ledger
+        self.hosts = hosts  # which hosts a run needs that the csub policy lacks; None cannot say
+        # the way to Temporal (`dispatch.Dispatcher`, or a test's stand-in); None reaches no workflow
+        self.dispatcher = dispatcher
         self.token = token  # None disables the worker check (tests, a dev service)
         self.stale_s = stale_s
         self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
@@ -240,10 +539,17 @@ class BufferService:
         self.archive_dir = archive_dir  # a retire writes the buffer's draws here; None keeps them (a dev service)
         self.meta = meta  # what the page needs from mia.yaml (page_meta); None answers nulls
         self.ui_dir = ui_dir  # the page's files; None serves no page
+        self.changes = Changes()  # every write to a subject is announced here; `GET /stream` follows it
+        # (kind, number) -> (the action sent to its workflow, when): there until the workflow writes anything.
+        # ponytail: in memory, so a restart forgets it and the page offers the stage's buttons again for the
+        # rest of the minute; a column on `actions` if that ever matters.
+        self._asked: dict[tuple[str, int], tuple[dict, float]] = {}
         self._empty: dict[str, deque[float]] = {}  # per buffer, the times of the last hour's 204s
         self._rng: dict[str, random.Random] = {}
         self._lock = threading.Lock()
         self._sync_lock = threading.Lock()
+        self._record_rows: tuple[str | None, list[dict]] = (None, [])  # a catalog ref's rows never change
+        self._last_plan: tuple[Any, dict] = (None, {})  # the last plan built, with what it was built from
 
     def _authorized(self, headers: dict[str, str]) -> bool:
         if self.token is None:
@@ -261,6 +567,9 @@ class BufferService:
                     if capability == "worker" and not self._authorized(headers or {}):
                         return 401, {"error": "unauthorized"}, {}
                     segments = [unquote(group) for group in match.groups()]  # volume ids hold "/" (record/v0.zarr)
+                    if capability == "action":
+                        self._guard_action(headers or {})
+                        return getattr(self, f"_{name}")(*segments, query=query, body=body, headers=headers or {})
                     return getattr(self, f"_{name}")(*segments, query=query, body=body)
             raise HttpError(404, f"no route {method} {path}")
         except HttpError as error:
@@ -275,16 +584,20 @@ class BufferService:
         return BufferConfig.model_validate(config)
 
     def _serving(self, buffer: str) -> BufferConfig:
-        """The config of a buffer consumers may use: 410 once its latest event is `retired`, 409 while the round has
-        not been approved yet (its latest event is from before the staged gate's approve, spec §15). A buffer with
-        no events (registered by hand) serves."""
+        """The config of a buffer consumers may use. An allowlist (spec autonomous-gates §3): the latest event must
+        be `approved`, `ready` or `idle`. `retired` is 410; a round not yet approved, a `needs-human`, or no event
+        at all (a hand registration that never authorized the buffer) is 409 with the reason."""
         config = self._config(buffer)
         kind = (self.ledger.latest_event(buffer) or {}).get("kind")
         if kind == "retired":
             raise HttpError(410, "buffer retired")
+        if kind in SERVING:
+            return config
+        if kind is None:
+            raise HttpError(409, "buffer has no approved event")
         if kind in UNAPPROVED:
             raise HttpError(409, "buffer not approved")
-        return config
+        raise HttpError(409, "buffer needs a human")
 
     def _consumer(self, buffer: str, query: dict[str, str]) -> str:
         consumer_id = query.get("consumer", "")
@@ -357,9 +670,27 @@ class BufferService:
             raise HttpError(404, f"no {kind} asset {key}")
         return 200, {"kind": kind, "key": key, "data": data, "refs": refs}, {}
 
+    @staticmethod
+    def _page_of(query: dict[str, str], sorts: dict[str, Any]) -> Page | None:
+        """The page a list route is asked for (None: the whole list, as the workers call it); 422 on a bad one."""
+        try:
+            return page_query(query, sorts)
+        except ValueError as error:
+            raise HttpError(422, str(error)) from None
+
     def _list_assets(self, kind: str, *, query: dict[str, str], body: bytes) -> Response:
+        page = self._page_of(query, ASSET_SORTS)
         assets = self.ledger.assets(kind, state=query.get("state"), record=query.get("record"))
-        return 200, {"kind": kind, "assets": assets, "bytes": self.ledger.asset_bytes(kind)}, {}
+        out: dict[str, Any] = {"kind": kind, "bytes": self.ledger.asset_bytes(kind)}
+        if page is None:
+            return 200, {**out, "assets": assets}, {}
+        # the page's row names its dataset: a raw download is keyed by it, a staged artifact carries it
+        issues = self._dataset_issues()
+        for asset in assets:
+            asset["record"] = asset["key"] if kind == "raw" else (asset["data"] or {}).get("record")
+            asset["issue"] = issues.get(asset["record"])
+        rows, total = paged(assets, page, ASSET_SORTS, _asset_haystack)
+        return 200, {**out, "assets": rows, "total": total}, {}
 
     def _sync_assets(self, *, query: dict[str, str], body: bytes) -> Response:
         if self.raw_root is None and self.staged_root is None:
@@ -379,7 +710,12 @@ class BufferService:
             self._sync_lock.release()
 
     def _locks(self, *, query: dict[str, str], body: bytes) -> Response:
-        return 200, {"locks": [asdict(holder) for holder in self.locks.holders()] if self.locks else []}, {}
+        page = self._page_of(query, LOCK_SORTS)
+        locks = [asdict(holder) for holder in self.locks.holders()] if self.locks else []
+        if page is None:
+            return 200, {"locks": locks}, {}
+        rows, total = paged(locks, page, LOCK_SORTS, lambda row: (row["kind"], row["key"], row["owner"]))
+        return 200, {"locks": rows, "total": total}, {}
 
     # --- records, datasets and the plan: what the catalog holds and which of it is prepared ------
 
@@ -418,6 +754,781 @@ class BufferService:
             raise HttpError(404, f"no dataset row for {record}")
         return 200, row, {}
 
+    # --- datasets as the page shows them: a catalog record joined with what the registry knows ------
+
+    def _dataset_rows(self) -> tuple[str, list[dict]]:
+        """(the newest catalog ref, one row per dataset): every record of that catalog, then every dataset the
+        registry knows whose record is not in it."""
+        ref = self.ledger.latest_catalog()
+        if ref is None:
+            raise HttpError(404, "no catalog synced")
+        if self._record_rows[0] != ref:  # a ref is a commit: its records are parsed once
+            self._record_rows = (ref, [record_row(path, record) for path, record in self.ledger.records(ref)])
+        datasets = {row["id"]: row for row in self.ledger.datasets()}
+        raw = {asset["key"]: asset for asset in self.ledger.assets("raw")}
+        staged: dict[str, list[dict]] = {}
+        for asset in self.ledger.assets("staged"):
+            staged.setdefault(str((asset["data"] or {}).get("record")), []).append(asset)
+        statics = list(self._record_rows[1])
+        known = {static["id"] for static in statics}
+        statics += [record_row(None, {"id": record}) for record in datasets if record not in known]
+        rows = [
+            dataset_row(static, datasets.get(static["id"]), raw.get(static["id"]), staged.get(static["id"], []))
+            for static in statics
+        ]
+        issues = self._dataset_issues()
+        for row in rows:
+            row["issue"] = issues.get(row["id"])
+        return ref, rows
+
+    def _dataset_issues(self) -> dict[str, int | None]:
+        """Each dataset's GitHub issue. A dataset row's `issue` is the number of the workflow that prepares it:
+        for a dataset a label started that is its issue, but for one started from the page it is the subject's
+        number, and the issue is the one the mirror opened for the subject (none until it has)."""
+        issues = {row["id"]: row.get("issue") for row in self.ledger.datasets()}
+        return issues | {row["key"]: row["issue"] for row in self.ledger.find_subjects(kind="dataset")}
+
+    def _request_records(self, number: str) -> list[str]:
+        """The records a preparation request names. One that selects by rule names none here: the round's first
+        timeline entry lists what it admitted."""
+        if not number.isdigit():
+            raise HttpError(422, "query request must be a request's number")
+        found = self.ledger.find_subjects(kind="prep", number=int(number))
+        if not found:
+            raise HttpError(404, f"no preparation request {number}")
+        return _prep_records(found[0])
+
+    def _catalog_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The Datasets list: one page of datasets, filtered by state, modality, dims, licence or a request's
+        records, with how many datasets have each filter value."""
+        page = self._page_of({"limit": "50", **query}, DATASET_SORTS)
+        assert page is not None
+        ref, rows = self._dataset_rows()
+        counts = facets(rows)
+        if "request" in query:
+            wanted = set(self._request_records(query["request"]))
+            rows = [row for row in rows if row["id"] in wanted]
+        for name in DATASET_FILTERS:
+            if name in query:
+                rows = [row for row in rows if row[name] == query[name]]
+        found, total = paged(rows, page, DATASET_SORTS, dataset_haystack)
+        return 200, {"ref": ref, "rows": found, "total": total, "facets": counts}, {}
+
+    def _catalog_dataset(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        """Everything known about one dataset: its row, its catalog record, its preparation row, its raw download,
+        its staged artifacts, the requests that name it, and its subject. The buffers whose pool holds it are
+        `GET /buffers?record=`."""
+        ref, rows = self._dataset_rows()
+        row = next((row for row in rows if row["id"] == record), None)
+        if row is None:
+            raise HttpError(404, f"no dataset {record}")
+        found = self.ledger.record(ref, record)
+        requests = [
+            {name: request[name] for name in ("key", "number", "stage", "status", "updated")}
+            for request in map(self._subject_view, self.ledger.find_subjects(kind="prep"))
+            if record in _prep_records(request)
+        ]  # ponytail: reads every request; an index of request -> records when there are thousands
+        subject = self.ledger.subject("dataset", record)
+        raw = self.ledger.assets("raw", record=None)
+        return (
+            200,
+            {
+                "ref": ref,
+                "row": row,
+                "path": found[0] if found else None,
+                "record": found[1] if found else None,
+                "dataset": self.ledger.dataset(record),
+                "raw_asset": next((asset for asset in raw if asset["key"] == record and asset["data"]), None),
+                "staged_assets": self.ledger.assets("staged", record=record),
+                "requests": requests,
+                "subject": self._subject_view(subject) if subject else None,
+            },
+            {},
+        )
+
+    # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
+
+    def _subject_view(self, row: dict) -> dict:
+        """The row plus its status word, the actions its stage accepts (sorted, for a stable page) and `asked`:
+        the action that was sent to its workflow and that the workflow has not answered yet. Until it does the
+        stage is still the old one, and the page must not offer that stage's buttons as if nothing was clicked."""
+        status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
+        asked = None
+        if (held := self._asked.get((row["kind"], row["number"]))) is not None:
+            action, since = held
+            if (wait_s := ASKED_WAIT_S - (time.monotonic() - since)) > 0:
+                asked = {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
+        return {**row, "status": status, "actions": sorted(actions), "asked": asked}
+
+    def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        if kind not in SUBJECT_RULES:
+            raise HttpError(404, f"no subjects of kind {kind!r}")
+        parsed = _parse(AdoptBody, body)
+        if parsed.stage not in SUBJECT_RULES[kind]:
+            raise HttpError(422, f"stage must be one of {list(SUBJECT_RULES[kind])}, got {parsed.stage!r}")
+        try:
+            row = self.ledger.adopt_subject(kind, int(number), parsed.key, stage=parsed.stage, data=parsed.data)
+        except ValueError as error:
+            raise HttpError(409, str(error)) from None
+        self.changes.announce(kind, row["number"])
+        return 200, self._subject_view(row), {}
+
+    def _get_subject(self, kind: str, key: str, *, query: dict[str, str], body: bytes) -> Response:
+        row = self.ledger.subject(kind, key) if kind in SUBJECT_RULES else None
+        if row is None:
+            raise HttpError(404, f"no {kind} {key!r}")
+        return 200, self._subject_view(row), {}
+
+    def _list_subjects(self, kind: str, *, query: dict[str, str], body: bytes) -> Response:
+        if kind not in SUBJECT_RULES:
+            raise HttpError(404, f"no subjects of kind {kind!r}")
+        page = self._page_of(query, SUBJECT_SORTS)
+        subjects = [self._subject_view(row) for row in self.ledger.find_subjects(kind=kind)]
+        if page is None:
+            return 200, {"subjects": subjects}, {}
+        rows, total = paged(subjects, page, SUBJECT_SORTS, _subject_haystack)
+        return 200, {"subjects": rows, "total": total}, {}
+
+    def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
+        for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
+        last day that did not reach Temporal (each with its subject, for the Retry)."""
+        views = [self._subject_view(row) for row in self.ledger.find_subjects()]
+        # ponytail: reads every subject; a status column and an index when there are tens of thousands
+        for index, view in enumerate(views):
+            if view["kind"] == "buffer" and "dropped" in view["actions"]:
+                # the round's buffer has the id of the go that started it
+                gos = [a for a in self.ledger.actions("buffer", view["number"]) if a["action"] == "go"]
+                board = self.ledger.buffer_datasets(f"i{view['number']}-e{gos[-1]['id']}") if gos else []
+                if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
+                    views[index] = {**view, "drops": drops}
+        failed = []
+        for action in self.ledger.undelivered(time.time() - 86400):
+            found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
+            failed.append({**action, "subject": self._subject_view(found[0]) if found else None})
+        needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+        page = self._page_of(query, SUBJECT_SORTS)
+        if page is None:
+            return 200, {"needs": needs, "failed": failed}, {}
+        rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
+        return 200, {"needs": rows, "total": total, "failed": failed}, {}
+
+    def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
+        """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
+        number in every kind, an issue URL in the kinds of its repo, and always an exact key."""
+        text = query.get("q", "").strip()
+        if not text:
+            raise HttpError(422, "q is required: an issue number, an issue URL or a subject's key")
+        rows = self.ledger.find_subjects(key=text)
+        url = ISSUE_URL_RE.match(text)
+        if url:
+            meta = self.meta or {}
+            kinds = {meta.get("datasets_repo"): ("dataset",), meta.get("buffers_repo"): ("buffer", "prep")}
+            rows += [
+                row for row in self.ledger.find_subjects(issue=int(url[2])) if row["kind"] in kinds.get(url[1], ())
+            ]
+        elif text.removeprefix("#").isdecimal():
+            rows += self.ledger.find_subjects(issue=int(text.removeprefix("#")))
+            rows += self.ledger.find_subjects(number=int(text.removeprefix("#")))  # as a round or buffer id shows it
+        unique = {(row["kind"], row["number"]): row for row in rows}  # a key that is also its issue number
+        return 200, {"subjects": [self._subject_view(row) for row in unique.values()]}, {}
+
+    def _stream(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, self.changes.stream(), {"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
+
+    # --- the timeline: what happened to a subject; rounds write it, the page reads it, the mirror copies it ---
+
+    def _numbered(self, kind: str, number: str) -> dict:
+        found = self.ledger.find_subjects(kind=kind, number=int(number)) if kind in SUBJECT_RULES else []
+        if not found:
+            raise HttpError(404, f"no {kind} #{number}")
+        return found[0]
+
+    def _changed(self, kind: str, number: int) -> None:
+        """Tell the page's stream and the subject's mirror that something was written."""
+        self.changes.announce(kind, number)
+        if self.dispatcher is not None:
+            self.dispatcher.kick_mirror(kind, number)
+
+    def kick_unmirrored(self) -> None:
+        """Kick the mirror of every subject with an entry not yet posted: run at start, so an entry appended just
+        before a crash, or while Temporal was away, is not left behind."""
+        if self.dispatcher is not None:
+            for kind, number in self.ledger.unmirrored_subjects():
+                self.dispatcher.kick_mirror(kind, number)
+
+    def _append_entry(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._numbered(kind, number)
+        parsed = _parse(EntryBody, body)
+        if parsed.stage is not None and parsed.stage not in SUBJECT_RULES[kind]:
+            raise HttpError(422, f"stage must be one of {list(SUBJECT_RULES[kind])}, got {parsed.stage!r}")
+        written = self.ledger.append_entry(
+            kind, int(number), body=parsed.body, marker=parsed.marker, round_id=parsed.round, stage=parsed.stage
+        )
+        assert written is not None  # the subject was just found, and nothing deletes one
+        self._asked.pop((kind, int(number)), None)  # the workflow wrote: whatever was asked of it is answered
+        self._changed(kind, int(number))
+        return 200, {"subject": self._subject_view(written[0]), "entry": written[1]}, {}
+
+    def _timeline(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        subject = self._numbered(kind, number)
+        entries, actions = self.ledger.timeline(kind, int(number)), self.ledger.actions(kind, int(number))
+        return 200, {"subject": self._subject_view(subject), "entries": entries, "actions": actions}, {}
+
+    # --- actions: a click on the page, recorded and sent to its workflow in one request (spec §5, §10) ---
+
+    @staticmethod
+    def _guard_action(headers: dict[str, str]) -> None:
+        """Action routes take no token, so they take JSON only and no other site's request: without this a web
+        page open in a browser on the same network could post a form here. This is not identity."""
+        given = {key.lower(): value for key, value in headers.items()}
+        if given.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            raise HttpError(415, "an action is a JSON body (Content-Type: application/json)")
+        origin = given.get("origin")
+        if origin and urlsplit(origin).netloc != given.get("host"):
+            raise HttpError(403, "an action must come from this service's own page")
+
+    def _actor(self, headers: dict[str, str], parsed: ActionBody) -> str:
+        """Who asks (spec §10): `page` for anyone, since there is no sign-in yet; a worker, which proves itself
+        with the token, may name itself and the root request its round is charged to. Sign-in changes this
+        function and nothing else."""
+        if parsed.actor is None and parsed.root is None:
+            return "page"
+        if self.token is not None and not self._authorized(headers):
+            raise HttpError(401, "naming an actor or a root needs the worker token")
+        return parsed.actor or "page"
+
+    def _catalog_record(self, record: str) -> dict | None:
+        """The record with this id in the newest synced catalog that holds it, or None."""
+        for catalog in self.ledger.catalogs():
+            if found := self.ledger.record(catalog["ref"], record):
+                return found[1]
+        return None
+
+    def _catalog_records(self, records: list[str]) -> dict[str, dict]:
+        """Record id -> its synced catalog entry, for those of the records a synced catalog holds."""
+        return {record: row for record in records if (row := self._catalog_record(record)) is not None}
+
+    def _needed(
+        self,
+        *,
+        records: list[str] | None = None,
+        prep: int | None = None,
+        spec: str | None = None,
+        request: list[str] | None = None,
+    ) -> Needed:
+        """The hosts the named catalog records, a request's records (`request`, or the request numbered `prep`)
+        or a buffer's planned pool need (host -> the record ids that need it). A named record no synced catalog
+        holds is a 404; a request's contributes nothing (the worker refuses it). A buffer's host is one its
+        published binding names that its record's synced catalog entry also names: a binding lies under a root a
+        job can mount read-write."""
+        if self.hosts is None:
+            raise HttpError(503, "this service has no csub policy to check hosts against")
+        if prep is not None:
+            request = self._request_records(str(prep))
+        if request is not None:
+            return self.hosts.for_records(self._catalog_records(request))
+        if records is not None:
+            if missing := [record for record in records if self._catalog_record(record) is None]:
+                raise HttpError(404, f"{missing[0]!r} is not a record of a synced catalog")
+            return self.hosts.for_records(self._catalog_records(records))
+        if spec is None:
+            raise HttpError(422, "give records, prep or spec")
+        subject = self.ledger.subject("buffer", spec)
+        if subject is None:
+            raise HttpError(404, f"no buffer spec {spec!r}")
+        rounds = [
+            entry["round"]
+            for entry in self.ledger.timeline("buffer", subject["number"])
+            if entry["stage"] == "plan-review" and entry["round"]
+        ]
+        try:
+            if not rounds:
+                raise ValueError("no round at plan-review")
+            pool = self.hosts.pool(rounds[-1])
+        except (OSError, ValueError):
+            raise HttpError(409, f"buffer {spec!r} has no plan to read") from None
+        folders = {record: (self.ledger.dataset(record) or {}).get("folder") for record in pool}
+        bound = self.hosts.for_bindings({record: folder for record, folder in folders.items() if folder})
+        named = self.hosts.for_records(self._catalog_records(pool))
+        kept = {host: [record for record in ids if record in named.get(host, [])] for host, ids in bound.items()}
+        return {host: ids for host, ids in kept.items() if ids}
+
+    def _hosts_missing(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The hosts a run needs that the csub policy lacks. A read route: it writes nothing."""
+        parsed = _parse(MissingBody, body)
+        given = {name: value for name, value in parsed if value is not None}
+        if len(given) != 1:
+            raise HttpError(422, "give exactly one of records, prep or spec")
+        needed = self._needed(**given)
+        assert self.hosts is not None  # _needed answered 503 otherwise
+        try:
+            absent = self.hosts.missing(needed)
+        except (OSError, ValueError):  # a TOMLDecodeError is a ValueError
+            raise HttpError(503, "the generated csub policy cannot be read: `mia up` regenerates it") from None
+        return 200, {"hosts": [{"host": host, "records": ids} for host, ids in sorted(absent.items())]}, {}
+
+    def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        parsed = _parse(ActionBody, body)
+        actor = self._actor(headers, parsed)
+        subject = self.ledger.subject("dataset", record)
+        if subject is None:
+            if parsed.action != "go":
+                raise HttpError(404, f"no dataset {record!r} has been started")
+            if self._catalog_record(record) is None:
+                raise HttpError(404, f"{record!r} is not a record of a synced catalog")
+            self._check_hosts(parsed, partial(self._needed, records=[record]), "dataset", None)
+            # a dataset whose registry row already names an issue keeps that number: its
+            # workflow id, rounds and budget root are built from it
+            known = (self.ledger.dataset(record) or {}).get("issue")
+            subject = self.ledger.create_subject("dataset", record, number=known if isinstance(known, int) else None)
+        payload = {name: value for name, value in (("note", parsed.note), ("root", parsed.root)) if value}
+        needed = (partial(self._needed, records=[record])) if parsed.action == "go" else None
+        return self._act_on(subject, parsed, actor, payload, needed)
+
+    # --- buffer specs and preparation requests: created and run from the page (spec §4.4, §8.1) ---
+
+    @staticmethod
+    def _spec_name(text: str) -> str:
+        try:
+            return load_spec_text(text).name
+        except SpecError as error:
+            raise HttpError(422, f"not a buffer spec: {error}") from None
+
+    def _save_spec(self, text: str) -> dict:
+        """The buffer subject named by the spec's `name`, holding this text: created, or its text replaced. A
+        spec posted under a name that exists is an edit of that subject, never a second one."""
+        subject = self.ledger.create_subject("buffer", self._spec_name(text), data={"spec": text})
+        if subject["data"].get("spec") != text:
+            edited = self.ledger.set_subject_data("buffer", subject["number"], {**subject["data"], "spec": text})
+            assert edited is not None  # it was just read
+            subject = edited
+        self.changes.announce("buffer", subject["number"])
+        return subject
+
+    def _put_spec(self, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        parsed = _parse(SpecBody, body)
+        if parsed.action is None:
+            if parsed.approve_hosts:  # spec host-approval §5: only the four start actions carry hosts
+                raise HttpError(422, "approve_hosts goes with an action that starts jobs")
+            return 200, {"subject": self._subject_view(self._save_spec(parsed.spec))}, {}
+        name = self._spec_name(parsed.spec)
+        go = ActionBody(
+            action="go",
+            key=parsed.key,
+            spec=parsed.spec,
+            plan_first=parsed.plan_first,
+            approve_hosts=parsed.approve_hosts,
+        )
+        return self._buffer_action(name, go, headers, create=True)
+
+    def _spec_action(self, name: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        return self._buffer_action(name, _parse(ActionBody, body), headers)
+
+    def _buffer_action(self, name: str, parsed: ActionBody, headers: dict[str, str], create: bool = False) -> Response:
+        actor = self._actor(headers, parsed)
+        subject = self.ledger.subject("buffer", name)
+        if subject is None and not create:
+            raise HttpError(404, f"no buffer spec {name!r}")
+        payload: dict = {}
+        if parsed.action == "go":
+            text = parsed.spec if parsed.spec is not None else (subject or {}).get("data", {}).get("spec")
+            if not text:
+                raise HttpError(422, f"buffer spec {name!r} has no spec text to run: send one")
+            if self._spec_name(text) != name:
+                raise HttpError(
+                    422, f"the spec's name is not {name!r}: a spec's name is its subject, post it to /specs"
+                )
+            self._accepts(subject or {"kind": "buffer", "key": name, "stage": "new", "revision": 0}, parsed)
+            self._check_hosts(parsed, None, "buffer", subject["number"] if subject else None)  # a go: no `needed`
+            subject = self._save_spec(text)  # only once the stage takes a go: what is stored is what ran last
+            payload = {"spec": text, **({"plan_first": True} if parsed.plan_first else {})}
+        assert subject is not None
+        needed = None
+        if parsed.action == "approve" and subject["stage"] == "plan-review":
+            needed = partial(self._needed, spec=name)
+        if parsed.action == "revoke":
+            if not parsed.records:
+                raise HttpError(422, "a revoke names the records that leave the buffer: `records`")
+            payload = {"records": parsed.records}
+        if parsed.action == "dropped":
+            payload = {"record": self._dropped_record(subject, parsed)}
+        return self._act_on(subject, parsed, actor, payload, needed)
+
+    def _dropped_record(self, subject: dict, parsed: ActionBody) -> str:
+        """The record of a `dropped`, once its files look complete. The workflow takes any non-empty file and
+        records its hash, so a click during a copy would record a truncated file as good: refuse while anything
+        under `incoming/` changed in the last minute (the poller waited a whole interval for the same reason)."""
+        record = parsed.record or ""
+        if not RECORD_ID_RE.fullmatch(record):
+            raise HttpError(422, "`dropped` names the record whose files are in place: `record`")
+        self._accepts(subject, parsed)
+        incoming = self.raw_root / record / "incoming" if self.raw_root else None
+        files = [path for path in incoming.rglob("*") if path.is_file()] if incoming and incoming.is_dir() else []
+        if not files:
+            raise HttpError(409, f"no file under {incoming}: copy the dataset's files there first")
+        newest = max(path.stat().st_mtime for path in files)
+        if time.time() - newest < DROP_QUIET_S:
+            raise HttpError(409, f"a file under {incoming} is still being written; try again in a minute")
+        return record
+
+    def _file_prep(self, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        """File a preparation request and run it: a new subject `prep-<number>` holding the request's text."""
+        parsed = _parse(SpecBody, body)
+        try:
+            records = load_prep_text(parsed.spec).records
+        except SpecError as error:
+            raise HttpError(422, f"not a preparation request: {error}") from None
+        go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, approve_hosts=parsed.approve_hosts)
+        needed = partial(self._needed, request=records)
+        repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
+        if repeat is not None and repeat["kind"] == "prep":  # a double click: the request filed by the first one
+            subject = self.ledger.find_subjects(kind="prep", number=repeat["number"])[0]
+        else:
+            self._check_hosts(go, needed, "prep", None)
+            subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec})
+        return self._act_on(subject, go, self._actor(headers, go), {"spec": parsed.spec}, needed)
+
+    def _prep_action(self, number: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
+        parsed = _parse(ActionBody, body)
+        subject = self._numbered("prep", number)
+        payload: dict = {}
+        needed = None
+        if parsed.action == "go":
+            text = parsed.spec if parsed.spec is not None else subject["data"].get("spec")
+            if not text:
+                raise HttpError(422, f"request {subject['key']} has no text to run: send one as `spec`")
+            try:
+                records = load_prep_text(text).records
+            except SpecError as error:
+                raise HttpError(422, f"not a preparation request: {error}") from None
+            payload = {"spec": text}
+            needed = partial(self._needed, request=records)
+        return self._act_on(subject, parsed, self._actor(headers, parsed), payload, needed)
+
+    def _stop(self, subject: dict, action: dict, stopped: bool) -> None:
+        """The force stop, for a run that does not answer a cancel (one frozen by nondeterminism), once its
+        workflow is terminated (`stopped`: one was running): retire the subject's buffers with their `retired`
+        events and set the stage a closed issue got (`retired`, or `done` for a request). The entry says what
+        was done and what is left running."""
+        kind, number = subject["kind"], subject["number"]
+        retired = []
+        if kind == "buffer":
+            for buffer in self.ledger.buffers():
+                mine = re.fullmatch(rf"i{number}-e\d+", buffer["id"]) is not None
+                if mine and (buffer.get("latest_event") or {}).get("kind") != "retired":
+                    self.ledger.retire(buffer["id"], self.archive_dir)
+                    self.ledger.add_event(buffer["id"], "retired", issue=number, event_id=None, detail="stopped")
+                    retired.append(buffer["id"])
+        what = "workflow stopped" if stopped else "no workflow was running"
+        if retired:
+            what += "; retired " + ", ".join(f"`{buffer}`" for buffer in retired)
+        left = "A cluster job that was already running is not killed."
+        if kind == "prep":
+            left += " The dataset rounds this request started keep running: cancel them on their own pages."
+        marker = f"<!-- mia: stopped {action['id']} -->"
+        self.ledger.append_entry(
+            kind,
+            number,
+            body=f"stopped: {what}. {left}\n\n{marker}",
+            marker=marker,
+            stage="retired" if kind == "buffer" else "done",
+        )
+
+    def _accepts(self, subject: dict, parsed: ActionBody) -> None:
+        """Steps 1 and 2 of spec §5: the subject's stage accepts the action (409 with what it does take), and a
+        verdict names the revision that was looked at (409 when the subject has moved on). A key seen before is
+        the same action: one already sent, or sent again within RETRY_WINDOW_S of the click, is not checked
+        (the first try may have arrived and moved the stage; the workflow drops an event id it has handled).
+        An older undelivered one is checked like a new click, so a stale Retry cannot pass the stage table."""
+        if parsed.key and (seen := self.ledger.action_by_key(parsed.key)) is not None:
+            age = time.time() - datetime.fromisoformat(seen["at"]).timestamp()
+            if seen["state"] == "sent" or age < RETRY_WINDOW_S:
+                return
+        kind, key, stage = subject["kind"], subject["key"], subject["stage"]
+        status, accepted = SUBJECT_RULES[kind][stage]
+        if parsed.action not in accepted:
+            takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
+            raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
+        if parsed.action in ("approve", "reject"):
+            if parsed.revision is None:
+                raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
+            if parsed.revision != subject["revision"]:
+                raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
+
+    def _check_hosts(
+        self, parsed: ActionBody, needed: Callable[[], Needed] | None, kind: str, number: int | None
+    ) -> bool:
+        """Refuse approve_hosts that cannot be approved here: the action starts no job (422), the service has no
+        policy (503), or a host is not one the run needs (422); a key used for another action is a 409. The key
+        comes first: one that carried this same action is a repeat, whatever the stage is by now.
+        Nothing is written. False when there is nothing to approve: no hosts, or a key that already carried this
+        action (the first try checked and approved them). `number` is None while the subject is not created."""
+        if not parsed.approve_hosts:
+            return False
+        if parsed.key and (seen := self.ledger.action_by_key(parsed.key)) is not None:
+            if (seen["kind"], seen["number"], seen["action"]) != (kind, number, parsed.action):
+                raise HttpError(409, f"the key {parsed.key!r} was used for another action")  # as Ledger.add_action
+            return False
+        if needed is None:
+            raise HttpError(422, "approve_hosts goes with an action that starts jobs")
+        if self.hosts is None:
+            raise HttpError(503, "this service has no csub policy to approve hosts in")
+        try:
+            self.hosts.check(parsed.approve_hosts, needed())
+        except ValueError as error:
+            raise HttpError(422, str(error)) from None
+        return True
+
+    def _act_on(
+        self,
+        subject: dict,
+        parsed: ActionBody,
+        actor: str,
+        payload: dict,
+        needed: Callable[[], Needed] | None = None,
+    ) -> Response:
+        """Steps 1 to 6 of spec §5 for one subject: check the stage and the revision (`_accepts`), record the
+        action, send it to Temporal, and settle it with its timeline entry. A key seen before is the same action
+        sent again under its id, whatever the stage is by now. `approve_hosts` (only with `needed`, the hosts this
+        run needs) is checked, approved and written to the timeline after every other refusal and before the
+        action is recorded."""
+        kind, number = subject["kind"], subject["number"]
+        self._accepts(subject, parsed)
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal: no workflow can be started from it")
+        if self._check_hosts(parsed, needed, kind, number):
+            assert self.hosts is not None  # _check_hosts answered 503 otherwise
+            try:
+                added = self.hosts.approve(parsed.approve_hosts, by=actor, kind=kind, number=number)
+            except PolicyError as error:
+                raise HttpError(503, str(error)) from None
+            if added:
+                names = ", ".join(f"`{neutralize(host)}`" for host in added)
+                self.ledger.append_entry(
+                    kind,
+                    number,
+                    body=f"**Hosts approved:** {names} by `{neutralize(actor)}`",
+                    marker=f"<!-- mia: hosts {time.time_ns()} -->",
+                )
+        try:
+            action, _ = self.ledger.add_action(kind, number, parsed.action, actor, key=parsed.key, payload=payload)
+        except ValueError as error:
+            raise HttpError(409, str(error)) from None
+        if action["state"] == "sent":
+            return 202, action, {}
+        payload = action["payload"]
+        # the workflow's signal: a buffer's `plan` is a go that waits at the plan too (its event's kind says so)
+        signal = "plan" if payload.get("plan_first") else parsed.action
+        event = LabelEvent(signal, str(action["id"]), action["actor"], action["at"])
+        running = True
+        self._asked[(kind, number)] = (action, time.monotonic())  # before the send: the answer may beat this request
+        try:
+            if parsed.action == "cancel":  # only a running round can be cancelled: nothing is started for it
+                running = self.dispatcher.signal_running(kind, number, "cancel", event)
+            elif parsed.action == "dropped":  # the workflow's plain `dropped(record)`, as the poller sent it
+                if not self.dispatcher.signal_running(kind, number, "dropped", payload["record"]):
+                    raise DispatchError("no workflow is running for it")
+            elif parsed.action == "stop":  # a terminate needs no replay: it also ends a run nondeterminism froze
+                reason = f"stopped from the page (action {action['id']})"
+                running = self.dispatcher.terminate(kind, number, reason)
+            else:
+                self.dispatcher.send(kind, number, signal, event)
+        except DispatchError as error:
+            self._asked.pop((kind, number), None)  # nothing was asked of any workflow
+            failed = self.ledger.settle_action(action["id"], "failed", str(error))
+            self.changes.announce(kind, number)
+            return 503, {"error": f"not delivered: {error}", "action": failed}, {}
+        text = f"**Action:** `{parsed.action}` by `{action['actor']}`"
+        if payload.get("plan_first"):
+            text += " (plan first)"
+        if payload.get("records"):
+            text += ": " + ", ".join(f"`{neutralize(record)}`" for record in payload["records"])
+        if payload.get("record"):
+            text += f": `{neutralize(payload['record'])}`"
+        if note := payload.get("note"):
+            # the mirror posts this under the bot's name: it must ping nobody (no mentions; spec §2 non-goals)
+            quiet = neutralize(note)[:16000].replace("@", "@\u200b")
+            text += "\n\n" + "\n".join(f"> {line}" for line in quiet.splitlines())
+        if spec := payload.get("spec"):  # the timeline, and so the issue, says exactly what ran
+            fenced = neutralize(spec).replace("```", "` ` `")
+            text += f"\n\n```yaml\n{fenced}{'' if fenced.endswith(chr(10)) else chr(10)}```"
+        sent = self.ledger.settle_action(action["id"], "sent", entry=(text, f"<!-- mia: action {action['id']} -->"))
+        if parsed.action == "stop" or not running:
+            self._asked.pop((kind, number), None)  # the service answers these itself, just below
+        if parsed.action == "stop":
+            self._stop(subject, action, running)
+        elif not running:
+            # the registry says a round is in progress and Temporal has no run for it (terminated by hand, or
+            # failed): the subject must not read "working" for ever, so the route ends the round itself
+            marker = f"<!-- mia: cancelled {action['id']} -->"
+            said = f"cancelled: no workflow was running for this {kind}\n\n{marker}"
+            self.ledger.append_entry(kind, number, body=said, marker=marker, stage="cancelled")
+        self._changed(kind, number)
+        return 202, sent, {}
+
+    def _get_action(self, action_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        action = self.ledger.action(int(action_id))
+        if action is None:
+            raise HttpError(404, f"no action {action_id}")
+        return 200, action, {}
+
+    def _refuse_action(self, action_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A workflow would not act on an action that reached it (a click that crossed a stage change)."""
+        parsed = _parse(RefusalBody, body)
+        action = self.ledger.settle_action(int(action_id), parsed.state, parsed.detail)
+        if action is None:
+            raise HttpError(404, f"no action {action_id}")
+        self._asked.pop((action["kind"], action["number"]), None)
+        self.changes.announce(action["kind"], action["number"])
+        return 200, action, {}
+
+    def _set_subject_issue(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        subject = self.ledger.set_subject_issue(kind, int(number), _parse(IssueBody, body).issue)
+        if subject is None:
+            raise HttpError(404, f"no {kind} #{number}")
+        self.changes.announce(kind, int(number))
+        return 200, self._subject_view(subject), {}
+
+    def _health(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Whether Temporal answers and whether a worker polls each task queue: the page's banner (spec §8.3)."""
+        if self.dispatcher is None:
+            return 200, {"temporal": False, "queues": {}}, {}
+        return 200, self.dispatcher.health(), {}
+
+    def _run_status(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._numbered(kind, number)
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal")
+        try:
+            return 200, {"status": self.dispatcher.run_status(kind, int(number))}, {}
+        except DispatchError as error:
+            raise HttpError(503, str(error)) from None
+
+    def _mark_mirrored(self, kind: str, number: str, seq: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(MirroredBody, body)
+        if not self.ledger.mark_mirrored(kind, int(number), int(seq), parsed.comment_url):
+            raise HttpError(404, f"no entry {seq} of {kind} #{number}")
+        self.changes.announce(kind, int(number))
+        return 200, {"ok": True}, {}
+
+    # --- assessments and budgets: what the gates decided and what each root request has spent ------
+
+    def _put_assessment(self, assessment_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(AssessmentBody, body)
+        if parsed.id != assessment_id:
+            raise HttpError(422, f"the body's id {parsed.id!r} is not the path's {assessment_id!r}")
+        for value, allowed, what in (
+            (parsed.gate, GATES, "gate"),
+            (parsed.subject.kind, SUBJECT_KINDS, "subject kind"),
+            (parsed.verdict, VERDICTS, "verdict"),
+        ):
+            if value not in allowed:
+                raise HttpError(422, f"{what} must be one of {list(allowed)}, got {value!r}")
+        return 200, self.ledger.put_assessment(parsed.model_dump()), {}
+
+    def _get_assessment(self, assessment_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        row = self.ledger.assessment(assessment_id)
+        if row is None:
+            raise HttpError(404, f"no assessment {assessment_id}")
+        return 200, row, {}
+
+    def _list_assessments(self, *, query: dict[str, str], body: bytes) -> Response:
+        rows = self.ledger.assessments(
+            subject_kind=query.get("subject_kind"),
+            subject_ref=query.get("subject_ref"),
+            gate=query.get("gate"),
+            by=query.get("by"),
+            before=query.get("before"),
+            limit=_int(query, "limit", 200, low=1, high=1000),
+        )
+        return 200, {"assessments": rows}, {}
+
+    def _decisions(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The page's Decisions view (spec autonomous-gates §10): the newest assessments and, per gate, how the
+        judge and the humans agree."""
+        gate = query.get("gate")
+        if gate is not None and gate not in GATES:
+            raise HttpError(422, f"gate must be one of {list(GATES)}, got {gate!r}")
+        page = self._page_of({"limit": "50", **query}, {})
+        assert page is not None
+        # ponytail: reads every assessment of the gate to name its dataset; a record column when there are 100k
+        rows = self.ledger.assessments(gate=gate, limit=100_000)
+        numbers = {row["issue"]: row["id"] for row in self.ledger.datasets() if row.get("issue")}
+        numbers |= {row["number"]: row["key"] for row in self.ledger.find_subjects(kind="dataset")}
+        artifacts = {
+            asset["key"].rsplit("/", 1)[-1]: asset["data"].get("record")
+            for asset in self.ledger.assets("staged")
+            if asset["data"]
+        }
+        rejected: set[tuple] = set()  # subjects with a reject among the rows seen so far, which are the newer ones
+        for row in rows:
+            subject = row.get("subject") or {}
+            if record := _assessed_record(subject, numbers, artifacts):
+                row["record"] = record
+            about = (subject.get("kind"), subject.get("ref"))
+            if row.get("verdict") == "approve" and about in rejected:
+                row["overruled"] = True  # a later reject (a revocation, or a person disagreeing) stands instead
+            elif row.get("verdict") == "reject":
+                rejected.add(about)
+        if "record" in query:
+            rows = [row for row in rows if row.get("record") == query["record"]]
+        found, total = paged(rows, page, {})
+        gates = [gate] if gate else list(GATES)
+        agreement = {name: self.ledger.agreement(name) for name in gates}
+        return 200, {"assessments": found, "total": total, "agreement": agreement}, {}
+
+    def _reserve(self, root: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(ReserveBody, body)
+        return 200, self.ledger.reserve(root, parsed.reservation_id, parsed.kind, parsed.usd, parsed.caps), {}
+
+    def _settle(self, root: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(SettleBody, body)
+        row = self.ledger.settle(
+            root,
+            parsed.reservation_id,
+            usd=parsed.usd,
+            fetched_bytes=parsed.fetched_bytes,
+            staged_bytes=parsed.staged_bytes,
+        )
+        return 200, row, {}
+
+    def _get_budget(self, root: str, *, query: dict[str, str], body: bytes) -> Response:
+        row = self.ledger.budget(root)
+        if row is None:
+            raise HttpError(404, f"no budget for {root}")
+        return 200, row, {}
+
+    def _list_budgets(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"budgets": self.ledger.budgets()}, {}
+
+    def _delete_volume(self, buffer: str, volume_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        if not self.ledger.delete_volume(buffer, volume_id):
+            raise HttpError(404, f"no volume {volume_id} in {buffer}")
+        return 200, {"deleted": volume_id}, {}
+
+    def _volumes(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        self._config(buffer)
+        page = self._page_of(query, VOLUME_SORTS)
+        volumes = self.ledger.volume_rows(buffer)
+        if page is None:
+            return 200, {"volumes": volumes}, {}
+        draws = self.ledger.draws_per_volume(buffer)
+        for volume in volumes:
+            volume["draws"] = draws.get(volume["id"], 0)
+        rows, total = paged(volumes, page, VOLUME_SORTS, lambda row: (row["id"], row["artifact"]))
+        return 200, {"volumes": rows, "total": total}, {}
+
+    def _consumers(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        """The training jobs registered with the buffer: one page of them."""
+        self._config(buffer)
+        page = self._page_of({"limit": "50", **query}, CONSUMER_SORTS)
+        assert page is not None
+        consumers = self.ledger.consumers(buffer, self.stale_s)
+        rows, total = paged(consumers, page, CONSUMER_SORTS, lambda row: (row.get("name"), row.get("host")))
+        return 200, {"consumers": rows, "total": total}, {}
+
     def _crop_png(self, folder: str, crop_id: str, name: str, *, query: dict[str, str], body: bytes) -> Response:
         """A published crop's raw.png or overlay.png from storage_root: the page's previews."""
         if self.storage_root is None:
@@ -433,19 +1544,44 @@ class BufferService:
         return 200, {"datasets": self.ledger.datasets(query.get("state"))}, {}
 
     def _plan(self, *, query: dict[str, str], body: bytes) -> Response:
-        text = _parse(PlanBody, body).spec
+        parsed = _parse(PlanBody, body)
+        text = parsed.spec
         try:
             spec = load_spec_text(text)
         except SpecError as error:
             raise HttpError(422, str(error)) from None
         ref = spec.catalog.ref
-        records = self.ledger.records(ref)
-        if not records:
-            raise HttpError(409, f"catalog ref {ref} is not synced; run: mia-buffers catalog sync --ref {ref}")
         states = {row["id"]: row.get("state", "unprepared") for row in self.ledger.datasets()}
-        prepared = {record for record, state in states.items() if state == "prepared"}
-        plan = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared)
-        return 200, plan.to_dict(states), {}
+        # the designer asks for the same plan once per page turn and sort: keep the last one while nothing it
+        # depends on has changed (the spec's text, which names the ref, and every dataset's state)
+        key = (text, frozenset(states.items()))
+        kept_for, plan = self._last_plan  # read once: another request may replace it meanwhile
+        if kept_for != key:
+            records = self.ledger.records(ref)
+            if not records:
+                raise HttpError(409, f"catalog ref {ref} is not synced; run: mia-buffers catalog sync --ref {ref}")
+            prepared = {record for record, state in states.items() if state == "prepared"}
+            plan = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared).to_dict(states)
+            self._last_plan = (key, plan)
+        if parsed.page is None:
+            return 200, plan, {}
+        asked = parsed.page
+        fields = {"limit": str(asked.limit), "offset": str(asked.offset), "dir": asked.dir, "q": asked.q}
+        page = self._page_of(fields | ({"sort": asked.sort} if asked.sort else {}), PLAN_SORTS)
+        assert page is not None
+        datasets = {row["id"]: row for row in self._dataset_rows()[1]}
+        staged_as = levels_key(int((spec.patch_for("2D") or {}).get("y") or 0), spec.sampling.levels)
+        view = plan_view(
+            plan,
+            datasets,
+            staged_as,
+            page,
+            fit_only=asked.fit_only,
+            prepared_only=asked.prepared_only,
+            raw_cached=asked.raw_cached,
+            staged_geom=asked.staged_geom,
+        )
+        return 200, {**plan, **view}, {}
 
     def _sync_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         root = self.storage_root
@@ -465,7 +1601,30 @@ class BufferService:
     # --- a buffer's status board, events, summary and retire: the page and the lifecycle -----------
 
     def _list_buffers(self, *, query: dict[str, str], body: bytes) -> Response:
-        return 200, {"buffers": self.ledger.buffers()}, {}
+        """Every buffer's summary. Paged, each also names its spec and, when its spec has a newer round, that
+        round (`superseded_by`); filters: `spec` (a spec's number), `record` (a dataset on the buffer's board, whose
+        row is added as `board`). Without a sort: the newest spec first, its newest round first."""
+        page = self._page_of(query, BUFFER_SORTS)
+        buffers = self.ledger.buffers()
+        if page is None:
+            return 200, {"buffers": buffers}, {}
+        specs = {row["number"]: row["key"] for row in self.ledger.find_subjects(kind="buffer")}
+        buffers.sort(key=lambda row: _round_of(row["id"]), reverse=True)
+        newest: dict[int, str] = {}
+        for buffer in buffers:
+            number = _round_of(buffer["id"])[0]
+            newest.setdefault(number, buffer["id"])
+            buffer["spec"] = specs.get(number)  # its spec's page; a buffer of a spec never adopted has none
+            buffer["superseded_by"] = newest[number] if number and newest[number] != buffer["id"] else None
+        if "spec" in query:
+            if not query["spec"].isdigit():
+                raise HttpError(422, "query spec must be a spec's number")
+            buffers = [buffer for buffer in buffers if _round_of(buffer["id"])[0] == int(query["spec"])]
+        if "record" in query:
+            boards = {board["buffer"]: board for board in self.ledger.boards_of(query["record"])}
+            buffers = [{**buffer, "board": boards[buffer["id"]]} for buffer in buffers if buffer["id"] in boards]
+        rows, total = paged(buffers, page, BUFFER_SORTS, lambda row: (row["id"], _spec_name(row)))
+        return 200, {"buffers": rows, "total": total}, {}
 
     def _put_board(self, buffer: str, record: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)
@@ -476,7 +1635,29 @@ class BufferService:
 
     def _board(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)
-        return 200, {"buffer": buffer, "datasets": self.ledger.buffer_datasets(buffer)}, {}
+        page = self._page_of(query, BOARD_SORTS)
+        board = self.ledger.buffer_datasets(buffer)
+        if page is None:
+            return 200, {"buffer": buffer, "datasets": board}, {}
+        # the page's row names its dataset: its issue, its crops, and the staged artifact this buffer draws from
+        datasets = {row["id"]: row for row in self.ledger.datasets()}
+        staged = {
+            asset["data"].get(
+                "record"
+            ): f"{asset['data'].get('levels_key')}/{asset['data'].get('record')}/{asset['key']}"
+            for asset in self.ledger.assets("staged")
+            if asset["data"] and buffer in asset["refs"] and asset["data"].get("levels_key")
+        }
+        issues = self._dataset_issues()
+        for row in board:
+            known = datasets.get(row["record"]) or {}
+            row.update({name: known.get(name) for name in ("folder", "previews", "crops")})
+            row["issue"] = issues.get(row["record"])
+            row["staged"] = staged.get(row["record"])
+        rows, total = paged(
+            board, page, BOARD_SORTS, lambda row: (row["record"], row["status"], row["reason"], row["job"])
+        )
+        return 200, {"buffer": buffer, "datasets": rows, "total": total}, {}
 
     def _add_event(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         # no config check: `created` and `planned` precede the buffer's config (create_buffer runs at sourcing)
@@ -489,7 +1670,13 @@ class BufferService:
         return 200, added, {}
 
     def _events(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
-        return 200, {"buffer": buffer, "events": self.ledger.events(buffer)}, {}
+        page = self._page_of(query, EVENT_SORTS)
+        events = self.ledger.events(buffer)
+        if page is None:
+            return 200, {"buffer": buffer, "events": events}, {}
+        events.reverse()  # the page reads the newest first
+        rows, total = paged(events, page, EVENT_SORTS, lambda row: (row["kind"], row["detail"]))
+        return 200, {"buffer": buffer, "events": rows, "total": total}, {}
 
     def _retire(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         self._config(buffer)
@@ -511,7 +1698,7 @@ class BufferService:
         consumer_id = self._consumer(buffer, query)
         n = _int(query, "n", 1, low=1, high=MAX_N)
         split = self._split_of(buffer, consumer_id)
-        volumes = self.ledger.volumes(buffer)
+        volumes = self.ledger.live_volumes(buffer)  # a quarantined (revoked) volume is never drawn
         with self._lock:
             if buffer not in self._rng:  # seed from what the ledger already served, so a restart draws fresh crops
                 self._rng[buffer] = random.Random(f"{config.seed}:{self.ledger.max_seq(buffer)}")
@@ -537,7 +1724,7 @@ class BufferService:
         size = config.split_sizes.get(split, DEFAULT_SPLIT_SIZE)
         if start >= size:
             raise HttpError(416, f"from {start} is past the {split} list of {size}")
-        volumes = self.ledger.volumes(buffer)
+        volumes = self.ledger.live_volumes(buffer)  # a quarantined (revoked) volume is never listed
         if not servable(volumes, split):
             return self._no_content(buffer)
         candidates, exhausted = capacity(volumes, split), False
@@ -607,8 +1794,15 @@ class BufferService:
     def _meta(self, *, query: dict[str, str], body: bytes) -> Response:
         if self.meta is not None:
             return 200, self.meta, {}
-        names = ("buffers_repo", "datasets_repo", "catalog_repo", "service_url", "datasets_workflow_url")
-        return 200, {**dict.fromkeys(names), "roots": {}, "quota": {}, "keeper": {}}, {}
+        names = (
+            "buffers_repo",
+            "datasets_repo",
+            "catalog_repo",
+            "service_url",
+            "datasets_workflow_url",
+            "gallery_branch",
+        )
+        return 200, {**dict.fromkeys(names), "roots": {}, "quota": {}, "keeper": {}, "lines": LINES}, {}
 
     def _usage(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         config = self._config(buffer)
@@ -616,11 +1810,13 @@ class BufferService:
             empty = len(self._empty_window(buffer, time.time()))
         last_hour = {**self.ledger.last_hour(buffer), "empty": empty}
         days = self.ledger.usage(buffer)
-        return (
-            200,
-            {"buffer": buffer, "days": days, "last_hour": last_hour, "max_empty_fraction": config.max_empty_fraction},
-            {},
-        )
+        out = {"buffer": buffer, "last_hour": last_hour, "max_empty_fraction": config.max_empty_fraction}
+        page = self._page_of(query, USAGE_SORTS)
+        if page is None:
+            return 200, {**out, "days": days}, {}
+        days.sort(key=lambda day: day["day"], reverse=True)  # the page's table reads the newest day first
+        rows, total = paged(days, page, USAGE_SORTS)
+        return 200, {**out, "days": rows, "total": total}, {}
 
     def _put_keeper(self, *, query: dict[str, str], body: bytes) -> Response:
         try:
@@ -650,14 +1846,17 @@ class BufferService:
                     self.ledger.set_volume_missing(buffer, volume.id, missing, volume.path)
                     volumes[index] = replace(volume, missing=missing)
         splits = sorted({split for volume in volumes for split in volume.split_planes})
+        quarantined = self.ledger.quarantined_volumes(buffer)
+        live = [volume for volume in volumes if volume.id not in quarantined]
         return (
             200,
             {
                 "buffer": buffer,
                 "config": config.model_dump(),
                 "volumes": len(volumes),
-                "servable": {split: len(servable(volumes, split)) for split in splits},
+                "servable": {split: len(servable(live, split)) for split in splits},
                 "missing": [volume.id for volume in volumes if volume.missing],
+                "quarantined": quarantined,
                 "draws": self.ledger.draws_per_volume(buffer),
                 "consumers": self.ledger.consumers(buffer, self.stale_s),
             },
@@ -674,6 +1873,20 @@ def make_server(service: BufferService, host: str, port: int) -> ThreadingHTTPSe
             status, payload, headers = service.handle(
                 self.command, parts.path, dict(parse_qsl(parts.query)), body, dict(self.headers.items())
             )
+            if payload is not None and not isinstance(payload, (bytes, dict)):
+                # a stream: no Content-Length, one flushed write per chunk, until the reader leaves
+                self.send_response(status)
+                for key, value in headers.items():
+                    self.send_header(key, value)
+                self.end_headers()
+                self.close_connection = True
+                try:
+                    for chunk in payload:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except OSError:
+                    pass  # the reader left; its thread ends here
+                return
             if isinstance(payload, bytes):
                 data = payload  # the handler's headers carry its Content-Type
             else:
@@ -704,18 +1917,11 @@ def ledger_path(cfg: Config) -> Path:
 
 
 def open_ledger(cfg: Config) -> Ledger:
-    """The ledger on the local root. The first start moves the old `<state_dir>/buffers.sqlite` there (the old file
-    keeps a `.moved` suffix); a missing ledger beside existing backups is refused, never silently started empty."""
+    """The ledger on the local root; a missing ledger beside existing backups is refused, never silently started
+    empty."""
     path = ledger_path(cfg)
     require_local_dir(path.parent)
-    old = cfg.paths.state_dir / "buffers.sqlite"
-    if not path.exists() and old.exists():
-        old_ledger = Ledger(old)
-        old_ledger.backup(path)
-        old_ledger.close()
-        os.replace(old, old.with_suffix(".sqlite.moved"))
-        print(f"buffer-api: moved the ledger from {old} to {path}", flush=True)
-    elif not path.exists():
+    if not path.exists():
         backups = sorted((cfg.paths.state_dir / "backups").glob("buffers-*.sqlite"))
         if backups:
             raise RuntimeError(
@@ -745,7 +1951,7 @@ def backup_forever(ledger: Ledger, directory: Path, minutes: int, stop: threadin
 def page_meta(cfg: Config) -> dict:
     """What the page reads from mia.yaml (`GET /meta`): the repos, the service URL, the Temporal UI prefix of a
     dataset's workflow (append the issue number; None without `temporal.ui_url`), each root's browser URL (None when
-    unset), the quota and the keeper's cadence."""
+    unset), the quota, the keeper's cadence and each kind's lifecycle line."""
     github, paths, ui_url = cfg.github, cfg.paths, cfg.temporal.ui_url
     # ponytail: mia-data's namespace is its default; read services.mia-data.temporal.namespace when a deployment renames it
     workflow_prefix = quote(f"mia-data/{github.datasets_repo}/issue-", safe="")
@@ -757,9 +1963,13 @@ def page_meta(cfg: Config) -> dict:
         "datasets_workflow_url": f"{ui_url.rstrip('/')}/namespaces/mia-data/workflows/{workflow_prefix}"
         if ui_url
         else None,
+        # ponytail: mia-data's gallery branch as this service's own config reads it (the default unless the
+        # shared section sets it); read services.<mia-data>.gallery.branch when a deployment renames it there
+        "gallery_branch": cfg.gallery.branch,
         "roots": {root: getattr(paths, f"{root}_url") for root in paths.ROOTS},
         "quota": cfg.quota.model_dump(),
         "keeper": cfg.keeper.model_dump(),
+        "lines": LINES,
     }
 
 
@@ -776,21 +1986,29 @@ def serve(cfg: Config) -> None:
         raise SystemExit(str(error)) from error
     url = urlparse(cfg.service.url)
     assert url.port is not None  # ServiceCfg requires an explicit port
-    server = make_server(
-        BufferService(
-            ledger,
-            token=token,
-            storage_root=cfg.paths.storage_root,
-            raw_root=cfg.paths.raw_root,
-            staged_root=cfg.paths.staged_root,
-            locks=LockDir(cfg.paths.local_root / "locks"),
-            archive_dir=cfg.paths.state_dir / "archive",
-            meta=page_meta(cfg),
-            ui_dir=Path(__file__).parent / "ui",
-        ),
-        url.hostname or "127.0.0.1",
-        url.port,
+
+    check = HostCheck.from_config(cfg)
+    try:
+        generate_policy(check.base_policy, check.policy_dir, check.writable)
+    except PolicyError as error:
+        raise SystemExit(str(error)) from error
+    from .dispatch import dispatcher_for  # here, not at the top: it reaches autodev's CLI helpers
+
+    service = BufferService(
+        ledger,
+        token=token,
+        storage_root=cfg.paths.storage_root,
+        raw_root=cfg.paths.raw_root,
+        staged_root=cfg.paths.staged_root,
+        locks=LockDir(cfg.paths.local_root / "locks"),
+        archive_dir=cfg.paths.state_dir / "archive",
+        meta=page_meta(cfg),
+        ui_dir=Path(__file__).parent / "ui",
+        dispatcher=dispatcher_for(cfg),
+        hosts=check,
     )
+    service.kick_unmirrored()  # what a crash, or Temporal being away, left unposted
+    server = make_server(service, url.hostname or "127.0.0.1", url.port)
     backups = cfg.paths.state_dir / "backups"
     stop = threading.Event()
     threading.Thread(target=backup_forever, args=(ledger, backups, cfg.keeper.minutes, stop), daemon=True).start()

@@ -33,6 +33,8 @@ class Feedback:
 
     id: str  # "review-<id>" | "comment-<id>"
     text: str
+    author: str = ""  # the reviewer's login; an approval by the same author later withdraws the request
+    at: str = ""  # GitHub's ISO-8601 UTC timestamp of the review or comment
 
 
 @dataclass
@@ -119,6 +121,30 @@ class PublishInput:
     workspace: Workspace
     pr: int | None
     feedback_id: str | None = None
+
+
+@dataclass
+class JudgeInput:
+    """The review judge's subject (spec autonomous-gates §4.1): the round whose head was pushed."""
+
+    issue: int
+    key: str
+    round: int
+    workspace: Workspace
+    pr: int | None
+    head_sha: str
+
+
+@dataclass
+class JudgeOutcome:
+    """What the review judge said, after policy; `assessment` is "" without a registry."""
+
+    verdict: str
+    effective: str
+    confidence: float
+    summary: str
+    assessment: str = ""
+    cost_usd: float | None = None
 
 
 @dataclass

@@ -93,7 +93,7 @@ def test_lifecycle_fields_and_defaults(tmp_path):
         load_spec(path)
 
 
-# -- the preparation request (milestone E)
+# -- the preparation request
 
 PREP_SELECT = {"paths": ["datasets/**"], "where": {"license": {"in": ["CC0-1.0"]}}}
 
@@ -132,7 +132,7 @@ def test_prep_spec_refused(body, needle):
 
 def test_buffer_spec_refuses_a_prep_request_by_name():
     data = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "c" * 40}, "records": ["a"]}
-    with pytest.raises(SpecError, match="prep:go"):
+    with pytest.raises(SpecError, match="file it with Prepare"):
         load_spec_text(yaml.safe_dump(data))
 
 
@@ -142,3 +142,9 @@ def test_sample_plan_defaults_and_must_match_splits():
     data["splits"]["fractions"] = {"train": 0.8, "val": 0.1, "test": 0.0, "extra": 0.1}
     with pytest.raises(SpecError, match="sampling.plan.samples must name exactly the splits"):
         load_spec_text(yaml.safe_dump(data))
+
+
+def test_a_prep_request_can_ask_for_prepared_datasets_again():
+    base = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "a" * 40}, "records": ["r"]}
+    assert load_prep_text(yaml.safe_dump(base)).again is False
+    assert load_prep_text(yaml.safe_dump({**base, "again": True})).again is True

@@ -9,7 +9,7 @@ request, and merges it after a human approves. Design: [agentic-dev-infrastructu
 |---|---|
 | add `autodev:go` to an issue (needs write access) | runs an agent round, opens PR `autodev/issue-N`, labels the issue `autodev:review` |
 | review with *Request changes*, or comment `/revise <what>` (write access) | runs another round on the same branch (up to `max_revisions`) |
-| approve the PR (or comment `/approve <sha>` under a personal token, after the latest round's summary) | squash-merges that exact commit, closes the issue |
+| approve the PR (or comment `/approve <sha>` under a personal token, after the latest round's summary) | squash-merges that exact commit, closes the issue (a change request you made earlier on the same head is withdrawn by your approval; anyone else's still blocks) |
 | close the PR | stops; re-add `autodev:go` to start over (closing the *issue* does not stop a running workflow) |
 | sees `autodev:needs-human` | read the failure comment, fix, re-add `autodev:go` (an open PR is resumed) |
 
@@ -53,32 +53,13 @@ Files: the Temporal CLI binary, `temporal.db` and its log live in `temporal.stat
 `~/.local/state/temporal`); the broker log is in `<state_dir>-host/logs`, which the sandbox never binds; worker logs
 are in `<state_dir>/logs`.
 
-Upgrading a host from the old up-scripts: the dev server's database used to be `<autodev state_dir>-host/temporal.db`.
-To keep in-flight workflows, stop the old tmux sessions (`tmux kill-session -t <deployment>`) and copy that file into
-`temporal.state_dir` before the first `mia up`, or point `temporal.state_dir` at the old `-host` directory. A fresh
-database is fine on a dev host: the poll schedule is re-applied and open issues are picked up on the next poll.
-
-Moving a service off a legacy per-app file (`services.<name>.config`, deprecated): copying its sections into the
-service block is not enough, because three things change with it. Name the service after the old file's `deployment`
-(labels, task queue and workflow ids come from it). Set `paths.state_dir` in the service block to the old state
-directory, or move that directory to `<state_root>/<name>` while no round is running (in-flight rounds look for their
-`rounds/<id>/pins.json` and csub job-id files there). Keep `temporal.namespace` in the block when the old file set
-one. Then `mia restart <service>`.
-
 buffer-api (`mia-buffers serve`) keeps its SQLite ledger at `<local_root>/service/buffers.sqlite` (host-local disk,
 never NFS) and writes backups to `<state_dir>/backups/` every `keeper.minutes`; worker writes need the token in
-`service.token_file`. The first start moves an old `<state_dir>/buffers.sqlite` to the new place (the old file keeps a
-`.moved` suffix). If the ledger is missing but `<state_dir>/backups/` holds backups, `serve` refuses to start and names
+`service.token_file`. If the ledger is missing but `<state_dir>/backups/` holds backups, `serve` refuses to start and names
 the newest: copy it to `<local_root>/service/buffers.sqlite` to restore it.
 After the first `mia up`, fill the registry:
 `mia exec mia-buffers catalog sync` (the catalog records; `--ref <sha>` for a particular commit) and
 `mia exec mia-buffers datasets sync` (the prepared rows, from `storage_root`).
-
-Upgrading mia-buffers to the registry (milestone B): restart it with no buffer round in `buffer:sourcing`. A stage job
-submitted before the upgrade writes to the old `<levels key>/<record>` directory, and its dataset fails after the
-restart. The first round after the upgrade re-stages every record under `<levels key>/<record>/<artifact id>`. Rolling
-back to the pre-B code once new volumes are registered needs a ledger backup taken before the upgrade: the old code does
-not know the `artifact` key.
 
 Under a personal token you are both the bot and the reviewer, so GitHub won't let you *approve* your own PR:
 comment `/approve <first 7+ chars of the head sha>` instead. Only `/approve` comments posted after the bot's latest
@@ -109,6 +90,29 @@ systemd on a cluster-attached host) is [`docs/deployment.md`](../docs/deployment
 6. As the service account: `pixi run mia exec autodev init-labels`, `pixi run mia up`, then
    `pixi run mia exec autodev check`.
 
+## The judges: from shadow to active
+
+Every human gate can have a judge (spec `docs/specs/2026-11-09-autonomous-gates.md`): a second model, read-only,
+over the gate's evidence. It earns authority in three steps, per gate, and nothing turns on by itself.
+
+1. **Off** (`judge.<gate>.mode: off`, the default): no judge runs.
+2. **Shadow** (`mode: shadow`): set it in `mia.yaml` (a `judge.model` other than the deployment's
+   `agent.model` is a precaution, not a rule), `pixi run mia restart`. The judge runs on every live round: autodev's review judge after each
+   pushed head (a PR comment headed "Review judge", no `/approve` line), mia-data's crop judge after each passing set
+   (a comment under the crop table). Both write an assessment `by: judge`; the person's verdict still decides. Watch the
+   **Decisions** tab of the buffers page: per gate, how many subjects were judged and whether the newest human verdict
+   agrees. Build an evaluation set from the human-reviewed rounds on disk and score the judge offline:
+
+   ```
+   pixi run mia exec mia-data collect-judge-set /path/to/eval-crops
+   pixi run mia judge eval crops /path/to/eval-crops            # per category: agree, false approve, false reject, abstain
+   ```
+
+   Twenty live rounds without a false approval, and none on the evaluation set, is the bar the spec sets
+   (`autonomy.min_shadow_rounds`).
+3. **Active** (`mode: active`, not available yet): the judge's approve authorizes within policy; *Revoke* on the
+   dataset's or the spec's page withdraws it at any time, `mia pause` stops every workflow at its next job.
+
 ## Known gaps (deliberate, for later)
 
 - No cancel command: `temporal workflow terminate -w <id>` stops a workflow but leaves its job; `csub kill <job>`.
@@ -136,7 +140,7 @@ names what is missing); P4 see the plan.
 
 1. `cp mia.yaml.example mia.yaml` (if you have not), fill in the shared paths, the `mia-data` block, `harness.dir` and a `github.token_file` (or app key).
    `paths.work_root` and `paths.storage_root` take a path or `{path, url}`; with a `url` (the folder in Fileglancer)
-   the issue comments link the round's workspace and the dataset's crops folder.
+   the timeline entries link the round's workspace and the dataset's crops folder.
    The data repo needs at least one commit on its default branch: the `galleries` branch is created through the
    trees API, which answers 409 on an empty repo.
 2. `pixi run mia exec mia-data check` verifies repos, Temporal, csub, dirs and the harness pin (and that `cd harness
@@ -145,16 +149,17 @@ names what is missing); P4 see the plan.
    `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run mia exec mia-data check`.
 3. `pixi run mia up` starts Temporal (unless `mia.yaml` says `temporal.managed: false`, in which case it only
    checks that the configured cluster answers), then each service: it ensures the service's namespace, starts
-   its broker and sandboxed worker, and applies the poll schedule. Re-running it while a session exists only
+   its broker and sandboxed worker, and applies its schedule. Re-running it while a session exists only
    re-applies that service's schedule, so a run that failed partway is repaired by running it again. Uses
    `temporal` from PATH; a managed server downloads one into `temporal.state_dir/bin` otherwise. Manage with
    `mia ps`, `mia logs mia-data [worker|broker]` (`-n N`, `-f`), `mia attach mia-data`, `mia down mia-data`,
    `mia restart mia-data` (needed after a config change; wait for running rounds to finish first). `mia down`
    with no service stops everything, Temporal last; naming a service never touches Temporal.
-4. `pixi run mia exec mia-data init-labels` creates the `data:*` labels; `pixi run mia exec mia-data seed` seeds
-   dataset issues from the catalog.
+4. `pixi run mia exec mia-data init-labels` creates the `data:*` stage labels the mirror sets. Datasets are
+   started from the buffers page (*Start*); an issue, a copy of the dataset's timeline, appears in the data repo
+   the first time its dataset has something to say.
 5. `pixi run mia exec mia-data test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.
-6. Labels on a dataset issue: `data:go` starts a run; `data:approve` publishes the crops under review (and merges
-   the snippet PR that made them); `data:reject`, with your comments on the issue, sends them to the agent fixing
-   the snippet and the next crops come back for review.
+6. Buttons on a dataset's page: *Start* starts a round; *Approve* publishes the crops under review (and merges
+   the snippet PR that made them); *Reject…* asks for your feedback and sends it to the agent fixing the snippet,
+   and the next crops come back for review; *Cancel the round* ends a round in progress.

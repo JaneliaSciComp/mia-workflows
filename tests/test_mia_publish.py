@@ -201,3 +201,13 @@ def test_prepared_row_requires_matching_manifest(tmp_path):
     (ds / "binding.yaml").write_bytes(b"snippets_commit: 4c1d\n")  # no record
     reindex(ds, {})
     assert prepared_row(ds) is None
+
+
+def test_a_revoked_folder_is_not_prepared(tmp_path):
+    from mia_data.publish import REVOKED_FILE
+    from tests.test_buffers_sync import write_prepared
+
+    write_prepared(tmp_path / "f", "rec")
+    assert prepared_row(tmp_path / "f")["state"] == "prepared"
+    (tmp_path / "f" / REVOKED_FILE).write_text('{"by": "human:a"}')
+    assert prepared_row(tmp_path / "f") is None

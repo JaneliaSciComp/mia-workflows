@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from mia_helpers import FakeGH, make_cfg
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHistory
 from temporalio.exceptions import ApplicationError
@@ -20,15 +20,19 @@ from temporalio.worker import Replayer, UnsandboxedWorkflowRunner, Worker
 from mia_data import workflows
 from mia_data.activities import Activities
 from mia_data.models import (
+    AssessmentWritten,
     DatasetState,
     GalleryResult,
     JobArgs,
     JobDone,
+    JudgeResult,
     LabelEvent,
     LockTaken,
     MatchResult,
     Pins,
     PrUpdate,
+    Reservation,
+    Revocation,
     RoundLimits,
     SmokeResult,
     VerifyResult,
@@ -36,7 +40,7 @@ from mia_data.models import (
 from mia_data.workflows import MiaDataDataset
 
 SHA = "a" * 40
-PINS = Pins("rec-1", "c" * 40, SHA, "h" * 40, "sha256:x")
+PINS = Pins("rec-1", "c" * 40, SHA, "h" * 40, "sha256:x", root="o/data#7")
 
 
 @pytest.fixture
@@ -49,6 +53,14 @@ async def env():
 
 def ev(kind, eid, at="2026-01-01T00:00:00Z"):
     return LabelEvent(kind, eid, "alice", at)
+
+
+def turn(answers, key, default):
+    """The next of a key's queued answers (a list; its last one repeats), the one answer, or `default`."""
+    queued = answers.get(key, default)
+    if not isinstance(queued, list):
+        return queued
+    return queued.pop(0) if len(queued) > 1 else queued[0]
 
 
 def shift(iso, seconds):
@@ -73,7 +85,18 @@ class Mocks:
         revisions=5,
         lock_busy=0,
         slow_stages=(),
+        paused=False,
+        reservations=None,
+        assess_authorized=True,
+        submit_error=None,
+        revocation=None,
+        crop_judge="off",
+        judge_result=None,
+        submit_gate=None,
+        kill_error=None,
     ):
+        self.submit_gate = submit_gate  # an asyncio.Event: every submit waits for it, as a slow bsub would
+        self.kill_error = kill_error  # a message: kill_job fails with it
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
         self.outcome, self.smoke, self.states = outcome, smoke or SmokeResult(True, True), states or {}
@@ -82,6 +105,14 @@ class Mocks:
         self.await_failures, self.gate, self.gate_on = await_failures, gate, gate_on
         self.test_ok_by, self.pr_now, self.trees, self.revisions = test_ok_by or {}, pr_now, trees or {}, revisions
         self.lock_busy = lock_busy  # how many take_lock calls find the raw cache held by someone else
+        self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
+        self.assess_authorized = assess_authorized  # what the policy answers to an approve
+        self.submit_error = submit_error  # a message: every submit raises it, non-retryable
+        self.revocation = revocation or Revocation("as-r", ["art1"], ["i3-e4"])  # what revoke_dataset answers
+        self.crop_judge = crop_judge  # judge.crops.mode the limits activity reports
+        self.judge_result = judge_result or JudgeResult(
+            "approve", "approve", 0.9, "fine", "as-j", 0.5, "Crop judge: approve"
+        )
 
     def acts(self):
         rec = lambda name, *a: self.calls.append((name, a))  # noqa: E731
@@ -94,7 +125,7 @@ class Mocks:
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
             rec("limits")
-            return RoundLimits(4, 16, 120, self.revisions)
+            return RoundLimits(4, 16, 120, self.revisions, crop_judge=self.crop_judge, judge_max_budget_usd=3.5)
 
         @activity.defn(name="set_stage")
         async def set_stage(
@@ -134,8 +165,12 @@ class Mocks:
         @activity.defn(name="submit")
         async def submit(key: str, kind: str, a: JobArgs) -> str:
             rec("submit", key, kind, a)
+            if self.submit_error:
+                raise ApplicationError(self.submit_error, non_retryable=True)
             if kind == "crop":
                 self.crop_jobs[a.workspace] = a
+            if self.submit_gate:
+                await self.submit_gate.wait()
             return f"job-{key}"
 
         @activity.defn(name="read_match")
@@ -204,6 +239,12 @@ class Mocks:
             rec("open_snippet_issue", round_id, snippet_issue, *([binding, draft] if binding else []))
             return 100
 
+        @activity.defn(name="kill_job")
+        async def kill_job(job_id: str) -> None:
+            rec("kill_job", job_id)
+            if self.kill_error:
+                raise ApplicationError(self.kill_error, non_retryable=True)
+
         @activity.defn(name="read_feedback")
         async def read_feedback(issue: int, since: str | None, until: str) -> str:
             rec("read_feedback", issue, since, until)
@@ -222,6 +263,62 @@ class Mocks:
         async def tree_sha(sha: str, name: str) -> str | None:
             rec("tree_sha", sha, name)
             return self.trees.get(sha, "T1")
+
+        @activity.defn(name="paused")
+        async def paused() -> bool:
+            rec("paused")
+            return turn({"p": self.paused}, "p", False)  # a list: answers in turn, the last repeats
+
+        @activity.defn(name="reserve")
+        async def reserve(root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
+            rec("reserve", root, reservation_id, kind, usd)
+            return turn(self.reservations, kind, Reservation(True))
+
+        @activity.defn(name="settle")
+        async def settle(root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
+            rec("settle", root, reservation_id, usd, fetched_bytes)
+
+        @activity.defn(name="assess")
+        async def assess(
+            issue: int,
+            round_id: str,
+            gate: str,
+            subject_kind: str,
+            subject_ref: str,
+            verdict: str,
+            by: str,
+            summary: str = "",
+            supersedes: str | None = None,
+        ) -> AssessmentWritten:
+            rec("assess", gate, subject_kind, subject_ref, verdict, by, summary)
+            refused = "rejected by human:bob at t: wrong channel"
+            return AssessmentWritten("as-1", self.assess_authorized, "" if self.assess_authorized else refused)
+
+        @activity.defn(name="revoke_dataset")
+        async def revoke_dataset(issue: int, round_id: str, actor: str, event_id: str) -> Revocation:
+            rec("revoke_dataset", round_id, actor, event_id)
+            return self.revocation
+
+        @activity.defn(name="prepare_judge")
+        async def prepare_judge(
+            issue: int,
+            round_id: str,
+            gate: str,
+            crop_ws: str,
+            verify_ws: str,
+            verified: list[dict],
+            attempt: int = 1,
+            tag: str = "",
+        ) -> str:
+            rec("prepare_judge", gate, crop_ws, verify_ws, len(verified), tag)
+            return f"/w/{round_id}/judge-{gate}-{tag}-{attempt}"
+
+        @activity.defn(name="read_judge")
+        async def read_judge(
+            issue: int, round_id: str, ws: str, gate: str, subject_kind: str, subject_ref: str, mode: str
+        ) -> JudgeResult:
+            rec("read_judge", ws, gate, subject_kind, subject_ref, mode)
+            return self.judge_result
 
         @activity.defn(name="adopt_pr_binding")
         async def adopt_pr_binding(round_id: str, pr: int, sha: str) -> dict:
@@ -250,6 +347,14 @@ class Mocks:
             set_crop_status,
             tree_sha,
             adopt_pr_binding,
+            paused,
+            reserve,
+            settle,
+            assess,
+            revoke_dataset,
+            prepare_judge,
+            read_judge,
+            kill_job,
         ]
 
     def await_act(self):
@@ -335,19 +440,16 @@ async def reject_review(h, m, eid="12", dt=1):
     await approve_review(h, m, eid, dt, kind="reject")
 
 
-async def test_a_stage_write_does_not_hold_the_round(env):
-    """stage-write-async: the match job is submitted while GitHub still owes the `matching` label; a final stage
-    (needs-human here, from the failed match) waits for its write."""
-    m = Mocks(outcome="blocked", slow_stages={"matching", "needs-human"})
+async def test_a_round_waits_for_its_stage_write(env):
+    """stage-write-awaited: buffer-api checks an action against the registry's stage, so the stage may not lag
+    the round: the match job is not submitted until the `matching` write has landed (spec webapp-actions §6)."""
+    m = Mocks(outcome="blocked", slow_stages={"matching"})
     async with started(env, m) as h:
-        await until(lambda: m.of("submit"))
-        assert m.stages == [] and m.of("submit")[0][1] == "match"
-        # open the gate once the final write waits: the matching write's cancel went first, so its completion
-        # cannot race the cancel (the test server answers that race with ACTIVITY_UNKNOWN and a failed task)
-        await until(lambda: ("needs-human",) in m.of("stage_waits"))
+        await until(lambda: ("matching",) in m.of("stage_waits"))
+        assert "submit" not in m.names() and m.stages == []
         m.stage_gate.set()
         await idle(h, m, "needs-human")
-    assert m.stages == ["matching", "needs-human"]
+    assert m.stages == ["matching", "needs-human"] and m.of("submit")[0][1] == "match"
 
 
 async def test_match_crops_review_approve_publishes_that_set(env):
@@ -582,11 +684,15 @@ async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke
     assert m.stages == ["matching", "needs-human"] and "no data" in m.of("set_stage")[-1][1]
 
 
-async def test_a_failed_smoke_job_still_releases_the_raw_lock(env):
-    m = Mocks(states={"smoke": ("EXIT", 2)})
+async def test_a_failed_smoke_job_still_releases_the_raw_lock_and_posts_its_own_errors(env):
+    """harness smoke exits 1 on any error: the issue gets smoke.json's errors, read after the lock is released."""
+    m = Mocks(states={"smoke": ("EXIT", 2)}, smoke=SmokeResult(False, errors=["peer closed connection"]))
     async with started(env, m) as h:
         await idle(h, m, "needs-human")
-    assert "read_smoke" not in m.names() and m.of("release_lock") == [("raw", "rec-1", "mia-data i7-e11 smoke")]
+    assert m.of("release_lock") == [("raw", "rec-1", "mia-data i7-e11 smoke")]
+    assert m.of("read_smoke") == [("/w/i7-e11/smoke-1", None)]  # no raw asset row for a failed job
+    assert m.names().index("release_lock") < m.names().index("read_smoke")
+    assert m.of("set_stage")[-1][1] == "smoke job job-mia-7-i7-e11-smoke-1 ended EXIT (exit 2): peer closed connection"
 
 
 # --- the development path (§7.3) ------------------------------------------------------------
@@ -736,7 +842,7 @@ async def test_stale_and_misplaced_rejects_are_refused(env):
         await until(lambda: len(m.of("refuse_label")) == 2)
         await idle(h, m, "review")
     assert [(a[0], a[2]) for a in m.of("refuse_label")] == [("data:reject", "12"), ("data:reject", "13")]
-    assert "data:review" in m.of("refuse_label")[0][1] and "older" in m.of("refuse_label")[1][1]
+    assert "at `review`" in m.of("refuse_label")[0][1] and "older" in m.of("refuse_label")[1][1]
     assert not m.of("read_feedback") and m.stages[-1] == "review"
 
 
@@ -968,30 +1074,8 @@ def pr(n, ref, sha, state="open", repo="o/snippets"):
 
 def _poll(tmp_path, data, snip):
     fc = FakeClient()
-    return Activities(make_cfg(tmp_path), data, snip, None, None, bot="bot", client=fc), fc
-
-
-async def test_poll_starts_a_round_per_go_and_refuses_an_unprivileged_label(tmp_path):
-    at = "2026-10-12T10:00:00Z"
-    data = PollGH(
-        "o/data",
-        issues={1: issue(1, "data:go", "licence-excluded"), 2: issue(2, "data:go"), 3: issue(3, "data:approve")},
-        events={
-            (1, "data:go"): ("alice", "51", at),
-            (2, "data:go"): ("alice", "52", at),
-            (3, "data:approve"): ("mallory", "53", at),
-        },
-        perms={"alice": "write"},
-    )
-    a, fc = _poll(tmp_path, data, PollGH("o/snippets"))
-    await a.poll()
-    started_ids = sorted(kw["id"] for _, _, kw in fc.started)  # a stale `licence-excluded` label refuses nothing
-    assert started_ids == ["mia-data/o/data/issue-1", "mia-data/o/data/issue-2"]
-    (_, arg, kw) = next(s for s in fc.started if s[2]["id"].endswith("issue-2"))
-    assert (arg, kw["task_queue"], kw["start_signal"]) == (DatasetState(2), "mia-data", "go")
-    assert kw["start_signal_args"] == [LabelEvent("go", "52", "alice", at)]
-    assert sorted(data.removed) == [(1, "data:go"), (2, "data:go"), (3, "data:approve")]
-    assert "mallory" in data.comments[3][0]["body"] and 1 not in data.comments and 2 not in data.comments
+    cfg = make_cfg(tmp_path, service={"url": "http://svc.example.org:8765"})
+    return Activities(cfg, data, snip, None, None, bot="bot", client=fc), fc
 
 
 async def test_poll_sets_status_for_non_snippet_pr(tmp_path):
@@ -1047,6 +1131,8 @@ async def test_poll_signals_a_pr_only_when_it_changes(tmp_path):
 HISTORY = Path(__file__).parent / "fixtures" / "mia" / "dataset_history.json"
 DEVELOP_HISTORY = HISTORY.with_name("develop_history.json")
 LOCK_HISTORY = HISTORY.with_name("dataset_history_c.json")
+CANCEL_HISTORY = HISTORY.with_name("dataset_history_cancel.json")
+AWAITED_HISTORY = HISTORY.with_name("dataset_history_b.json")
 
 
 def _scrub(obj):
@@ -1098,18 +1184,396 @@ async def test_replay_dataset_history_c(env):
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 
-async def test_poll_accepts_go_only_from_listed_bot(tmp_path):
-    at = "2026-10-12T10:00:00Z"
-    data = PollGH(
-        "o/data",
-        issues={1: issue(1, "data:go"), 2: issue(2, "data:go")},
-        events={(1, "data:go"): ("mia-bot[bot]", "61", at), (2, "data:go"): ("other[bot]", "62", at)},
+async def test_replay_dataset_history_b(env):
+    """The match → done run under the `stage-write-awaited` patch (every stage write is awaited), as
+    test_replay_dataset_history. Re-record this one alone, so the older fixtures keep their paths:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_b"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks()
+        async with started(env, m) as h:
+            await approve_review(h, m)
+            await idle(h, m, "done")
+            AWAITED_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-stage-awaited", AWAITED_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def cancelled_mid_match(h, m):
+    """Cancel the round while its match job runs, then let the abandoned wait end."""
+    await until(lambda: m.of("await"))
+    await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+    await idle(h, m, "cancelled")
+    m.gate.set()
+
+
+async def test_cancel_ends_the_round_kills_its_job_and_a_new_go_starts_over(env):
+    """spec webapp-actions §5: a round in progress is cancelled before anything else is asked of its dataset. The
+    round ends now: its job is killed by id, its reservation settled, and the dataset is `cancelled`."""
+    m = Mocks(gate=asyncio.Event(), gate_on="match")
+    async with started(env, m) as h:
+        await cancelled_mid_match(h, m)
+        job = "job-mia-7-i7-e11-match-1"
+        assert m.of("kill_job") == [(job,)] and m.of("await")[0][0] == job
+        assert [a[1] for a in m.of("settle")] == ["mia-7-i7-e11-match-1"]  # the reservation does not stay open
+        assert m.of("set_stage")[-1][:2] == ("cancelled", "cancelled by alice") and "read_match" not in m.names()
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await idle(h, m, "review")
+    assert m.stages == ["matching", "cancelled", "matching", "testing", "review"]
+    assert not m.of("refuse_label")
+
+
+async def test_cancel_at_review_ends_the_round_and_releases_nothing_twice(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        assert m.of("kill_job") == [] and "publish_crops" not in m.names()  # no job was running
+        fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
+        await h.signal(MiaDataDataset.approve, ev("approve", "13", shift(fin, 5)))  # the set is no longer under review
+        await until(lambda: m.of("refuse_label"))
+    assert m.stages[-1] == "cancelled" and m.of("refuse_label")[0][0] == "data:approve"
+
+
+async def test_a_cancel_with_no_round_running_is_refused(env):
+    m = Mocks(outcome="blocked")
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await until(lambda: m.of("refuse_label"))
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))  # a redelivery: answered once
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await idle(h, m, "needs-human")
+    assert [a[0] for a in m.of("refuse_label")] == ["data:cancel"] and "no round" in m.of("refuse_label")[0][1]
+    assert m.stages == ["matching", "needs-human", "matching", "needs-human"] and m.of("kill_job") == []
+
+
+async def test_cancel_while_the_shadow_judge_job_runs_ends_the_round_and_publishes_nothing(env):
+    """The stage is `review` and the crop judge's job still runs: a cancel landing in that wait must not be caught
+    by the judge's best-effort handler, or the round would go on and a later approve would publish a set that
+    then reads `cancelled`."""
+    m = Mocks(crop_judge="shadow", gate=asyncio.Event(), gate_on="judge")
+    async with started(env, m) as h:
+        await until(lambda: any("judge" in call[1] for call in m.of("await")))
+        assert m.stages[-1] == "review"
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        m.gate.set()
+        judge_job = next(call[0] for call in m.of("await") if "judge" in call[1])
+        assert m.of("kill_job") == [(judge_job,)] and "publish_crops" not in m.names()
+        assert not any("did not run to the end" in call[0] for call in m.of("comment"))  # not mistaken for a failure
+        fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
+        await h.signal(MiaDataDataset.approve, ev("approve", "13", shift(fin, 5)))
+        await until(lambda: m.of("refuse_label"))
+    assert m.stages[-1] == "cancelled" and "publish_crops" not in m.names()
+
+
+async def test_cancel_while_a_job_is_being_submitted_kills_the_job_that_was_submitted(env):
+    """A submit in flight is not interrupted by a cancel: the cluster gets the job. The round must wait for the
+    submit to answer, then kill that job, or it runs on with nobody waiting on it."""
+    m = Mocks(submit_gate=asyncio.Event(), gate=asyncio.Event(), gate_on="match")
+    async with started(env, m) as h:
+        await until(lambda: m.of("submit"))
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await asyncio.sleep(0.5)
+        assert m.stages == ["matching"]  # not cancelled while the job's fate is unknown
+        m.submit_gate.set()  # the cluster has the job now
+        await idle(h, m, "cancelled")
+        m.gate.set()
+    assert m.of("kill_job") == [("job-mia-7-i7-e11-match-1",)]
+    assert [a[1] for a in m.of("settle")] == ["mia-7-i7-e11-match-1"]
+
+
+async def test_a_job_that_cannot_be_killed_is_said_and_the_dataset_needs_a_human(env):
+    m = Mocks(gate=asyncio.Event(), gate_on="match", kill_error="the broker is away")
+    async with started(env, m) as h:
+        await until(lambda: m.of("await"))
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "needs-human")
+        m.gate.set()
+    detail = m.of("set_stage")[-1][1]
+    assert "job-mia-7-i7-e11-match-1" in detail and "may still be running" in detail and "the broker is away" in detail
+    assert "cancelled" not in m.stages
+
+
+async def test_cancel_kills_the_job_before_the_raw_lock_is_released(env):
+    """One writer per raw cache: the lock a job ran under is given up only once the job is dead."""
+    m = Mocks(gate=asyncio.Event(), gate_on="smoke")
+    async with started(env, m) as h:
+        await until(lambda: any("smoke" in call[1] for call in m.of("await")))
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        m.gate.set()
+    names = m.names()
+    assert names.index("kill_job") < names.index("release_lock") and m.of("release_lock")
+
+
+async def test_a_cancel_that_arrives_when_a_rollover_is_due_is_acted_on_not_lost(env, monkeypatch):
+    due = {"on": False}
+    monkeypatch.setattr(workflows, "_rollover_due", lambda: due["on"] and workflow.info().continued_run_id is None)
+    m = Mocks()
+    async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
+        await idle(h, m, "review")
+        due["on"] = True  # the history has grown past the server's suggestion: the next activation sees it
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+
+
+async def test_run_again_after_cancelling_a_develop_round_reuses_its_snippet_issue(env):
+    """A cancel while autodev writes the snippet leaves its issue and PR open; the next round must not ask
+    autodev for the same snippet a second time."""
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await until(
+            lambda: len(m.of("open_snippet_issue")) == 2 or m.stages[-1:] == ["developing"] and len(m.stages) > 3
+        )
+        await until(lambda: m.stages.count("developing") == 2)
+    remembered = [call[1] for call in m.of("open_snippet_issue")]
+    assert remembered[0] is None and (
+        len(remembered) == 1 or remembered[1] == 100
+    )  # resumed, or reopened by its number
+
+
+async def test_replay_dataset_history_cancel(env):
+    """A round cancelled while its match job ran, as test_replay_dataset_history. Re-record this one alone:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_cancel"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks(gate=asyncio.Event(), gate_on="match")
+        async with started(env, m) as h:
+            await cancelled_mid_match(h, m)
+            CANCEL_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-cancelled", CANCEL_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def test_every_job_is_reserved_against_the_root_and_settled(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert [a[2] for a in m.of("reserve")] == ["match", "smoke", "crop", "verify"]
+    assert [a[1] for a in m.of("reserve")] == [a[0] for a in m.of("submit")]  # the reservation id is the job key
+    assert [a[0] for a in m.of("reserve")] == [PINS.root] * 4 and m.of("reserve")[0][3] == 5.0  # the agent's cap
+    assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")]  # one settle per reservation
+    assert m.names().index("reserve") < m.names().index("submit")
+
+
+async def test_a_refused_reservation_ends_the_round_naming_the_root(env):
+    reason = "root o/data#7: usd 99.00 reserved or spent + 5.00 would exceed max_usd 100"
+    m = Mocks(reservations={"match": Reservation(False, reason)})
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert "submit" not in m.names()
+    assert m.of("set_stage")[-1][1] == f"root budget: {reason}"
+
+
+async def test_a_paused_operator_stops_the_round_before_its_first_job(env):
+    m = Mocks(paused=True)
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
+
+
+# --- human verdicts are assessments -------------------------------------------------
+
+
+async def test_an_approve_is_written_as_an_assessment_before_the_crops_are_published(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m, eid="12")
+        await idle(h, m, "done")
+    (assessed,) = m.of("assess")  # the subject is <round id>:<test id>
+    assert assessed[:2] == ("crops", "crop_set") and assessed[2].startswith("i7-e11:")
+    assert assessed[3:5] == ("approve", "human:alice")
+    assert m.names().index("assess") < m.names().index("publish_crops")
+
+
+async def test_an_approve_the_policy_refuses_publishes_nothing(env):
+    m = Mocks(assess_authorized=False)
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "needs-human")
+    assert "publish_crops" not in m.names()
+    assert m.of("set_stage")[-1][1] == (
+        "approve recorded as as-1, but publication is not authorized: rejected by human:bob at t: wrong channel"
     )
-    fc = FakeClient()
-    cfg = make_cfg(tmp_path, github={"trusted_bots": ["mia-bot[bot]"]})
-    a = Activities(cfg, data, PollGH("o/snippets"), None, None, bot="bot", client=fc)
-    await a.poll()
-    ((wf, arg, kw),) = fc.started
-    assert (arg, kw["start_signal_args"]) == (DatasetState(1), [LabelEvent("go", "61", "mia-bot[bot]", at)])
-    assert sorted(data.removed) == [(1, "data:go"), (2, "data:go")]
-    assert 1 not in data.comments and "does not have write access" in data.comments[2][0]["body"]
+
+
+async def test_a_reject_is_written_as_an_assessment(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await reject_review(h, m)
+        await until(lambda: m.of("open_snippet_issue"))
+    assert [a[3:5] for a in m.of("assess")] == [("reject", "human:alice")]
+
+
+async def test_pr_head_verdicts_are_assessed_on_the_head_sha(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await happy(h, m)
+    assert m.of("assess")[-1][:5] == ("crops", "pr_head", H1, "approve", "human:alice")
+    assert m.names().index("assess") < m.names().index("comment", m.names().index("assess"))  # before `/approve`
+
+
+# --- revoking a published dataset ----------------------------------------------------
+
+REVOKE_AT = "2030-01-01T00:00:00Z"
+
+
+async def test_revoke_after_done_ends_in_needs_human_and_lists_the_blast_radius(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
+        await idle(h, m, "needs-human")
+    assert m.of("revoke_dataset") == [("i7-e11", "alice", "77")]
+    detail, extra = m.of("set_stage")[-1][1:3]
+    assert (
+        detail == "revoked by alice: the dataset row is `revoked`, 1 artifact quarantined; running it again repairs it"
+    )
+    assert "art1" in extra and "i3-e4" in extra
+
+
+async def test_revoke_during_a_later_review_is_taken_and_ends_the_round(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
+        await idle(h, m, "needs-human")
+    assert m.of("revoke_dataset") == [("i7-e13", "alice", "77")] and len(m.of("publish_crops")) == 1
+
+
+async def test_revoke_with_nothing_published_is_refused(env):
+    m = Mocks(outcome="blocked", revocation=Revocation(""))  # the activity finds no manifest
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+        await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
+        await until(lambda: m.of("refuse_label"))
+    assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this dataset has published no crops")
+    assert len(m.of("revoke_dataset")) == 1
+
+
+async def test_a_refused_revoke_during_review_leaves_the_round_under_review(env):
+    m = Mocks(revocation=Revocation(""))
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
+        await until(lambda: m.of("refuse_label"))
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert m.of("refuse_label")[-1][0] == "data:revoke" and len(m.of("publish_crops")) == 1
+
+
+async def test_a_failed_submit_settles_its_reservation(env):
+    m = Mocks(submit_error="csub refused the job")
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")] == [m.of("submit")[0][0]]
+
+
+async def test_a_pause_mid_round_stops_at_the_next_job(env):
+    m = Mocks(paused=[False, True])
+    async with started(env, m) as h:
+        await idle(h, m, "needs-human")
+    assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
+    assert m.of("prepare_match")  # the round got past admission and stopped at its first job
+
+
+async def test_a_concurrency_refusal_waits_and_tries_again(env):
+    busy = Reservation(False, "root o/data#7: 20 jobs running, max_concurrent_jobs 20", wait=True)
+    m = Mocks(reservations={"match": [busy, Reservation(True)]})
+    async with started(env, m) as h:
+        await until(lambda: m.of("reserve"))
+        await env.sleep(timedelta(minutes=3))  # past the first wait (poll_minutes)
+        await idle(h, m, "review")
+    assert [a[2] for a in m.of("reserve")][:2] == ["match", "match"] and len(m.of("submit")) == 4
+
+
+# --- the crop judge in shadow (spec autonomous-gates §9) -------------------------------------------------
+
+
+async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env):
+    m = Mocks(crop_judge="shadow")
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        names = m.names()
+        assert names.index("comment") < names.index("prepare_judge") < names.index("read_judge")
+        assert m.stages.index("review") < len(m.stages) and names.index(
+            "set_stage", names.index("comment")
+        ) < names.index("prepare_judge")  # the gate opens first
+        (prepared,) = m.of("prepare_judge")
+        assert (
+            prepared[0] == "crops" and prepared[3] == 16 and prepared[4] == SHA[:12]
+        )  # every verified crop is evidence
+        judged = [a for a in m.of("submit") if a[1] == "judge"]
+        assert len(judged) == 1 and judged[0][2].workspace == f"/w/i7-e11/judge-crops-{SHA[:12]}-1"
+        (read,) = m.of("read_judge")
+        assert read[1:4] == ("crops", "crop_set", f"i7-e11:i7-e11-{SHA[:12]}") and read[4] == "shadow"
+        judge_comments = [a for a in m.of("comment") if a[1].startswith("judge crops i7-e11")]
+        assert judge_comments == [("Crop judge: approve", f"judge crops i7-e11 {SHA}", "data", None)]
+        assert "publish_crops" not in names  # shadow: the verdict decided nothing
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert "publish_crops" in m.names()
+
+
+async def test_shadow_judge_failure_is_a_comment_not_a_stop(env):
+    m = Mocks(crop_judge="shadow", states={f"judge-crops-{SHA[:12]}": ("FAILED", 1)})
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await until(lambda: [a for a in m.of("comment") if a[1].startswith("judge crops")])
+    assert "read_judge" in m.names()  # the failure is an escalate on record
+    (failed,) = [a for a in m.of("comment") if a[1].startswith("judge crops")]
+    assert failed[0].startswith("The crop judge's judge job job-mia-7-i7-e11-judge-")
+    assert "ended FAILED (exit 1); its verdict is recorded as an escalation." in failed[0]
+    assert m.stages == ["matching", "testing", "review"]
+
+
+async def test_a_refused_reservation_skips_the_shadow_judge_and_the_round_goes_on(env):
+    m = Mocks(crop_judge="shadow", reservations={"judge": [Reservation(False, "would exceed max_usd 1")]})
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await until(lambda: [a for a in m.of("comment") if a[1].startswith("judge crops")])
+        (skipped,) = [a for a in m.of("comment") if a[1].startswith("judge crops")]
+        assert (
+            skipped[0] == "The crop judge was skipped: root budget: would exceed max_usd 1. A person's verdict decides."
+        )
+        assert "prepare_judge" in m.names() and all(a[1] != "judge" for a in m.of("submit"))
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert "publish_crops" in m.names()
+
+
+async def test_judge_off_runs_nothing(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+    assert "prepare_judge" not in m.names() and all(a[1] != "judge" for a in m.of("submit"))
+
+
+async def test_judge_is_budgeted_and_settled(env):
+    m = Mocks(crop_judge="shadow")
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+    (reserved,) = [a for a in m.of("reserve") if a[2] == "judge"]
+    assert reserved[3] == 3.5 and reserved[1].startswith("mia-7-i7-e11-judge-")  # the limits' value, not a default
+    assert any(a[1] == reserved[1] for a in m.of("settle"))
+
+
+async def test_a_pr_heads_set_is_judged_too(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"}, crop_judge="shadow")
+    async with started(env, m) as h:
+        await to_review(h, m)
+    (read,) = m.of("read_judge")
+    assert read[3] == f"i7-e11:i7-e11-{H1[:12]}"
+    names = m.names()
+    status_at = max(i for i, name in enumerate(names) if name == "set_crop_status")
+    assert m.of("set_crop_status")[-1][1] == "success" and status_at < names.index("prepare_judge")  # status first

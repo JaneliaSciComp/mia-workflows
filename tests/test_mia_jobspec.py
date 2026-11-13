@@ -20,6 +20,7 @@ from mia_data.jobspec import (
     crop_job,
     harness_pin,
     harness_snapshot,
+    judge_job,
     match_job,
     match_prompt,
     smoke_job,
@@ -217,10 +218,15 @@ def test_match_job(tmp_path):
     assert s.allow_hosts == sorted(["data.example.org", "cdn.example.net", *cfg.network.package_hosts])
     assert not any("github" in h or "anthropic" in h or "claude" in h for h in s.allow_hosts)
     assert s.agent == "claude" and f"--max-budget-usd {cfg.limits.agent_max_budget_usd}" in s.command
-    assert '--allowedTools "Bash(harness smoke:*),Read,Write,Glob,Grep"' in s.command and "> claude.json" in s.command
+    assert (
+        '--allowedTools "Bash(harness smoke:*),Bash(harness list:*),Read,Write,Glob,Grep"' in s.command
+        and "> claude.json" in s.command
+    )
+    snap = str(cfg.paths.work_root / "_snapshots" / pins.snippets_commit)
+    assert '--tools "Bash,Read,Write,Glob,Grep"' in s.command and "--restricted" in s.command
+    assert "--strict-mcp-config" in s.command and f"--add-dir {snap}" in s.command
     cache = str(cfg.paths.work_root / "_cache" / "rec-1")
     assert cache in s.ro_mounts and s.rw_mounts == [] and s.env["MIA_HARNESS_CACHE_WRITABLE"] == "0"
-    snap = str(cfg.paths.work_root / "_snapshots" / pins.snippets_commit)
     hsnap = str(cfg.paths.work_root / "_harness" / pins.harness_commit)
     assert sorted(s.ro_mounts) == sorted([str(cfg.harness.dir), hsnap, snap, cache]) and snap in s.command
     assert (s.env["MIA_HARNESS_COMMIT"], s.env["MIA_HARNESS_ENV_DIGEST"]) == (pins.harness_commit, pins.env_digest)
@@ -307,3 +313,15 @@ def test_match_prompt_names_pins_and_outcomes(tmp_path):
     for o in ("matched", "needs_snippet", "blocked", "host_not_allowed", "outcome.json"):
         assert o in p
     assert "ineligible" not in p and "256" not in p  # size is the buffer plan's call (spec §12)
+
+
+def test_judge_job_is_read_only_and_short(tmp_path):
+    cfg, ws = _cfg(tmp_path), _ws(tmp_path)
+    s = judge_job(cfg, _args(ws, _pins(cfg)))
+    assert s.agent == "claude" and s.allow_hosts == [] and s.rw_mounts == []
+    assert s.walltime_min == cfg.judge.walltime_min == 30 and s.cpus == 1
+    assert '--allowedTools "Read,Glob,Grep"' in s.command and '--tools "Read,Glob,Grep"' in s.command
+    assert "--restricted" in s.command and "--strict-mcp-config" in s.command and "--add-dir evidence" in s.command
+    assert f"--model {cfg.judge.model}" in s.command and f"--max-budget-usd {cfg.judge.max_budget_usd}" in s.command
+    assert "harness smoke" not in s.command and "Bash" not in s.command.split("claude -p", 1)[1]
+    assert s.env["MIA_HARNESS_CACHE_DIR"] == "" and "_snapshots" not in s.command

@@ -43,6 +43,7 @@ class Pins:
     snippets_commit: str
     harness_commit: str
     env_digest: str
+    root: str = ""  # the root request charged for this round (`<repo>#<issue>`); "" in a history that has none
 
 
 @dataclass
@@ -89,6 +90,7 @@ class DatasetState:
     tests: list[Test] = field(default_factory=list)
     attempts: dict[str, int] = field(default_factory=dict)  # stage -> attempts used
     pending: list[PrUpdate] = field(default_factory=list)  # PR updates not yet acted on
+    published: bool = False  # some round of this issue published crops: there is something a data:revoke withdraws
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:
@@ -120,7 +122,7 @@ class MatchResult:
     reason: str = ""
     binding_path: str | None = None  # matched: the checked binding, under state_dir
     binding_hash: str | None = None
-    shapes: dict | None = None  # wire format: the `ineligible` outcome's shapes until spec §12; unused now
+    shapes: dict | None = None  # wire format: recorded histories carry it; unused
     draft: dict | None = None  # needs_snippet: draft_binding, what_fails, tried
     reasons: list[str] = field(default_factory=list)  # matched: the binding's reasons
 
@@ -130,7 +132,7 @@ class SmokeResult:
     """The worker's own quick check of a binding: can the data be opened and read as the record says?"""
 
     ok: bool
-    eligible: bool = True  # wire format: smoke's size verdict until spec §12; smoke.json no longer sends it
+    eligible: bool = True  # wire format: recorded histories carry it; smoke.json does not send it
     shapes: dict | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -148,6 +150,7 @@ class VerifyResult:
     crops: list[dict]  # verified crops only: [{"crop_id", "files": {rel: sha256}}]
     n_effective: int | None = None  # the crop job's n, lowered by capacity (its report.json); None if unknown
     bytes_fetched: int = 0  # the crop job's, from its report.json
+    crop_errors: list[str] = field(default_factory=list)  # the crop job's own errors (report.json): why it failed
 
 
 @dataclass
@@ -159,6 +162,38 @@ class RoundLimits:
     walltime_min: int
     max_pr_revisions: int = 5  # PR heads tested per round (develop path)
     poll_minutes: int = 2  # how long a round waits between tries of a lock someone else holds
+    agent_max_budget_usd: float = 5.0  # what a match agent run may cost: reserved against the root before it runs
+    crop_judge: str = "off"  # judge.crops.mode: off | shadow | active (spec autonomous-gates §9)
+    judge_max_budget_usd: float = 2.0  # what one judge run may cost: reserved like the match agent's
+
+
+@dataclass
+class AssessmentWritten:
+    """A human verdict recorded as an assessment (spec autonomous-gates §5), and whether the subject is now
+    authorized under the policy; `reason` is the policy's answer either way."""
+
+    id: str
+    authorized: bool
+    reason: str = ""
+
+
+@dataclass
+class Revocation:
+    """What `data:revoke` recorded (spec autonomous-gates §6): the reject assessment superseding the approve, the
+    staged artifacts quarantined and the buffers that drew from the dataset."""
+
+    assessment: str
+    artifacts: list[str] = field(default_factory=list)
+    buffers: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Reservation:
+    """Whether a job may be charged to its root request (spec autonomous-gates §8); `reason` names the cap when not."""
+
+    ok: bool
+    reason: str = ""
+    wait: bool = False  # the refusal is the concurrency cap: wait and ask again rather than fail
 
 
 @dataclass
@@ -174,3 +209,19 @@ class GalleryResult:
     prefix: str
     urls: dict[str, str]  # rel -> ?raw=true URL
     table: str  # the markdown table from render_crops_table
+
+
+@dataclass
+class JudgeResult:
+    """What the judge said about a subject, after policy read it (spec autonomous-gates §4): `verdict` is the
+    judge's own, `effective` what the assessment records (a reject without a `bad` finding is an approve, low
+    confidence is an escalate). `comment` is rendered for the issue; `assessment` is "" without a registry."""
+
+    verdict: str
+    effective: str
+    confidence: float
+    summary: str
+    assessment: str = ""
+    cost_usd: float | None = None
+    comment: str = ""
+    findings: list[dict] = field(default_factory=list)  # <= 64 of {"item", "severity", "note"}

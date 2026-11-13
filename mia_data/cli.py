@@ -1,4 +1,4 @@
-"""The `mia-data` command line: health checks, seeding issues, labels, the worker, the poll schedule, a
+"""The `mia-data` command line: health checks, labels, the worker, the poll schedule, a
 synchronous crop test for snippet PRs and storage maintenance (deployments start and stop with
 `pixi run mia`). Heavy imports happen inside the commands that need them.
 """
@@ -11,6 +11,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -28,7 +29,7 @@ from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from autodev.github import GitHub
 from mia_core.fs import require_local_dir, require_secret_file
 
-from .config import EXTRA_LABELS, HUMAN_LABELS, STAGES, load_config
+from .config import EXTRA_LABELS, STAGES, load_config
 
 if TYPE_CHECKING:
     from .activities import Activities
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("mia_data")
 
-# the catalog's data hosts the broker policy must allow
+# the catalog's data hosts a mia-data job may need: approved on the page when a run starts, or in the base policy
 DATA_HOSTS = [
     "zenodo.org",
     "ftp.ebi.ac.uk",
@@ -77,11 +78,16 @@ def _wanted_hosts(cfg: Config) -> list[str]:
 
 def _csub_problems(cfg: Config, probe: Any, lsf_queues: set[str] | None) -> list[str]:
     """Everything in the broker policy (`csub probe`) that would stop mia-data's jobs: hosts, the agent, env
-    vars, mounts, queues. Each message says what to change in broker.toml."""
+    vars, mounts, queues. Each message says what to change: a host is approved on the page when a run is started
+    (or added to the base policy), everything else is a base policy edit."""
     from .binding import missing_hosts
     from .jobspec import HARNESS_ENV
 
-    problems = [f"host not allowed: {host}" for host in missing_hosts(_wanted_hosts(cfg), list(probe.allowed_hosts))]
+    hint = "approve it on the page when a run is started, or add it to the base policy"
+    problems = [
+        f"host not allowed: {host} ({hint}; a redirect target also goes into network.redirect_hosts)"
+        for host in missing_hosts(_wanted_hosts(cfg), list(probe.allowed_hosts))
+    ]
     if "claude" not in probe.agents:
         problems.append(
             'agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '
@@ -231,22 +237,10 @@ async def cmd_reindex(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-async def cmd_seed(cfg: Config, args: argparse.Namespace) -> int:
-    from .seed import seed
-
-    gh_data, gh_catalog = _gh(cfg, cfg.github.data_repo), _gh(cfg, cfg.github.catalog_repo)
-    try:
-        created = await seed(cfg, gh_data, gh_catalog, args.dry_run)
-    finally:
-        await gh_data.aclose()
-        await gh_catalog.aclose()
-    print(f"{'would create' if args.dry_run else 'created'} {len(created)} issue(s)")
-    return 0
-
-
 async def cmd_init_labels(cfg: Config, args: argparse.Namespace) -> int:
     gh = _gh(cfg, cfg.github.data_repo)
-    labels = {**{cfg.label(kind): spec for kind, spec in {**STAGES, **HUMAN_LABELS}.items()}, **EXTRA_LABELS}
+    # stage labels only: they filter issue lists and the mirror sets them; nothing reads a label as a command
+    labels = {**{cfg.label(kind): spec for kind, spec in STAGES.items()}, **EXTRA_LABELS}
     try:
         for name, (color, description) in labels.items():
             if await gh.ensure_label(name, color, description):
@@ -390,7 +384,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     from autodev.jobs import CsubJobs
 
     from .activities import Activities
-    from .workflows import MiaDataDataset, MiaDataPoll
+    from .mirror import Mirror, dataset_issue, dataset_page
+    from .workflows import MiaDataDataset, MiaDataPoll, MiaMirror
 
     client = await _client(cfg)
     clients = _github_clients(cfg)
@@ -398,11 +393,15 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     activities = Activities(
         cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=bot, client=client
     )
+    # the dataset issues' mirror (spec webapp-actions §7)
+    labels, openers = {"dataset": (cfg.label, STAGES)}, {"dataset": dataset_issue(cfg, clients[2])}
+    pages = {"dataset": dataset_page(cfg)}
+    mirror = [Mirror(clients[0], activities.registry, bot, labels, openers, pages).mirror]
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
-        workflows=[MiaDataDataset, MiaDataPoll],
-        activities=activities.all(),
+        workflows=[MiaDataDataset, MiaDataPoll, MiaMirror],
+        activities=[*activities.all(), *mirror],
         max_concurrent_activities=8,
     )
     await_worker = Worker(
@@ -454,6 +453,80 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_collect_judge_set(cfg: Config, args: argparse.Namespace) -> int:
+    """Build a crop-judge evaluation set (spec autonomous-gates §9) from the rounds a human already labelled: for
+    the newest human verdict on each crop set in the registry, the round's crop and verify workspaces still on disk
+    become `<dir>/<item>/evidence/` through the worker's own builder, and expected.json carries the human verdict and
+    the category `<modality family>/<label kind>`. Rounds whose workspaces are gone are listed as skipped."""
+    import yaml
+
+    from mia_core.judge.evidence import build as build_evidence
+    from mia_core.judge.schema import prompt_text
+    from mia_core.registry import Registry
+    from mia_core.untrusted import read_untrusted
+
+    from .gallery import gallery_files
+
+    if cfg.service is None:
+        print("service.url is not set: no registry to read the human verdicts from", file=sys.stderr)
+        return 1
+    out = Path(args.dir)
+    out.mkdir(parents=True, exist_ok=True)
+    rows = Registry.from_config(cfg.service).assessments(subject_kind="crop_set", gate="crops", limit=1000)
+    newest: dict[str, dict] = {}
+    for row in rows:  # newest first
+        if str(row.get("by", "")).startswith("human:") and row.get("verdict") in ("approve", "reject"):
+            newest.setdefault(row["subject"]["ref"], row)
+    made = 0
+    for ref, row in list(newest.items())[: args.limit]:
+        round_id, _, test_id = ref.partition(":")
+        issue_match, sha12 = re.match(r"i(\d+)-", round_id), test_id.rsplit("-", 1)[-1]
+        if not issue_match or len(sha12) != 12:
+            print(f"skipped {ref}: not a round's crop set")
+            continue
+        round_ws = cfg.paths.work_root / f"issue-{int(issue_match.group(1))}" / round_id
+        crop_ws = next(iter(sorted(round_ws.glob(f"crop-{sha12}*-1"))), None)
+        verify_ws = next(iter(sorted(round_ws.glob(f"verify-{sha12}*-1"))), None)
+        record_file = cfg.paths.state_dir / "rounds" / round_id / "record.yaml"
+        if not (crop_ws and verify_ws and record_file.is_file()):
+            print(f"skipped {ref}: workspaces or record not on disk under {round_ws}")
+            continue
+        try:
+            verify = json.loads(read_untrusted(verify_ws, "verify.json", 16 << 20) or "")  # a job wrote it
+            verified = [
+                {"crop_id": crop["crop_id"], "files": crop["files"]}
+                for crop in verify.get("crops") or []
+                if crop.get("ok")
+            ]
+            files = gallery_files(crop_ws, verify_ws, verified)
+        except (OSError, ValueError, KeyError) as error:
+            print(f"skipped {ref}: {type(error).__name__}: {error}")
+            continue
+        binding = yaml.safe_load(files.pop("binding.yaml")) or {}
+        binding.pop("reasons", None)
+        record = yaml.safe_load(record_file.read_text()) or {}
+        family = ((record.get("imaging") or {}).get("modality") or ["unknown"])[0]
+        kinds = sorted({str(label.get("segmentation_type") or "unknown") for label in binding.get("labels") or []})
+        category = f"{family}/{'+'.join(kinds) or 'none'}"
+        crops = "\n".join(f"- `{crop['crop_id']}`" for crop in verified) or "(no verified crop)"
+        item = out / ref.replace(":", "_").replace("/", "_")
+        build_evidence(
+            item,
+            f"{prompt_text('crops')}\n# The crops in this set\n\n{crops}\n",
+            {**files, "binding.yaml": yaml.safe_dump(binding, sort_keys=False).encode(), "record.yaml": record_file},
+            author_workspace=round_ws / "match-1",
+        )
+        (item / "expected.json").write_text(
+            json.dumps(
+                {"verdict": row["verdict"], "category": category, "by": row["by"], "subject": ref, "at": row["at"]}
+            )
+        )
+        print(f"{item.name}\t{category}\t{row['verdict']}\t{len(verified)} crops")
+        made += 1
+    print(f"{made} items in {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mia-data", description=__doc__)
     parser.add_argument("--config", help="path to mia_data.yaml (default: $MIA_DATA_CONFIG or ./mia_data.yaml)")
@@ -463,16 +536,19 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("reindex", help="rebuild manifest.json with current WITHDRAWN marks").add_argument(
         "dataset", nargs="?"
     )
-    sub.add_parser("seed", help="create one issue per downloaded dataset").add_argument(
-        "--dry-run", action="store_true"
-    )
-    sub.add_parser("init-labels", help="create the stage, human and extra labels on the data repo")
+    sub.add_parser("init-labels", help="create the stage and extra labels on the data repo")
     test_pr = sub.add_parser("test-pr", help="run the test crops on a snippets PR head and post mia-data/crops")
     test_pr.add_argument("pr", type=int)
     test_pr.add_argument("--binding", required=True, help="binding YAML to test (e.g. the PR's examples/<record>.yaml)")
     test_pr.add_argument("--record", required=True, help="catalog record id")
     sub.add_parser("worker", help="run the Temporal workers (main and await queues)")
     sub.add_parser("schedule", help="manage the poll Schedule").add_argument("action", choices=["apply"])
+    collect = sub.add_parser(
+        "collect-judge-set",
+        help="build a crop-judge evaluation set from the rounds a human labelled (`mia judge eval`)",
+    )
+    collect.add_argument("dir")
+    collect.add_argument("--limit", type=int, help="at most N crop sets")
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     _setup_logging(cfg, args.cmd if args.cmd == "worker" else None)
@@ -480,11 +556,11 @@ def main(argv: list[str] | None = None) -> int:
         "check": cmd_check,
         "crops-by-snippet": cmd_crops_by_snippet,
         "reindex": cmd_reindex,
-        "seed": cmd_seed,
         "init-labels": cmd_init_labels,
         "worker": cmd_worker,
         "test-pr": cmd_test_pr,
         "schedule": cmd_schedule,
+        "collect-judge-set": cmd_collect_judge_set,
     }
     return asyncio.run(commands[args.cmd](cfg, args))
 

@@ -91,13 +91,19 @@ def approved(head_sha: str, reviews: list[dict], comments: list[dict], reviewers
 
 
 def feedback(
-    reviews: list[dict], review_comments: list[dict], comments: list[dict], reviewers: Reviewers
+    reviews: list[dict],
+    review_comments: list[dict],
+    comments: list[dict],
+    reviewers: Reviewers,
+    head_sha: str | None = None,
 ) -> list[Feedback]:
     """Change requests from people with write access, oldest first.
 
     A "changes requested" review becomes one Feedback with its inline comments attached; a `/revise` comment
-    becomes one Feedback with the rest of the comment as its text."""
-    items: list[tuple[str, Feedback]] = []  # (timestamp, feedback) for sorting
+    becomes one Feedback with the rest of the comment as its text. With `head_sha`, a request is dropped when
+    its author later approved that head (by review or `/approve`): they withdrew it. Anyone else's stands (spec
+    autonomous-gates §3)."""
+    items: list[Feedback] = []
     for review in reviews:
         if review.get("state") != "CHANGES_REQUESTED" or not reviewers.is_human_writer(_login(review)):
             continue
@@ -108,19 +114,30 @@ def feedback(
             if comment.get("pull_request_review_id") == review["id"]
         ]
         text = "\n".join(filter(None, [review.get("body") or "", *inline])) or "(changes requested, no details)"
-        items.append((review.get("submitted_at") or "", Feedback(f"review-{review['id']}", text)))
+        items.append(Feedback(f"review-{review['id']}", text, _login(review) or "", review.get("submitted_at") or ""))
     for comment in comments:
         if reviewers.is_ours(comment.get("body")):
             continue
         match = REVISE_RE.search(comment.get("body") or "")
         if match and reviewers.may_command(comment, match):
+            text = match.group(1).strip() or "(no details)"
             items.append(
-                (
-                    comment.get("created_at") or "",
-                    Feedback(f"comment-{comment['id']}", match.group(1).strip() or "(no details)"),
-                )
+                Feedback(f"comment-{comment['id']}", text, _login(comment) or "", comment.get("created_at") or "")
             )
-    return [item for _, item in sorted(items, key=lambda pair: pair[0])]
+    approved_at: dict[str, str] = {}  # login -> when they last approved head_sha
+    if head_sha:
+        for review in reviews:
+            if review.get("state") == "APPROVED" and review.get("commit_id") == head_sha and (login := _login(review)):
+                approved_at[login] = max(approved_at.get(login, ""), review.get("submitted_at") or "")
+        for comment in comments:
+            if reviewers.is_ours(comment.get("body")):
+                continue
+            match = APPROVE_RE.search(comment.get("body") or "")
+            if match and head_sha.startswith(match.group(1)) and reviewers.may_command(comment, match):
+                login = _login(comment) or ""
+                approved_at[login] = max(approved_at.get(login, ""), comment.get("created_at") or "")
+    items = [item for item in items if approved_at.get(item.author, "") <= item.at]
+    return sorted(items, key=lambda item: item.at)
 
 
 def handled_ids(comments: list[dict], reviewers: Reviewers) -> set[str]:

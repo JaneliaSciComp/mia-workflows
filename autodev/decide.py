@@ -21,8 +21,10 @@ def decide(
     """Return (action, detail): the Feedback to act on for REVISE, the reason for ESCALATE, else None.
 
     Pending change requests win over an approval while revisions remain; once the limit is hit, a pending
-    request escalates to a human instead. An escalation already raised (`escalated`) is a WAIT: the PR
-    is in a human's hands until something about it changes."""
+    request escalates to a human instead, approved or not: an approval never outranks a request someone else
+    still holds (the activity already dropped requests their own author withdrew by approving, spec
+    autonomous-gates §3). An escalation already raised (`escalated`) is a WAIT: the PR is in a human's hands
+    until something about it changes."""
 
     def escalate(reason: str) -> tuple[str, str | None]:
         return (WAIT, None) if escalation(reason, snapshot) == escalated else (ESCALATE, reason)
@@ -34,6 +36,8 @@ def decide(
     pending = [item for item in snapshot.feedback if item.id not in handled]
     if pending and revisions < max_revisions:
         return REVISE, pending[0]
+    if pending and snapshot.approved:
+        return escalate(f"approved with unaddressed change requests (revision limit {max_revisions} reached)")
     if snapshot.approved:
         if snapshot.checks in ("success", "none"):
             return MERGE, None

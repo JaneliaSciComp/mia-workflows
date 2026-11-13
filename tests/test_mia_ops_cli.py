@@ -24,7 +24,7 @@ def test_help_lists_commands(capsys):
         cli.main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("up", "down", "restart", "ps", "logs", "attach", "exec", "init-token"):
+    for cmd in ("up", "down", "restart", "ps", "logs", "attach", "exec", "init-token", "pause", "resume"):
         assert cmd in out
 
 
@@ -102,9 +102,9 @@ def test_attach(stack, fake):  # noqa: F811
 
 
 def test_exec_runs_the_app_cli_with_its_config(stack, fake, tmp_path):  # noqa: F811
-    assert cli.main(["exec", "mia-data", "seed", "--dry-run"]) == 0
+    assert cli.main(["exec", "mia-data", "reindex", "rec-1"]) == 0
     argv, kw = fake.calls[-1]
-    assert argv == [str(services.PY), "-m", "mia_data.cli", "seed", "--dry-run"]
+    assert argv == [str(services.PY), "-m", "mia_data.cli", "reindex", "rec-1"]
     assert kw["env"]["MIA_DATA_CONFIG"] == f"{tmp_path}/mia_data.yaml"
 
 
@@ -116,6 +116,28 @@ def test_exec_passes_the_service_name(tmp_path, fake, monkeypatch):  # noqa: F81
     assert argv[1:3] == ["-m", "mia_buffers.cli"] and kw["env"]["MIA_SERVICE"] == "mia-buffers"
 
 
+def test_exec_uses_the_services_broker_when_it_is_running(tmp_path, fake, monkeypatch):  # noqa: F811
+    s = make_stack_v2(tmp_path)
+    monkeypatch.setattr(cli, "load_manifest", lambda _: s.manifest)
+    monkeypatch.delenv("CSUB_TRANSPORT", raising=False)
+    monkeypatch.delenv("CSUB_SOCKET", raising=False)
+
+    def exec_env() -> dict:
+        assert cli.main(["exec", "mia-data", "status"]) == 0
+        return fake.calls[-1][1]["env"]
+
+    env = exec_env()  # not running, no socket: the operator's own csub client config
+    assert "CSUB_TRANSPORT" not in env and "CSUB_SOCKET" not in env
+    sock = tmp_path / "scratch/me/mia-data/csub.sock"
+    sock.parent.mkdir(parents=True)
+    sock.touch()
+    env = exec_env()  # the socket a killed broker left behind
+    assert "CSUB_TRANSPORT" not in env and "CSUB_SOCKET" not in env
+    fake.running.add("mia-data")
+    env = exec_env()
+    assert env["CSUB_TRANSPORT"] == "unix" and env["CSUB_SOCKET"] == str(sock)
+
+
 def test_init_token_writes_once_with_mode_600(tmp_path, fake, monkeypatch, capsys):  # noqa: F811
     s = make_stack_v2(tmp_path)
     (tmp_path / "token").unlink()
@@ -123,3 +145,37 @@ def test_init_token_writes_once_with_mode_600(tmp_path, fake, monkeypatch, capsy
     assert cli.main(["init-token"]) == 0
     assert oct((tmp_path / "token").stat().st_mode & 0o777) == "0o600" and len((tmp_path / "token").read_text()) == 64
     assert cli.main(["init-token"]) == 0 and "exists" in capsys.readouterr().err
+
+
+def test_pause_and_resume_edit_the_manifest(stack, tmp_path, monkeypatch):  # noqa: F811
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("services: {}\n")
+    monkeypatch.setenv("MIA_CONFIG", str(manifest))
+    assert cli.main(["pause"]) == 0 and "pause: true" in manifest.read_text()
+    assert cli.main(["resume"]) == 0 and "pause: false" in manifest.read_text()
+
+
+def test_judge_eval_cli(stack, tmp_path, monkeypatch, capsys):  # noqa: F811
+    from mia_core.judge.eval import EvalRow
+    from mia_ops import cli as ops_cli
+
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("judge: {model: opus, min_confidence: 0.5}\nservices: {}\n")
+    monkeypatch.setenv("MIA_CONFIG", str(manifest))
+    seen = {}
+
+    def evaluate(eval_dir, cfg, *, limit=None, run=None, max_suspect=None):
+        seen.update(
+            dir=eval_dir, model=cfg.model, min_confidence=cfg.min_confidence, limit=limit, max_suspect=max_suspect
+        )
+        return [
+            EvalRow("a", "confocal/none", "approve", "approve", 0.9, 0.2),
+            EvalRow("b", "confocal/none", "reject", "approve", 0.8, None),
+        ]
+
+    monkeypatch.setattr(ops_cli.judge_eval, "evaluate", evaluate)
+    assert ops_cli.main(["judge", "eval", "crops", str(tmp_path / "set"), "--limit", "2", "--model", "haiku"]) == 0
+    assert seen == {"dir": tmp_path / "set", "model": "haiku", "min_confidence": 0.5, "limit": 2, "max_suspect": 2}
+    out = capsys.readouterr().out
+    assert "a\tconfocal/none\texpected approve\tgot approve\t0.9\t$0.20" in out and "\tgot approve\t0.8\t-" in out
+    assert "| confocal/none | 2 | 1 | 1 | 0 | 0 |" in out and "| all | 2 | 1 | 1 | 0 | 0 |" in out

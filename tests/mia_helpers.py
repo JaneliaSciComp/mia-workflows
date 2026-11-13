@@ -5,6 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
+
+from mia_core.registry import Registry
 from mia_data.config import Config
 
 
@@ -107,3 +110,15 @@ class FakeGH:
         self.files[path] = content
         self.puts.append(path)
         return True
+
+
+def registry_for(service) -> Registry:
+    """A registry client whose requests go straight to `service.handle` (a `BufferService` in this process)."""
+
+    def handler(request):
+        status, payload, _ = service.handle(
+            request.method, request.url.raw_path.decode().split("?")[0], dict(request.url.params), request.content
+        )
+        return httpx.Response(status, json=payload)
+
+    return Registry("http://svc", None, transport=httpx.MockTransport(handler))

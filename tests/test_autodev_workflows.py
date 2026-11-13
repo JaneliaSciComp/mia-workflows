@@ -23,6 +23,8 @@ from autodev.models import (
     IssueInput,
     JobOutcome,
     JobRef,
+    JudgeInput,
+    JudgeOutcome,
     MergeInput,
     MergeResult,
     ObserveInput,
@@ -61,6 +63,9 @@ class Mocks:
         observe_failures=0,
         report_failures=0,
         observe_fatal=False,
+        judge=False,
+        judge_state="DONE",
+        judge_gate=None,
     ):
         self.observe_failures, self.report_failures, self.reported = observe_failures, report_failures, 0
         self.observe_fatal = observe_fatal
@@ -68,6 +73,8 @@ class Mocks:
         self.snaps = list(snaps)
         self.existing_pr, self.job_state, self.exit_code = existing_pr, job_state, exit_code
         self.publish_pr, self.await_failures, self.merge_ok = publish_pr, await_failures, merge_ok
+        self.judge, self.judge_state = judge, judge_state  # judge.review.mode on, and how its job ends
+        self.judge_gate = judge_gate  # an asyncio.Event the judge's await waits on, to hold the judge back
 
     def acts(self):
         @activity.defn(name="set_stage")
@@ -100,6 +107,21 @@ class Mocks:
                 return PrRef(self.publish_pr, "h1" if self.publish_pr else None)
             return PrRef(a.pr, f"h{a.round}")
 
+        @activity.defn(name="prepare_judge")
+        async def prepare_judge(a: JudgeInput) -> str:
+            self.calls.append(("prepare_judge", a))
+            return f"{a.workspace.dir}/judge-review" if self.judge else ""
+
+        @activity.defn(name="submit_judge")
+        async def submit_judge(a: SubmitInput) -> JobRef:
+            self.calls.append(("submit_judge", a))
+            return JobRef(f"judge-{a.round}", 30)
+
+        @activity.defn(name="read_judge")
+        async def read_judge(a: JudgeInput) -> JudgeOutcome:
+            self.calls.append(("read_judge", a))
+            return JudgeOutcome("approve", "approve", 0.9, "fine", "as-1", 0.5)
+
         @activity.defn(name="observe_pr")
         async def observe(a: ObserveInput) -> PrSnapshot:
             self.calls.append(("observe", a.pr))
@@ -126,7 +148,20 @@ class Mocks:
                 raise ApplicationError("github 502")
             self.reported += 1
 
-        return [set_stage, comment, find_pr, prepare, submit, publish, observe, merge, report]
+        return [
+            set_stage,
+            comment,
+            find_pr,
+            prepare,
+            submit,
+            publish,
+            observe,
+            merge,
+            report,
+            prepare_judge,
+            submit_judge,
+            read_judge,
+        ]
 
     def await_act(self):
         @activity.defn(name="await_agent")
@@ -135,6 +170,10 @@ class Mocks:
             if self.await_failures:
                 self.await_failures -= 1
                 raise ApplicationError("worker died mid-await")
+            if a.job_id.startswith("judge-"):
+                if self.judge_gate is not None:
+                    await self.judge_gate.wait()
+                return JobOutcome(a.job_id, self.judge_state, 0 if self.judge_state == "DONE" else 1)
             return JobOutcome(a.job_id, self.job_state, self.exit_code)
 
         return [await_agent]
@@ -208,9 +247,10 @@ async def test_feedback_revised_once(env):
     assert m.of("publish")[1].feedback_id == "review-1" and m.of("merge")[0].sha == "h2"
 
 
-async def test_revision_limit_escalates_but_approval_still_merges(env):
+async def test_revision_limit_escalates_and_the_requesters_approval_merges(env):
+    """`_snapshot` drops a request its author withdrew by approving, so the approving snapshot carries none."""
     f1, f2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
-    m = Mocks([snap(feedback=[f1]), snap(feedback=[f1, f2]), snap(feedback=[f1, f2], approved=True)])
+    m = Mocks([snap(feedback=[f1]), snap(feedback=[f1, f2]), snap(approved=True)])
     assert await run(env, m, IssueInput(7, max_revisions=1)) == "merged"
     assert len(m.of("prepare")) == 2
     assert any("revision limit" in c.body for c in m.of("comment"))
@@ -219,10 +259,18 @@ async def test_revision_limit_escalates_but_approval_still_merges(env):
 async def test_escalation_is_raised_once_then_waits(env):
     f1, f2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
     stuck = snap(feedback=[f1, f2])
-    m = Mocks([snap(feedback=[f1]), stuck, stuck, stuck, snap(feedback=[f1, f2], approved=True)])
+    m = Mocks([snap(feedback=[f1]), stuck, stuck, stuck, snap(approved=True)])
     assert await run(env, m, IssueInput(7, max_revisions=1)) == "merged"
     assert m.names().count("observe") == 5
     assert sum("revision limit" in c.body for c in m.of("comment")) == 1
+
+
+async def test_an_outsiders_pending_request_blocks_the_merge_at_the_limit(env):
+    """An escalation leaves the PR in a human's hands (the workflow keeps watching); closing it ends the run."""
+    f1, f2 = Feedback("review-1", "a", "alice"), Feedback("review-2", "b", "admin")
+    m = Mocks([snap(feedback=[f1]), snap(feedback=[f1, f2], approved=True), snap(state="closed")])
+    assert await run(env, m, IssueInput(7, max_revisions=1)) == "closed"
+    assert any("unaddressed change requests" in c.body for c in m.of("comment")) and "merge" not in m.names()
 
 
 async def test_closed_pr_stops(env):
@@ -310,3 +358,49 @@ async def test_bad_key_is_replaced_by_run_id(env, key):
     assert await run(env, m, IssueInput(7, key=key)) == "merged"
     used = m.of("prepare")[0].key
     assert re.fullmatch(r"[0-9a-f]{8}", used) and m.of("submit")[0].key == used
+
+
+# --- the review judge in shadow (spec autonomous-gates §9) -----------------------------------------------------
+
+
+async def test_review_judge_in_shadow_runs_beside_the_watch_and_never_holds_a_merge(env):
+    import asyncio
+
+    gate = asyncio.Event()
+    m = Mocks([snap(approved=True)], judge=True, judge_gate=gate)
+    tq = f"tq-{uuid.uuid4()}"
+    async with (
+        Worker(env.client, task_queue=tq, workflows=[IssueWorkflow], activities=m.acts()),
+        Worker(env.client, task_queue=tq + "-await", activities=m.await_act()),
+    ):
+        h = await env.client.start_workflow(
+            IssueWorkflow.execute, IssueInput(7), id=f"wf-{uuid.uuid4()}", task_queue=tq
+        )
+        for _ in range(500):  # the PR is approved and merged while the judge's job is still running
+            if "merge" in m.names():
+                break
+            await asyncio.sleep(0.02)
+        assert "merge" in m.names() and "read_judge" not in m.names() and "submit_judge" in m.names()
+        gate.set()
+        assert await h.result() == "merged"
+    names = m.names()
+    assert (
+        names.index("publish") < names.index("prepare_judge") < names.index("submit_judge") < names.index("read_judge")
+    )
+    (prepared,) = m.of("prepare_judge")
+    assert (prepared.pr, prepared.head_sha, prepared.workspace.dir) == (5, "h1", "/w/round-1")
+    assert "judge-1" in m.of("await") and not [c for c in m.of("comment") if "judge" in c.marker]
+
+
+async def test_review_judge_off_runs_nothing_after_publish(env):
+    m = Mocks([snap(approved=True)])
+    assert await run(env, m) == "merged"
+    assert "prepare_judge" in m.names() and "submit_judge" not in m.names() and "read_judge" not in m.names()
+
+
+async def test_review_judge_failure_is_a_comment_not_a_stop(env):
+    m = Mocks([snap(approved=True)], judge=True, judge_state="EXIT")
+    assert await run(env, m) == "merged"
+    assert "read_judge" in m.names()  # the failure is an escalate on record
+    (note,) = [c for c in m.of("comment") if c.marker == "judge-failed h1"]
+    assert note.number == 5 and note.body.startswith("The review judge's job judge-1 ended EXIT (exit 1); its verdict")

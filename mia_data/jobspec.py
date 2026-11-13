@@ -33,6 +33,7 @@ import yaml
 
 from autodev.gitops import GitError, Mirror, git
 from autodev.jobs import JobSpec
+from mia_core.judge.evidence import command as judge_command
 from mia_core.locks import LockDir
 
 from .binding import hosts, missing_hosts, record_urls
@@ -43,7 +44,8 @@ if TYPE_CHECKING:
     from .models import JobArgs, Pins
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-MATCH_TOOLS = "Bash(harness smoke:*),Read,Write,Glob,Grep"
+MATCH_TOOLS = "Bash(harness smoke:*),Bash(harness list:*),Read,Write,Glob,Grep"
+MATCH_AVAILABLE = "Bash,Read,Write,Glob,Grep"  # --tools: what exists; MATCH_TOOLS is what runs unprompted
 HARNESS_ENV = (
     "MIA_HARNESS_JOB_BYTES",
     "MIA_HARNESS_COMMIT",
@@ -71,13 +73,15 @@ class PinMoved(RuntimeError):
 
 
 class HostsNotAllowed(RuntimeError):
-    """A job needs hosts the csub policy doesn't allow. Not retryable: the fix is a broker.toml edit."""
+    """A job needs hosts the csub policy doesn't allow. Not retryable: the fix is approving them on the page when
+    the run is started again, or adding them to the operator's base policy."""
 
     def __init__(self, missing: list[str]):
         self.missing = missing
         super().__init__(
             f"hosts not allowed by the csub policy: {', '.join(missing)} "
-            "(add them to broker.toml, and to network.redirect_hosts if they are redirect targets)"
+            "(approve them on the page when the run is started, or add them to the base policy; "
+            "a redirect target also goes into network.redirect_hosts)"
         )
 
 
@@ -295,12 +299,13 @@ def _spec(
     ro_inputs: list[Path | None],
     record: str | None = None,
     writable: bool = False,
+    walltime_min: int | None = None,
     **kwargs: Any,
 ) -> JobSpec:
     """The JobSpec shared by every kind: harness env vars, mounts, and the wrapper that records the exit code.
 
     `record` enables the per-dataset download cache (read-write when `writable`); `ro_inputs` are extra
-    read-only mounts (None entries are skipped)."""
+    read-only mounts (None entries are skipped); `walltime_min` overrides limits.job_walltime_min."""
     assert_pin(cfg, pins)  # the admitted environment, or no job
     harness_src = harness_snapshot(cfg, pins.harness_commit)  # the admitted source (made at admission; idempotent)
     env = {
@@ -331,7 +336,7 @@ def _spec(
         name=f"{cfg.deployment}-{kind}",
         command=f'set -u\n{prelude}{body}\nrc=$?\necho "$rc" > exit_code\nexit "$rc"\n',
         workspace=str(workspace),
-        walltime_min=cfg.limits.job_walltime_min,
+        walltime_min=walltime_min or cfg.limits.job_walltime_min,
         allow_hosts=allow_hosts,
         ro_mounts=ro_mounts,
         rw_mounts=rw_mounts,
@@ -353,7 +358,8 @@ def match_job(cfg: Config, args: JobArgs) -> JobSpec:
         f"ln -sfn {quote(str(snapshot_dir))} snapshot && \\\n"
         f'claude -p "$(cat prompt.md)" --model {quote(cfg.agent.model)} '
         f"--max-budget-usd {cfg.limits.agent_max_budget_usd} --output-format json \\\n"
-        f'  --allowedTools "{MATCH_TOOLS}" > claude.json 2> claude.err'
+        f'  --allowedTools "{MATCH_TOOLS}" --tools "{MATCH_AVAILABLE}" --restricted --strict-mcp-config \\\n'
+        f"  --add-dir {quote(str(snapshot_dir))} > claude.json 2> claude.err"
     )
     return _spec(
         cfg,
@@ -413,3 +419,22 @@ def verify_job(cfg: Config, args: JobArgs, crops_dir: Path, existing: Path | Non
         + f" --out verify.json; v=$?\nharness preview {crops} --out preview && (exit $v)"
     )  # overlays even if a crop fails
     return _spec(cfg, "verify", Path(args.workspace), args.pins, body, [], [crops_dir, _parent(existing)])
+
+
+def judge_job(cfg: Config, args: JobArgs) -> JobSpec:
+    """The judge (spec autonomous-gates §4): Claude Code with read-only tools over `<workspace>/evidence/`, which
+    prepare_judge wrote. No hosts of its own (Anthropic's come from the csub policy's [agents] table), no dataset
+    cache, no snippet snapshot: it looks at evidence and writes one JSON verdict."""
+    return _spec(
+        cfg,
+        "judge",
+        Path(args.workspace),
+        args.pins,
+        judge_command(cfg.judge.model, cfg.judge.max_budget_usd),
+        [],
+        [],
+        walltime_min=cfg.judge.walltime_min,
+        agent="claude",
+        cpus=1,
+        mem_mb=cfg.agent.mem_mb,
+    )

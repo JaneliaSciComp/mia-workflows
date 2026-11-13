@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -29,9 +30,12 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB
 from autodev.jobs import JobSpec
+from mia_core import autonomy
 from mia_core.assets import cache_missing, raw_asset, read_files_json
+from mia_core.config import manifest_path
 from mia_core.fs import dir_bytes
-from mia_core.locks import heartbeat_through, release_or_log, take_or_holder
+from mia_core.judge import policy
+from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
@@ -39,9 +43,9 @@ from mia_data.binding import hosts as job_hosts
 from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
-from mia_data.models import JobDone, LockTaken
+from mia_data.models import JobDone, LockTaken, Reservation
 from mia_data.publish import prepared_row
-from mia_data.seed import ID_RE, MARKER, render_issue
+from mia_data.seed import ID_RE
 from mia_data.status import render_links, render_stage
 
 from .api import BufferConfig
@@ -53,6 +57,7 @@ from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions,
 from .models import (
     MAX_POLL_MINUTES,
     BindingInfo,
+    BoardAssessed,
     BufferPins,
     BufferState,
     DatasetIssue,
@@ -69,6 +74,8 @@ from .models import (
     QuotaCheck,
     RawStatus,
     RegisterResult,
+    RevokedArtifacts,
+    RevokedSignal,
     SourcingLimits,
     StagedSummary,
     StageJobArgs,
@@ -76,7 +83,6 @@ from .models import (
     job_key,
 )
 from .plan import MANUAL_DROP_NOTE, UNREADABLE, Row, _group_key, build_plan, load_records, plan_hash
-from .poll import run_poll
 from .register import buffer_config, recipe_for, volume_bodies
 from .select import decide_all
 from .spec import SpecError, load_prep_text, load_spec
@@ -94,14 +100,10 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 ROUND_RE = re.compile(r"[ip]\d+-e\d+")  # i<issue>-e<event>: a buffer round; p<issue>-e<event>: a preparation request
 BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
-SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 MANIFEST_SOURCE_MANUAL = "manual"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
 FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
 FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
-DATA_LABEL = "data:{}"  # mia-data's labels on a dataset issue (mia_data.config.Config.label)
-DATA_GO = DATA_LABEL.format("go")
-DATA_IN_PROGRESS = {"matching", "developing", "testing", "pr-ready", "review", "cropping"}
 KEEPER = "keeper"  # the cache keeper's lock owner
 KEEPER_LOCK_TTL_S = 900
 KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, whatever step it is in
@@ -171,12 +173,10 @@ class Activities:
         self._gh_datasets = gh_datasets
         self.registry = Registry.from_config(cfg.service)  # synchronous: call it through asyncio.to_thread
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
-        self._dropped: dict[tuple[int, str], tuple] = {}  # poll: (issue, record) -> incoming/ listing last signalled
-        self._seen_listing: dict[tuple[int, str], tuple] = {}  # poll: the listing seen on the previous pass
 
     @property
     def gh_data(self) -> GitHub:
-        """mia-data's name for the issue repo client (mia_data.poll.deliver_label posts through it)."""
+        """mia-data's name for the issue repo client."""
         return self.gh_issues
 
     @property
@@ -234,31 +234,189 @@ class Activities:
             self.prep_status,
             self.set_prep_stage,
             self.comment_prep,
-            self.poll,
             self.keep,
+            self.paused,
+            self.reserve,
+            self.settle,
+            self.assess_board,
+            self.unregister_volumes,
+            self.revoke_targets,
+            self.revoke_artifacts,
+            self.kill_job,
+            self.prep_cancel,
         ]
+
+    # --- assessments at the staged gate (spec autonomous-gates §5) -----------------------------------
+
+    @activity.defn(name="assess_board")
+    @mia_permanent_errors
+    async def assess_board(self, issue: int, round_id: str, buffer_id: str, verdict: str, by: str) -> BoardAssessed:
+        """Write the gate verdict as one assessment per staged artifact among the buffer's volumes, then ask the
+        policy per artifact; the records of an artifact it does not authorize come back in `refused`. An artifact
+        whose newest assessment is a reject (a revocation) gets no approve: only a deliberate re-judgment or a repair
+        publication supersedes that."""
+        registry = self.registry
+        rows = await asyncio.to_thread(registry.volumes, buffer_id)
+        records: dict[str, list[str]] = {}
+        for row in rows:
+            if row.get("artifact"):
+                records.setdefault(str(row["artifact"]), []).append(str(row["record"]))
+        out = BoardAssessed()
+        for artifact in sorted(records):
+            prior = await asyncio.to_thread(
+                functools.partial(registry.assessments, subject_kind="artifact", subject_ref=artifact)
+            )
+            if standing := policy.refused(prior):  # a revocation stands: a board approve never writes over it
+                out.refused.update(dict.fromkeys(records[artifact], f"rejected by {standing}"))
+                continue
+            asset = await asyncio.to_thread(registry.asset, "staged", artifact) or {}
+            assessment = policy.new_assessment(
+                gate="staged",
+                subject_kind="artifact",
+                subject_ref=artifact,
+                verdict=verdict,
+                by=by,
+                at=time.time(),
+                source_digest=str(asset.get("source_digest") or ""),
+                summary=f"buffer:{verdict} on {buffer_id} by {by.removeprefix('human:')}",
+            )
+            await asyncio.to_thread(registry.put_assessment, assessment)
+            out.assessments.append(assessment["id"])
+            written = await asyncio.to_thread(
+                functools.partial(registry.assessments, subject_kind="artifact", subject_ref=artifact)
+            )
+            auth = policy.authorized(written)
+            if not auth.ok:
+                out.refused.update(dict.fromkeys(records[artifact], auth.reason))
+        return out
+
+    @activity.defn(name="unregister_volumes")
+    @mia_permanent_errors
+    async def unregister_volumes(self, buffer_id: str, record: str) -> list[str]:
+        """Delete every volume of the record from the buffer's registration; returns the ids removed."""
+        registry = self.registry
+        rows = await asyncio.to_thread(registry.volumes, buffer_id)
+        removed = [str(row["id"]) for row in rows if str(row["id"]).startswith(f"{record}/")]
+        for volume_id in removed:
+            await asyncio.to_thread(registry.delete_volume, buffer_id, volume_id)
+        return removed
+
+    # --- buffer:revoke: the records a human named, and their artifacts (spec autonomous-gates §6) -----
+
+    @activity.defn(name="revoke_targets")
+    @mia_permanent_errors
+    async def revoke_targets(self, issue: int, actor: str, until: str) -> list[str]:
+        """The records a revoke names: those of the revoke action whose time is `until` (the workflow passes the
+        event's own time, which is why an action's `at` is stored exactly as sent; spec webapp-actions §6)."""
+        found_subject = await asyncio.to_thread(self.registry.timeline, "buffer", issue)
+        for action in (found_subject or {}).get("actions", []):
+            if action["action"] == "revoke" and action["at"] == until:
+                return [str(record) for record in action["payload"].get("records", [])]
+        return []
+
+    @activity.defn(name="revoke_artifacts")
+    @mia_permanent_errors
+    async def revoke_artifacts(
+        self, round_id: str, buffer_id: str, records: list[str], by: str, summary: str
+    ) -> RevokedArtifacts:
+        """For each distinct artifact among the buffer's volumes of `records`: a reject assessment (gate `staged`)
+        and the quarantine mark on its asset row. Records with no volume in this buffer are left out."""
+        registry, at = self.registry, time.time()
+        rows = await asyncio.to_thread(registry.volumes, buffer_id)
+        wanted = set(records)
+        hit = [row for row in rows if row.get("record") in wanted and row.get("artifact")]
+        out = RevokedArtifacts(volumes=[str(row["id"]) for row in hit])
+        out.records = list(dict.fromkeys(str(row["record"]) for row in hit))
+        for artifact in dict.fromkeys(str(row["artifact"]) for row in hit):
+            reject = policy.new_assessment(
+                gate="staged",
+                subject_kind="artifact",
+                subject_ref=artifact,
+                verdict="reject",
+                by=by,
+                at=at,
+                summary=summary,
+            )
+            await asyncio.to_thread(registry.put_assessment, reject)
+            quarantine = {"quarantined": True, "quarantined_at": at, "quarantined_by": by}
+            await asyncio.to_thread(registry.put_asset, "staged", artifact, quarantine)
+            out.assessments.append(reject["id"])
+        return out
+
+    # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
+
+    @activity.defn(name="paused")
+    async def paused(self) -> bool:
+        """Whether `autonomy.pause` is set in mia.yaml now (re-read: `mia pause` edits the file in place)."""
+        return await asyncio.to_thread(autonomy.paused, manifest_path())
+
+    @activity.defn(name="reserve")
+    async def reserve(self, root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
+        """Charge a job to its root before it launches; a refusal names the cap. A round from before the root
+        pins (empty root) has no budget to check."""
+        if not root:
+            return Reservation(True, "no budget")
+        caps = self.cfg.autonomy.caps()
+        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
+        ok = bool(out.get("ok"))
+        return Reservation(ok, "" if ok else str(out.get("reason", "")), wait=bool(out.get("wait")) and not ok)
+
+    @activity.defn(name="settle")
+    async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
+        """Close the job's reservation with what it cost and moved; an accounting write never fails a round."""
+        if not root:
+            return
+        registry = self.registry
+        await asyncio.to_thread(
+            best_effort,
+            lambda: registry.settle(root, reservation_id, usd=usd, fetched_bytes=fetched_bytes),
+            f"settle {reservation_id}",
+            log,
+        )
 
     # --- helpers -----------------------------------------------------------------------------
 
     def _clean(self, text: str) -> str:
         return neutralize(text, self.gh_issues.tokens())
 
-    async def _comment_once(self, gh: GitHub, number: int, body: str, marker: str) -> str | None:
-        """Post unless the bot already commented with this marker (an outsider's copy does not count)."""
-        for comment in await gh.issue_comments(number):
-            if (comment.get("user") or {}).get("login") == self.bot and marker in (comment.get("body") or ""):
-                return comment.get("html_url")
-        return (await gh.comment(number, body)).get("html_url")
+    async def _post(
+        self,
+        kind: str,
+        issue: int,
+        body: str,
+        marker: str,
+        *,
+        round_id: str | None = None,
+        stage: str | None = None,
+    ) -> None:
+        """Write what a round has to say about its buffer spec (`buffer`) or preparation request (`prep`): a
+        stage, a text (once per marker), or both. It is the subject's stage and a timeline entry in the registry,
+        a required write, and no GitHub call: the mirror copies it to the issue whenever GitHub answers (spec
+        webapp-actions §6, §7)."""
+        write = functools.partial(
+            self.registry.append_entry, kind, issue, body=body, marker=marker, round_id=round_id, stage=stage
+        )
+        await asyncio.to_thread(write)
 
-    async def _swap_label(self, issue: int, want: str, stage_labels: list[str]) -> None:
-        """Leave `want` as the issue's only label among `stage_labels`."""
-        gh = self.gh_issues
-        current = {label["name"] for label in (await gh.get_issue(issue)).get("labels", [])}
-        for name in stage_labels:
-            if name in current and name != want:
-                await gh.remove_label(issue, name)
-        if want not in current:
-            await gh.add_labels(issue, [want])
+    async def _action(self, kind: str | None, number: int, event_id: str) -> dict | None:
+        """The action whose id is this event id; None when the event is not an action (a signal of the keeper's).
+        An action of another subject is an error. `kind` None: either kind."""
+        action = await asyncio.to_thread(self.registry.action, event_id)
+        if action is None:
+            return None
+        if action["number"] != number or (kind is not None and action["kind"] != kind):
+            raise ValueError(f"event {event_id} is not an action on {kind or 'subject'} #{number}")
+        return action
+
+    async def _spec_text(self, kind: str, issue: int, event_id: str, what: str) -> str:
+        """The YAML a round runs: the `spec` its action carries, exactly as it was sent (spec webapp-actions §6)."""
+        action = await self._action(kind, issue, event_id)
+        if action is None:
+            raise ValueError(f"event {event_id} is not an action: a round runs the {what} its action carries")
+        text = action["payload"].get("spec")
+        if not text:
+            raise ValueError(f"action {event_id} carries no {what}")
+        return str(text)
 
     def _round_dir(self, round_id: str) -> Path:
         if not ROUND_RE.fullmatch(round_id):
@@ -350,22 +508,17 @@ class Activities:
     @activity.defn(name="admit")
     @mia_permanent_errors
     async def admit(self, issue: int, event_id: str) -> BufferPins:
-        """Pin the round: the spec from the issue body's one ```yaml fence, the catalog at the spec's ref and
-        the harness checkout. Written once to state_dir/rounds/<round>/; a retry returns the same pins."""
+        """Pin the round: the spec its action carries (see `_spec_text`), the catalog at the spec's ref and the
+        harness checkout. Written once to state_dir/rounds/<round>/; a retry returns the same pins."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
         if (round_dir / "pins.json").is_file():
             return self._pins(round_dir.name)
-        body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")  # GitHub saves CRLF
-        fences = SPEC_FENCE.findall(body)
-        if len(fences) != 1:
-            raise ValueError(
-                f"issue #{issue}: expected exactly one ```yaml block holding the buffer spec, found {len(fences)}"
-            )
+        text = await self._spec_text("buffer", issue, event_id, "buffer spec")
         round_dir.mkdir(parents=True, exist_ok=True)
         spec_path = round_dir / "spec.yaml"
-        write_atomic(spec_path, fences[0])
+        write_atomic(spec_path, text)
         try:
             spec = load_spec(spec_path)
         except SpecError as error:
@@ -375,6 +528,7 @@ class Activities:
             hashlib.sha256(spec_path.read_bytes()).hexdigest(),
             spec.catalog.ref,
             *await asyncio.to_thread(harness_pin, self.cfg),
+            root=self.cfg.root_of(issue),
         )
         await asyncio.to_thread(harness_snapshot, self.cfg, pins.harness_commit)  # freeze the source now
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted
@@ -453,11 +607,11 @@ class Activities:
     async def set_stage(
         self, issue: int, stage: str, state: BufferState | None = None, detail: str = "", extra: str = ""
     ) -> None:
-        """Swap the `buffer:<stage>` label and, within a round, post the stage's comment once."""
+        """Write the buffer spec's stage and, within a round, the stage's timeline entry once."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
-        await self._swap_label(issue, self.cfg.label(stage), [self.cfg.label(other) for other in STAGES])
         if not (state and state.round_id):
+            await self._post("buffer", issue, "", "", stage=stage)
             return
         if (kind := STAGE_EVENTS.get(stage)) is not None:
             buffer, registry = state.buffer_id or state.round_id, self.registry
@@ -477,16 +631,17 @@ class Activities:
             self._clean(extra) if extra else "",
             render_links(links),
         ]
-        await self._comment_once(
-            self.gh_issues, issue, "\n".join(part for part in parts if part) + f"\n{marker}", marker
-        )
+        body = "\n".join(part for part in parts if part) + f"\n{marker}"
+        await self._post("buffer", issue, body, marker, round_id=state.round_id, stage=stage)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
     async def comment(self, issue: int, body: str, marker: str) -> str | None:
-        """Post once per marker. Returns the comment's URL."""
+        """Add an entry to the buffer spec's timeline, once per marker. Returns None (it returned the comment's
+        URL when it posted to GitHub; the signature is recorded in histories)."""
         full_marker = self.cfg.marker(marker)
-        return await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
+        await self._post("buffer", issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
+        return None
 
     @activity.defn(name="comment_plan")
     @mia_permanent_errors
@@ -499,55 +654,66 @@ class Activities:
         marker = self.cfg.marker(f"plan {round_id}{suffix}")
         link = self.cfg.paths.link(self._round_workspace(issue, round_id))
         body = render_plan_comment(self._plan(round_id), link, dropped)
-        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n{marker}", marker)
+        await self._post("buffer", issue, f"{self._clean(body)}\n{marker}", marker, round_id=round_id)
 
     @activity.defn(name="nudge_dataset")
     @mia_permanent_errors
     async def nudge_dataset(self, round_id: str, record: str) -> DatasetIssue:
-        """Hand a dataset without a binding to mia-data (spec §3 step 1): find its issue in the datasets repo by
-        the record marker, open one if there is none (mia-data's own issue body, pinned to the round's catalog
-        ref), and add `data:go` unless mia-data is already working on it or has finished. A stale `data:ineligible`
-        (a verdict mia-data no longer gives, spec §12) is nudged like `new`: mia-data's first stage replaces it."""
+        """Hand a dataset without a binding to mia-data (spec §3 step 1): send its dataset a `go` unless mia-data
+        is already working on it or has finished (see `_nudge`)."""
         return (await self._nudge(round_id, record))[0]
 
-    async def _nudge(self, round_id: str, record: str) -> tuple[DatasetIssue, bool]:
-        """nudge_dataset's work, and whether it opened the dataset issue."""
-        gh, record_yaml = self.gh_datasets, self._record(round_id, record)
-        folder = dataset_folder(record_yaml, record)
-        issue = await gh.find_issue_by_marker(MARKER.format(record))
-        created = issue is None
-        if issue is None:
-            title, body, labels = render_issue(
-                record_yaml,
-                {"record_commit": self._pins(round_id).catalog_ref},
-                self.cfg.github.catalog_repo,
-                self._row(round_id, record)["path"],
-                record,
-            )
-            issue = await gh.create_issue(title, body, labels)
-        number = int(issue["number"])
-        names = {label["name"] for label in issue.get("labels") or []}
-        stages = [name[len("data:") :] for name in names if name.startswith("data:")]
-        stages = [stage for stage in stages if stage not in ("go", "approve")]  # human labels are not stages
-        stage = stages[0] if stages else "new"
-        if stage == "done":
+    async def _nudge(self, round_id: str, record: str, again: bool = False) -> tuple[DatasetIssue, bool]:
+        """nudge_dataset's work, and whether the dataset was started for the first time. The dataset's subject
+        says where it stands; a dataset that needs a round gets a `go` sent to buffer-api with the worker token:
+        actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
+        `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). No issue is
+        searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
+        registry, folder = self.registry, dataset_folder(self._record(round_id, record), record)
+        subject = await asyncio.to_thread(registry.subject, "dataset", record)
+        number, stage = (subject["number"], subject["stage"]) if subject else (0, "new")
+        if stage == "done" and not again:  # `again`: a dataset that is done gets a new round all the same
             path = self.cfg.paths.storage_root / folder
             note = (
-                f"the dataset issue is `data:done` but `{path}` has no binding.yaml with a matching manifest.json: "
-                "run the dataset again (add `data:go` on it) so mia-data publishes both"
+                f"the dataset is `done` but `{path}` has no binding.yaml with a matching manifest.json: "
+                "run it again from its page so mia-data publishes both"
             )
-            return DatasetIssue(number, stage, False, note, folder), created
-        if DATA_GO in names or stage in DATA_IN_PROGRESS:
-            return DatasetIssue(number, stage, False, folder=folder), created
-        await gh.add_labels(number, [DATA_GO])
-        return DatasetIssue(number, stage, True, folder=folder), created
+            return DatasetIssue(number, stage, False, note, folder), False
+        if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
+            return DatasetIssue(number, stage, False, folder=folder), False
+        pins = self._pins(round_id)
+        kind = "prep" if round_id.startswith("p") else "buffer"
+        go = functools.partial(
+            registry.send_action,
+            f"/datasets/{record}/actions",
+            "go",
+            key=f"{round_id}/{record}",
+            actor=f"{kind}:{_issue_of(round_id)}",
+            root=pins.root,
+        )
+        try:
+            try:
+                action = await asyncio.to_thread(go)
+            except RegistryError as error:
+                if error.status != 404:
+                    raise
+                # buffer-api has not seen this record: load the round's catalog ref into it, as the plan does
+                from .cli import catalog_sync
 
-    # --- preparation requests (milestone E) --------------------------------------------------
+                await catalog_sync(self.cfg, self.gh_catalog, registry, pins.catalog_ref)
+                action = await asyncio.to_thread(go)
+        except RegistryError as error:
+            if error.status != 409:
+                raise
+            return DatasetIssue(number, stage, False, folder=folder), False  # a round began meanwhile
+        return DatasetIssue(int(action["number"]), stage, True, folder=folder), subject is None
+
+    # --- preparation requests ----------------------------------------------------------------
 
     @activity.defn(name="prep_admit")
     @mia_permanent_errors
     async def prep_admit(self, issue: int, event_id: str) -> PrepPins:
-        """Pin a preparation request: the prep spec from the issue body's one ```yaml fence, the catalog at its ref
+        """Pin a preparation request: the prep spec its action carries, the catalog at its ref
         and the records it names (or its `select` admits there). Written once to state_dir/rounds/p<issue>-e<event>/
         with a plan.json of {id, path} rows and buffer-shaped pins, so nudge_dataset reads the records as it does a
         buffer round's; a retry returns the same pins."""
@@ -556,14 +722,9 @@ class Activities:
         round_dir = self._round_dir(f"p{int(issue)}-e{event_id}")
         if (round_dir / "prep.json").is_file():
             return PrepPins(**json.loads((round_dir / "prep.json").read_text()))
-        body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")
-        fences = SPEC_FENCE.findall(body)
-        if len(fences) != 1:
-            raise ValueError(
-                f"issue #{issue}: expected exactly one ```yaml block holding the preparation request, found {len(fences)}"
-            )
+        text = await self._spec_text("prep", issue, event_id, "preparation request")
         try:
-            spec = load_prep_text(fences[0])
+            spec = load_prep_text(text)
         except SpecError as error:
             raise ValueError(f"preparation request refused: {error}") from error
         ref = spec.catalog.ref
@@ -589,35 +750,42 @@ class Activities:
                 f"set max_records: {len(records)} in the request to confirm, or split it"
             )
         round_dir.mkdir(parents=True, exist_ok=True)
-        write_atomic(round_dir / "spec.yaml", fences[0])
+        write_atomic(round_dir / "spec.yaml", text)
         write_atomic(
             round_dir / "plan.json", json.dumps({"rows": [{"id": id_, "path": paths[id_]} for id_ in records]})
         )
-        spec_hash = hashlib.sha256(fences[0].encode()).hexdigest()
-        write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(BufferPins(spec_hash, ref, "", ""))))
-        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue))
+        spec_hash, root = hashlib.sha256(text.encode()).hexdigest(), self.cfg.root_of(issue)
+        buffer_pins = BufferPins(spec_hash, ref, "", "", root=root)
+        write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(buffer_pins)))
+        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root, again=spec.again)
         write_atomic(round_dir / "prep.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the request admitted
         return pins
 
     @activity.defn(name="prep_nudge")
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
-        """Hand one requested record to mia-data unless the registry already settled it (prepared or needs-human:
-        GitHub is not touched); otherwise nudge_dataset, its result named for the request's comment."""
+        """Hand one requested record to mia-data unless the registry already settled it (prepared or
+        needs-human); otherwise nudge_dataset, its result named for the request's entry. A request that says
+        `again` hands those over too: the dataset gets a new round, and its row says `in-progress` at once, so
+        the request follows that round instead of settling on what the last one left."""
+        again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
         except RegistryError as error:  # best effort: the dataset issue tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        if (state := (row or {}).get("state")) in ("prepared", "needs-human"):
+        settled = (state := (row or {}).get("state")) in ("prepared", "needs-human")
+        if settled and not again:
             issue = (row or {}).get("issue")
-            return PrepOutcome(record, state, issue if isinstance(issue, int) else None)
-        found, created = await self._nudge(round_id, record)
-        if found.stage == "done":
-            outcome = "done-unpublished"
-        elif found.nudged:
+            return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
+        found, created = await self._nudge(round_id, record, again=again)
+        if settled and found.nudged:
+            await asyncio.to_thread(self.registry.put_dataset, record, state="in-progress")
+        if found.nudged:
             outcome = "opened" if created else "nudged"
-        else:  # data:go present already, or mia-data is working on it
+        elif found.stage == "done":
+            outcome = "done-unpublished"
+        else:  # mia-data is working on it, or it waits for a review
             outcome = "in-progress"
         return PrepOutcome(record, outcome, found.number, found.note)
 
@@ -631,28 +799,30 @@ class Activities:
     @activity.defn(name="set_prep_stage")
     @mia_permanent_errors
     async def set_prep_stage(self, issue: int, stage: str, state: PrepState | None = None, detail: str = "") -> None:
-        """Swap the `prep:<stage>` label and, within a request's round, post the stage's comment once."""
+        """Write the request's stage and, within its round, the stage's timeline entry once."""
         if stage not in PREP_STAGES:
             raise ValueError(f"unknown preparation stage {stage!r}")
-        await self._swap_label(issue, self.cfg.prep_label(stage), [self.cfg.prep_label(other) for other in PREP_STAGES])
         if not (state and state.round_id):
+            await self._post("prep", issue, "", "", stage=stage)
             return
         marker = self.cfg.marker(f"prep stage {state.round_id} {stage}")
         body = render_stage(stage, self._clean(detail), prefix="prep") + f"\n{marker}"
-        await self._comment_once(self.gh_issues, issue, body, marker)
+        await self._post("prep", issue, body, marker, round_id=state.round_id, stage=stage)
 
     @activity.defn(name="comment_prep")
     @mia_permanent_errors
     async def comment_prep(self, issue: int, round_id: str, outcomes: list[PrepOutcome]) -> None:
-        """Post, once per round, what was done for each requested record, with its dataset issue."""
-        repo = self.cfg.github.datasets_repo  # the dataset issues live there: a bare #N would link this repo's
-        lines = ["| record | outcome | issue |", "|---|---|---|"]
+        """Write, once per round, what was done for each requested record, with a link to its dataset's page
+        (a dataset's number is not an issue number, so it is never written as `<repo>#<n>`; spec §4.1)."""
+        base = self.cfg.service.url.rstrip("/")
+        lines = ["| record | outcome | page |", "|---|---|---|"]
         for entry in outcomes:
             outcome = f"{entry.outcome}: {entry.note}" if entry.note else entry.outcome
-            lines.append(f"| `{entry.record}` | {outcome} | {f'{repo}#{entry.issue}' if entry.issue else ''} |")
+            page = f"[open]({base}/#datasets/{quote(entry.record, safe='')})" if entry.issue else ""
+            lines.append(f"| `{entry.record}` | {outcome} | {page} |")
         marker = self.cfg.marker(f"prep outcomes {round_id}")
         body = "\n".join(lines)
-        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n\n{marker}", marker)
+        await self._post("prep", issue, f"{self._clean(body)}\n\n{marker}", marker, round_id=round_id)
 
     @activity.defn(name="comment_drop")
     @mia_permanent_errors
@@ -664,26 +834,64 @@ class Activities:
         suffix = " " + hashlib.sha256("\n".join(sorted(missing)).encode()).hexdigest()[:8] if missing else ""
         marker = self.cfg.marker(f"drop {round_id} {record}{suffix}")
         body = render_drop_comment(record, link, files, list(missing))
-        await self._comment_once(self.gh_issues, issue, f"{self._clean(body)}\n{marker}", marker)
-
-    @activity.defn(name="poll")
-    async def poll(self) -> list[str]:
-        return await run_poll(self)
+        await self._post("buffer", issue, f"{self._clean(body)}\n{marker}", marker, round_id=round_id)
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
-        """Remove a human label we won't act on and say why, once per event."""
-        humans = {self.cfg.label(kind) for kind in HUMAN_LABELS} | {
-            self.cfg.prep_label(kind) for kind in PREP_HUMAN_LABELS
-        }
+        """Refuse an action we won't act on and say why, once per event; an event that is no action (a signal of
+        the keeper's) gets the entry alone."""
+        humans = {self.cfg.label(kind) for kind in (*HUMAN_LABELS, "cancel")} | {
+            self.cfg.prep_label(kind) for kind in (*PREP_HUMAN_LABELS, "cancel")
+        }  # every action a person can send to a request
         if label not in humans or not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"refuse_label: bad label/event {label!r}/{event_id!r}")
-        await self.gh_issues.remove_label(issue, label)
+        kind = "prep" if label.startswith(self.cfg.prep_label("")) else "buffer"
+        said = f"Ignoring `{label}`: {self._clean(reason)}"
+        if await self._action(kind, issue, event_id) is not None:  # a click: the page shows the reason against it
+            await asyncio.to_thread(self.registry.refuse_action, event_id, self._clean(reason))
+            said = f"Refused `{label.partition(':')[2]}`: {self._clean(reason)}"
         marker = self.cfg.marker(f"refused {label} {event_id}")
-        await self._comment_once(
-            self.gh_issues, issue, f"Ignoring `{label}`: {self._clean(reason)}\n\n{marker}", marker
-        )
+        await self._post(kind, issue, f"{said}\n\n{marker}", marker)
+
+    @activity.defn(name="kill_job")
+    async def kill_job(self, job_id: str) -> None:
+        """Kill a cluster job by id: a job of a round that was cancelled (spec webapp-actions §5). The wait on it
+        is cancelled by the workflow; a job that already ended is not an error to the runner."""
+        if self.jobs is None:
+            raise RuntimeError("no job runner: this activity runs only inside the worker")
+        await asyncio.to_thread(self.jobs.client.kill, [job_id])
+
+    @activity.defn(name="prep_cancel")
+    @mia_permanent_errors
+    async def prep_cancel(self, issue: int, records: list[str]) -> list[str]:
+        """A request was cancelled: cancel the dataset rounds it started and no others. A record counts when its
+        dataset is still in a round and that round's `go` was sent by this request (`prep:<issue>`); a dataset
+        somebody else started, or one that has settled, is left alone. Returns the records cancelled."""
+        registry, actor, cancelled = self.registry, f"prep:{int(issue)}", []
+        for record in records:
+            subject = await asyncio.to_thread(registry.subject, "dataset", record)
+            if subject is None or "cancel" not in subject["actions"]:
+                continue
+            found = await asyncio.to_thread(registry.timeline, "dataset", subject["number"])
+            gos = [a for a in (found or {}).get("actions", []) if a["action"] == "go" and a["state"] == "sent"]
+            if not gos or gos[-1]["actor"] != actor:
+                continue
+            cancel = functools.partial(
+                registry.send_action,
+                f"/datasets/{record}/actions",
+                "cancel",
+                key=f"cancel {actor} {gos[-1]['id']}",
+                actor=actor,
+            )
+            try:
+                await asyncio.to_thread(cancel)
+            except RegistryError as error:
+                if error.status != 409:  # its round ended meanwhile: nothing to cancel
+                    raise
+                continue
+            cancelled.append(record)
+        return cancelled
 
     # --- sourcing: binding, drop, stage job, registration ------------------------------------
 
@@ -723,28 +931,35 @@ class Activities:
         manual = any(url.startswith("manual://") for url in urls) or bool(
             missing_hosts(url_hosts, await asyncio.to_thread(self.probe))
         )
-        staged, artifact = await self._staged_before(round_id, record)
+        staged, artifact, refused = await self._staged_before(round_id, record)
         if manual:
-            return BindingInfo(
-                True, str(dest), digest, [], [list(pair) for pair in drop_names(urls)], staged=staged, artifact=artifact
-            )
-        return BindingInfo(True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged, artifact=artifact)
+            drops = [list(pair) for pair in drop_names(urls)]
+            return BindingInfo(True, str(dest), digest, [], drops, staged=staged, artifact=artifact, refused=refused)
+        return BindingInfo(
+            True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged, artifact=artifact, refused=refused
+        )
 
-    async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str]:
-        """(found, artifact id): found when buffer-api's registry holds an `ok` pyramid under this artifact id
-        and its stage.json is still on disk (its `last_used` is then touched). Buffer-api unreachable or refusing:
-        not found (stage again)."""
+    async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str, str]:
+        """(found, artifact id, refused): found when buffer-api's registry holds an `ok` pyramid under this artifact
+        id and its stage.json is still on disk (its `last_used` is then touched); `refused` names the newest
+        assessment of a found artifact when it is a reject (a revocation: never reuse it). Buffer-api unreachable
+        or refusing: not found (stage again)."""
         artifact = self._artifact(round_id, record)
+        registry = self.registry
         try:
-            data = await asyncio.to_thread(self.registry.asset, "staged", artifact)
+            data = await asyncio.to_thread(registry.asset, "staged", artifact)
         except RegistryError as error:
             activity.logger.warning("%s: registry unavailable, staging again: %s", record, error)
-            return False, artifact
+            return False, artifact, ""
         found = isinstance(data, dict) and data.get("ok") is True
         found = found and (self._staged_dir(round_id, record) / "stage.json").is_file()
-        if found:  # a buffer is about to reuse it: the keeper's hold rule spares it
+        if not found:
+            return False, artifact, ""
+        written = await asyncio.to_thread(lambda: registry.assessments(subject_kind="artifact", subject_ref=artifact))
+        refused = policy.refused(written) or ""
+        if not refused:  # a buffer is about to reuse it: the keeper's hold rule spares it
             await self.mark_asset("staged", artifact, {"last_used": time.time()})
-        return found, artifact
+        return True, artifact, refused
 
     @activity.defn(name="prepare_stage")
     @mia_permanent_errors
@@ -823,11 +1038,15 @@ class Activities:
 
     @activity.defn(name="await_job")
     async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
-        """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock."""
+        """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock.
+        A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3)."""
         if self.jobs is None:
             raise RuntimeError("no job runner: await_job runs only inside the worker")
         heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
-        outcome = await self.jobs.wait(job_id, workspace, heartbeat)
+        try:
+            outcome = await self.jobs.wait(job_id, workspace, heartbeat)
+        except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
+            raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
         return JobDone(outcome.job_id, outcome.state, outcome.exit_code)
 
     @activity.defn(name="read_stage")
@@ -1320,14 +1539,20 @@ class Activities:
         from temporalio.service import RPCError, RPCStatusCode
 
         buffer_id, kind = buffer["id"], latest["kind"]
-        config = BufferConfig.model_validate(buffer["config"])  # a config stored before D gets D's defaults
+        config = BufferConfig.model_validate(buffer["config"])  # a stored config without a newer field gets its default
         signals: list[tuple[str, list[Any], str]] = []
         if kind == "staged":  # unapproved past retire_after_days: retire; a missing pyramid is not yet its problem
             if now - float(latest["at"]) > config.retire_after_days * 86400:
                 signals.append(("retire", [None, buffer_id], ""))
-            missing = []
+            status: dict = {}
         else:
-            missing = (await asyncio.to_thread(self.registry.status, buffer_id))["missing"]  # stats the pyramids
+            status = await asyncio.to_thread(self.registry.status, buffer_id)  # stats the pyramids
+        missing, quarantined = status.get("missing") or [], status.get("quarantined") or []
+        if quarantined:  # a revocation (spec autonomous-gates §6): the buffer unregisters these volumes
+            records = sorted({str(volume).split("/", 1)[0] for volume in quarantined})
+            reason = "quarantined: " + ", ".join(quarantined)
+            signal = RevokedSignal(records, [str(volume) for volume in quarantined], text(reason, 500), buffer_id)
+            signals.append(("revoked", [signal], ",".join(records)))
         if missing:
             records = sorted({volume.split("/", 1)[0] for volume in missing})
             reason = "pyramid missing: " + ", ".join(missing)
@@ -1421,7 +1646,7 @@ class Activities:
     async def _keeper_evict(
         self, report: KeeperReport, kind: str, roots: tuple[Path, ...], hold_s: float, now: float, dry_run: bool
     ) -> None:
-        """Evict `kind`'s free assets until under quota; when still over, say so on the newest buffer issue."""
+        """Evict `kind`'s free assets until under quota; when still over, the report says by how much."""
         registry, limit = self.registry, getattr(self.cfg.quota, f"{kind}_bytes")
         if limit <= 0:
             return
@@ -1429,7 +1654,14 @@ class Activities:
         in_progress: set[str] = set()
         if kind == "raw":  # a prep job may be reading the raw cache of a record mia-data is working on
             in_progress = {row["id"] for row in await asyncio.to_thread(registry.datasets, "in-progress")}
-        rules: dict[str, Any] = {"hold_s": hold_s, "now": now, "in_progress": in_progress, "kind": kind}
+        quarantine_s = self.cfg.autonomy.quarantine_days * 86400  # a revoked artifact is evidence for this long
+        rules: dict[str, Any] = {
+            "hold_s": hold_s,
+            "now": now,
+            "in_progress": in_progress,
+            "kind": kind,
+            "quarantine_s": quarantine_s,
+        }
         locks = lock_dir(self.cfg)
 
         def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its fetch and stage of the record
@@ -1471,8 +1703,8 @@ class Activities:
             report.evicted.append(f"{kind} {row['key']}")
         over_by = int(live_bytes(rows) - live_bytes(evicted) - limit)
         if over_by > 0 and not dry_run:
-            report.over_quota[kind] = over_by
-            await self._over_quota_comment(kind, over_by)
+            report.over_quota[kind] = over_by  # the Cache view shows it from the keeper's report
+            log.warning("keeper: %s", OVER_QUOTA.format(kind=kind, over_by=over_by))
 
     async def _keeper_remove(
         self, report: KeeperReport, kind: str, row: dict, roots: tuple[Path, ...], now: float
@@ -1494,22 +1726,6 @@ class Activities:
         await asyncio.to_thread(registry.put_asset, kind, key, {"state": "evicted", "evicted_at": now, "bytes": 0})
         log.info("keeper: evicted %s %s (%s bytes, last used %s)", kind, key, data.get("bytes"), data.get("last_used"))
         return True
-
-    async def _over_quota_comment(self, kind: str, over_by: int) -> None:
-        """Comment once on the newest open issue labelled `buffer:*`; with none open, only log."""
-        prefix = self.cfg.label("")
-        issues = [
-            issue
-            for issue in await self.gh_issues.list_issues(state="open")
-            if any(str((label or {}).get("name", "")).startswith(prefix) for label in issue.get("labels") or [])
-        ]
-        message = OVER_QUOTA.format(kind=kind, over_by=over_by)
-        if not issues:
-            log.warning("keeper: %s (no open buffer issue to tell)", message)
-            return
-        marker = self.cfg.marker(f"keeper over-quota {kind}")
-        newest = max(issues, key=lambda issue: issue["number"])
-        await self._comment_once(self.gh_issues, newest["number"], f"{message}\n\n{marker}", marker)
 
 
 def _issue_of(round_id: str) -> int:

@@ -32,7 +32,7 @@ by a human whenever no existing snippet can read the dataset.
 - Harness: numpy, tifffile, imagecodecs, mrcfile, h5py, pypng
 - pytest, pytest-asyncio, respx
 
-**Spec:** [`docs/mia-crops-spec.md`](../mia-crops-spec.md) v0.8. Section numbers like §7.6 below refer to it.
+**Spec:** [`docs/specs/2026-10-12-mia-crops.md`](../specs/2026-10-12-mia-crops.md) v0.8. Section numbers like §7.6 below refer to it.
 The spec already holds every planning decision, so there is no spec-editing task (Task 0).
 
 ## Before you start (prerequisites, not tasks)

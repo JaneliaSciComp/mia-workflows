@@ -1,6 +1,6 @@
-"""`mia-buffers register`: a plan plus staged volumes → one buffer in buffer-api (spec v0.5 §5, milestone 2).
+"""`mia-buffers register`: a plan plus staged volumes → one buffer in buffer-api (spec v0.5 §5).
 
-The hand-registration path: the worker of milestone 3 will call the same functions after staging.
+The hand-registration path: the worker calls the same functions after staging.
 """
 
 from __future__ import annotations
@@ -191,8 +191,8 @@ def volume_bodies(
     usable sample is refused: it must be staged again with a harness that records one). Each body names the staged
     `artifact` its volume lives in (default: the staged directory's name, the hand-registration layout)."""
     split = row.get("split")
-    if split is None:  # a plan.json written before milestone D: the spec's fractions, as the plan would decide
-        log.warning("%s: plan row has no split policy (planned before D): using the spec's fractions", row["id"])
+    if split is None:  # a plan row without a split policy: the spec's fractions, as the plan would decide
+        log.warning("%s: plan row has no split policy: using the spec's fractions", row["id"])
         split = {"policy": "fractions", "fractions": dict(spec.splits.fractions), "seed": spec.splits.seed}
     if report is None:
         report = json.loads((staged / "stage.json").read_text())
@@ -288,8 +288,9 @@ def register(
     plan_hash: str,
     token: str | None = None,
 ) -> dict:
-    """Create the buffer and register every pooled, staged volume (with the worker `token`, when the service
-    wants one); returns registered / skipped / refused."""
+    """Create the buffer, register every pooled, staged volume (with the worker `token`, when the service wants
+    one) and authorize it to serve by writing the `approved` and `ready` events; returns registered / skipped /
+    refused / events."""
     out: dict = {"registered": [], "skipped": {}, "refused": {}}
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     with httpx.Client(base_url=url, timeout=30.0, headers=headers) as client:
@@ -315,4 +316,9 @@ def register(
                         out["refused"][volume_id] = response.json().get("error", response.text)
                     except ValueError:  # not JSON: a proxy page
                         out["refused"][volume_id] = response.text[:500]
+        for kind in ("approved", "ready"):  # buffer-api serves only under an approved, ready or idle event
+            client.post(
+                f"/buffers/{buffer}/events", json={"kind": kind, "detail": "mia-buffers register"}
+            ).raise_for_status()
+        out["events"] = ["approved", "ready"]
     return out

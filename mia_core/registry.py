@@ -107,6 +107,57 @@ class Registry:
     def datasets(self, state: str | None = None) -> list[dict]:
         return self.request("GET", "/datasets", params={"state": state} if state else None)["datasets"]
 
+    # --- subjects: a dataset, a buffer spec or a preparation request (spec webapp-actions §4.1) ------
+
+    def adopt_subject(self, kind: str, number: int, key: str, *, stage: str = "new", data: dict | None = None) -> dict:
+        """Make an existing issue a subject (or refresh one no workflow has written a stage to); 409: key taken."""
+        body = {"key": key, "stage": stage, "data": data or {}}
+        return self.request("PUT", f"/subjects/{quote(kind, safe='')}/{number}", json=body)
+
+    def subject(self, kind: str, key: str) -> dict | None:
+        return self._lookup(f"/subjects/{quote(kind, safe='')}/{quote(key, safe='')}")
+
+    def append_entry(
+        self,
+        kind: str,
+        number: int,
+        *,
+        body: str = "",
+        marker: str = "",
+        round_id: str | None = None,
+        stage: str | None = None,
+    ) -> dict:
+        """Write a subject's stage, a timeline entry (once per marker), or both: {subject, entry}. 404: no such
+        subject."""
+        fields = {"body": body, "marker": marker, "round": round_id, "stage": stage}
+        return self.request("POST", f"/timeline/{quote(kind, safe='')}/{number}", json=fields)
+
+    def timeline(self, kind: str, number: int) -> dict | None:
+        """{subject, entries} of the subject with this number; None when there is none."""
+        return self._lookup(f"/timeline/{quote(kind, safe='')}/{number}")
+
+    def mark_mirrored(self, kind: str, number: int, seq: int, comment_url: str | None) -> None:
+        self.request("PUT", f"/timeline/{quote(kind, safe='')}/{number}/{seq}", json={"comment_url": comment_url})
+
+    def set_subject_issue(self, kind: str, number: int, issue: int) -> dict:
+        """The mirror's write-back: the GitHub issue it opened for the subject."""
+        return self.request("PUT", f"/subjects/{quote(kind, safe='')}/{number}/issue", json={"issue": issue})
+
+    # --- actions: what a person, or a worker for a request, asked of a subject (spec webapp-actions §4.2) ---
+
+    def action(self, action_id: int | str) -> dict | None:
+        """The action with this id; None when the id is not an action's (a GitHub label event's, until slice E)."""
+        return self._lookup(f"/actions/{action_id}")
+
+    def refuse_action(self, action_id: int | str, detail: str) -> dict:
+        """Mark an action its workflow would not act on, with the reason the page shows against the click."""
+        return self.request("PUT", f"/actions/{action_id}", json={"state": "refused", "detail": detail})
+
+    def send_action(self, path: str, action: str, **fields: Any) -> dict:
+        """Ask for an action as a worker: POST it to an action route (`/datasets/<record>/actions`). `key` makes
+        a retried call the same action; `actor` and `root` are honoured because the token is sent."""
+        return self.request("POST", quote(path), json={"action": action, **fields})
+
     def put_asset(self, kind: str, key: str, data: dict) -> dict:
         return self.request("PUT", f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}", json=data)
 
@@ -169,6 +220,69 @@ class Registry:
     def put_keeper(self, report: dict) -> dict:
         """Store the keeper's last pass for the page (`at` added when absent); returns it as stored."""
         return self.request("PUT", "/keeper", json=report)
+
+    # --- assessments, budgets and volumes (spec autonomous-gates §5, §6, §8) ---------------------
+
+    def put_assessment(self, assessment: dict) -> dict:
+        return self.request("PUT", f"/assessments/{quote(assessment['id'], safe='')}", json=assessment)
+
+    def assessments(
+        self,
+        *,
+        subject_kind: str | None = None,
+        subject_ref: str | None = None,
+        gate: str | None = None,
+        by: str | None = None,
+        before: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """The matching assessments, newest first; `before` (an assessment id) pages further back."""
+        given = (
+            ("subject_kind", subject_kind),
+            ("subject_ref", subject_ref),
+            ("gate", gate),
+            ("by", by),
+            ("before", before),
+            ("limit", limit),
+        )
+        params = {name: value for name, value in given if value is not None}
+        return self.request("GET", "/assessments", params=params or None)["assessments"]
+
+    def decisions(self, gate: str | None = None, *, offset: int | None = None, limit: int | None = None) -> dict:
+        """{assessments, total, agreement}: one page of the Decisions view's data, newest first (spec
+        autonomous-gates §10)."""
+        given = (("gate", gate), ("offset", offset), ("limit", limit))
+        params = {name: value for name, value in given if value is not None}
+        return self.request("GET", "/decisions", params=params or None)
+
+    def assessment(self, assessment_id: str) -> dict | None:
+        return self._lookup(f"/assessments/{quote(assessment_id, safe='')}")
+
+    def reserve(self, root: str, reservation_id: str, kind: str, usd: float, caps: dict[str, float]) -> dict:
+        """Charge a job to its root: {ok, reason, usage}."""
+        body = {"reservation_id": reservation_id, "kind": kind, "usd": usd, "caps": caps}
+        return self.request("POST", f"/budgets/{quote(root, safe='')}/reserve", json=body)
+
+    def settle(
+        self, root: str, reservation_id: str, *, usd: float | None = None, fetched_bytes: int = 0, staged_bytes: int = 0
+    ) -> dict:
+        body = {
+            "reservation_id": reservation_id,
+            "usd": usd,
+            "fetched_bytes": fetched_bytes,
+            "staged_bytes": staged_bytes,
+        }
+        return self.request("POST", f"/budgets/{quote(root, safe='')}/settle", json=body)
+
+    def budget(self, root: str) -> dict | None:
+        return self._lookup(f"/budgets/{quote(root, safe='')}")
+
+    def delete_volume(self, buffer: str, volume_id: str) -> None:
+        self.request("DELETE", f"/buffers/{quote(buffer, safe='')}/volumes/{quote(volume_id, safe='')}")
+
+    def volumes(self, buffer: str) -> list[dict]:
+        """The buffer's volumes as small rows: {id, artifact, record, missing}."""
+        return self.request("GET", f"/buffers/{quote(buffer, safe='')}/volumes")["volumes"]
 
     def status(self, buffer: str) -> dict:
         """The buffer's status (stats its pyramids, flags the missing); a consumer route, the token is harmless."""

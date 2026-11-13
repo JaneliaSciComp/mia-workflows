@@ -177,8 +177,9 @@ def test_help_lists_app_commands(capsys):
         main(["--help"])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    for cmd in ("check", "seed", "worker", "test-pr", "schedule"):
+    for cmd in ("check", "worker", "test-pr", "schedule"):
         assert cmd in out
+    assert "seed" not in out  # an issue appears when its dataset has something to say: the mirror opens it
     assert "restart" not in out and "attach" not in out
 
 
@@ -200,3 +201,84 @@ def test_check_adds_local_root_and_token_rows_when_configured(monkeypatch, tmp_p
     main(["check"])
     out = capsys.readouterr().out.rstrip("\n").split("\n")
     assert len(out) == 9 and out[7].startswith("ok   local root") and out[8].startswith("ok   service token")
+
+
+def test_collect_judge_set(monkeypatch, tmp_path, capsys):
+    import hashlib
+
+    import yaml
+
+    from mia_core.judge import policy
+
+    cfg = make_cfg(tmp_path, service={"url": "http://svc:8765", "token_file": None})
+    monkeypatch.setattr(cli, "load_config", lambda _: cfg)
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
+    sha = "a" * 40
+    round_ws = cfg.paths.work_root / "issue-7" / "i7-e11"
+    crop_ws, verify_ws = round_ws / f"crop-{sha}-1", round_ws / f"verify-{sha}-1"
+    raw = b"rawpng"
+    (crop_ws / "crops" / "c1").mkdir(parents=True)
+    (crop_ws / "crops" / "c1" / "raw.png").write_bytes(raw)
+    (verify_ws / "preview" / "c1").mkdir(parents=True)
+    (verify_ws / "preview" / "c1" / "overlay.png").write_bytes(b"ov")
+    (verify_ws / "binding.yaml").write_text(
+        yaml.safe_dump({"record": "rec-1", "labels": [{"segmentation_type": "instance"}], "reasons": ["guessed"]})
+    )
+    (verify_ws / "verify.json").write_text(
+        json.dumps({"crops": [{"crop_id": "c1", "ok": True, "files": {"raw.png": hashlib.sha256(raw).hexdigest()}}]})
+    )
+    (cfg.paths.state_dir / "rounds" / "i7-e11").mkdir(parents=True)
+    (cfg.paths.state_dir / "rounds" / "i7-e11" / "record.yaml").write_text(
+        yaml.safe_dump({"imaging": {"modality": ["fluorescence"]}})
+    )
+    rows = [
+        policy.new_assessment(
+            gate="crops",
+            subject_kind="crop_set",
+            subject_ref=f"i7-e11:i7-e11-{sha[:12]}",
+            verdict="reject",
+            by="human:a",
+            at=10.0,
+        ),
+        policy.new_assessment(
+            gate="crops",
+            subject_kind="crop_set",
+            subject_ref=f"i7-e11:i7-e11-{sha[:12]}",
+            verdict="approve",
+            by="human:b",
+            at=20.0,
+        ),
+        policy.new_assessment(
+            gate="crops",
+            subject_kind="crop_set",
+            subject_ref=f"i7-e11:i7-e11-{sha[:12]}",
+            verdict="approve",
+            by="judge",
+            at=21.0,
+        ),
+        policy.new_assessment(
+            gate="crops",
+            subject_kind="crop_set",
+            subject_ref="i8-e12:i8-e12-bbbbbbbbbbbb",
+            verdict="approve",
+            by="human:a",
+            at=30.0,
+        ),
+    ]
+
+    class FakeRegistry:
+        def assessments(self, **kw):
+            return sorted(rows, key=lambda r: r["id"], reverse=True)
+
+    monkeypatch.setattr("mia_core.registry.Registry.from_config", classmethod(lambda cls, s: FakeRegistry()))
+    assert main(["collect-judge-set", str(tmp_path / "set")]) == 0
+    out = capsys.readouterr().out
+    item = tmp_path / "set" / f"i7-e11_i7-e11-{sha[:12]}"
+    expected = json.loads((item / "expected.json").read_text())
+    assert expected["verdict"] == "approve" and expected["by"] == "human:b"  # the newest human verdict
+    assert expected["category"] == "fluorescence/instance"
+    assert (item / "evidence" / "c1" / "raw.png").read_bytes() == raw and (
+        item / "evidence" / "c1" / "overlay.png"
+    ).exists()
+    assert "reasons" not in yaml.safe_load((item / "evidence" / "binding.yaml").read_text())
+    assert "skipped i8-e12:i8-e12-bbbbbbbbbbbb" in out and "1 items in" in out

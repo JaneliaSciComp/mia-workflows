@@ -15,7 +15,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mia_core.hosts import HOST_RE
+from mia_core.judge.evidence import command as judge_command
+
 from . import jobs
+from .config import is_github_host
 from .jobs import read_untrusted
 from .models import JobOutcome, JobRef, Workspace, check_key
 
@@ -99,6 +103,30 @@ exit "$rc"
 """
 
 
+def judge_dir(round_dir: Path) -> Path:
+    """The review judge's workspace: a sibling of the round dir (`<key>/judge-r<n>`), outside the author job's
+    writable mount, so the author can plant nothing there (no CLAUDE.md, no settings, no exit_code)."""
+    round_dir = Path(round_dir)
+    return round_dir.parent / round_dir.name.replace("round-", "judge-r", 1)
+
+
+def judge_script(cfg: Config) -> str:
+    """The review judge's job script, cwd = the judge workspace: Claude Code with read-only tools over
+    `evidence/` (spec autonomous-gates §4), the exit code recorded for the worker."""
+    quote = shlex.quote
+    path = (
+        f'export PATH={":".join(quote(entry) for entry in cfg.agent.path_prepend)}:"$PATH"\n'
+        if cfg.agent.path_prepend
+        else ""
+    )
+    return f"""set -u
+{path}{judge_command(cfg.judge.model, cfg.judge.max_budget_usd)}
+rc=$?
+echo "$rc" > exit_code
+exit "$rc"
+"""
+
+
 def read_result(round_dir: Path, limit: int = 20000) -> tuple[str, float | None]:
     """The agent's summary and cost from result.json. Untrusted: any shape may be there."""
     try:
@@ -126,6 +154,21 @@ def csub_client(cfg: Config) -> Any:
     return jobs.csub_client(cfg.deployment)
 
 
+# ponytail: csub refuses more than 64 hosts on a job, so the oldest policy hosts drop first; upgrade is a per-issue
+# host list or a higher limit in csub.
+MAX_JOB_HOSTS = 64
+
+
+def agent_hosts(configured: list[str], policy_hosts: list[str]) -> list[str]:
+    """The configured hosts, then the exact hosts the broker's policy allows (never patterns, names csub refuses
+    as a job host, or GitHub hosts), without repeats; past MAX_JOB_HOSTS the oldest policy hosts are dropped and
+    configured hosts stay."""
+    usable = [host for host in policy_hosts if HOST_RE.fullmatch(host) and not is_github_host(host)]
+    hosts = list(dict.fromkeys(configured))
+    extra = [host for host in dict.fromkeys(usable) if host not in hosts]
+    return hosts + extra[max(0, len(hosts) + len(extra) - MAX_JOB_HOSTS) :]
+
+
 class AgentJobs:
     """Submits and waits on agent jobs for one deployment, keyed by (issue, key, round)."""
 
@@ -146,7 +189,9 @@ class AgentJobs:
         agent_cfg = self.cfg.agent
         job_key = f"issue-{issue}-{check_key(key)}-r{round_number}"
 
-        def build_spec() -> jobs.JobSpec:  # built lazily: the API key env var is read only when no id file exists
+        # built lazily: the broker is probed and the API key read only when no id file exists
+        async def build_spec() -> jobs.JobSpec:
+            policy_hosts = (await asyncio.to_thread(self.jobs.client.probe)).allowed_hosts
             return jobs.JobSpec(
                 name=f"autodev-{issue}-r{round_number}",  # csub rejects names containing the username; session = deployment
                 command=job_script(self.cfg, workspace.base_sha),
@@ -154,13 +199,35 @@ class AgentJobs:
                 walltime_min=agent_cfg.walltime_min,
                 cpus=agent_cfg.cpus,
                 mem_mb=agent_cfg.mem_mb,
-                allow_hosts=list(agent_cfg.allow_hosts),
+                allow_hosts=agent_hosts(agent_cfg.allow_hosts, policy_hosts),
                 agent="claude",
                 ro_mounts=[mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts],  # Config guarantees ":ro"
                 env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
             )
 
         return JobRef(await self.jobs.submit(job_key, build_spec), agent_cfg.walltime_min)
+
+    async def submit_judge(self, issue: int, key: str, round_number: int, judge_dir: str) -> JobRef:
+        """Submit the review judge once per round: a read-only Claude Code job in `judge_dir`, no hosts of its own,
+        its walltime and budget from `judge`."""
+        agent_cfg, judge_cfg = self.cfg.agent, self.cfg.judge
+        job_key = f"issue-{issue}-{check_key(key)}-r{round_number}-judge"
+
+        def build_spec() -> jobs.JobSpec:
+            return jobs.JobSpec(
+                name=f"autodev-{issue}-r{round_number}-judge",
+                command=judge_script(self.cfg),
+                workspace=judge_dir,
+                walltime_min=judge_cfg.walltime_min,
+                cpus=1,
+                mem_mb=agent_cfg.mem_mb,
+                allow_hosts=[],
+                agent="claude",
+                ro_mounts=[],
+                env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
+            )
+
+        return JobRef(await self.jobs.submit(job_key, build_spec), judge_cfg.walltime_min)
 
     async def wait(self, job_id: str, workspace: Workspace, heartbeat: Callable[[str], None]) -> JobOutcome:
         return await self.jobs.wait(job_id, workspace.dir, heartbeat)

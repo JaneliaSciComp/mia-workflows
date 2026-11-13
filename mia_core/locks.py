@@ -198,18 +198,24 @@ def release_or_log(locks: LockDir, kind: str, key: str, owner: str) -> None:
         log.warning("%s: the lock %s/%s was no longer held at release", owner, kind, key)
 
 
+class LockLost(RuntimeError):
+    """A heartbeat found the lock lapsed or in someone else's hands. The job runner kills the job on it: a stale
+    lease is never evidence that its writer stopped (spec autonomous-gates §3)."""
+
+    def __init__(self, kind: str, key: str, owner: str) -> None:
+        self.kind, self.key, self.owner = kind, key, owner
+        super().__init__(f"{owner} lost the lock {kind}/{key}: it lapsed or someone else holds it")
+
+
 def heartbeat_through(locks: LockDir, lock: Sequence[str], inner: Callable[[str], None]) -> Callable[[str], None]:
     """A job-wait heartbeat callback that calls `inner(state)`, then refreshes `lock` ([kind, key, owner]).
 
-    A lock that is gone or someone else's is logged once, not raised: the job runs on either way."""
+    Raises `LockLost` when the lock is gone or someone else's; the job runner kills the job before it propagates."""
     kind, key, owner = lock
-    lost = False
 
     def beat(state: str) -> None:
-        nonlocal lost
         inner(state)
-        if not locks.heartbeat(kind, key, owner) and not lost:
-            lost = True
-            log.warning("%s lost the lock %s/%s: it lapsed or someone else holds it", owner, kind, key)
+        if not locks.heartbeat(kind, key, owner):
+            raise LockLost(kind, key, owner)
 
     return beat

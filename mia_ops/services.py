@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 from autodev.config import PROJECT_DIR
 from mia_core.fs import require_local_dir, require_secret_file
+from mia_core.hosts import PolicyError, generate_policy, placement_problem
 
 from .manifest import Manifest
 
@@ -329,6 +330,29 @@ class Temporal:
 # ---- app services
 
 
+def _rw_binds(svc: Service) -> list[Path]:
+    """What the service's worker sandbox binds with `--rw` (its state dir, the cwd, is bound read-write too)."""
+    return [*(p for flag, p in svc.app.extra_mounts(svc.cfg) if flag == "--rw"), svc.cfg.paths.work_root, svc.run]
+
+
+def writable_mounts(stack: Stack) -> list[Path]:
+    """Every path any worker can write: the placement rules keep the generated policy out of all of them."""
+    return [path for svc in stack.services.values() for path in (svc.state, *_rw_binds(svc))]
+
+
+def ensure_policy(stack: Stack) -> Path:
+    """Generate mia's csub policy from the operator's base policy and the approved hosts; exit naming the
+    mia.yaml key at fault when the placement or the base policy is refused."""
+    csub = stack.manifest.csub
+    writable = writable_mounts(stack)
+    if problem := placement_problem(csub.base_policy, csub.policy_dir, writable):
+        sys.exit(f"mia: csub.policy_dir: {problem} (the base policy is csub.base_policy)")
+    try:
+        return generate_policy(csub.base_policy, csub.policy_dir, writable)
+    except PolicyError as error:
+        sys.exit(f"mia: csub.base_policy: {error}")
+
+
 def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     """Start one app service: broker + sandboxed worker in tmux, then apply its poll schedule.
     Temporal is started (managed) or verified (external) first. Re-running on a live session only
@@ -372,9 +396,8 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
             require_secret_file(token_file)
         except RuntimeError as error:
             sys.exit(f"{svc.name}: {error}")
-    extra = svc.app.extra_mounts(cfg)
-    rw_extra = (p for flag, p in extra if flag == "--rw")
-    for d in (svc.state / "logs", svc.host / "logs", cfg.paths.work_root, svc.run, *rw_extra):
+    policy = ensure_policy(stack)
+    for d in (svc.state / "logs", svc.host / "logs", *_rw_binds(svc)):
         d.mkdir(parents=True, exist_ok=True)
 
     temporal.up()
@@ -389,7 +412,9 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
 
     sock = svc.run / "csub.sock"
     broker_log = svc.host / "logs/broker.log"
-    new_session(svc.name, "broker", f"{shell(BROKER, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}")
+    new_session(
+        svc.name, "broker", f"{shell(BROKER, '--policy', policy, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}"
+    )
     allow = ["github.com", "api.github.com", temporal.host]
     if (service := getattr(cfg, "service", None)) and (host := urlparse(service.url).hostname):
         allow.append(host)  # every worker with a `service` block writes the registry (mia-data's dataset rows too)
@@ -402,9 +427,11 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     mounts: list[object] = ["--ro", PROJECT_DIR, "--ro", svc.config_path, "--ro", svc.secret]
     if token_file is not None and token_file != svc.secret:
         mounts += ["--ro", token_file]
-    for flag, path in extra:
-        mounts += [flag, path]
-    mounts += ["--rw", cfg.paths.work_root, "--rw", svc.run]
+    for flag, path in svc.app.extra_mounts(cfg):
+        if flag == "--ro":
+            mounts += [flag, path]
+    for path in _rw_binds(svc):
+        mounts += ["--rw", path]
     worker = shell(
         sandbox, *mounts, *(a for h in allow for a in ("--allow", h)), "--",
         "env", *(f"{key}={value}" for key, value in svc.env().items()), "CSUB_TRANSPORT=unix", f"CSUB_SOCKET={sock}",

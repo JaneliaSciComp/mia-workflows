@@ -5,13 +5,16 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 from mia_helpers import FakeGH
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 from test_buffers_config import make_cfg
 from test_buffers_plan import BCSS, CATALOG, ONE_CH, U937, spec_with
 from test_buffers_register import token_server, write_stage_json  # noqa: F401  (fixture)
@@ -31,6 +34,7 @@ from mia_buffers.models import (
     PrepState,
     QuotaCheck,
     RawStatus,
+    RevokedSignal,
     StagedSummary,
     job_key,
 )
@@ -40,7 +44,8 @@ from mia_buffers.status import render_plan_comment, render_ready, render_staged
 from mia_core.registry import Registry, RegistryError
 from mia_core.untrusted import texts
 from mia_data.catalog import dataset_folder
-from mia_data.models import LockTaken
+from mia_data.jobspec import lock_dir
+from mia_data.models import LockTaken, Reservation
 from mia_data.publish import reindex
 
 FIXTURES = Path(__file__).parent / "fixtures" / "buffers"
@@ -62,9 +67,19 @@ def spec_text() -> str:
     return yaml.safe_dump(spec.model_dump(by_alias=True, exclude={"warnings"}), sort_keys=False)
 
 
-def issue_body(spec: str | None = None, fences: int = 1) -> str:
-    block = f"```yaml\n{spec or spec_text()}```\n"
-    return "A buffer for the demo.\n\n" + block * fences + "\nNotes below.\n"
+SPEC_NAME = load_spec(FIXTURES / "spec.yaml").name  # the key of the fixture's buffer spec
+
+
+def put_action(acts, kind: str, number: int, action_id: int, payload: dict, action: str = "go") -> None:
+    """An action with a chosen id in the fixture service's ledger: these tests name their rounds by event id."""
+    row = (action_id, kind, number, action, "page", "2026-11-01T00:00:00+00:00", None, json.dumps(payload))
+    with sqlite3.connect(acts.ledger_path) as db:
+        db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
+
+
+def set_spec(acts, spec: str) -> None:
+    """The spec the fixture round's go (action 11 on buffer 7) carries."""
+    put_action(acts, "buffer", 7, 11, {"spec": spec})
 
 
 def record_of(record_id: str) -> dict:
@@ -93,7 +108,7 @@ def acts(tmp_path, monkeypatch, token_server):  # noqa: F811
     monkeypatch.setattr(cli, "catalog_snapshot", fake_catalog_snapshot)  # the plan's on-demand `catalog sync`
     monkeypatch.setattr(acts_module, "harness_pin", lambda cfg_: ("h" * 40, "d" * 64))
     monkeypatch.setattr(acts_module, "harness_snapshot", lambda cfg_, commit: tmp_path / "hsnap")
-    gh = FakeGH("o/buffers", issues={7: {"number": 7, "body": issue_body(), "labels": [{"name": "buffer:planning"}]}})
+    gh = FakeGH("o/buffers", issues={7: {"number": 7, "body": "", "labels": [{"name": "buffer:planning"}]}})
     activities = Activities(
         cfg,
         gh,
@@ -105,6 +120,9 @@ def acts(tmp_path, monkeypatch, token_server):  # noqa: F811
     )
     activities.gh = gh
     registry = activities.registry = Registry(token_server, "t")
+    activities.ledger_path = tmp_path / "l.sqlite"  # the fixture service's ledger (`token_server`)
+    registry.adopt_subject("buffer", 7, SPEC_NAME, data={"spec": spec_text()})
+    set_spec(activities, spec_text())
     for _, record in load_records(CATALOG):
         registry.put_dataset(record["id"], state="prepared")
     yield activities
@@ -112,9 +130,20 @@ def acts(tmp_path, monkeypatch, token_server):  # noqa: F811
 
 
 @pytest.fixture
+def gateway(token_server):  # noqa: F811
+    """What the fixture's buffer-api sent to Temporal: the actions the activities asked it for."""
+    return token_server.gateway
+
+
+@pytest.fixture
 def server(acts, token_server):  # noqa: F811
     """The buffer-api the activities' registry client talks to (the `acts` fixture starts it)."""
     return token_server
+
+
+def posted(acts, kind="buffer", number=7) -> list[str]:
+    """The texts a round wrote to the subject's timeline, in order (they were issue comments before the mirror)."""
+    return [entry["body"] for entry in acts.registry.timeline(kind, number)["entries"]]
 
 
 async def admitted(acts) -> BufferPins:
@@ -148,16 +177,33 @@ async def test_admit_writes_spec_and_pins(acts):
     assert await acts.admit(7, "11") == pins
 
 
-@pytest.mark.parametrize("fences", [0, 2])
-async def test_admit_refuses_issue_without_one_yaml_fence(acts, fences):
-    acts.gh.issues[7]["body"] = issue_body(fences=fences)
-    with pytest.raises(ApplicationError, match="exactly one ```yaml") as error:
-        await admitted(acts)
+async def test_admit_and_prep_admit_pin_their_own_issue_as_root(acts):
+    pins = await admitted(acts)
+    assert pins.root == f"{acts.cfg.github.buffers_repo}#7"
+    assert acts._pins(ROUND).root == pins.root  # written to pins.json
+    prep_issue(acts, records=[U937])
+    prep = await acts.prep_admit(8, "21")
+    assert prep.root == f"{acts.cfg.github.buffers_repo}#8" and acts._pins(PREP_ROUND).root == prep.root
+
+
+async def test_nudge_charges_the_dataset_round_to_the_buffers_root(acts, gateway):
+    await acts.plan(7, ROUND, await admitted(acts))
+    await acts.nudge_dataset(ROUND, U937)
+    go = acts.registry.timeline("dataset", gateway.sent[0][1])["actions"][0]
+    assert go["payload"] == {"root": f"{acts.cfg.github.buffers_repo}#7"} and go["actor"] == "buffer:7"
+
+
+async def test_admit_refuses_an_event_that_is_no_action_or_carries_no_spec(acts):
+    with pytest.raises(ApplicationError, match="event 12 is not an action") as error:
+        await acts.admit(7, "12")
     assert error.value.non_retryable
+    put_action(acts, "buffer", 7, 12, {})
+    with pytest.raises(ApplicationError, match="action 12 carries no buffer spec"):
+        await acts.admit(7, "12")
 
 
 async def test_admit_refuses_invalid_spec(acts):
-    acts.gh.issues[7]["body"] = issue_body(spec_text().replace("schema_version: 1", "schema_version: 2"))
+    set_spec(acts, spec_text().replace("schema_version: 1", "schema_version: 2"))
     with pytest.raises(ApplicationError, match="spec refused") as error:
         await admitted(acts)
     assert error.value.non_retryable
@@ -221,7 +267,7 @@ async def test_comment_plan_posts_once(acts):
     await acts.plan(7, ROUND, await admitted(acts))
     await acts.comment_plan(7, ROUND)
     await acts.comment_plan(7, ROUND)
-    bodies = [c["body"] for c in acts.gh.comments[7]]
+    bodies = posted(acts)
     assert (
         len(bodies) == 1
         and "2 in the pool" in bodies[0]
@@ -230,7 +276,7 @@ async def test_comment_plan_posts_once(acts):
     )
 
 
-CALL_TO_ACTION = "approve with `buffer:approve` to serve it as it is, or edit the spec and add `buffer:go` again"
+CALL_TO_ACTION = "approve to serve it as it is, or edit the spec and run it again"
 
 
 def test_render_staged_lists_outcomes_groups_and_the_call_to_action():
@@ -332,7 +378,7 @@ def test_plan_comment_lists_dropped_records():
     assert "**Dropped**" not in render_plan_comment(plan, None)
 
 
-# -- the dataset hand-off (milestone 4)
+# -- the dataset hand-off
 
 
 def with_datasets(acts, issues=None):
@@ -348,50 +394,121 @@ def with_datasets(acts, issues=None):
     return gh
 
 
-async def test_nudge_dataset_opens_the_issue_and_adds_go(acts):
+async def test_nudge_dataset_sends_a_go_through_the_registry_once(acts, gateway):
     await acts.plan(7, ROUND, await admitted(acts))
     gh = with_datasets(acts)
     info = await acts.nudge_dataset(ROUND, U937)
-    assert (info.number, info.stage, info.nudged) == (100, "new", True) and info.folder == "lm-human-u937-edu-h2ax-dapi"
-    ((title, body, labels),) = gh.created
-    assert body.startswith(f"<!-- mia-data:record={U937} -->") and title.startswith(U937) and "data:new" in labels
-    assert "Downloaded by: none" in body and "data:go" in {x["name"] for x in gh.issues[100]["labels"]}
-    again = await acts.nudge_dataset(ROUND, U937)  # a retry: the issue exists and already carries data:go
-    assert (again.number, again.nudged) == (100, False) and len(gh.created) == 1
+    assert (info.stage, info.nudged) == ("new", True) and info.folder == "lm-human-u937-edu-h2ax-dapi"
+    subject = acts.registry.subject("dataset", U937)
+    assert (subject["number"], subject["issue"]) == (info.number, None)  # no issue is opened or labelled
+    assert gh.created == [] and gh.issues == {}
+    ((kind, number, signal, event),) = gateway.sent
+    assert (kind, number, signal, event.actor) == ("dataset", info.number, "go", "buffer:7")
+    again = await acts.nudge_dataset(ROUND, U937)  # a retried activity: the same key, the same action, no second go
+    assert again.number == info.number and len(gateway.sent) == 1
+    assert len(acts.registry.timeline("dataset", info.number)["actions"]) == 1
 
 
-async def test_nudge_dataset_in_progress_does_not_relabel(acts):
+async def test_nudge_dataset_in_a_round_or_at_review_is_left_alone(acts, gateway):
     await acts.plan(7, ROUND, await admitted(acts))
-    gh = with_datasets(acts, {5: (U937, ["data:testing"])})
-    info = await acts.nudge_dataset(ROUND, U937)
-    assert (info.number, info.stage, info.nudged) == (5, "testing", False)
-    assert {x["name"] for x in gh.issues[5]["labels"]} == {"data:testing"}
+    for stage in ("testing", "review"):
+        acts.registry.adopt_subject("dataset", 5, U937, stage=stage)
+        info = await acts.nudge_dataset(ROUND, U937)
+        assert (info.number, info.stage, info.nudged) == (5, stage, False)
+    assert gateway.sent == []
 
 
-async def test_nudge_dataset_with_a_stale_ineligible_label_gets_go(acts):
-    """`data:ineligible` is a verdict mia-data no longer gives (spec §12): the issue is nudged like a new one."""
+async def test_nudge_dataset_done_without_binding_reports_it(acts, gateway):
     await acts.plan(7, ROUND, await admitted(acts))
-    gh = with_datasets(acts, {5: (U937, ["data:ineligible", "licence-excluded"])})
-    info = await acts.nudge_dataset(ROUND, U937)
-    assert (info.number, info.stage, info.nudged) == (5, "ineligible", True)
-    assert "data:go" in {x["name"] for x in gh.issues[5]["labels"]}
-
-
-async def test_nudge_dataset_done_without_binding_reports_it(acts):
-    await acts.plan(7, ROUND, await admitted(acts))
-    gh = with_datasets(acts, {5: (U937, ["data:done"])})
+    acts.registry.adopt_subject("dataset", 5, U937, stage="done")
     info = await acts.nudge_dataset(ROUND, U937)
     assert (info.number, info.stage, info.nudged) == (5, "done", False)
-    assert "binding.yaml" in info.note and "data:go" in info.note
-    assert {x["name"] for x in gh.issues[5]["labels"]} == {"data:done"}
+    assert "binding.yaml" in info.note and "from its page" in info.note and gateway.sent == []
 
 
-async def test_nudge_dataset_needs_human_gets_go_again(acts):
+@pytest.mark.parametrize("stage", ["needs-human", "cancelled"])
+async def test_nudge_dataset_that_stopped_gets_a_go_again(acts, gateway, stage):
     await acts.plan(7, ROUND, await admitted(acts))
-    gh = with_datasets(acts, {5: (U937, ["data:needs-human"])})
+    acts.registry.adopt_subject("dataset", 5, U937, stage=stage)
     info = await acts.nudge_dataset(ROUND, U937)
-    assert (info.stage, info.nudged) == ("needs-human", True)
-    assert "data:go" in {x["name"] for x in gh.issues[5]["labels"]}
+    assert (info.number, info.stage, info.nudged) == (5, stage, True)
+    assert [(sent[1], sent[2]) for sent in gateway.sent] == [(5, "go")]
+
+
+async def test_nudge_for_a_record_buffer_api_has_not_seen_syncs_the_rounds_catalog_first(acts, gateway):
+    prep_issue(acts, records=[U937])
+    acts.registry.put_dataset(U937, state="in-progress")
+    await acts.prep_admit(8, "21")  # nothing has synced this ref into the registry yet
+    assert acts.registry.catalogs() == []
+    assert (await acts.prep_nudge(PREP_ROUND, U937)).outcome == "opened"
+    assert [catalog["ref"] for catalog in acts.registry.catalogs()] == [REF] and len(gateway.sent) == 1
+
+
+async def test_a_round_started_by_an_action_runs_the_spec_the_action_carries(acts):
+    text = spec_text()
+    number = acts.registry.adopt_subject("buffer", 7, SPEC_NAME)["number"]
+    go = acts.registry.request(
+        "POST", f"/specs/{SPEC_NAME}/actions", json={"action": "go", "spec": text + "# as sent\n"}
+    )
+
+    async def no_issue(issue_number):
+        raise AssertionError("an action's round must not read the issue")
+
+    acts.gh.get_issue = no_issue
+    await acts.admit(number, str(go["id"]))
+    round_dir = acts.cfg.paths.state_dir / "rounds" / f"i7-e{go['id']}"
+    assert (round_dir / "spec.yaml").read_text() == text + "# as sent\n"
+    with pytest.raises(ApplicationError, match="is not an action on buffer #8"):
+        await acts.admit(8, str(go["id"]))
+
+
+async def test_a_request_filed_from_the_page_is_admitted_from_its_action(acts, gateway):
+    text = yaml.safe_dump(
+        {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/catalog", "ref": REF}, "records": [U937]}
+    )
+    go = acts.registry.request("POST", "/prep", json={"spec": text})
+    pins = await acts.prep_admit(go["number"], str(go["id"]))
+    assert pins.records == [U937] and pins.root == f"{acts.cfg.github.buffers_repo}#{go['number']}"
+    assert gateway.sent[0][:3] == ("prep", go["number"], "go")
+
+
+async def test_a_revoke_from_the_page_names_its_records_in_the_action(acts):
+    acts.registry.adopt_subject("buffer", 7, SPEC_NAME, stage="ready")
+    revoke = acts.registry.request(
+        "POST", f"/specs/{SPEC_NAME}/actions", json={"action": "revoke", "records": [U937, BCSS]}
+    )
+    assert await acts.revoke_targets(7, "page", revoke["at"]) == [U937, BCSS]
+    assert await acts.revoke_targets(7, "page", "2026-10-27T10:12:00Z") == []  # no revoke action at that time
+
+
+async def test_refusing_an_action_marks_it_and_removes_no_label(acts):
+    acts.registry.adopt_subject("buffer", 7, SPEC_NAME, stage="idle")
+    keep = acts.registry.request("POST", f"/specs/{SPEC_NAME}/actions", json={"action": "keep"})
+    await acts.refuse_label(7, "buffer:keep", "the buffer is not idle", str(keep["id"]))
+    refused = acts.registry.action(keep["id"])
+    assert (refused["state"], refused["detail"]) == ("refused", "the buffer is not idle") and acts.gh.removed == []
+    await acts.refuse_label(7, "buffer:cancel", "there is no round in progress to cancel", "99")  # an action's name
+    assert "Ignoring `buffer:cancel`" in posted(acts)[-1]
+
+
+async def test_kill_job_kills_by_id(acts):
+    killed = []
+    acts.jobs = SimpleNamespace(client=SimpleNamespace(kill=killed.extend))
+    await acts.kill_job("4242")
+    assert killed == ["4242"]
+
+
+async def test_prep_cancel_cancels_only_the_dataset_rounds_this_request_started(acts, gateway):
+    await acts.plan(7, ROUND, await admitted(acts))  # syncs the catalog
+    mine = acts.registry.send_action(f"/datasets/{U937}/actions", "go", actor="prep:8", root="o/buffers#8")
+    theirs = acts.registry.send_action(f"/datasets/{BCSS}/actions", "go", actor="prep:9", root="o/buffers#9")
+    for action in (mine, theirs):
+        acts.registry.append_entry("dataset", action["number"], stage="matching")
+    assert await acts.prep_cancel(8, [U937, BCSS, "never-started"]) == [U937]
+    cancels = [(sent[1], sent[3].actor) for sent in gateway.sent if sent[2] == "cancel"]
+    assert cancels == [(mine["number"], "prep:8")]
+    acts.registry.append_entry("dataset", mine["number"], stage="cancelled")
+    assert await acts.prep_cancel(8, [U937]) == []  # settled: nothing to cancel
 
 
 async def test_comment_plan_reposts_once_per_dropped_set(acts):
@@ -399,11 +516,11 @@ async def test_comment_plan_reposts_once_per_dropped_set(acts):
     await acts.comment_plan(7, ROUND)
     await acts.comment_plan(7, ROUND, {BCSS: "data:ineligible on o/data#5"})
     await acts.comment_plan(7, ROUND, {BCSS: "data:ineligible on o/data#5"})
-    bodies = [c["body"] for c in acts.gh.comments[7]]
+    bodies = posted(acts)
     assert len(bodies) == 2 and "**Dropped**" in bodies[1] and f"- `{BCSS}`: data:ineligible" in bodies[1]
     assert "1 in the pool" in bodies[1] and f"| `{BCSS}` |" not in bodies[1]
     await acts.comment_plan(7, ROUND, {BCSS: "x", U937: "y"})
-    assert len(acts.gh.comments[7]) == 3
+    assert len(posted(acts)) == 3 and acts.gh.comments == {}  # the timeline, never the issue
 
 
 # -- bindings and the manual drop
@@ -608,7 +725,7 @@ async def test_register_dataset_raises_when_buffer_api_is_down(acts, server):
 
 
 async def test_large_stage_json_with_many_sampled_volumes_is_read_and_registered(acts, server):
-    """Review (milestone 4): 30 three-channel volumes with 4,096-value samples make stage.json ~5 MB, past the
+    """30 three-channel volumes with 4,096-value samples make stage.json ~5 MB, past the
     1 MiB cap the generic job-JSON reader uses; read_stage and register_dataset must still read it."""
     await planned_and_bound(acts)
     staged = write_stage_json(staged_dir(acts, U937))
@@ -628,21 +745,34 @@ async def test_large_stage_json_with_many_sampled_volumes_is_read_and_registered
 # -- labels and comments
 
 
-async def test_set_stage_swaps_label_and_comments_once(acts):
+async def test_set_stage_writes_the_subjects_stage_and_one_entry(acts):
     state = BufferState(7, round_id=ROUND, stage="plan-review")
     await acts.set_stage(7, "plan-review", state, "approve the plan")
     await acts.set_stage(7, "plan-review", state, "approve the plan")
-    assert [x["name"] for x in acts.gh.issues[7]["labels"]] == ["buffer:plan-review"]
-    bodies = [c["body"] for c in acts.gh.comments[7]]
+    subject = acts.registry.timeline("buffer", 7)["subject"]
+    assert (subject["key"], subject["stage"], subject["revision"]) == (SPEC_NAME, "plan-review", 2)
+    assert f"name: {SPEC_NAME}" in subject["data"]["spec"] and subject["status"] == "waiting"
+    bodies = posted(acts)
     assert len(bodies) == 1 and "`buffer:plan-review`" in bodies[0] and "approve the plan" in bodies[0]
+    assert [x["name"] for x in acts.gh.issues[7]["labels"]] == ["buffer:planning"]  # the label is the mirror's
+    await acts.set_stage(7, "ready")  # outside a round: the stage alone
+    assert acts.registry.timeline("buffer", 7)["subject"]["stage"] == "ready" and len(posted(acts)) == 1
 
 
-async def test_refuse_label_removes_and_explains(acts):
+async def test_a_write_for_a_subject_the_registry_does_not_know_fails(acts):
+    with pytest.raises(RegistryError) as error:
+        await acts.set_stage(9, "planning")
+    assert error.value.status == 404
+
+
+async def test_refusing_an_event_that_is_no_action_explains_and_touches_no_label(acts):
     acts.gh.issues[7]["labels"].append({"name": "buffer:approve"})
     await acts.refuse_label(7, "buffer:approve", "it is older than the plan", "12")
-    assert (7, "buffer:approve") in acts.gh.removed and "older than the plan" in acts.gh.comments[7][0]["body"]
-    await acts.refuse_label(7, "prep:go", "busy", "13")  # MiaPrep refuses a go while its round runs
-    assert (7, "prep:go") in acts.gh.removed and "Ignoring `prep:go`: busy" in acts.gh.comments[7][1]["body"]
+    assert "Ignoring `buffer:approve`: it is older than the plan" in posted(acts)[0]
+    prep_issue(acts)
+    await acts.refuse_label(8, "prep:go", "busy", "13")  # MiaPrep refuses a go while its round runs
+    assert "Ignoring `prep:go`: busy" in posted(acts, "prep", 8)[0]
+    assert acts.gh.removed == [] and acts.gh.comments == {}  # the issue is the mirror's
     with pytest.raises(ApplicationError):
         await acts.refuse_label(7, "data:go", "x", "12")
 
@@ -652,13 +782,6 @@ async def test_limits_come_from_config(acts):
     assert (limits.parallel, limits.walltime_min, limits.service_url) == (4, 120, "http://127.0.0.1:8765")
     assert (limits.parallel_fetch, limits.fetch_walltime_min, limits.fetch_attempts) == (2, 480, 4)
     assert (limits.poll_minutes, limits.lock_ttl_s) == (2, 900)
-
-
-async def test_admit_accepts_crlf_bodies(acts):
-    acts.gh.issues[7]["body"] = issue_body().replace("\n", "\r\n")  # GitHub's web editor saves CRLF
-    pins = await admitted(acts)
-    assert (acts.cfg.paths.state_dir / "rounds" / ROUND / "spec.yaml").read_text() == spec_text()
-    assert pins.catalog_ref == REF
 
 
 async def test_register_dataset_refuses_malformed_volumes(acts, server):
@@ -1071,7 +1194,7 @@ async def test_keep_evicts_a_free_staged_asset_under_quota(acts, keeper_server, 
     assert (await acts.keep()).evicted == []  # under quota now
 
 
-async def test_keep_posts_once_when_held_set_is_over_quota(acts, keeper_server):
+async def test_keep_reports_a_held_set_over_quota_and_writes_nothing_to_github(acts, keeper_server, caplog):
     from mia_core.fs import dir_bytes
 
     registry = keeper_server
@@ -1084,16 +1207,16 @@ async def test_keep_posts_once_when_held_set_is_over_quota(acts, keeper_server):
     for _ in range(2):
         report = await acts.keep()
         assert report.errors == [] and report.evicted == [] and report.over_quota == {"staged": over_by}
-    assert held.is_dir() and fresh.is_dir() and 9 not in acts.gh.comments
-    [comment] = acts.gh.comments[7]
-    assert f"over quota by {over_by} bytes" in comment["body"] and "keeper over-quota staged" in comment["body"]
+    assert held.is_dir() and fresh.is_dir()
+    # the Cache view shows the keeper's report; no issue is commented on (spec webapp-actions §6)
+    assert acts.gh.comments == {} and f"over quota by {over_by} bytes" in caplog.text
+    assert acts.registry.request("GET", "/keeper")["over_quota"] == {"staged": over_by}
     dry = await acts.keep(dry_run=True)
-    assert dry.over_quota == {} and len(acts.gh.comments[7]) == 1
+    assert dry.over_quota == {}
 
 
 async def test_keep_resets_stale_builds_and_removes_old_building_dirs(acts, keeper_server):
     import time
-    from types import SimpleNamespace
 
     registry = keeper_server
     catalog_not_due(acts)
@@ -1217,7 +1340,7 @@ async def test_keep_marks_a_half_removed_artifact_missing(acts, keeper_server, m
     assert (await acts.keep()).errors == [] and registry.asset("staged", "art")["state"] == "missing"  # not reused
 
 
-# -- milestone D: publish by rename, the status board, events, retire, the keeper's lifecycle signals
+# -- publish by rename, the status board, events, retire, the keeper's lifecycle signals
 
 
 def staged_into(directory: Path, artifact_id: str | None = None, **report) -> Path:
@@ -1261,7 +1384,7 @@ async def test_read_stage_leaves_a_failed_build_for_the_keeper(acts, server):
     assert not result.ok and result.errors == ["boom"]
     assert (building / "stage.json").is_file() and not staged_dir(acts, U937).exists()
     assert acts.registry.asset("staged", staged_dir(acts, U937).name)["state"] == "partial"
-    staged_into(staged_dir(acts, U937), ok=False)  # a failed build where milestone C staged in place
+    staged_into(staged_dir(acts, U937), ok=False)  # a failed build left in the final directory
     (building / "stage.json").unlink()
     staged_into(building, staged_dir(acts, U937).name)
     assert (await acts.read_stage(ROUND, U937)).ok  # the good build replaces it; the failed one is set aside
@@ -1318,9 +1441,10 @@ async def test_set_stage_writes_the_event(acts, server):
     events = httpx.get(f"{server}/buffers/{ROUND}/events").json()["events"]
     assert [event["kind"] for event in events] == ["created", "planned", "sourcing", "ready"]
     assert {(event["issue"], event["detail"]) for event in events} == {(7, "x" * 200)}
-    acts.registry = Registry("http://127.0.0.1:9")
-    await acts.set_stage(7, "idle", state)  # buffer-api down: the label still moves
-    assert [label["name"] for label in acts.gh.issues[7]["labels"]] == ["buffer:idle"]
+    live, acts.registry = acts.registry, Registry("http://127.0.0.1:9")
+    with pytest.raises(RegistryError):  # buffer-api down: the stage is not written, so the activity is retried
+        await acts.set_stage(7, "idle", state)
+    assert live.timeline("buffer", 7)["subject"]["stage"] == "ready" and acts.gh.comments == {}
 
 
 async def test_mark_dataset_and_retire(acts, server):
@@ -1386,17 +1510,21 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
 
     def buffer(buffer_id, kinds, volumes=(), **config):
         registry.request("PUT", f"/buffers/{buffer_id}", json={**CFG, **config})
-        for volume_id, present in volumes:
+        for volume_id, present, *artifact in volumes:
             path = staged_root / buffer_id / volume_id
             if present:
                 path.mkdir(parents=True)
             volume = {**body(), "path": str(path), "record": volume_id.split("/")[0]}
+            if artifact:
+                volume["artifact"] = artifact[0]
             registry.request("PUT", f"/buffers/{buffer_id}/volumes/{volume_id.replace('/', '%2F')}", json=volume)
         for kind in kinds:
             registry.event(buffer_id, kind)
 
     buffer("i2-e3", ["created", "ready"], [("rec-a/v0.zarr", False), ("rec-b/v0.zarr", False), ("rec-c/v0", True)])
     buffer("i4-e5", ["ready"], [("rec-d/v0", True)], idle_hours=1)  # no consumer for over an hour
+    buffer("i16-e17", ["ready"], [("rec-h/v0", True, "art-h"), ("rec-i/v0", True, "art-i")])  # art-h is revoked
+    registry.put_asset("staged", "art-h", {"quarantined": True, "quarantined_at": 1.0})
     buffer("i6-e7", ["ready", "idle"], retire_after_days=0.01)  # idle for over 864 s
     buffer("i8-e9", ["ready", "idle"], retire_after_days=0.01)  # its workflow is gone
     buffer("i10-e11", ["approved"], [("rec-e/v0", False)])  # still sourcing: not the keeper's to judge
@@ -1412,6 +1540,7 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
     await acts._keeper_buffers(report, now, dry_run=True)
     expected = [
         "retire i12-e13",
+        "revoked i16-e17 rec-h",
         "degraded i2-e3 rec-a,rec-b",
         "idle i4-e5",
         "retire i6-e7",
@@ -1421,9 +1550,14 @@ async def test_keeper_signals_degraded_idle_and_retire(acts, keeper_server, monk
 
     report = KeeperReport()
     await acts._keeper_buffers(report, now, dry_run=False)
-    assert report.signalled == expected[:4] and report.errors == []  # the gone workflow is logged, not reported
+    assert report.signalled == expected[:5] and report.errors == []  # the gone workflow is logged, not reported
     assert acts.client.sent == [
         (acts.cfg.workflow_id(12), "retire", [None, "i12-e13"]),
+        (
+            acts.cfg.workflow_id(16),
+            "revoked",
+            [RevokedSignal(["rec-h"], ["rec-h/v0"], "quarantined: rec-h/v0", "i16-e17")],
+        ),
         (
             acts.cfg.workflow_id(2),
             "degraded",
@@ -1521,24 +1655,28 @@ async def test_keeper_watch_survives_a_pre_d_config_and_a_failing_buffer(acts, k
     assert report.errors == ["buffers: i4-e5: boom"]
 
 
-# -- milestone E: the preparation request
+# -- the preparation request
 
 PREP_ROUND = "p8-e21"
 
 
-def prep_body(**fields) -> str:
+def prep_spec(**fields) -> str:
     spec = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/catalog", "ref": REF}, **fields}
-    return f"Please prepare these.\n\n```yaml\n{yaml.safe_dump(spec, sort_keys=False)}```\n"
+    return yaml.safe_dump(spec, sort_keys=False)
 
 
 def prep_issue(acts, number: int = 8, **fields) -> None:
-    acts.gh.issues[number] = {"number": number, "body": prep_body(**fields), "labels": [{"name": "prep:requested"}]}
+    """A preparation request as subject `number`, whose go (action 21 for request 8, 22 for 9) carries its spec."""
+    acts.gh.issues[number] = {"number": number, "body": "", "labels": [{"name": "prep:requested"}]}
+    spec = prep_spec(**fields)
+    acts.registry.adopt_subject("prep", number, f"prep-{number}", data={"spec": spec})
+    put_action(acts, "prep", number, number + 13, {"spec": spec})
 
 
 async def test_prep_admit_and_nudge_report_prepared_records(acts):
     prep_issue(acts, records=[U937, BCSS, U937])
     pins = await acts.prep_admit(8, "21")
-    assert pins == PrepPins(PREP_ROUND, REF, [U937, BCSS], 14, issue=8)
+    assert pins == PrepPins(PREP_ROUND, REF, [U937, BCSS], 14, issue=8, root=f"{acts.cfg.github.buffers_repo}#8")
     assert await acts.prep_admit(8, "21") == pins  # a retry: the same pins
     round_dir = acts.cfg.paths.state_dir / "rounds" / PREP_ROUND
     assert {row["id"] for row in json.loads((round_dir / "plan.json").read_text())["rows"]} == {U937, BCSS}
@@ -1548,9 +1686,9 @@ async def test_prep_admit_and_nudge_report_prepared_records(acts):
     assert outcome == PrepOutcome(U937, "prepared") and gh.created == [] and gh.issues == {}
     await acts.comment_prep(8, PREP_ROUND, [outcome, PrepOutcome(BCSS, "opened", 100)])
     await acts.comment_prep(8, PREP_ROUND, [outcome])  # once per round
-    (comment,) = acts.gh.comments[8]
-    assert "| record | outcome | issue |" in comment["body"] and f"| `{U937}` | prepared |  |" in comment["body"]
-    assert f"| `{BCSS}` | opened | o/data#100 |" in comment["body"]
+    (comment,) = posted(acts, "prep", 8)
+    assert "| record | outcome | page |" in comment and f"| `{U937}` | prepared |  |" in comment
+    assert f"| `{BCSS}` | opened | [open](http://127.0.0.1:8765/#datasets/{BCSS}) |" in comment  # never `repo#n`
 
 
 async def test_prep_admit_refuses_unknown_records(acts):
@@ -1576,28 +1714,49 @@ async def test_prep_admit_selects_records_with_a_select_block(acts):
     assert sorted(pins.records) == sorted([BCSS, U937]) and pins.timeout_days == 3
 
 
-async def test_prep_nudge_opens_once_for_two_requests(acts):
+async def test_prep_nudge_starts_a_dataset_once_for_two_requests(acts, gateway):
     acts.registry.put_dataset(U937, state="in-progress")  # not prepared: mia-data has work to do
     prep_issue(acts, 8, records=[U937])
     prep_issue(acts, 9, records=[U937])
     first, second = await acts.prep_admit(8, "21"), await acts.prep_admit(9, "22")
-    gh = with_datasets(acts)
-    assert await acts.prep_nudge(first.round_id, U937) == PrepOutcome(U937, "opened", 100)
-    assert await acts.prep_nudge(second.round_id, U937) == PrepOutcome(U937, "in-progress", 100)
-    assert len(gh.created) == 1 and [x["name"] for x in gh.issues[100]["labels"]].count("data:go") == 1
+    opened = await acts.prep_nudge(first.round_id, U937)
+    assert (opened.outcome, opened.issue) == ("opened", acts.registry.subject("dataset", U937)["number"])
+    go = acts.registry.timeline("dataset", opened.issue)["actions"][0]
+    assert (go["actor"], go["payload"]) == ("prep:8", {"root": "o/buffers#8"})  # charged to the request that asked
+    acts.registry.append_entry("dataset", opened.issue, stage="matching")  # its round is running
+    assert await acts.prep_nudge(second.round_id, U937) == PrepOutcome(U937, "in-progress", opened.issue)
+    assert len(gateway.sent) == 1
 
 
-async def test_prep_nudge_maps_the_dataset_issue(acts):
+async def test_prep_nudge_maps_where_the_dataset_stands(acts, gateway):
     for record in (U937, BCSS):
         acts.registry.put_dataset(record, state="in-progress")
     prep_issue(acts, records=[U937, BCSS])
     await acts.prep_admit(8, "21")
-    with_datasets(acts, {5: (U937, ["data:done"]), 6: (BCSS, ["data:new"])})
+    acts.registry.adopt_subject("dataset", 5, U937, stage="done")
+    acts.registry.adopt_subject("dataset", 6, BCSS, stage="new")
     done = await acts.prep_nudge(PREP_ROUND, U937)
     assert (done.outcome, done.issue) == ("done-unpublished", 5) and "binding.yaml" in done.note
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
-    acts.registry.put_dataset(BCSS, state="needs-human", issue=6)  # settled in the registry: its row names the issue
+    acts.registry.put_dataset(BCSS, state="needs-human", issue=6)  # settled in the registry: its row names it
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "needs-human", 6)
+
+
+async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_too(acts, gateway):
+    """Without `again` a prepared dataset settles at once (the fixture's registry knows every record as prepared).
+    With it the dataset gets a new round, and its row says in-progress so that the request follows that round."""
+    prep_issue(acts, records=[U937, BCSS], again=True)
+    pins = await acts.prep_admit(8, "21")
+    assert pins.again is True
+    acts.registry.adopt_subject("dataset", 5, U937, stage="done")
+    acts.registry.put_dataset(BCSS, state="needs-human", issue=6)
+    acts.registry.adopt_subject("dataset", 6, BCSS, stage="needs-human")
+    assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "nudged", 5)
+    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
+    assert [sent[:3] for sent in gateway.sent] == [("dataset", 5, "go"), ("dataset", 6, "go")]
+    assert [acts.registry.dataset(record)["state"] for record in (U937, BCSS)] == ["in-progress", "in-progress"]
+    acts.registry.adopt_subject("dataset", 5, U937, stage="review")  # a round is under way: it is left to it
+    assert (await acts.prep_nudge(PREP_ROUND, U937)).outcome == "in-progress" and len(gateway.sent) == 2
 
 
 async def test_prep_status_reads_the_registry(acts):
@@ -1612,13 +1771,164 @@ async def test_prep_status_reads_the_registry(acts):
         await acts.prep_status([U937])
 
 
-async def test_set_prep_stage_swaps_label_and_comments_once(acts):
+async def test_set_prep_stage_writes_the_requests_stage_and_one_entry(acts):
     prep_issue(acts)
     state = PrepState(8, round_id=PREP_ROUND, stage="requested")
     await acts.set_prep_stage(8, "done", state, "every record is prepared")
     await acts.set_prep_stage(8, "done", state, "every record is prepared")
-    assert [x["name"] for x in acts.gh.issues[8]["labels"]] == ["prep:done"]
-    (comment,) = acts.gh.comments[8]
-    assert "`prep:done`" in comment["body"] and "every record is prepared" in comment["body"]
+    subject = acts.registry.timeline("prep", 8)["subject"]
+    assert (subject["key"], subject["stage"]) == ("prep-8", "done") and "kind: preparation" in subject["data"]["spec"]
+    (comment,) = posted(acts, "prep", 8)
+    assert "`prep:done`" in comment and "every record is prepared" in comment
+    assert [x["name"] for x in acts.gh.issues[8]["labels"]] == ["prep:requested"]  # the label is the mirror's
     with pytest.raises(ApplicationError):
         await acts.set_prep_stage(8, "new", state, "")
+
+
+async def test_await_job_lock_loss_is_permanent(acts, tmp_path):
+    """A heartbeat that finds the raw lock gone fails the wait for good (spec autonomous-gates §3); the runner has
+    killed the job by then."""
+    locks = lock_dir(acts.cfg)
+    assert locks.take("raw", "rec-1", "me", 900)
+
+    async def wait(job_id, workspace, heartbeat):
+        heartbeat("RUN")
+        return SimpleNamespace(job_id=job_id, state="DONE", exit_code=0)
+
+    acts.jobs = SimpleNamespace(wait=wait)
+    env = ActivityEnvironment()
+    assert (await env.run(acts.await_job, "j1", "/w", ["raw", "rec-1", "me"])).state == "DONE"
+    locks.release("raw", "rec-1", "me")
+    with pytest.raises(ApplicationError) as info:
+        await env.run(acts.await_job, "j2", "/w", ["raw", "rec-1", "me"])
+    assert info.value.non_retryable and info.value.type == "LockLost" and "lost the lock raw/rec-1" in str(info.value)
+
+
+async def test_reserve_and_settle_charge_the_root(acts):
+    acts.cfg.autonomy.root.max_usd = 7
+    assert await acts.reserve("o/buffers#7", "mia-7-i7-e11-u937-0", "stage", 5.0) == Reservation(True, "")
+    refused = await acts.reserve("o/buffers#7", "mia-7-i7-e11-u937-1", "stage", 5.0)
+    assert not refused.ok and "would exceed max_usd 7" in refused.reason
+    await acts.settle("o/buffers#7", "mia-7-i7-e11-u937-0", fetched_bytes=4096)
+    assert acts.registry.budget("o/buffers#7")["fetched_bytes"] == 4096
+    assert (await acts.reserve("", "k", "stage", 0.0)) == Reservation(True, "no budget")
+
+
+async def test_paused_reads_the_manifest_fresh(acts, tmp_path, monkeypatch):
+    from mia_core.autonomy import set_pause
+
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("services: {}\n")
+    monkeypatch.setenv("MIA_CONFIG", str(manifest))
+    assert await acts.paused() is False
+    set_pause(manifest, True)
+    assert await acts.paused() is True
+
+
+async def two_registered(acts) -> tuple[str, str]:
+    """U937 and BCSS staged and registered with buffer i7-e11; returns their artifact ids."""
+    await planned_and_bound(acts)
+    write_binding(acts, BCSS, ["https://zenodo.org/b.tif"])
+    await acts.read_binding(ROUND, BCSS)
+    write_stage_json(staged_dir(acts, U937))
+    write_stage_json(staged_dir(acts, BCSS))
+    await acts.create_buffer(ROUND, ROUND)
+    assert (await acts.register_dataset(ROUND, U937, ROUND)).refused == {}
+    assert (await acts.register_dataset(ROUND, BCSS, ROUND)).refused == {}
+    return staged_dir(acts, U937).name, staged_dir(acts, BCSS).name
+
+
+async def test_assess_board_writes_one_assessment_per_artifact_and_names_the_refused(acts, server):
+    import time
+
+    from mia_core.judge.policy import new_assessment
+
+    art_u, art_b = await two_registered(acts)
+    reject = new_assessment(
+        gate="staged",
+        subject_kind="artifact",
+        subject_ref=art_b,
+        verdict="reject",
+        by="human:bob",
+        at=time.time() - 60,
+        summary="revoked",
+    )
+    acts.registry.put_assessment(reject)
+    out = await acts.assess_board(7, ROUND, ROUND, "approve", "human:alice")
+    assert len(out.assessments) == 1 and list(out.refused) == [BCSS]  # no approve is written over a standing reject
+    assert [r["verdict"] for r in acts.registry.assessments(subject_kind="artifact", subject_ref=art_b)] == ["reject"]
+    assert out.refused[BCSS].startswith("rejected by human:bob at ") and out.refused[BCSS].endswith(": revoked")
+    rows = acts.registry.assessments(subject_kind="artifact", subject_ref=art_u)
+    assert (
+        [r["verdict"] for r in rows] == ["approve"] and rows[0]["gate"] == "staged" and rows[0]["by"] == "human:alice"
+    )
+
+
+async def test_unregister_volumes_deletes_a_records_volumes_only(acts, server):
+    await two_registered(acts)
+    assert await acts.unregister_volumes(ROUND, U937) == [f"{U937}/v0.zarr"]
+    assert [row["id"] for row in acts.registry.volumes(ROUND)] == [f"{BCSS}/v0.zarr"]
+    assert await acts.unregister_volumes(ROUND, U937) == []
+
+
+async def test_read_binding_reports_a_refused_artifact(acts, server):
+    import time
+
+    from mia_core.judge.policy import new_assessment
+
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, U937, ["https://zenodo.org/api/records/1/files/a.tif/content"])
+    await acts.read_binding(ROUND, U937)
+    artifact = staged_dir(acts, U937).name
+    write_stage_json(staged_dir(acts, U937))
+    await acts.read_stage(ROUND, U937)
+    assert (await acts.read_binding(ROUND, U937)).refused == ""
+    acts.registry.put_assessment(
+        new_assessment(
+            gate="staged",
+            subject_kind="artifact",
+            subject_ref=artifact,
+            verdict="reject",
+            by="human:bob",
+            at=time.time(),
+            summary="revoked",
+        )
+    )
+    binding = await acts.read_binding(ROUND, U937)
+    assert binding.staged and binding.refused.startswith("human:bob at ") and binding.refused.endswith(": revoked")
+
+
+async def test_keep_holds_a_quarantined_asset_for_the_quarantine(acts, keeper_server, monkeypatch):
+    import time
+
+    from mia_buffers import cli
+    from mia_core.fs import dir_bytes
+
+    registry = keeper_server
+    monkeypatch.setattr(cli, "catalog_snapshot", lambda cfg_, ref, tokens: CATALOG)
+    acts.gh_catalog.refs["main"] = REF
+    young, old_one = staged_artifact(acts, "young", 1000), staged_artifact(acts, "old", 1000)
+    now = time.time()
+    registry.put_asset("staged", "young", {"last_used": now - 49 * 3600, "quarantined": True, "quarantined_at": now})
+    old_at = now - acts.cfg.autonomy.quarantine_days * 86400 - 60
+    registry.put_asset("staged", "old", {"last_used": now - 49 * 3600, "quarantined": True, "quarantined_at": old_at})
+    acts.cfg.quota.staged_bytes, acts.cfg.quota.headroom_bytes = dir_bytes(young) // 2, 0
+    report = await acts.keep(dry_run=True)
+    assert report.evicted == ["staged old"] and report.errors == []  # the young one is held, over quota or not
+    assert young.is_dir() and old_one.is_dir()
+
+
+async def test_revoke_artifacts_rejects_and_quarantines_this_buffers_artifacts_only(acts, server):
+    from test_buffers_api import CFG, body
+
+    art_u, art_b = await two_registered(acts)
+    acts.registry.request("PUT", "/buffers/other", json=CFG)
+    other = {**body(f"{U937}/v0.zarr"), "record": U937, "artifact": "art-x"}
+    acts.registry.request("PUT", f"/buffers/other/volumes/{U937}%2Fv0.zarr", json=other)
+    acts.registry.put_asset("staged", "art-x", {"state": "ready", "record": U937})
+    out = await acts.revoke_artifacts(ROUND, ROUND, [U937, "not-here"], "human:alice", "buffer:revoke by alice")
+    assert out.records == [U937] and out.volumes == [f"{U937}/v0.zarr"] and len(out.assessments) == 1
+    assert acts.registry.asset("staged", art_u)["quarantined"] is True
+    assert "quarantined" not in acts.registry.asset("staged", "art-x")
+    assert "quarantined" not in (acts.registry.asset("staged", art_b) or {})  # the other record: untouched
+    assert acts.registry.assessments(subject_kind="artifact", subject_ref=art_u)[0]["verdict"] == "reject"

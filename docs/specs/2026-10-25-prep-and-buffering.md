@@ -14,7 +14,7 @@ artifacts (§1.10, §5.2), the service's state on host-local disk (§1.11, §3),
 `mia_core` package for what both applications share (§8), and cache coordination by lock files in a host-local
 directory instead of leases in the API (§1.7, §5.5). Builds on the training-buffers spec
 ([`2026-10-21-training-buffers.md`](2026-10-21-training-buffers.md), v0.7, milestones 0–4 built on branch
-`training-buffers`) and the mia-data crops spec ([`../mia-crops-spec.md`](../mia-crops-spec.md)). This document
+`training-buffers`) and the mia-data crops spec ([`2026-10-12-mia-crops.md`](2026-10-12-mia-crops.md)). This document
 changes how those two systems meet; it does not re-describe what they do inside.
 **Repos:** this repo (`mia_data/`, `mia_buffers/`, `mia_ops/`, `autodev/`), mia-snippets (harness:
 `fetch`), the issue repos `JaneliaSciComp/mia-workflow-data` (datasets) and `JaneliaSciComp/mia-buffers`

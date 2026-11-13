@@ -1,22 +1,23 @@
-"""The Temporal workflows that take a dataset issue from `go` label to published crops.
+"""The Temporal workflows that take a dataset from its `go` action to published crops.
 
-`MiaDataDataset` lives as long as the issue does. Each `go` starts a round: an agent matches the dataset to
-a loader snippet, the worker smoke-tests that match, the round's crops are made and shown on the issue, and a
-human approves them (published) or rejects them with comments (spec §14: autodev gets the comments and a
-superseding snippet's PR is followed). When no snippet fits, the round instead opens an issue in mia-snippets
+`MiaDataDataset` lives as long as the dataset's subject does. Each `go` starts a round: an agent matches the
+dataset to a loader snippet, the worker smoke-tests that match, the round's crops are made and shown in the
+dataset's timeline, and a human approves them (published) or rejects them with feedback (spec §14: autodev
+gets the feedback and a superseding snippet's PR is followed). When no snippet fits, the round instead opens an issue in mia-snippets
 for autodev to write one and follows that PR: every head's crops are reviewed the same way, the approve merges
 the PR, and the approved crops are published.
 
-Workflow code does no I/O: every GitHub, filesystem and cluster interaction is an activity called by name
-(see activities.py). The durable state is a `DatasetState`, handed to continue_as_new at quiet points.
+Workflow code does no I/O: every registry, GitHub, filesystem and cluster interaction is an activity called
+by name (see activities.py). The durable state is a `DatasetState`, handed to continue_as_new at quiet points.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import math
-from collections.abc import Awaitable
+from collections.abc import Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -29,15 +30,19 @@ with workflow.unsafe.imports_passed_through():
 
     from .crop_test import describe_failure, job_succeeded, judge
     from .models import (
+        AssessmentWritten,
         DatasetState,
         GalleryResult,
         JobArgs,
         JobDone,
+        JudgeResult,
         LabelEvent,
         LockTaken,
         MatchResult,
         Pins,
         PrUpdate,
+        Reservation,
+        Revocation,
         RoundLimits,
         SmokeResult,
         Test,
@@ -45,13 +50,19 @@ with workflow.unsafe.imports_passed_through():
         job_key,
     )
 
-GO, APPROVE, REJECT = "data:go", "data:approve", "data:reject"
-BUSY = "busy, ignored: a round is already running. Add it again once the issue shows a final stage."
-NOT_REVIEW = (
-    "`data:approve` and `data:reject` count only while the issue is in `data:review`, for the round under review."
-)
+GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:revoke"
+CANCEL = "data:cancel"  # an action only: there was never such a label
+NO_ROUND = "there is no round in progress to cancel"
+ROUND_ENDED = "the round ended before the cancel reached it"
+CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the round's activity in flight to answer
+NOTHING_TO_REVOKE = "nothing to revoke: this dataset has published no crops"
+REVOKED = "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; running it again repairs it"
+BUSY = "busy, ignored: a round is already running. Cancel it first, or ask again once it has ended."
+NOT_REVIEW = "an approve or a reject counts only while the dataset is at `review`, for the set under review."
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
+NOT_AUTHORIZED = "approve recorded as {id}, but publication is not authorized: {why}"
+PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then run it again"
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
 
@@ -87,6 +98,14 @@ class MiaDataDataset:
         self.go_events: list[LabelEvent] = []  # signals not yet acted on
         self.approve_events: list[LabelEvent] = []
         self.reject_events: list[LabelEvent] = []
+        self.revoke_events: list[LabelEvent] = []
+        self.cancel_events: list[LabelEvent] = []
+        # a cancel in progress (see _cancel_round): the round starts no new activity, the one in flight answers
+        self.cancelling = False
+        self.unwinding = False  # the round's task has been told to stop: what it runs from here on is clean-up
+        self.in_flight = 0  # the round's activities in flight (clean-up not counted)
+        self.round_task: asyncio.Future[None] | None = None
+        self.unkilled: list[str] = []  # jobs a cancel could not kill, each with the reason
         self.limits: RoundLimits | None = None  # read from config at the start of a round
         self.stage_write: Any = None  # the handle of a stage write still running beside the round (see _stage)
 
@@ -101,6 +120,17 @@ class MiaDataDataset:
     @workflow.signal
     def reject(self, event: LabelEvent) -> None:
         self.reject_events.append(event)
+
+    @workflow.signal
+    def revoke(self, event: LabelEvent) -> None:
+        """`data:revoke`: withdraw what this issue published (spec autonomous-gates §6); taken at any stage."""
+        self.revoke_events.append(event)
+
+    @workflow.signal
+    def cancel(self, event: LabelEvent) -> None:
+        """End the round in progress now (spec webapp-actions §5): see `_guard`. With no round running it is
+        refused."""
+        self.cancel_events.append(event)
 
     @workflow.signal
     def pr_update(self, update: PrUpdate) -> None:
@@ -120,9 +150,11 @@ class MiaDataDataset:
         elif (state.stage in DEVELOP or state.stage == "review") and state.snippet_issue:  # ... or following the PR
             await self._guard(self._follow_pr())
         while True:
-            await workflow.wait_condition(lambda: bool(self._labels()) or _rollover_due())
-            if not self._labels():
+            await workflow.wait_condition(lambda: bool(self._labels() or self.cancel_events) or self._roll_due())
+            if not (self._labels() or self.cancel_events):
                 await self._rollover()  # idle, nothing queued
+            await self._refuse_cancels()  # idle: no round to cancel
+            await self._revokes()  # a revoke counts at any stage
             await self._refuse_queued(gos=False)  # idle: a verdict has no round under review to apply to
             if not self.go_events:
                 continue
@@ -131,26 +163,55 @@ class MiaDataDataset:
                 continue
             rounds += 1
             await self._guard(self._round(event))
-            if (rounds >= MAX_ROUNDS_PER_EXECUTION or _rollover_due()) and not self._labels():
+            if (rounds >= MAX_ROUNDS_PER_EXECUTION or self._roll_due()) and not (self._labels() or self.cancel_events):
                 await self._rollover()
 
     # --- helpers ---------------------------------------------------------------------------
 
     async def _act(
-        self, name: str, *args: Any, seconds: int = 60, budget: timedelta = timedelta(hours=6), result_type: Any = None
+        self,
+        name: str,
+        *args: Any,
+        seconds: int = 60,
+        budget: timedelta = timedelta(hours=6),
+        result_type: Any = None,
+        cleanup: bool = False,
     ) -> Any:
         """Run an activity with a per-attempt timeout and an overall retry budget.
 
         Transient failures retry until the budget runs out; activities raise a non-retryable
-        ApplicationError for failures that a retry cannot fix."""
-        return await workflow.execute_activity(
-            name,
-            args=list(args),
-            start_to_close_timeout=timedelta(seconds=seconds),
-            schedule_to_close_timeout=budget,
-            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
-            result_type=result_type,
-        )
+        ApplicationError for failures that a retry cannot fix.
+
+        While a cancel is in progress the round's task starts no new activity: it is stopped here instead (the
+        round's own clean-up, `cleanup` or anything after it was told to stop, goes through). An activity
+        already in flight is left to answer, so what it did (a job submitted, a lock taken, a reservation
+        opened) is known and undone; `_cancel_round` waits for that."""
+        of_round = asyncio.current_task() is self.round_task and not self.unwinding and not cleanup
+        if of_round and self.cancelling:
+            self.unwinding = True
+            raise asyncio.CancelledError
+        self.in_flight += of_round
+        try:
+            return await workflow.execute_activity(
+                name,
+                args=list(args),
+                start_to_close_timeout=timedelta(seconds=seconds),
+                schedule_to_close_timeout=budget,
+                retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+                result_type=result_type,
+            )
+        except ActivityError as error:
+            if self.cancelling and isinstance(error.cause, CancelledError) and not cleanup:
+                # the cancel landed in the activity after all (the wait for it ran out): never a failed
+                # activity to a best-effort caller, which would carry the round on
+                raise asyncio.CancelledError from error
+            raise
+        finally:
+            self.in_flight -= of_round
+
+    def _roll_due(self) -> bool:
+        """Whether to continue as new now: never with a cancel queued, which a new run would not hear."""
+        return _rollover_due() and not self.cancel_events
 
     async def _limits(self) -> RoundLimits:
         """The round's config values. They are not part of the durable state, so a rollover re-reads them."""
@@ -158,17 +219,136 @@ class MiaDataDataset:
             self.limits = await self._act("limits", result_type=RoundLimits)
         return self.limits
 
-    async def _guard(self, step: Awaitable[None]) -> None:
-        """Run a step of the round; any failure ends the round in needs-human instead of failing the workflow."""
+    async def _guard(self, step: Coroutine[Any, Any, None]) -> None:
+        """Run a step of the round; any failure ends the round in needs-human instead of failing the workflow.
+
+        The step runs as a task so a `cancel` can end it wherever it is waiting (a job, a lock, a verdict, a PR):
+        see `_cancel_round` (spec webapp-actions §5)."""
+        self.cancel_events = [event for event in self.cancel_events if not self._seen(event)]
+        for stale in self.cancel_events:  # sent before this round began: it was not aimed at it
+            await self._refuse(CANCEL, NO_ROUND, stale)
+        self.cancel_events = []
+        round_task = self.round_task = asyncio.ensure_future(step)
+        cancel = asyncio.ensure_future(workflow.wait_condition(lambda: bool(self.cancel_events)))
         try:
-            await step
+            await workflow.wait([round_task, cancel], return_when=asyncio.FIRST_COMPLETED)
+            if round_task.done():
+                await round_task  # re-raises what ended it: a failure below, or a continue-as-new
+            else:
+                await self._cancel_round(round_task)
         except (ActivityError, RoundFailed) as error:
             await self._finish("needs-human", error_message(error))
+        except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up
+            self.unwinding = True
+            round_task.cancel()
+            await workflow.wait([round_task])
+            raise
+        finally:
+            cancel.cancel()
+            self.round_task, self.cancelling, self.unwinding = None, False, False
         await self._settle_stage_write(cancel=False)  # quiet point: the last stage write lands before a rollover
+
+    async def _cancel_round(self, round_task: asyncio.Future[None]) -> None:
+        """End the round a `cancel` was sent for, leaving nothing of it behind.
+
+        From now on the round starts no activity (`_act`). The one in flight is left to answer, so that a job it
+        submitted, a lock it took or a reservation it opened is known: the round's task then stops at its next
+        step and cleans up as it unwinds. A task that is waiting (a job, a lock, a verdict, a snippet PR) is
+        cancelled there. Its cluster job is killed first, then its reservation settled and its raw lock
+        released (`_job`): one writer per raw cache holds until the job is dead. A job that cannot be killed
+        makes the dataset `needs-human`, saying so, never `cancelled` over a job that runs on."""
+        events, self.cancel_events = self.cancel_events, []
+        self.cancelling, self.unkilled = True, []
+        if self.in_flight:
+            with contextlib.suppress(TimeoutError):  # after this long the cancel goes in anyway (see _act)
+                await workflow.wait_condition(lambda: not self.in_flight or round_task.done(), timeout=CANCEL_PATIENCE)
+        if not round_task.done() and not self.unwinding:  # waiting somewhere: stop it there
+            self.unwinding = True
+            round_task.cancel()
+        await workflow.wait([round_task])
+        self.cancelling = self.unwinding = False
+        if not round_task.cancelled() and round_task.exception() is None:
+            # the round reached its end by itself while the cancel was on its way: its stage stands
+            for event in events:
+                if not self._seen(event):
+                    await self._refuse(CANCEL, ROUND_ENDED, event)
+            return
+        for event in events:
+            self._seen(event)
+        if not round_task.cancelled():
+            workflow.logger.warning(
+                "issue #%d: the cancelled round ended with: %s", self.state.issue, round_task.exception()
+            )
+        if self.unkilled:
+            jobs = "; ".join(self.unkilled)
+            return await self._finish(
+                "needs-human",
+                f"cancelled by {events[-1].actor}, but a job could not be killed and may still be running: {jobs}",
+            )
+        await self._finish("cancelled", f"cancelled by {events[-1].actor}")
+
+    async def _kill(self, job_id: str) -> None:
+        """Kill a job of a round being cancelled; a failure is kept for the round's last word, never raised."""
+        try:
+            await self._act("kill_job", job_id, budget=timedelta(minutes=30), cleanup=True)
+        except ActivityError as error:
+            self.unkilled.append(f"{job_id}: {error_message(error)}")
+
+    async def _refuse_cancels(self) -> None:
+        """A cancel that arrived with no round in progress (a click that crossed the round's end): refuse it."""
+        events, self.cancel_events = self.cancel_events, []
+        for event in events:
+            if not self._seen(event):
+                await self._refuse(CANCEL, NO_ROUND, event)
 
     def _labels(self) -> bool:
         """Whether any label signal is queued."""
-        return bool(self.go_events or self.approve_events or self.reject_events)
+        return bool(self.go_events or self.approve_events or self.reject_events or self.revoke_events)
+
+    async def _revokes(self) -> bool:
+        """Act on every queued `data:revoke`; True when one ended the round (a refused label leaves it alone)."""
+        ended = False
+        while self.revoke_events:
+            event = self.revoke_events.pop(0)
+            if self._seen(event):
+                continue
+            try:
+                ended = await self._revoke(event) or ended
+            except (ActivityError, RoundFailed) as error:
+                await self._finish("needs-human", error_message(error))
+                ended = True
+            await self._settle_stage_write(cancel=False)
+        return ended
+
+    async def _revoke(self, event: LabelEvent) -> bool:
+        """Withdraw the dataset: the activity writes the reject assessments, quarantines the staged artifacts and
+        flips the row; the issue ends in needs-human naming the blast radius. Returns whether the round ended: an
+        issue that never published anything (no round, or no manifest on disk) only has the label refused."""
+        state = self.state
+        if not workflow.patched("l-revoke"):
+            return False
+        if not state.round_id:
+            await self._refuse(REVOKE, NOTHING_TO_REVOKE, event)
+            return False
+        out = await self._act(
+            "revoke_dataset",
+            state.issue,
+            state.round_id,
+            event.actor,
+            event.event_id,
+            seconds=900,
+            result_type=Revocation,
+        )
+        if not out.assessment:
+            await self._refuse(REVOKE, NOTHING_TO_REVOKE, event)
+            return False
+        artifacts = ", ".join(f"`{artifact}`" for artifact in out.artifacts) or "none"
+        buffers = ", ".join(f"`{buffer}`" for buffer in out.buffers) or "none"
+        extra = f"**Quarantined artifacts:** {artifacts}\n**Buffers that drew from it:** {buffers}\n"
+        count = len(out.artifacts)
+        detail = REVOKED.format(actor=event.actor, count=count, plural="" if count == 1 else "s")
+        await self._finish("needs-human", detail, extra=extra)
+        return True
 
     def _seen(self, event: LabelEvent) -> bool:
         """True if this label event was handled before; otherwise record it as handled now."""
@@ -180,16 +360,19 @@ class MiaDataDataset:
     async def _stage(
         self, stage: str, detail: str = "", budget: timedelta = timedelta(hours=6), extra: str = "", wait: bool = False
     ) -> None:
-        """Move the issue to `stage`: `set_stage` writes the registry row, swaps the label and posts the comment.
-        Behind `stage-write-async`, a stage inside a round does not wait for GitHub (its hourly write budget once
-        held three rounds 25 minutes before their first job): the write runs beside the round, and the next stage
-        write or the round's end cancels what is still pending. A final stage (`wait`) is awaited as before."""
+        """Move the dataset to `stage`: `set_stage` writes the registry row, the subject's stage and its entry.
+
+        Every stage write is awaited (`stage-write-awaited`; spec webapp-actions §6): the registry's stage is what
+        buffer-api checks an action against and what the page shows as waiting on a person, so it may not lag
+        the round. The write is a call to buffer-api. A history without that patch replays
+        `stage-write-async`: a stage inside a round runs beside it and only a final stage (`wait`) is
+        awaited."""
         self.state.stage = stage
         args = [self.state.issue, stage, self.state, detail, extra]
         if not workflow.patched("stage-write-async"):
             return await self._act("set_stage", *args, budget=budget)
         await self._drop_stage_write()
-        if wait:
+        if wait or workflow.patched("stage-write-awaited"):
             return await self._act("set_stage", *args, budget=budget)
         self.stage_write = workflow.start_activity(
             "set_stage",
@@ -197,6 +380,13 @@ class MiaDataDataset:
             start_to_close_timeout=timedelta(seconds=60),
             schedule_to_close_timeout=budget,
             retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            # stage-write-wait: a cancelled write already inside its GitHub call finishes before the next write
+            # starts, so two writes never swap labels at once (two issues once kept `matching` and `needs-human`)
+            cancellation_type=(
+                workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
+                if workflow.patched("stage-write-wait")
+                else workflow.ActivityCancellationType.TRY_CANCEL
+            ),
         )
 
     async def _rollover(self) -> None:
@@ -205,9 +395,9 @@ class MiaDataDataset:
         workflow.continue_as_new(self.state)
 
     async def _drop_stage_write(self) -> None:
-        """Cancel the stage write still pending, so a late retry cannot swap the label back; a write that failed
-        meanwhile is logged (the registry row and the next write carry the stage)."""
-        # ponytail: an attempt already inside its GitHub call finishes it; a label can lag one stage for a moment.
+        """Cancel the stage write still pending, so a late retry cannot swap the label back, and wait for an
+        attempt already inside its GitHub call to finish; a write that failed meanwhile is logged (the registry
+        row and the next write carry the stage)."""
         await self._settle_stage_write(cancel=True)
 
     async def _settle_stage_write(self, cancel: bool) -> None:
@@ -273,25 +463,74 @@ class MiaDataDataset:
         `lock` ([kind, key, owner], from _hold_raw) is heartbeated by the wait while the job runs."""
         state = self.state
         assert state.round_id and state.pins  # a round is admitted before any job runs
-        job_id = await self._act(
-            "submit",
-            job_key(state.issue, state.round_id, workspace_kind or kind, 1),
-            kind,
-            JobArgs(workspace, state.round_id, state.pins, **job_args),
-            seconds=600,
-            result_type=str,
-        )
-        walltime = timedelta(minutes=(await self._limits()).walltime_min)
-        return await workflow.execute_activity(
-            "await_job",
-            args=[job_id, workspace, *([lock] if lock else [])],  # two arguments as before when there is no lock
-            result_type=JobDone,
-            task_queue=workflow.info().task_queue + "-await",
-            start_to_close_timeout=walltime + QUEUE_SLACK,
-            schedule_to_close_timeout=walltime + timedelta(hours=24),
-            heartbeat_timeout=timedelta(minutes=3),
-            retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
-        )
+        key = job_key(state.issue, state.round_id, workspace_kind or kind, 1)
+        limits = await self._limits()
+        budgeted = workflow.patched("l-budget")
+        if budgeted:  # the operator's switches first: the pause, then the root budget (spec autonomous-gates §8)
+            usd = {"match": limits.agent_max_budget_usd, "judge": limits.judge_max_budget_usd}.get(kind, 0.0)
+            await self._reserve(key, kind, usd)
+        walltime = timedelta(minutes=limits.walltime_min)
+        job_id = None
+        try:
+            job_id = await self._act(
+                "submit",
+                key,
+                kind,
+                JobArgs(workspace, state.round_id, state.pins, **job_args),
+                seconds=600,
+                result_type=str,
+            )
+            done = await workflow.execute_activity(
+                "await_job",
+                args=[
+                    job_id,
+                    workspace,
+                    *([lock] if lock else []),
+                ],  # the lock is a third argument only when there is one
+                result_type=JobDone,
+                task_queue=workflow.info().task_queue + "-await",
+                start_to_close_timeout=walltime + QUEUE_SLACK,
+                schedule_to_close_timeout=walltime + timedelta(hours=24),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
+            )
+        except (ActivityError, asyncio.CancelledError) as error:
+            if self.cancelling and job_id:  # first the job, then its reservation; the caller's lock comes last
+                await self._kill(job_id)
+            if budgeted:
+                await self._settle(key)
+            if self.cancelling:  # never a failed job to a best-effort caller (the crop judge), which would go on
+                self.unwinding = True
+                raise asyncio.CancelledError from error
+            raise
+        if budgeted:
+            await self._settle(key)
+        return done
+
+    async def _reserve(self, key: str, kind: str, usd: float) -> None:
+        """The pause, then the root budget (spec autonomous-gates §8). A cap refusal ends the round; the concurrency
+        cap alone is a wait: poll_minutes, doubling up to 30 minutes, then ask again."""
+        state, tries = self.state, 0
+        assert state.pins
+        while True:
+            if await self._act("paused", result_type=bool):
+                raise RoundFailed(PAUSED)
+            reservation = await self._act("reserve", state.pins.root, key, kind, usd, result_type=Reservation)
+            if reservation.ok:
+                return
+            if not reservation.wait:
+                raise RoundFailed(f"root budget: {reservation.reason}")
+            poll_minutes = (await self._limits()).poll_minutes
+            await workflow.sleep(timedelta(minutes=min(poll_minutes * 2**tries, 30)))
+            tries += 1
+
+    async def _settle(self, key: str) -> None:
+        """Close the job's reservation; an accounting write that fails is logged, never the round's end."""
+        assert self.state.pins
+        try:
+            await self._act("settle", self.state.pins.root, key, None, 0, budget=timedelta(minutes=10), cleanup=True)
+        except ActivityError as error:
+            workflow.logger.warning("issue #%d: settle %s failed: %s", self.state.issue, key, error_message(error))
 
     async def _hold_raw(self, kind: str) -> list[str]:
         """Take the lock on the round record's raw cache for a `kind` (smoke, crop) job that writes it, waiting while
@@ -318,7 +557,7 @@ class MiaDataDataset:
         if lock is None:
             return
         try:
-            await self._act("release_lock", *lock, budget=timedelta(minutes=30))
+            await self._act("release_lock", *lock, budget=timedelta(minutes=30), cleanup=True)
         except ActivityError as error:
             workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
@@ -445,13 +684,20 @@ class MiaDataDataset:
         open (see _resume_pr); its snippets issue is remembered either way, so a retry never opens a second one."""
         state = self.state
         snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
-        if state.stage == "needs-human" and state.snippet_issue and workflow.patched("resume-snippet-pr"):
+        # (a cancelled develop round left its snippet issue and PR open too: autodev is not asked twice)
+        if (
+            state.stage in ("needs-human", "cancelled")
+            and state.snippet_issue
+            and workflow.patched("resume-snippet-pr")
+        ):
             snippet_issue, snippet_pr = state.snippet_issue, state.pr
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
         state.tests, state.attempts, state.pending = [], {}, []
         state.pins = await self._act("admit", state.issue, event.event_id, seconds=300, result_type=Pins)
         self.limits = await self._act("limits", result_type=RoundLimits)
+        if workflow.patched("l-budget") and await self._act("paused", result_type=bool):
+            raise RoundFailed(PAUSED)
         if snippet_issue and snippet_pr and await self._resume_pr(snippet_issue, snippet_pr):
             return
         await self._stage("matching")
@@ -463,7 +709,9 @@ class MiaDataDataset:
         if not job_succeeded(job := await self._job("match", workspace)):
             return await self._finish("needs-human", describe_failure("match", job))
         match = await self._act("read_match", workspace, seconds=300, result_type=MatchResult)
-        no_size_verdict = workflow.patched("h-no-eligibility")  # pre-H histories carry an `ineligible` outcome
+        no_size_verdict = workflow.patched(
+            "h-no-eligibility"
+        )  # a history without the patch carries an `ineligible` outcome
         if match.outcome == "needs_snippet":
             return await self._develop(match.draft or {}, snippet_issue)
         if match.outcome not in (("matched",) if no_size_verdict else ("matched", "ineligible")):
@@ -480,11 +728,11 @@ class MiaDataDataset:
             finally:
                 await self._release_raw(lock)
             if not ran:
-                return await self._finish("needs-human", describe_failure("smoke", job))
+                return await self._finish("needs-human", await self._smoke_failure(job, workspace))
         else:
             workspace = await self._prepare("smoke")
             if not job_succeeded(job := await self._job("smoke", workspace)):
-                return await self._finish("needs-human", describe_failure("smoke", job))
+                return await self._finish("needs-human", await self._smoke_failure(job, workspace))
             smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
         if not smoke.ok:
             why = "; ".join(smoke.errors) or "no errors reported"
@@ -493,7 +741,7 @@ class MiaDataDataset:
                 f"smoke failed: {why}"
                 + (f" (host not allowed: {smoke.host_not_allowed})" if smoke.host_not_allowed else ""),
             )
-        if not no_size_verdict:  # replay of a pre-H round only; smoke.json no longer says `eligible`
+        if not no_size_verdict:  # only a history without the patch reads smoke's `eligible`
             if smoke.eligible != (match.outcome == "matched"):
                 return await self._finish(
                     "needs-human",
@@ -522,19 +770,127 @@ class MiaDataDataset:
             )
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
+        await self._judge_crops(test)  # in shadow: after the gate opens, so a human verdict is only queued, never held
         await self._from_review()
+
+    async def _smoke_failure(self, job: JobDone, workspace: str) -> str:
+        """Why a smoke job failed: its end state and the errors of its own smoke.json, when it wrote one. `harness
+        smoke` exits 1 whenever `ok` is false, so the exit code alone told the issue nothing."""
+        if not workflow.patched("job-report-errors"):
+            return describe_failure("smoke", job)
+        smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
+        errors = [error for error in smoke.errors if not error.startswith("smoke.json is missing")]
+        if smoke.host_not_allowed:
+            errors.append(f"host not allowed: {smoke.host_not_allowed}")
+        return describe_failure("smoke", job, errors)
 
     async def _from_review(self) -> None:
         """At `data:review` without a PR to follow: approve publishes the set; reject asks autodev for a snippet
         superseding the binding's, with the reviewer's comments, and the round goes on as a develop round
         (spec §14); a new go ends the round and starts the next from matching."""
         kind, event = await self._review()
+        state = self.state
+        subject = ("crop_set", f"{state.round_id}:{state.tests[-1].test_id}")
         if kind == "approve" and event:
-            self.state.tests[-1].approved_at = event.at
+            written = await self._assess("approve", event, subject)
+            if not written.authorized:
+                return await self._finish("needs-human", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
+            state.tests[-1].approved_at = event.at
             await self._publish_set()
         elif kind == "reject" and event:
+            await self._assess("reject", event, subject)
             feedback = await self._feedback(event)
-            await self._develop({"what_fails": feedback}, self.state.snippet_issue, binding=self.state.binding)
+            await self._develop({"what_fails": feedback}, state.snippet_issue, binding=state.binding)
+
+    async def _judge_crops(self, test: Test) -> JudgeResult | None:
+        """The crop judge over a passing set (spec autonomous-gates §4.2, §9): evidence, the job, the assessment,
+        one comment. Off, or a run from before `m-crop-judge`: nothing. In shadow nothing here changes the round's
+        course: a failed job or an unreadable verdict is an `escalate` on record and a comment, a refused reservation
+        (the pause, the root budget) skips the judge with a comment, and the human label decides."""
+        if not workflow.patched("m-crop-judge"):
+            return None
+        limits = await self._limits()
+        if limits.crop_judge == "off" or not (test.crop_workspace and test.verify_workspace):
+            return None
+        state = self.state
+        assert state.round_id
+        marker, failed = f"judge crops {state.round_id} {test.sha}", ""
+        try:
+            verify = await self._act(
+                "read_verify", test.verify_workspace, test.crop_workspace, result_type=VerifyResult
+            )
+            workspace = await self._act(
+                "prepare_judge",
+                state.issue,
+                state.round_id,
+                "crops",
+                test.crop_workspace,
+                test.verify_workspace,
+                verify.crops,
+                1,
+                test.sha[:12],
+                seconds=600,
+                result_type=str,
+            )
+            try:
+                job = await self._job("judge", workspace, workspace_kind=f"judge-{test.sha[:12]}")
+            except RoundFailed as refused:  # the operator's switches: the judge is skipped, the round goes on
+                if limits.crop_judge != "shadow":
+                    raise
+                await self._act(
+                    "comment",
+                    state.issue,
+                    f"The crop judge was skipped: {refused}. A person's verdict decides.",
+                    marker,
+                )
+                return None
+            if not job_succeeded(job):
+                failed = describe_failure("judge", job)  # read_judge still records the escalate
+            result = await self._act(
+                "read_judge",
+                state.issue,
+                state.round_id,
+                workspace,
+                "crops",
+                "crop_set",
+                f"{state.round_id}:{test.test_id}",
+                limits.crop_judge,
+                seconds=300,
+                result_type=JudgeResult,
+            )
+        except ActivityError as error:
+            await self._act(
+                "comment",
+                state.issue,
+                f"The crop judge did not run to the end: {error_message(error)}. A person's verdict decides.",
+                marker,
+            )
+            return None
+        body = (
+            f"The crop judge's {failed}; its verdict is recorded as an escalation.\n\n" if failed else ""
+        ) + result.comment
+        await self._act("comment", state.issue, body, marker)
+        return result
+
+    async def _assess(self, verdict: str, event: LabelEvent, subject: tuple[str, str]) -> AssessmentWritten:
+        """Record a human verdict as an assessment (spec autonomous-gates §5) and ask whether the subject is
+        authorized; a run from before `l-assess` takes the label alone as the authorization."""
+        if not workflow.patched("l-assess"):
+            return AssessmentWritten("", True)
+        state, (kind, ref) = self.state, subject
+        return await self._act(
+            "assess",
+            state.issue,
+            state.round_id,
+            "crops",
+            kind,
+            ref,
+            verdict,
+            f"human:{event.actor}",
+            f"data:{verdict} by {event.actor}",
+            seconds=300,
+            result_type=AssessmentWritten,
+        )
 
     async def _feedback(self, event: LabelEvent) -> str:
         """The reviewer's comments on the issue since the set's report and up to this reject (spec §14)."""
@@ -546,9 +902,8 @@ class MiaDataDataset:
     async def _publish_set(self, test: Test | None = None, sha: str | None = None) -> None:
         """Publish the set that was validated: the round's own crops (spec §13), read back from their workspaces;
         `test` is the approved PR head's on the develop path (spec §14), else the round's last, and `sha` the
-        mia-snippets commit to publish under (the merge commit for a PR head's crops). A run from before
-        `one-crop-set`, or a Test record without workspaces (a round that reached review before I and was
-        approved after), takes the old production path instead."""
+        mia-snippets commit to publish under (the merge commit for a PR head's crops). A history without
+        `one-crop-set`, or a Test record without workspaces, takes the production path instead."""
         state = self.state
         test = test or state.tests[-1]
         if not (workflow.patched("one-crop-set") and test.crop_workspace and test.verify_workspace):
@@ -565,6 +920,7 @@ class MiaDataDataset:
             seconds=300,
             result_type=dict,
         )
+        state.published = True
         extra = (
             f"**Totals:** {len(published['published'])} crops published this round ({verify.ok_count} verified); "
             f"{published['total']} in the dataset\n"
@@ -594,6 +950,7 @@ class MiaDataDataset:
             seconds=300,
             result_type=dict,
         )
+        state.published = True
         table = (
             (await self._gallery("production", crop_workspace, verify_workspace, verify)).table if verify.crops else ""
         )
@@ -608,7 +965,8 @@ class MiaDataDataset:
         ):  # a limit or a crash: the surviving crops are published, the round needs a human
             return await self._finish(
                 "needs-human",
-                f"{describe_failure('crop', crop_job)}; the {verify.ok_count} crops that passed are published",
+                f"{describe_failure('crop', crop_job, verify.crop_errors)}; "
+                f"the {verify.ok_count} crops that passed are published",
                 extra,
             )
         if verify.ok_count >= needed:
@@ -649,9 +1007,11 @@ class MiaDataDataset:
     async def _review(self) -> tuple[str, LabelEvent | None]:
         """Wait at review for a verdict newer than the set (see _verdict), or a new go: ("go", None)."""
         while True:
-            await workflow.wait_condition(lambda: self._labels() or _rollover_due())
+            await workflow.wait_condition(lambda: self._labels() or self._roll_due())
             if not self._labels():
                 await self._rollover()  # stage review: the next run resumes here
+            if await self._revokes():
+                return "revoked", None  # the round ended in needs-human; nothing under review any more
             if verdict := await self._verdict():
                 return verdict
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
@@ -707,9 +1067,11 @@ class MiaDataDataset:
         await self._limits()
         loop = workflow.patched("review-loop")
         while True:
-            await workflow.wait_condition(lambda: bool(state.pending) or self._labels() or _rollover_due())
+            await workflow.wait_condition(lambda: bool(state.pending) or self._labels() or self._roll_due())
             if not (state.pending or self._labels()):
                 await self._rollover()  # the develop state is all in `state`: the next run resumes here
+            if await self._revokes():
+                return  # the round ended in needs-human
             if loop and state.stage == "review" and state.pr and (verdict := await self._verdict()):
                 kind, event = verdict
                 await (self._approve_pr(event) if kind == "approve" else self._revise_pr(event))
@@ -722,6 +1084,9 @@ class MiaDataDataset:
         """The reviewer approved the PR head's set: `/approve <head>` tells autodev to merge it. The merge wakes
         the round (_merged), which publishes these very crops when the merged snippet is the reviewed one."""
         state, test = self.state, self.state.tests[-1]
+        written = await self._assess("approve", event, ("pr_head", test.sha))
+        if not written.authorized:
+            return await self._finish("needs-human", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
         test.approved_at = event.at
         await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
         await self._stage(
@@ -732,6 +1097,7 @@ class MiaDataDataset:
         """The reviewer rejected the PR head's set: their comments go to the PR as `/revise`; autodev's next head
         brings its crops back to review."""
         state = self.state
+        await self._assess("reject", event, ("pr_head", state.tests[-1].sha))
         feedback = await self._feedback(event)
         await self._act(
             "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} {event.event_id}", "snippets"
@@ -815,6 +1181,8 @@ class MiaDataDataset:
         )  # the head's own, current or not
         if test.ok and current.head_sha == head and current.state == "open":
             await self._stage("review" if loop else "pr-ready", extra=f"**Snippet PR:** {current.url or f'#{pr.pr}'}\n")
+        if test.ok:
+            await self._judge_crops(test)  # after the status and the stage: the required status never waits on it
         return current
 
     async def _merged(self, pr: PrUpdate) -> None:
@@ -895,7 +1263,7 @@ class MiaDataDataset:
 
 @workflow.defn(name="MiaDataPoll")
 class MiaDataPoll:
-    """Run on a schedule: turn new labels and PR changes into signals for the dataset workflows."""
+    """Run on a schedule: turn snippet PR changes into signals for the dataset workflows."""
 
     @workflow.run
     async def run(self) -> list[str]:
@@ -905,3 +1273,31 @@ class MiaDataPoll:
             retry_policy=RetryPolicy(maximum_attempts=1),
             result_type=list[str],
         )
+
+
+@workflow.defn(name="MiaMirror")
+class MiaMirror:
+    """Copy one subject's timeline and stage to its GitHub issue (spec webapp-actions §7). buffer-api starts it,
+    or signals `kick` when it is already running, each time the subject is written. One pass posts everything
+    that is new; a kick that arrives during a pass asks for one more. The activity is retried without limit, so
+    GitHub being away only delays the issue; no round waits for this workflow."""
+
+    def __init__(self) -> None:
+        self.kicks = 0
+
+    @workflow.signal
+    def kick(self) -> None:
+        self.kicks += 1
+
+    @workflow.run
+    async def run(self, kind: str, number: int) -> None:
+        answered = -1
+        while answered != self.kicks:
+            answered = self.kicks
+            await workflow.execute_activity(
+                "mirror",
+                args=[kind, number],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_interval=timedelta(minutes=10)),
+                result_type=int,
+            )

@@ -148,3 +148,77 @@ def test_put_keeper():
     assert reg.put_keeper({"evicted": []}) == {"evicted": [], "at": 1.0}
     assert seen[0].method == "PUT" and seen[0].url.path == "/keeper" and json.loads(seen[0].read()) == {"evicted": []}
     assert seen[0].headers["authorization"] == "Bearer t"
+
+
+def test_assessment_budget_and_volume_paths():
+    seen = []
+    reg = Registry("http://svc", "t", transport=transport(seen, body={"ok": True, "assessments": [], "volumes": []}))
+    reg.put_assessment({"id": "a1", "gate": "crops"})
+    reg.assessments(subject_kind="artifact", subject_ref="art1")
+    reg.assessments(by="judge", before="a0", limit=5)
+    reg.decisions("crops", offset=50)
+    reg.reserve("o/r#7", "job-1", "match", 5.0, {"max_usd": 10})
+    reg.settle("o/r#7", "job-1", usd=1.0, fetched_bytes=3)
+    reg.delete_volume("b", "rec/v0.zarr")
+    reg.volumes("b")
+    assert [(r.method, r.url.raw_path.decode()) for r in seen] == [
+        ("PUT", "/assessments/a1"),
+        ("GET", "/assessments?subject_kind=artifact&subject_ref=art1"),
+        ("GET", "/assessments?by=judge&before=a0&limit=5"),
+        ("GET", "/decisions?gate=crops&offset=50"),
+        ("POST", "/budgets/o%2Fr%237/reserve"),
+        ("POST", "/budgets/o%2Fr%237/settle"),
+        ("DELETE", "/buffers/b/volumes/rec%2Fv0.zarr"),
+        ("GET", "/buffers/b/volumes"),
+    ]
+    assert json.loads(seen[5].content) == {"reservation_id": "job-1", "usd": 1.0, "fetched_bytes": 3, "staged_bytes": 0}
+
+
+def test_subject_calls():
+    seen = []
+    reg = Registry("http://svc", "tok", transport=transport(seen))
+    reg.adopt_subject("buffer", 8, "EM pool/2", stage="ready", data={"spec": "s"})
+    reg.subject("buffer", "EM pool/2")
+    assert (seen[0].method, seen[0].url.raw_path) == ("PUT", b"/subjects/buffer/8")
+    assert json.loads(seen[0].content) == {"key": "EM pool/2", "stage": "ready", "data": {"spec": "s"}}
+    assert (seen[1].method, seen[1].url.raw_path) == ("GET", b"/subjects/buffer/EM%20pool%2F2")
+    assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).subject("buffer", "x") is None
+
+
+def test_timeline_calls():
+    seen = []
+    reg = Registry("http://svc", "tok", transport=transport(seen))
+    reg.append_entry("dataset", 7, body="text", marker="m", round_id="i7-e1", stage="testing")
+    reg.append_entry("prep", 9, stage="done")
+    reg.timeline("buffer", 8)
+    reg.mark_mirrored("buffer", 8, 3, "https://x/c")
+    assert [(request.method, request.url.path) for request in seen] == [
+        ("POST", "/timeline/dataset/7"),
+        ("POST", "/timeline/prep/9"),
+        ("GET", "/timeline/buffer/8"),
+        ("PUT", "/timeline/buffer/8/3"),
+    ]
+    assert json.loads(seen[0].content) == {"body": "text", "marker": "m", "round": "i7-e1", "stage": "testing"}
+    assert json.loads(seen[1].content) == {"body": "", "marker": "", "round": None, "stage": "done"}
+    assert json.loads(seen[3].content) == {"comment_url": "https://x/c"}
+    assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).timeline("buffer", 1) is None
+
+
+def test_action_calls():
+    seen = []
+    reg = Registry("http://svc", "tok", transport=transport(seen))
+    reg.action(1800000000250)
+    reg.refuse_action(1800000000250, "a round is running")
+    reg.set_subject_issue("dataset", 28000000, 240)
+    reg.send_action("/datasets/rec a/actions", "go", key="p9-e1/rec a", actor="prep:9", root="o/b#9")
+    assert [(request.method, request.url.raw_path) for request in seen] == [
+        ("GET", b"/actions/1800000000250"),
+        ("PUT", b"/actions/1800000000250"),
+        ("PUT", b"/subjects/dataset/28000000/issue"),
+        ("POST", b"/datasets/rec%20a/actions"),
+    ]
+    assert json.loads(seen[1].content) == {"state": "refused", "detail": "a round is running"}
+    assert json.loads(seen[2].content) == {"issue": 240}
+    assert json.loads(seen[3].content) == {"action": "go", "key": "p9-e1/rec a", "actor": "prep:9", "root": "o/b#9"}
+    assert seen[3].headers["content-type"] == "application/json"
+    assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).action(1) is None

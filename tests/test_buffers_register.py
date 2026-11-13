@@ -168,12 +168,39 @@ def server(tmp_path):
     srv.shutdown()
 
 
+class SentActions:
+    """Stands in for buffer-api's Temporal gateway: records the actions sent to workflows."""
+
+    def __init__(self):
+        self.sent = []
+
+    def kick_mirror(self, kind, number):
+        pass
+
+    def send(self, kind, number, signal, event):
+        self.sent.append((kind, number, signal, event))
+
+    def signal_running(self, kind, number, signal, *args):
+        self.sent.append((kind, number, signal, *args))
+        return True
+
+
+class ServerUrl(str):
+    """The service's URL, carrying the stand-in for its Temporal gateway (`.gateway.sent`)."""
+
+    gateway: SentActions
+
+
 @pytest.fixture
 def token_server(tmp_path):
-    """A buffer-api that wants the worker token `t` on its worker routes."""
-    srv = make_server(BufferService(Ledger(tmp_path / "l.sqlite"), token="t"), "127.0.0.1", 0)
+    """A buffer-api that wants the worker token `t` on its worker routes; what it sends to Temporal is recorded
+    on the URL it yields (`token_server.gateway.sent`)."""
+    stand_in = SentActions()
+    srv = make_server(BufferService(Ledger(tmp_path / "l.sqlite"), token="t", dispatcher=stand_in), "127.0.0.1", 0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    url = ServerUrl(f"http://127.0.0.1:{srv.server_address[1]}")
+    url.gateway = stand_in
+    yield url
     srv.shutdown()
 
 
@@ -225,6 +252,12 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
         "val": 4,
         "test": 4,
     }
+    events = httpx.get(f"{token_server}/buffers/demo/events").json()["events"]
+    assert [event["kind"] for event in events] == ["approved", "ready"] and out["events"] == ["approved", "ready"]
+    consumer = httpx.post(
+        f"{token_server}/buffers/demo/consumers", json={"name": "n", "host": "h", "pid": 1, "split": "train"}
+    )
+    assert consumer.status_code == 201  # a hand-registered buffer serves because register authorized it
 
 
 def test_single_plane_volumes_split_by_fraction_across_a_dataset(tmp_path, spec_2d):  # noqa: F811
@@ -246,7 +279,7 @@ def test_volume_bodies_accepts_a_report(tmp_path, spec_2d):  # noqa: F811
     assert volume_bodies(row, staged, spec_2d, report=report) == from_file
 
 
-# --- normalisation statistics (milestone 4) ---------------------------------------------------
+# --- normalisation statistics ---------------------------------------------------
 
 SAMPLE_V0 = [[float(v) for v in range(0, 1010, 10)]]  # one channel, 101 values 0..1000
 SAMPLE_V1 = [[float(v) for v in range(500, 1510, 10)]]
@@ -324,7 +357,7 @@ def test_buffer_config_carries_scope(spec_2d):  # noqa: F811
 
 
 def test_dataset_scope_refuses_volumes_with_other_channel_counts(tmp_path, spec_2d):  # noqa: F811
-    """Review (milestone 4): pooling across volumes needs one channel count; a volume with another count is refused
+    """pooling across volumes needs one channel count; a volume with another count is refused
     with a reason, not an IndexError that fails the activity."""
     staged = write_two_volumes(tmp_path / "u937", {"v0.zarr": SAMPLE_V0, "v1.zarr": SAMPLE_V1})
     report = json.loads((staged / "stage.json").read_text())
@@ -359,8 +392,8 @@ def test_split_seed_comes_from_the_row_not_the_spec(tmp_path, spec_2d):  # noqa:
     assert planes(ROW, spec_2d) == planes(ROW, spec_with(spec_2d, **{"sampling.seed": 99}))
 
 
-def test_a_row_planned_before_d_falls_back_to_the_spec_fractions(tmp_path, spec_2d, caplog):  # noqa: F811
-    """A plan.json written before milestone D has no `split` on its rows: registration uses the spec's fractions
+def test_a_row_without_a_split_policy_falls_back_to_the_spec_fractions(tmp_path, spec_2d, caplog):  # noqa: F811
+    """A plan.json whose rows have no `split`: registration uses the spec's fractions
     and seed, and says so once, rather than failing a live round."""
     staged = write_stage_json(tmp_path / "u937")
     fallback = {"policy": "fractions", "fractions": dict(spec_2d.splits.fractions), "seed": spec_2d.splits.seed}
@@ -369,7 +402,7 @@ def test_a_row_planned_before_d_falls_back_to_the_spec_fractions(tmp_path, spec_
     [(_, new)] = volume_bodies({**ROW, "split": fallback}, staged, spec_2d)
     assert old["split_planes"] == new["split_planes"]
     assert [record.getMessage() for record in caplog.records] == [
-        "u937: plan row has no split policy (planned before D): using the spec's fractions"
+        "u937: plan row has no split policy: using the spec's fractions"
     ]
 
 

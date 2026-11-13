@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from mia_core.judge.comment import render_judge_comment as render_judge_comment
 from mia_core.untrusted import neutralize
 
 

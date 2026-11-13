@@ -78,8 +78,10 @@ def test_log_tail_reads_claude_and_job_stderr(tmp_path):
 
 
 class FakeCsub:
-    def __init__(self, states=("DONE",), existing=(), error=None):
+    def __init__(self, states=("DONE",), existing=(), error=None, policy_hosts=()):
+        self.policy_hosts, self.probes, self.probe_error = list(policy_hosts), 0, None
         self.submitted, self.states, self.existing, self.error = [], list(states), list(existing), error
+        self.killed = []
 
     def submit(self, spec):
         if self.error:
@@ -87,6 +89,16 @@ class FakeCsub:
         JobSpec.from_dict(spec)
         self.submitted.append(spec)
         return SimpleNamespace(job_id="777", walltime_min=spec["walltime_min"])
+
+    def probe(self):
+        self.probes += 1
+        if self.probe_error:
+            raise self.probe_error
+        return SimpleNamespace(allowed_hosts=list(self.policy_hosts))
+
+    def kill(self, job_ids=None):
+        self.killed.extend(job_ids or [])
+        return SimpleNamespace(killed=list(job_ids or []))
 
     def status(self, ids=None):
         if ids is None:
@@ -125,6 +137,42 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     assert spec["agent"] == "claude" and spec["shell"] is True and spec["cwd"] == ws.dir
     assert spec["mounts"] == [{"path": ws.dir, "mode": "rw"}, {"path": "/tools", "mode": "ro"}]
     assert spec["allow_hosts"] == ["pypi.org"] and spec["name"] == "autodev-7-r1" and "env" not in spec
+
+
+async def test_an_agent_job_names_its_configured_hosts_then_the_policys(tmp_path):
+    too_long = "a" * 64 + ".example.org"  # csub refuses a job host with a label over 63 characters
+    policy = ["pypi.org", "zenodo.org", "*.huggingface.co", "github.com", too_long, "data.4tu.nl"]
+    fake = FakeCsub(policy_hosts=policy)
+    j = _jobs(tmp_path, fake, allow_hosts=["pypi.org"])
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "zenodo.org", "data.4tu.nl"]
+
+
+async def test_a_retry_does_not_probe_the_broker(tmp_path):
+    fake = FakeCsub()
+    j = _jobs(tmp_path, fake)
+    ws = Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7")
+    ref = await j.submit(7, K, 1, ws)
+    fake.probe_error = OSError("socket down")
+    assert await j.submit(7, K, 1, ws) == ref and fake.probes == 1
+
+
+async def test_a_failed_probe_on_a_first_submission_submits_nothing(tmp_path):
+    fake = FakeCsub()
+    fake.probe_error = OSError("socket down")
+    j = _jobs(tmp_path, fake)
+    with pytest.raises(OSError):
+        await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
+    assert fake.submitted == []
+
+
+async def test_past_the_cap_the_newest_policy_hosts_are_kept(tmp_path):
+    fake = FakeCsub(policy_hosts=[f"h{n}.example.org" for n in range(70)])
+    j = _jobs(tmp_path, fake, allow_hosts=["pypi.org", "files.pythonhosted.org"])
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "files.pythonhosted.org"] + [
+        f"h{n}.example.org" for n in range(8, 70)
+    ]
 
 
 async def test_submit_reuses_job_found_by_name(tmp_path):
@@ -285,3 +333,13 @@ async def test_job_name_leaves_out_the_deployment(tmp_path):
     j = AgentJobs(make_cfg(tmp_path, deployment="autodev-someuser"), client_factory=lambda: fake)
     await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev-someuser/issue-7"))
     assert fake.submitted[0]["name"] == "autodev-7-r1" and fake.submitted[0]["session"] == "autodev-someuser"
+
+
+def test_judge_script_is_read_only(tmp_path):
+    from autodev.agent import judge_script
+
+    script = judge_script(make_cfg(tmp_path, agent={"path_prepend": ["/opt/bin"]}, judge={"model": "opus"}))
+    assert script.startswith("set -u\nexport PATH=/opt/bin:")
+    assert '--allowedTools "Read,Glob,Grep"' in script and '--tools "Read,Glob,Grep"' in script
+    assert "--restricted" in script and "--add-dir evidence > claude.json" in script and "--model opus" in script
+    assert "> exit_code" in script and "git bundle" not in script and "Edit" not in script and "Bash" not in script
