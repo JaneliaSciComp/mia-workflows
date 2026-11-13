@@ -119,6 +119,11 @@ def test_service_token_file_is_absolute(tmp_path):
 
     cfg = make_cfg(tmp_path, service={"url": "http://svc.example.org:8765", "token_file": "~/x"})
     assert cfg.service.token_file.is_absolute()
+    # every application reads the token through the shared model: `~` is expanded for all of them (autodev too)
+    from mia_core.config import ServiceCfg
+
+    shared = ServiceCfg(url="http://svc.example.org:8765", token_file="~/.config/mia/service-token")
+    assert shared.token_file == Path.home() / ".config/mia/service-token"
 
 
 def test_service_url_needs_an_explicit_port():

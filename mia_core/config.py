@@ -32,7 +32,12 @@ class TemporalCfg(BaseModel):
 
 class ServiceCfg(BaseModel):
     url: str  # buffer-api base URL, reachable from the worker
-    token_file: Path | None = None  # the worker token the service checks
+    token_file: Path | None = None  # the worker token the service checks; comes out expanded and absolute
+
+    @field_validator("token_file")
+    @classmethod
+    def _expand(cls, token_file: Path | None) -> Path | None:
+        return token_file.expanduser().absolute() if token_file else None  # not resolve(): follow no symlink
 
     @field_validator("url")
     @classmethod
