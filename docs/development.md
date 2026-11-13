@@ -373,20 +373,20 @@ sandbox bypasses its proxy for loopback names, and inside it they point at the s
 
 **Hosts.** Every broker `mia up` starts runs `csub-broker --policy <csub.policy_dir>/broker.toml`, a file
 `mia_core.hosts` generates from the operator's `csub.base_policy` plus `<policy_dir>/approved-hosts.jsonl` (one line per
-host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the
-hosts the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request)
-or its published bindings name (a buffer at `plan-review`, over its round's `plan.json` pool), their
-`network.redirect_hosts` targets and the package hosts. Ticked hosts travel as `approve_hosts` on a dataset's `go`,
-filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other action carrying a
-non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender, accepts only hosts
-that run needs (never a GitHub host), appends, regenerates (503 if it cannot) and posts a timeline entry. A broker loads
-its policy file on every request, so an approved host needs no restart: the next job sees it. Every generation checks
-that `policy_dir` is under home, apart from every read-write sandbox mount, and that its `broker.toml` is not the base
-policy file. Withdrawing an approval is a hand edit: remove the host's lines, then `mia up` (or the next approval)
-regenerates. A redirect target still needs `network.redirect_hosts`, and a pattern or a host wanted before any run is
-added to the base policy by hand. `mia exec <service> ...` goes through the service's broker when it is running. An
-autodev agent job names its `agent.allow_hosts` plus the exact hosts its broker's policy allows, at most 64
-(`autodev.agent.agent_hosts`).
+host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the hosts
+the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request) or its
+published bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
+pool), their `network.redirect_hosts` targets and the package hosts. Ticked hosts travel as `approve_hosts` on a
+dataset's `go`, filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other
+action carrying a non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender,
+accepts only hosts that run needs (never a GitHub host, an IP literal or the host of `service.url` or
+`temporal.address`), appends, regenerates (503 if it cannot) and posts a timeline entry. A broker loads its policy file
+on every request, so an approved host needs no restart: the next job sees it. Every generation checks that `policy_dir`
+is under home, apart from every read-write sandbox mount, and that its `broker.toml` is not the base policy file.
+Withdrawing an approval is a hand edit: remove the host's lines, then `mia up` (or the next approval) regenerates. A
+redirect target still needs `network.redirect_hosts`, and a pattern or a host wanted before any run is added to the base
+policy by hand. `mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
+names its `agent.allow_hosts` plus the exact hosts its broker's policy allows, at most 64 (`autodev.agent.agent_hosts`).
 
 1. **The go.** A `go` action carries the spec text (the page's *Plan*). With `plan_first` the round waits at its
    plan; without it the round stages first and asks once, at `staged`.

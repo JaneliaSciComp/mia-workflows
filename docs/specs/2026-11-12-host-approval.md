@@ -1,6 +1,8 @@
 # MIA: approving data hosts from the page — Spec
 
-**Status:** v0.4 · 2026-11-12 · approved by the user 2026-11-12 (as v0.3). v0.4 corrects §3 after a review: two
+**Status:** v0.5 · 2026-11-12 · approved by the user 2026-11-12 (as v0.3). v0.5, after the final review, holds a
+buffer's hosts to its catalog records and never approves an IP literal or the deployment's own hosts (§4, §9).
+v0.4 corrects §3 after a review: two
 generations at once are not harmless, and how they are made safe without a lock file; a `policy_dir` that
 holds the base policy is refused; the placement rules cover every worker-writable mount and are checked by
 every generation, not only by `mia up`.
@@ -173,7 +175,10 @@ answer and the worker's backstop cannot disagree.
 |---|---|
 | A dataset round | `mia_data.binding.hosts(record_urls(record), cfg)`: the hosts of every URL the catalog record names (`s3://` rewritten), their configured redirect targets, and the package hosts |
 | A preparation request | the union over the records its text names. A request that selects by rule names none: nothing is asked, and the backstop applies |
-| A buffer's Run (approve at `plan-review`) | the union over the round's pool of the hosts of each published `binding.yaml`'s URLs under `storage_root`, with their redirect targets and the package hosts. `manual://` URLs have no host |
+| A buffer's Run (approve at `plan-review`) | the union over the round's pool of the hosts of each published `binding.yaml`'s URLs under `storage_root`, with their redirect targets and the package hosts, each kept only if the record's synced catalog entry also names it (a record no synced catalog holds adds none). `manual://` URLs have no host |
+
+In every row an IP literal, a GitHub host and the deployment's own hosts (those of `service.url`,
+`temporal.address` and `temporal.ui_url`) are left out: they are never approved.
 
 **A buffer's pool** (*my call*) is the `in_pool` rows of the plan the round itself wrote:
 `<state_dir>/rounds/<round>/plan.json`, where `<round>` is the round of the spec's `plan-review` stage entry. A
@@ -279,12 +284,18 @@ can be removed there.
 
 The policy is what stops a sandboxed job from reaching an arbitrary host. An approval widens it, so:
 
-- A host can be approved only if a catalog record in the run names it (or a published binding, whose URLs
-  `check_binding` already held to the record's hosts). The trust root is the catalog repo's content plus a
-  person's click on a page that lists the hosts by name.
+- A host can be approved only if a catalog record in the run names it. A buffer's published bindings are under
+  `storage_root`, which a job can mount read-write, so `check_binding` having held them to the record's hosts
+  when they were published is not enough: a binding's host counts only if its record's synced catalog entry also
+  names it. The trust root is the catalog repo's content plus a person's click on a page that lists the hosts by
+  name.
+- An IP literal and the deployment's own hosts (those of `service.url`, `temporal.address` and
+  `temporal.ui_url`) are never approved, whoever posts the action: an action route takes no token, so a job that
+  could reach buffer-api must not be able to approve buffer-api.
 - The approvals file and the generated policy are under home, which no job can mount, and outside every worker
   sandbox. Only buffer-api and `mia up`, both on the host, write there.
-- Jobs cannot reach buffer-api: its host is not in the policy. The worker can, and is bounded as anyone.
+- Jobs cannot reach buffer-api: its host is not in the base policy and is never approved. The worker can, and is
+  bounded as anyone.
 - **The policy is the bound, not a job's own host list.** Every job gets a broker socket and the csub client, and
   the installed csub build does not hold a child job to its parent's hosts or mounts. Code in any job can
   therefore submit a child job that reaches any host the policy allows. An approval so widens what every job of
