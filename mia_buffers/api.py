@@ -1099,7 +1099,6 @@ class BufferService:
             plan_first=parsed.plan_first,
             approve_hosts=parsed.approve_hosts,
         )
-        self._check_hosts(go, None, "buffer", None)  # a buffer's go starts no job of its own: refuse before saving
         return self._buffer_action(name, go, headers, create=True)
 
     def _spec_action(self, name: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
@@ -1120,6 +1119,7 @@ class BufferService:
                     422, f"the spec's name is not {name!r}: a spec's name is its subject, post it to /specs"
                 )
             self._accepts(subject or {"kind": "buffer", "key": name, "stage": "new", "revision": 0}, parsed)
+            self._check_hosts(parsed, None, "buffer", subject["number"] if subject else None)  # a go: no `needed`
             subject = self._save_spec(text)  # only once the stage takes a go: what is stored is what ran last
             payload = {"spec": text, **({"plan_first": True} if parsed.plan_first else {})}
         assert subject is not None
@@ -1239,19 +1239,20 @@ class BufferService:
         self, parsed: ActionBody, needed: Callable[[], Needed] | None, kind: str, number: int | None
     ) -> bool:
         """Refuse approve_hosts that cannot be approved here: the action starts no job (422), the service has no
-        policy (503), the key was used for another action (409), or a host is not one the run needs (422).
+        policy (503), or a host is not one the run needs (422); a key used for another action is a 409. The key
+        comes first: one that carried this same action is a repeat, whatever the stage is by now.
         Nothing is written. False when there is nothing to approve: no hosts, or a key that already carried this
         action (the first try checked and approved them). `number` is None while the subject is not created."""
         if not parsed.approve_hosts:
+            return False
+        if parsed.key and (seen := self.ledger.action_by_key(parsed.key)) is not None:
+            if (seen["kind"], seen["number"], seen["action"]) != (kind, number, parsed.action):
+                raise HttpError(409, f"the key {parsed.key!r} was used for another action")  # as Ledger.add_action
             return False
         if needed is None:
             raise HttpError(422, "approve_hosts goes with an action that starts jobs")
         if self.hosts is None:
             raise HttpError(503, "this service has no csub policy to approve hosts in")
-        if parsed.key and (seen := self.ledger.action_by_key(parsed.key)) is not None:
-            if (seen["kind"], seen["number"], seen["action"]) != (kind, number, parsed.action):
-                raise HttpError(409, f"the key {parsed.key!r} was used for another action")  # as Ledger.add_action
-            return False
         try:
             self.hosts.check(parsed.approve_hosts, needed())
         except ValueError as error:

@@ -2202,6 +2202,29 @@ def test_a_repeat_of_a_sent_approve_returns_the_first_action_though_the_plan_is_
     assert len(_approvals(s)) == 1 and len(_bodies(s, "buffer", number)) == 3 and len(gateway.sent) == 1
 
 
+def test_a_repeat_of_a_sent_approve_after_the_stage_moved_returns_the_first_action(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    number, _ = _at_plan_review(s, tmp_path)
+    revision = s.ledger.subject("buffer", SPEC_NAME)["revision"]
+    body = {"action": "approve", "revision": revision, "key": "k1", "approve_hosts": ["data.example.org"]}
+    first = act(s, SPEC_ACTIONS, body)[1]
+    _stage(s, "buffer", number, "sourcing")
+    entries = len(_bodies(s, "buffer", number))
+    status, again, _ = act(s, SPEC_ACTIONS, body)
+    assert (status, again["id"]) == (202, first["id"])
+    assert len(_approvals(s)) == 1 and len(_bodies(s, "buffer", number)) == entries and len(gateway.sent) == 1
+
+
+def test_an_edited_spec_sent_with_approve_hosts_is_refused_and_not_stored(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    s.ledger.create_subject("buffer", SPEC_NAME, data={"spec": SPEC_TEXT})
+    status, out, _ = act(
+        s, SPEC_ACTIONS, {"action": "go", "spec": SPEC_TEXT + "\n# edited\n", "approve_hosts": ["data.example.org"]}
+    )
+    assert status == 422 and "starts jobs" in out["error"]
+    assert s.ledger.subject("buffer", SPEC_NAME)["data"]["spec"] == SPEC_TEXT and gateway.sent == []
+
+
 def test_a_reused_key_approves_nothing(tmp_path, _home):
     s, gateway = _starting(tmp_path)
     assert act(s, "/datasets/rec-b/actions", {"action": "go", "key": "k1"})[0] == 202
