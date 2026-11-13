@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from autodev.config import PROJECT_DIR
-from mia_core.config import manifest_path, read_manifest
+from mia_core.config import CsubCfg, csub_config, manifest_path, read_manifest
 
 NAME_RE = re.compile(r"[a-z][a-z0-9-]{1,30}")
 
@@ -36,6 +36,7 @@ class Manifest(BaseModel):
     sandbox_dir: Path = Path("../agentic-sandbox/scripts")  # relative to the repo
     temporal: TemporalCfg = TemporalCfg()
     services: dict[str, ServiceCfg]
+    csub: CsubCfg = CsubCfg()
     path: Path | None = None  # the file this was loaded from (set by load_manifest)
 
     @model_validator(mode="after")
@@ -66,6 +67,6 @@ def load_manifest(path: str | os.PathLike | None = None) -> Manifest:
     path = manifest_path(path or os.environ.get("MIA_CONFIG")).expanduser().resolve()
     data = read_manifest(path)
     try:
-        return Manifest(**{**data, "path": path})
+        return Manifest(**{**data, "csub": csub_config(data), "path": path})
     except ValidationError as e:
         sys.exit(f"mia: {path}: {e}")

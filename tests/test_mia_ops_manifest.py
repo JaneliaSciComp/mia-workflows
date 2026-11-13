@@ -74,3 +74,12 @@ def test_load_manifest_resolves_a_relative_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     m = load_manifest("m.yaml")
     assert m.path.is_absolute() and m.path == (tmp_path / "m.yaml").resolve()
+
+
+def test_manifest_carries_the_csub_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / "mia.yaml"
+    path.write_text("paths: {state_root: /x/state}\ncsub: {base_policy: ~/b.toml}\nservices: {aa: {app: autodev}}\n")
+    manifest = load_manifest(path)
+    assert manifest.csub.base_policy == tmp_path / "b.toml"
+    assert str(manifest.csub.policy_dir) == "/x/state/csub"

@@ -87,6 +87,15 @@ network:
   package_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, repo.prefix.dev]
   redirect_hosts: {}
 
+# csub's policy. `base_policy` is the operator's broker.toml: mia reads it and never writes it. `policy_dir` is where
+# mia keeps the policy it generates (default: <paths.state_root>/csub). Two rules for `policy_dir`: it is under the
+# home directory (csub lets no job mount anything there), and it neither contains nor lies inside any directory a
+# worker sandbox binds read-write (state dirs, work_root, storage_root, raw_root, staged_root, the lock directory).
+# Its broker.toml must not be the base policy itself.
+csub:
+  base_policy: ~/.config/csub/broker.toml
+  # policy_dir: ~/.local/state/mia/csub
+
 # buffer-api (`mia-buffers serve`) and its clients. The port is required in `url`. `token_file` holds the worker
 # token its write routes need (chmod 600; `mia init-token` creates it). buffer-api also reaches Temporal (the
 # `temporal.address` above): it starts the workflow that copies each dataset's, buffer's and request's timeline

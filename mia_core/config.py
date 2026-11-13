@@ -14,7 +14,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
@@ -41,6 +41,20 @@ class ServiceCfg(BaseModel):
         if urlparse(url).port is None:
             raise ValueError("service.url needs an explicit port, e.g. http://host.example.org:8765")
         return url
+
+
+class CsubCfg(BaseModel):
+    """The csub block: the operator's policy (read, never written) and the directory where mia keeps the policy it
+    generates. Both paths come out expanded and absolute."""
+
+    base_policy: Path = Path("~/.config/csub/broker.toml")
+    policy_dir: Path = Path("~/.local/state/csub")
+
+    @model_validator(mode="after")
+    def _expand(self) -> CsubCfg:
+        self.base_policy = self.base_policy.expanduser().absolute()
+        self.policy_dir = self.policy_dir.expanduser().absolute()
+        return self
 
 
 class KeeperCfg(BaseModel):
@@ -122,6 +136,15 @@ class JudgeCfg(BaseModel):
         return frozenset(gate for gate, cfg in self._gates().items() if cfg.mode == "active")
 
 
+def csub_config(manifest: dict) -> CsubCfg:
+    """The manifest's csub block; `policy_dir` defaults to `<paths.state_root>/csub` when that is set."""
+    values = dict(manifest.get("csub") or {})
+    state_root = (manifest.get("paths") or {}).get("state_root")
+    if state_root is not None and "policy_dir" not in values:
+        values["policy_dir"] = str(Path(state_root) / "csub")
+    return CsubCfg(**values)
+
+
 def load_dotenv(path: Path = PROJECT_DIR / ".env") -> None:
     """Minimal .env loader: KEY=VALUE lines; variables already in the environment win."""
     if not path.is_file():
@@ -178,6 +201,7 @@ def service_config(manifest: dict, name: str) -> dict:
             raise ValueError(f"{key}: the shared section must be a mapping")
         result[key] = {**shared, **copy.deepcopy(value)}
     result["deployment"] = name
+    result["csub"] = csub_config(manifest).model_dump(mode="json")
     if block["app"] == "mia-buffers":
         # buffer-api starts and signals mia-data's workflows: tell it their namespace and task queue (the task
         # queue is the service's name). A manifest without such a service leaves the model's default.

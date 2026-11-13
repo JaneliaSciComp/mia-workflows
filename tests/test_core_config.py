@@ -1,9 +1,10 @@
 import copy
+from pathlib import Path
 
 import pytest
 import yaml
 
-from mia_core.config import MANIFEST_ONLY, load_service_config, service_config
+from mia_core.config import MANIFEST_ONLY, csub_config, load_service_config, service_config
 
 SHARED = {
     "sandbox_dir": "../agentic-sandbox/scripts",
@@ -203,3 +204,19 @@ def test_gate_mode_takes_yamls_bare_off():
     from mia_core.config import GateCfg
 
     assert GateCfg(mode=False).mode == "off"  # `mode: off` in YAML is False
+
+
+def test_csub_policy_dir_defaults_beside_the_state_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    with_root = csub_config({"paths": {"state_root": "/x/state"}})
+    assert with_root.policy_dir == Path("/x/state/csub")
+    assert with_root.base_policy == tmp_path / ".config/csub/broker.toml"
+    assert csub_config({}).policy_dir == tmp_path / ".local/state/csub"
+    explicit = csub_config({"paths": {"state_root": "/x/state"}, "csub": {"policy_dir": "~/p", "base_policy": "~/b"}})
+    assert explicit.policy_dir == tmp_path / "p" and explicit.base_policy == tmp_path / "b"
+
+
+def test_every_service_receives_the_csub_block():
+    manifest = {**SHARED, "csub": {"policy_dir": "/h/p"}}
+    assert service_config(manifest, "mia-data")["csub"] == service_config(manifest, "snippets")["csub"]
+    assert service_config(manifest, "snippets")["csub"]["policy_dir"] == "/h/p"
