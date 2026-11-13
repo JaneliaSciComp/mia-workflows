@@ -107,7 +107,10 @@ Agents are untrusted code driven by text from issues, so they never run on the h
   The job runs Claude Code in its own sandbox, bound read-write to just its round directory, with a network allowlist
   limited to Anthropic and package hosts. It never gets GitHub access or the worker's token.
 - A **csub broker** on the host, running with the user's policy (`broker.toml`: allowed hosts, allowed roots,
-  `allow_claude`), is what actually submits the jobs. The sandboxed worker can only ask it.
+  `allow_claude`), is what actually submits the jobs. The sandboxed worker can only ask it. `mia up` starts each
+  broker on a policy it generates (`csub.policy_dir/broker.toml`): the operator's file plus the hosts a person
+  approved on the page when starting a run (`approved-hosts.jsonl`; the operator's file is never written).
+  To withdraw an approval, delete its lines from `approved-hosts.jsonl` and run `mia up` again.
 - The **worker**, not the agent, does all GitHub and git pushes, and pushes only to the deployment's own
   `autodev/issue-N` branches.
 
