@@ -88,6 +88,9 @@ def allowed_patterns(policy_dir: Path) -> list[str]          # broker.allowed_ho
 - `dump_toml` writes tables one or two deep holding strings, integers, floats, booleans and lists of strings;
   strings as `json.dumps` writes them. Anything else raises `PolicyError` naming the dotted key. Mark it
   `# ponytail:` (ceiling: the shapes a csub policy has; upgrade: `tomli-w`).
+- `generate_policy` and `approve_hosts` first refuse, with a `PolicyError` naming both paths, a `policy_dir`
+  whose `broker.toml` is the base policy itself: `(policy_dir / POLICY_NAME).resolve() == base_policy.resolve()`
+  (so a symlinked directory is caught too). This is the one place every writer passes through.
 - `generate_policy`: parse the base (`PolicyError` naming the file when it is missing or not TOML); append to
   `broker.allowed_hosts` each approved host that `missing_hosts` says the base lacks; `dump_toml`; require
   `tomllib.loads(text) == merged` (`PolicyError` otherwise). The text starts with
@@ -108,6 +111,10 @@ def allowed_patterns(policy_dir: Path) -> list[str]          # broker.allowed_ho
   - `test_approved_hosts_are_added_in_order_and_every_base_key_is_kept`: approve `b.example.org` then
     `a.example.org`; `allowed_hosts` ends `[..., "b.example.org", "a.example.org"]`; every other key equal.
   - `test_a_host_the_base_matches_by_pattern_is_not_added`: approve `cdn.huggingface.co`; the list is unchanged.
+  - `test_a_policy_dir_that_holds_the_base_is_refused_and_the_base_keeps_its_bytes`: parametrized over
+    `policy_dir` being the base's own directory and a symlink to it, for `generate_policy` and for
+    `approve_hosts`; each raises `PolicyError`, the base is byte-for-byte unchanged, and no approvals file or
+    temp file appears beside it.
   - `test_a_missing_or_invalid_base_is_an_error_and_writes_nothing`: `PolicyError` naming the base path; an
     earlier generated file keeps its bytes.
   - `test_a_value_the_writer_cannot_write_names_its_key`: a base with `when = 2026-01-01` under `[limits]` raises
@@ -164,7 +171,7 @@ path is and the two rules for `policy_dir`.
 `tests/test_mia_ops_cli.py`.
 
 **Interfaces:** consumes `generate_policy`, `PolicyError`, `Manifest.csub`. Produces
-`services.ensure_policy(stack: Stack) -> Path`: the two checks of spec §3, then `generate_policy`; each failure
+`services.ensure_policy(stack: Stack) -> Path`: the three checks of spec §3, then `generate_policy`; each failure
 is a `sys.exit` naming `csub.policy_dir` or `csub.base_policy` and the path. Home is `Path.home().resolve()`.
 A `policy_dir` overlaps a state dir when either contains the other.
 
@@ -182,6 +189,9 @@ A `policy_dir` overlaps a state dir when either contains the other.
     test's home); `SystemExit` matching `csub.policy_dir` and `home`; no tmux session is started and nothing is
     created at that path.
   - `test_up_refuses_a_policy_dir_inside_a_state_dir`: `csub: {policy_dir: <state_root>/mia-data/csub}`.
+  - `test_up_refuses_a_policy_dir_that_holds_the_base_policy`: `csub: {policy_dir: <home>/.config/csub}`;
+    `SystemExit` matching `csub.policy_dir` and `csub.base_policy`; the base's bytes are unchanged and no tmux
+    session is started.
   - `test_up_refuses_a_missing_base_policy`: the base removed; `SystemExit` matching `csub.base_policy`.
   - `test_up_on_a_running_service_regenerates_the_policy`: delete the generated file, `service_up` again, it is
     back.

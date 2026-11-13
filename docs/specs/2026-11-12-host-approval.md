@@ -1,7 +1,8 @@
 # MIA: approving data hosts from the page — Spec
 
 **Status:** v0.4 · 2026-11-12 · approved by the user 2026-11-12 (as v0.3). v0.4 corrects §3 after a review: two
-generations at once are not harmless, and how they are made safe without a lock file.
+generations at once are not harmless, and how they are made safe without a lock file; a `policy_dir` that
+holds the base policy is refused.
 v0.3 names the page's entry points as they stand at 4a37504 (§6). v0.2 took the user's rulings
 on autodev and on csub (§2.1) and a reviewer's pass against the code: where the policy directory may live (§3),
 where a buffer's pool comes from (§4), which broker `mia exec` talks to (§3), and what the installed csub does
@@ -109,7 +110,8 @@ csub:
   policy_dir: <paths.state_root>/csub       # default; holds the two files above
 ```
 
-**Where `policy_dir` may be** (*my call*). `mia up` checks two things and exits with a message naming the path:
+**Where `policy_dir` may be** (*my call*). `mia up` checks three things and exits with a message naming the
+path:
 
 1. **It is under the user's home directory.** csub refuses any job mount under home or containing it, which is
    what keeps a job from mounting the directory and rewriting either file. The installed csub does not protect a
@@ -118,6 +120,10 @@ csub:
    load the generated one.
 2. **It neither contains nor lies inside any service's `state_dir`.** A worker's sandbox binds its state dir
    read-write; `policy_dir` is not mounted into any worker sandbox.
+3. **Its `broker.toml` is not the base policy.** A `policy_dir` of `~/.config/csub` passes the first two
+   checks and would make the generated file the operator's own. Both paths are resolved before they are
+   compared, so a symlinked directory is caught. The generating function refuses this itself as well, before
+   it writes anything, so buffer-api cannot do it either.
 
 **Generation** is one function in `mia_core` (it imports nothing from the other packages), a pure function of
 the base policy and the approvals file:
@@ -293,7 +299,7 @@ from the page; the dialog offers the host.
 **Slices.** Each is deployable on its own.
 
 - **A. The policy file.** Generation (merge and order, round trip, a base that is missing or invalid, a value
-  that cannot be written, an approved host the base already matches), the `csub` config block with its two path
+  that cannot be written, an approved host the base already matches), the `csub` config block with its three path
   checks, `mia up` passing `--policy`, and `mia exec` using the service's socket. With no approvals the
   deployment behaves as before.
 - **B. The service.** Needed and missing hosts for the three kinds of run; `/hosts/missing`; `approve_hosts` on
