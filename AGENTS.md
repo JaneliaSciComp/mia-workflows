@@ -67,12 +67,11 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   against the stage table. Every other route the page needs is a read route (`tests/test_buffers_ui.py` enforces
   it). An action can ask a workflow to do something; it cannot write what a workflow found, which stays behind the
   worker token.
-- **Only a person's click approves a host.** Every broker `mia up` starts reads `<csub.policy_dir>/broker.toml`,
-  generated from the operator's `csub.base_policy` plus `approved-hosts.jsonl`. buffer-api alone appends to that file,
-  only hosts the run's own catalog records or published bindings name, and only for a start action carrying
-  `approve_hosts`; nothing writes the operator's `broker.toml`. `policy_dir` stays under home, apart from every
-  read-write sandbox mount, and is never the base's own directory: every generation checks it. Withdrawing an approval
-  is a hand edit of the jsonl, then `mia up`.
+- **Only a person's click approves a host.** Brokers read `<csub.policy_dir>/broker.toml`, generated from the operator's
+  `csub.base_policy` plus `approved-hosts.jsonl`. buffer-api alone appends to that file, only on a person's start
+  action and only hosts that run's jobs need (its records' or bindings' URL hosts, redirect targets, package hosts);
+  nothing writes the operator's `broker.toml`. `policy_dir` is under home, apart from every directory a worker sandbox
+  binds read-write, and its `broker.toml` is not the base policy file.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 

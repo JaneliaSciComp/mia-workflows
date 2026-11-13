@@ -204,7 +204,8 @@ or `needs-human`. `mia-buffers datasets sync` rebuilds the prepared rows from `s
 
 Agents never hold GitHub credentials or reach GitHub; the worker does every GitHub write. Each job asks csub
 only for the hosts in its binding, and the broker's policy is the ceiling: a host missing from the policy fails
-the round before submission, with an entry naming it. Unreviewed snippet code from a PR head runs only inside
+the round before submission, with an entry naming it (a person can approve the host from the page when starting
+the run). Unreviewed snippet code from a PR head runs only inside
 job sandboxes, and the verify job that judges its output loads no snippet code. Merging a snippet needs a
 person's approve of the crops its exact head made, plus the required status; so does publishing them. The page's
 buttons need no login: they can ask the workflow to act, and cannot write what a workflow found.
