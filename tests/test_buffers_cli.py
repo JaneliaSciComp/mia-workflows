@@ -99,7 +99,7 @@ def test_help_lists_commands(capsys):
         main(["--help"])
     assert error.value.code == 0
     out = capsys.readouterr().out
-    for command in ("plan", "serve", "register", "worker", "schedule", "init-labels", "adopt-issues"):
+    for command in ("plan", "serve", "register", "worker", "schedule", "init-labels"):
         assert command in out
 
 

@@ -7,8 +7,7 @@ from mia_buffers.config import PREP_STAGES, STAGES
 from mia_buffers.ledger import Ledger
 from mia_buffers.mirror import buffer_issue, prep_issue
 from mia_data.mirror import Mirror
-from tests.mia_helpers import FakeGH
-from tests.test_buffers_adopt import registry_for
+from tests.mia_helpers import FakeGH, registry_for
 from tests.test_buffers_config import make_cfg
 
 PREP_TEXT = yaml.safe_dump(

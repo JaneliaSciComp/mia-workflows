@@ -394,27 +394,6 @@ async def cmd_retire(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-async def cmd_adopt_issues(cfg: Config, args: argparse.Namespace) -> int:
-    """Make every dataset, buffer and preparation request issue a subject of the registry (`--dry-run`: report
-    only). Safe to run again."""
-    from .adopt import adopt_issues
-
-    clients = (_gh(cfg, cfg.github.datasets_repo), _gh(cfg, cfg.github.buffers_repo))
-    try:
-        with Registry.from_config(cfg.service) as registry:
-            lines = await adopt_issues(*clients, registry, dry_run=args.dry_run)
-    except RegistryError as error:
-        print(error.message, file=sys.stderr)
-        return 1
-    finally:
-        for gh in clients:
-            await gh.aclose()
-    print("\n".join(lines))
-    to_look_at = sum(line.startswith(("duplicate:", "refused:", "skipped:")) for line in lines)
-    print(f"{'would adopt' if args.dry_run else 'adopted'} {len(lines) - to_look_at}, {to_look_at} to look at")
-    return 0
-
-
 def _deployment(args: argparse.Namespace) -> int:
     """Run a command that needs mia_buffers.yaml and Temporal."""
     cfg = load_config(args.config)
@@ -428,7 +407,6 @@ def _deployment(args: argparse.Namespace) -> int:
         "datasets": cmd_datasets_sync,
         "assets": cmd_assets_sync,
         "retire": cmd_retire,
-        "adopt-issues": cmd_adopt_issues,
     }[args.command]
     return asyncio.run(command(cfg, args))
 
@@ -494,10 +472,6 @@ def main(argv: list[str] | None = None) -> int:
     retire.add_argument("buffer", help="buffer id (the round id, i<issue>-e<event>)")
     retire.add_argument("--config", help="path to mia.yaml (default: $MIA_CONFIG or ./mia.yaml)")
     retire.set_defaults(func=_deployment)
-    adopt = sub.add_parser("adopt-issues", help="make every dataset, buffer and request issue a registry subject")
-    adopt.add_argument("--dry-run", action="store_true", help="print the report; write nothing")
-    adopt.add_argument("--config", help="path to mia.yaml (default: $MIA_CONFIG or ./mia.yaml)")
-    adopt.set_defaults(func=_deployment)
     args = parser.parse_args(argv)
     return int(args.func(args))
 

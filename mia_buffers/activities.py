@@ -19,7 +19,7 @@ import re
 import shutil
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
@@ -100,9 +100,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 ROUND_RE = re.compile(r"[ip]\d+-e\d+")  # i<issue>-e<event>: a buffer round; p<issue>-e<event>: a preparation request
 BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
-SPEC_FENCE = re.compile(r"^```ya?ml[ \t]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
-REVOKE_RE = re.compile(r"^/revoke\s+([a-z0-9][a-z0-9._-]{0,120})\s*$", re.M)  # a `/revoke <record>` line
-REVOKE_WINDOW_DAYS = 7  # how far back a buffer:revoke reads its actor's `/revoke` lines
 MANIFEST_SOURCE_MANUAL = "manual"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
 FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
@@ -309,28 +306,13 @@ class Activities:
     @activity.defn(name="revoke_targets")
     @mia_permanent_errors
     async def revoke_targets(self, issue: int, actor: str, until: str) -> list[str]:
-        """The records named as `/revoke <record>` lines in `actor`'s comments on the issue within the week before
-        `until` (the label's time), deduplicated in order of first mention. A line, never a mention mid-sentence."""
-        # a revoke sent from the page names its records itself: the action whose time is `until` (the workflow
-        # passes the event's own time, which is why an action's `at` is stored exactly as sent; spec §6)
+        """The records a revoke names: those of the revoke action whose time is `until` (the workflow passes the
+        event's own time, which is why an action's `at` is stored exactly as sent; spec webapp-actions §6)."""
         found_subject = await asyncio.to_thread(self.registry.timeline, "buffer", issue)
         for action in (found_subject or {}).get("actions", []):
             if action["action"] == "revoke" and action["at"] == until:
                 return [str(record) for record in action["payload"].get("records", [])]
-        # ponytail: a label's round: its revoke names them in comments (slice E, second deploy)
-        end = _parse_iso(until)
-        if end is None:
-            raise ValueError(f"buffer:revoke: the label's time {until!r} is not an ISO-8601 time")
-        start = end - timedelta(days=REVOKE_WINDOW_DAYS)
-        found: dict[str, None] = {}
-        for comment in await self.gh_issues.issue_comments(issue):
-            if ((comment.get("user") or {}).get("login")) != actor:
-                continue
-            created = _parse_iso(str(comment.get("created_at") or ""))
-            if created is None or not start <= created <= end:
-                continue
-            found.update(dict.fromkeys(REVOKE_RE.findall(str(comment.get("body") or ""))))
-        return list(found)
+        return []
 
     @activity.defn(name="revoke_artifacts")
     @mia_permanent_errors
@@ -397,13 +379,6 @@ class Activities:
     def _clean(self, text: str) -> str:
         return neutralize(text, self.gh_issues.tokens())
 
-    async def _comment_once(self, gh: GitHub, number: int, body: str, marker: str) -> str | None:
-        """Post unless the bot already commented with this marker (an outsider's copy does not count)."""
-        for comment in await gh.issue_comments(number):
-            if (comment.get("user") or {}).get("login") == self.bot and marker in (comment.get("body") or ""):
-                return comment.get("html_url")
-        return (await gh.comment(number, body)).get("html_url")
-
     async def _post(
         self,
         kind: str,
@@ -421,17 +396,11 @@ class Activities:
         write = functools.partial(
             self.registry.append_entry, kind, issue, body=body, marker=marker, round_id=round_id, stage=stage
         )
-        try:
-            await asyncio.to_thread(write)
-        except RegistryError as err:
-            if err.status != 404:
-                raise
-            await self._adopt(kind, issue)
-            await asyncio.to_thread(write)
+        await asyncio.to_thread(write)
 
     async def _action(self, kind: str | None, number: int, event_id: str) -> dict | None:
-        """The action whose id is this event id; None when the event is not an action (a GitHub label event, until
-        labels stop starting rounds). An action of another subject is an error. `kind` None: either kind."""
+        """The action whose id is this event id; None when the event is not an action (a signal of the keeper's).
+        An action of another subject is an error. `kind` None: either kind."""
         action = await asyncio.to_thread(self.registry.action, event_id)
         if action is None:
             return None
@@ -440,41 +409,14 @@ class Activities:
         return action
 
     async def _spec_text(self, kind: str, issue: int, event_id: str, what: str) -> str:
-        """The YAML a round runs: the `spec` its action carries, exactly as it was sent (spec webapp-actions §6);
-        for a GitHub label event, the one ```yaml fence of the issue's body."""
-        if (action := await self._action(kind, issue, event_id)) is not None:
-            text = action["payload"].get("spec")
-            if not text:
-                raise ValueError(f"action {event_id} carries no {what}")
-            return str(text)
-        # ponytail: a label's round: the only read of the issue's body (slice E, second deploy)
-        body = ((await self.gh_issues.get_issue(issue)).get("body") or "").replace("\r\n", "\n")  # GitHub saves CRLF
-        fences = SPEC_FENCE.findall(body)
-        if len(fences) != 1:
-            raise ValueError(
-                f"issue #{issue}: expected exactly one ```yaml block holding the {what}, found {len(fences)}"
-            )
-        return str(fences[0])
-
-    async def _adopt(self, kind: str, issue: int) -> None:
-        """Make an issue the registry has no subject for a subject, named as `adopt-issues` would name it."""
-        # ponytail: a label's round on an issue `adopt-issues` never saw: adopted by its first write
-        # (spec webapp-actions §11 step 2; slice E, second deploy).
-        from .adopt import buffer_subject, prep_subject
-
-        found = await self.gh_issues.get_issue(issue)
-        if kind == "prep":
-            key, data = prep_subject(found)
-        else:
-            name, data = buffer_subject(found)
-            key = name or f"issue-{issue}"
-        adopt = functools.partial(self.registry.adopt_subject, kind, issue, data=data)
-        try:
-            await asyncio.to_thread(adopt, key)
-        except RegistryError as taken:
-            if taken.status != 409 or kind == "prep":
-                raise
-            await asyncio.to_thread(adopt, f"{key}-{issue}")  # an earlier issue holds this spec name
+        """The YAML a round runs: the `spec` its action carries, exactly as it was sent (spec webapp-actions §6)."""
+        action = await self._action(kind, issue, event_id)
+        if action is None:
+            raise ValueError(f"event {event_id} is not an action: a round runs the {what} its action carries")
+        text = action["payload"].get("spec")
+        if not text:
+            raise ValueError(f"action {event_id} carries no {what}")
+        return str(text)
 
     def _round_dir(self, round_id: str) -> Path:
         if not ROUND_RE.fullmatch(round_id):
@@ -891,7 +833,8 @@ class Activities:
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
     async def refuse_label(self, issue: int, label: str, reason: str, event_id: str) -> None:
-        """Remove a human label we won't act on and say why, once per event."""
+        """Refuse an action we won't act on and say why, once per event; an event that is no action (a signal of
+        the keeper's) gets the entry alone."""
         humans = {self.cfg.label(kind) for kind in (*HUMAN_LABELS, "cancel")} | {
             self.cfg.prep_label(kind) for kind in (*PREP_HUMAN_LABELS, "cancel")
         }  # every action a person can send to a request
@@ -902,8 +845,6 @@ class Activities:
         if await self._action(kind, issue, event_id) is not None:  # a click: the page shows the reason against it
             await asyncio.to_thread(self.registry.refuse_action, event_id, self._clean(reason))
             said = f"Refused `{label.partition(':')[2]}`: {self._clean(reason)}"
-        else:  # ponytail: a label's round (slice E, second deploy)
-            await self.gh_issues.remove_label(issue, label)
         marker = self.cfg.marker(f"refused {label} {event_id}")
         await self._post(kind, issue, f"{said}\n\n{marker}", marker)
 
@@ -1779,14 +1720,6 @@ class Activities:
         await asyncio.to_thread(registry.put_asset, kind, key, {"state": "evicted", "evicted_at": now, "bytes": 0})
         log.info("keeper: evicted %s %s (%s bytes, last used %s)", kind, key, data.get("bytes"), data.get("last_used"))
         return True
-
-
-def _parse_iso(text: str) -> datetime | None:
-    """A GitHub ISO-8601 time (`Z` or an offset) as an aware datetime; None when it is not one."""
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def _issue_of(round_id: str) -> int:

@@ -16,8 +16,7 @@ from mia_buffers.ledger import Ledger
 from mia_data.config import STAGES
 from mia_data.mirror import Mirror
 from mia_data.workflows import MiaMirror
-from tests.mia_helpers import FakeGH
-from tests.test_buffers_adopt import registry_for
+from tests.mia_helpers import FakeGH, registry_for
 
 
 def data_label(stage):

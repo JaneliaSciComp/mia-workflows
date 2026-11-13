@@ -880,7 +880,7 @@ def _with_service(t, tmp_path):
     """Give the activities a registry backed by a real service in this process; returns its ledger."""
     from mia_buffers.api import BufferService
     from mia_buffers.ledger import Ledger
-    from tests.test_buffers_adopt import registry_for
+    from tests.mia_helpers import registry_for
 
     ledger = Ledger(tmp_path / "ledger.sqlite")
     t.a.registry = registry_for(BufferService(ledger))

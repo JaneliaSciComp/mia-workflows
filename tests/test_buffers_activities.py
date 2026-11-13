@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,12 +67,19 @@ def spec_text() -> str:
     return yaml.safe_dump(spec.model_dump(by_alias=True, exclude={"warnings"}), sort_keys=False)
 
 
-SPEC_NAME = load_spec(FIXTURES / "spec.yaml").name  # the key a buffer issue with this spec is adopted under
+SPEC_NAME = load_spec(FIXTURES / "spec.yaml").name  # the key of the fixture's buffer spec
 
 
-def issue_body(spec: str | None = None, fences: int = 1) -> str:
-    block = f"```yaml\n{spec or spec_text()}```\n"
-    return "A buffer for the demo.\n\n" + block * fences + "\nNotes below.\n"
+def put_action(acts, kind: str, number: int, action_id: int, payload: dict, action: str = "go") -> None:
+    """An action with a chosen id in the fixture service's ledger: these tests name their rounds by event id."""
+    row = (action_id, kind, number, action, "page", "2026-11-01T00:00:00+00:00", None, json.dumps(payload))
+    with sqlite3.connect(acts.ledger_path) as db:
+        db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
+
+
+def set_spec(acts, spec: str) -> None:
+    """The spec the fixture round's go (action 11 on buffer 7) carries."""
+    put_action(acts, "buffer", 7, 11, {"spec": spec})
 
 
 def record_of(record_id: str) -> dict:
@@ -100,7 +108,7 @@ def acts(tmp_path, monkeypatch, token_server):  # noqa: F811
     monkeypatch.setattr(cli, "catalog_snapshot", fake_catalog_snapshot)  # the plan's on-demand `catalog sync`
     monkeypatch.setattr(acts_module, "harness_pin", lambda cfg_: ("h" * 40, "d" * 64))
     monkeypatch.setattr(acts_module, "harness_snapshot", lambda cfg_, commit: tmp_path / "hsnap")
-    gh = FakeGH("o/buffers", issues={7: {"number": 7, "body": issue_body(), "labels": [{"name": "buffer:planning"}]}})
+    gh = FakeGH("o/buffers", issues={7: {"number": 7, "body": "", "labels": [{"name": "buffer:planning"}]}})
     activities = Activities(
         cfg,
         gh,
@@ -112,6 +120,9 @@ def acts(tmp_path, monkeypatch, token_server):  # noqa: F811
     )
     activities.gh = gh
     registry = activities.registry = Registry(token_server, "t")
+    activities.ledger_path = tmp_path / "l.sqlite"  # the fixture service's ledger (`token_server`)
+    registry.adopt_subject("buffer", 7, SPEC_NAME, data={"spec": spec_text()})
+    set_spec(activities, spec_text())
     for _, record in load_records(CATALOG):
         registry.put_dataset(record["id"], state="prepared")
     yield activities
@@ -182,16 +193,17 @@ async def test_nudge_charges_the_dataset_round_to_the_buffers_root(acts, gateway
     assert go["payload"] == {"root": f"{acts.cfg.github.buffers_repo}#7"} and go["actor"] == "buffer:7"
 
 
-@pytest.mark.parametrize("fences", [0, 2])
-async def test_admit_refuses_issue_without_one_yaml_fence(acts, fences):
-    acts.gh.issues[7]["body"] = issue_body(fences=fences)
-    with pytest.raises(ApplicationError, match="exactly one ```yaml") as error:
-        await admitted(acts)
+async def test_admit_refuses_an_event_that_is_no_action_or_carries_no_spec(acts):
+    with pytest.raises(ApplicationError, match="event 12 is not an action") as error:
+        await acts.admit(7, "12")
     assert error.value.non_retryable
+    put_action(acts, "buffer", 7, 12, {})
+    with pytest.raises(ApplicationError, match="action 12 carries no buffer spec"):
+        await acts.admit(7, "12")
 
 
 async def test_admit_refuses_invalid_spec(acts):
-    acts.gh.issues[7]["body"] = issue_body(spec_text().replace("schema_version: 1", "schema_version: 2"))
+    set_spec(acts, spec_text().replace("schema_version: 1", "schema_version: 2"))
     with pytest.raises(ApplicationError, match="spec refused") as error:
         await admitted(acts)
     assert error.value.non_retryable
@@ -466,8 +478,7 @@ async def test_a_revoke_from_the_page_names_its_records_in_the_action(acts):
         "POST", f"/specs/{SPEC_NAME}/actions", json={"action": "revoke", "records": [U937, BCSS]}
     )
     assert await acts.revoke_targets(7, "page", revoke["at"]) == [U937, BCSS]
-    (await acts.gh.comment(7, f"/revoke {U937}", "alice"))["created_at"] = "2026-10-27T10:10:00Z"
-    assert await acts.revoke_targets(7, "alice", "2026-10-27T10:12:00Z") == [U937]  # a label's revoke: comments
+    assert await acts.revoke_targets(7, "page", "2026-10-27T10:12:00Z") == []  # no revoke action at that time
 
 
 async def test_refusing_an_action_marks_it_and_removes_no_label(acts):
@@ -738,7 +749,7 @@ async def test_set_stage_writes_the_subjects_stage_and_one_entry(acts):
     state = BufferState(7, round_id=ROUND, stage="plan-review")
     await acts.set_stage(7, "plan-review", state, "approve the plan")
     await acts.set_stage(7, "plan-review", state, "approve the plan")
-    subject = acts.registry.timeline("buffer", 7)["subject"]  # the issue was adopted by its first write
+    subject = acts.registry.timeline("buffer", 7)["subject"]
     assert (subject["key"], subject["stage"], subject["revision"]) == (SPEC_NAME, "plan-review", 2)
     assert f"name: {SPEC_NAME}" in subject["data"]["spec"] and subject["status"] == "waiting"
     bodies = posted(acts)
@@ -748,21 +759,20 @@ async def test_set_stage_writes_the_subjects_stage_and_one_entry(acts):
     assert acts.registry.timeline("buffer", 7)["subject"]["stage"] == "ready" and len(posted(acts)) == 1
 
 
-async def test_a_second_issue_with_a_taken_spec_name_is_adopted_under_name_and_number(acts):
-    acts.gh.issues[9] = {"number": 9, "body": issue_body(), "labels": []}
-    await acts.set_stage(7, "planning")
-    await acts.set_stage(9, "planning")
-    assert acts.registry.timeline("buffer", 9)["subject"]["key"] == f"{SPEC_NAME}-9"
+async def test_a_write_for_a_subject_the_registry_does_not_know_fails(acts):
+    with pytest.raises(RegistryError) as error:
+        await acts.set_stage(9, "planning")
+    assert error.value.status == 404
 
 
-async def test_refuse_label_removes_and_explains(acts):
+async def test_refusing_an_event_that_is_no_action_explains_and_touches_no_label(acts):
     acts.gh.issues[7]["labels"].append({"name": "buffer:approve"})
     await acts.refuse_label(7, "buffer:approve", "it is older than the plan", "12")
-    assert (7, "buffer:approve") in acts.gh.removed and "older than the plan" in posted(acts)[0]
+    assert "Ignoring `buffer:approve`: it is older than the plan" in posted(acts)[0]
     prep_issue(acts)
     await acts.refuse_label(8, "prep:go", "busy", "13")  # MiaPrep refuses a go while its round runs
-    assert (8, "prep:go") in acts.gh.removed and "Ignoring `prep:go`: busy" in posted(acts, "prep", 8)[0]
-    assert acts.gh.comments == {}
+    assert "Ignoring `prep:go`: busy" in posted(acts, "prep", 8)[0]
+    assert acts.gh.removed == [] and acts.gh.comments == {}  # the issue is the mirror's
     with pytest.raises(ApplicationError):
         await acts.refuse_label(7, "data:go", "x", "12")
 
@@ -772,13 +782,6 @@ async def test_limits_come_from_config(acts):
     assert (limits.parallel, limits.walltime_min, limits.service_url) == (4, 120, "http://127.0.0.1:8765")
     assert (limits.parallel_fetch, limits.fetch_walltime_min, limits.fetch_attempts) == (2, 480, 4)
     assert (limits.poll_minutes, limits.lock_ttl_s) == (2, 900)
-
-
-async def test_admit_accepts_crlf_bodies(acts):
-    acts.gh.issues[7]["body"] = issue_body().replace("\n", "\r\n")  # GitHub's web editor saves CRLF
-    pins = await admitted(acts)
-    assert (acts.cfg.paths.state_dir / "rounds" / ROUND / "spec.yaml").read_text() == spec_text()
-    assert pins.catalog_ref == REF
 
 
 async def test_register_dataset_refuses_malformed_volumes(acts, server):
@@ -1657,13 +1660,17 @@ async def test_keeper_watch_survives_a_pre_d_config_and_a_failing_buffer(acts, k
 PREP_ROUND = "p8-e21"
 
 
-def prep_body(**fields) -> str:
+def prep_spec(**fields) -> str:
     spec = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/catalog", "ref": REF}, **fields}
-    return f"Please prepare these.\n\n```yaml\n{yaml.safe_dump(spec, sort_keys=False)}```\n"
+    return yaml.safe_dump(spec, sort_keys=False)
 
 
 def prep_issue(acts, number: int = 8, **fields) -> None:
-    acts.gh.issues[number] = {"number": number, "body": prep_body(**fields), "labels": [{"name": "prep:requested"}]}
+    """A preparation request as subject `number`, whose go (action 21 for request 8, 22 for 9) carries its spec."""
+    acts.gh.issues[number] = {"number": number, "body": "", "labels": [{"name": "prep:requested"}]}
+    spec = prep_spec(**fields)
+    acts.registry.adopt_subject("prep", number, f"prep-{number}", data={"spec": spec})
+    put_action(acts, "prep", number, number + 13, {"spec": spec})
 
 
 async def test_prep_admit_and_nudge_report_prepared_records(acts):
@@ -1892,22 +1899,6 @@ async def test_keep_holds_a_quarantined_asset_for_the_quarantine(acts, keeper_se
     report = await acts.keep(dry_run=True)
     assert report.evicted == ["staged old"] and report.errors == []  # the young one is held, over quota or not
     assert young.is_dir() and old_one.is_dir()
-
-
-async def test_revoke_targets_reads_the_actors_revoke_lines(acts):
-    acts.gh_issues.comments[7] = [
-        {
-            "user": {"login": "alice"},
-            "created_at": "2026-11-10T10:00:00Z",
-            "body": "/revoke rec-a\nlooks wrong\n/revoke rec-b\n/revoke rec-a",
-        },
-        {"user": {"login": "bob"}, "created_at": "2026-11-10T10:05:00Z", "body": "/revoke rec-c"},
-        {"user": {"login": "alice"}, "created_at": "2026-11-01T10:00:00Z", "body": "/revoke rec-old"},
-        {"user": {"login": "alice"}, "created_at": "2026-11-10T12:00:00Z", "body": "/revoke rec-later"},
-        {"user": {"login": "alice"}, "created_at": "2026-11-10T10:30:00Z", "body": "please /revoke rec-inline"},
-    ]
-    assert await acts.revoke_targets(7, "alice", "2026-11-10T11:00:00Z") == ["rec-a", "rec-b"]
-    assert await acts.revoke_targets(7, "carol", "2026-11-10T11:00:00Z") == []
 
 
 async def test_revoke_artifacts_rejects_and_quarantines_this_buffers_artifacts_only(acts, server):
