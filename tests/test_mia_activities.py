@@ -117,7 +117,7 @@ async def test_admit_charges_the_root_its_go_carries_or_the_dataset_itself(tmp_p
     assert (await t.a.admit(1, "11")).root == f"{t.cfg.github.data_repo}#1"
     with pytest.raises(ApplicationError, match="event 12 is not an action") as error:
         await t.a.admit(1, "12")
-    assert error.value.non_retryable
+    assert error.value.non_retryable and str(error.value).count("ValueError") == 1  # the type is named once
 
 
 async def _match_ws(t, outcome, binding=None):

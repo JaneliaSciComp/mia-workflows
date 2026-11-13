@@ -129,10 +129,8 @@ def mia_permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
     async def wrapper(*args, **kwargs):
         try:
             return await inner(*args, **kwargs)
-        except PERMANENT as error:
-            raise ApplicationError(
-                f"{type(error).__name__}: {error}", type=type(error).__name__, non_retryable=True
-            ) from error
+        except PERMANENT as error:  # the type names the exception: an ApplicationError's text begins with it
+            raise ApplicationError(str(error), type=type(error).__name__, non_retryable=True) from error
 
     return cast(Fn, wrapper)
 
