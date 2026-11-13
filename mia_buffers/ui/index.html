@@ -1551,7 +1551,7 @@ function createBuffer(container, yaml, blocker) {
   if (!area.dataset.edited) area.value = yaml;
   const run = container.querySelector("button"), status = container.querySelector(".actions .small");
   run.disabled = !!blocker && !area.dataset.edited;  // an edited spec is judged by the service, not by the controls' plan
-  run.title = run.disabled ? blocker : "";
+  run.title = run.disabled ? blocker : BUTTON_HELP.plan;
   if (!status.textContent || status.dataset.blocker) { status.textContent = run.disabled ? blocker : ""; status.dataset.blocker = "1"; }
 }
 // `again` (the Datasets list's ticks): every ticked dataset gets a round, also one that is prepared or that stopped;
