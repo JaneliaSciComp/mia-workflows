@@ -123,7 +123,13 @@ def test_a_datasets_state_is_what_a_person_reads_and_the_stage_decides_it():
 
     for stage in ("matching", "developing", "testing", "merging"):
         assert dataset_state(stage, saved=True) == dataset_state(stage, saved=False) == "in-progress"
-    for stage in ("review", "needs-human", "cancelled"):  # a person has to act, saved crops of an earlier round or not
+    for stage in (
+        "review",
+        "failed",
+        "blocked",
+        "needs-human",
+        "cancelled",
+    ):  # a person has to act, whatever was saved before
         assert dataset_state(stage, saved=True) == "needs-human"
     assert dataset_state("done", saved=True) == "prepared" and dataset_state("done", saved=False) == "needs-human"
     # what code asks instead: is a round open? Review is one (a reject makes its crops again), a stop is not

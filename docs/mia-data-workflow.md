@@ -98,7 +98,9 @@ snippet for each raw and label array and writes a **binding**, a small YAML sayi
 snippet and parameters, with reasons. It may run `harness smoke` to try bindings and `harness list` to see a
 directory URL's files, but may not change snippet code. The job runs Claude Code restricted to five built-in
 tools, with no settings files and no MCP servers; the sandbox mounts are the other half of that restriction. Its
-outcome is `matched`, `needs_snippet` or `blocked`.
+outcome is `matched`, `needs_snippet`, `blocked` or `failed`. The agent chooses between the last two by what a
+person would have to do: `blocked` when something has to be decided or changed before any run can bind the dataset,
+`failed` when running the match again may pass.
 
 The worker never trusts the agent's claim. It checks the binding (right record and commit, URLs from the
 record, https only, snippets exist) and runs its own **smoke job**, a plain `harness smoke` with no agent. Only
@@ -125,7 +127,7 @@ required `mia-data/crops` commit status on that exact commit. A head whose crops
 matched binding's; one whose crops fail gets the report as a `/revise` on the PR, and autodev fixes it. Nobody
 merges the PR by hand: *Approve* on the dataset's page makes the worker post `/approve <head>` on the PR (stage
 `merging`), autodev merges, and if the merged snippet tree is the approved head's, the approved crops are
-saved; otherwise the merge commit gets its own crops, reviewed again. If the round ends in `needs-human`
+saved; otherwise the merge commit gets its own crops, reviewed again. If the round stops (`failed` or `blocked`)
 while the PR is still open (a lost job, a failed status write), *Run again* resumes that PR: the current head is
 tested again under a new round, and no second snippets issue is opened. A PR closed or merged by then means a new
 match. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
@@ -140,7 +142,7 @@ round adds crops rather than duplicating them; then `harness verify` and `harnes
 workspace that loads no snippet code. Verify checks each crop is a square 16-bit PNG of the crop edge (256, or
 the image's own extent when it is smaller: a small dataset is cropped whole, never refused) with matching labels
 and writes overlay PNGs. At least half of the set must verify (verify exits 1 whenever one crop fails, so its
-report is the judge); fewer ends the round `needs-human` with nothing saved. The passing crops' `raw.png`
+report is the judge); fewer ends the round `failed` with nothing saved. The passing crops' `raw.png`
 and `overlay.png` are committed to the `galleries` branch of mia-workflow-data, and a timeline entry shows them
 with the binding and the agent's reasons. The stage is `review`, and the dataset is listed under *Needs you*.
 
@@ -166,7 +168,7 @@ The next crops come back to `review`; the loop runs until an approve.
 assessment supersedes the approve, every staged artifact of the record is quarantined and rejected, the registry
 row becomes `revoked` and `revoked.json` is written beside the manifest, so no buffer plans or reuses the dataset
 and the buffers that drew from it unregister its volumes (the keeper tells them). Nothing is deleted; the dataset
-ends in `needs-human` listing the artifacts and buffers, and *Run again* with a round that saves its crops repairs
+ends in `blocked` listing the artifacts and buffers, and *Run again* with a round that saves its crops repairs
 it.
 
 **Saving.** The approve saves the very crops that were reviewed: the worker reads the round's verify
@@ -184,8 +186,11 @@ the cache read-only, writes a private one and takes no lock.
 
 Every stage change is a new entry, never an edit: the stage, what it produced, and the folders to look at. The
 dataset is in exactly one stage at a time, written only by the workflow: `matching`, `developing`, `testing`,
-`review`, `merging`, `done`, `needs-human` or `cancelled`. The buttons on its page are the actions its stage
-accepts. Anything the system cannot handle ends in `needs-human` with an entry saying why and what to change;
+`review`, `merging`, `done`, `failed`, `blocked` or `cancelled`. The buttons on its page are the actions its stage
+accepts. A round that cannot go on stops with an entry saying why, in one of two stages: `failed` when a job or a
+check failed and running it again may pass, `blocked` when a person has to decide or change something first (the
+match agent says so, a host is not approved, admission refuses the record, the policy refuses an approve, a
+revocation, a pause). `needs-human` is the stage of a stop that says neither;
 *Run again* afterwards retries from the start with a new seed, or, when the round was following a snippet PR that
 is still open, picks that PR up again. *Cancel the round* ends a round in progress: its jobs are killed and the
 stage is `cancelled`.

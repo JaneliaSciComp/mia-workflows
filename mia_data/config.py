@@ -37,7 +37,9 @@ STAGES = {
     "review": ("1d76db", "mia-data: waiting for review"),
     "merging": ("1d76db", "mia-data: crops approved; autodev is merging the snippet PR"),
     "done": ("5319e7", "mia-data: crops saved"),
-    "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
+    "failed": ("d93f0b", "mia-data: a step failed; running it again may pass"),
+    "blocked": ("b60205", "mia-data: stopped until a person decides or changes something"),
+    "needs-human": ("d93f0b", "mia-data: stopped, with no word on whether it failed or is blocked"),
     "cancelled": ("cccccc", "mia-data: the round was cancelled"),
 }
 HUMAN_LABELS = {  # the actions a person takes
@@ -67,6 +69,8 @@ STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "review": ("waiting", frozenset({"approve", "reject", "cancel"})),
     "merging": ("working", frozenset({"cancel"})),
     "done": ("done", frozenset({"go", "revoke"})),
+    "failed": ("stuck", frozenset({"go", "revoke"})),
+    "blocked": ("stuck", frozenset({"go", "revoke"})),
     "needs-human": ("stuck", frozenset({"go", "revoke"})),
     "cancelled": ("done", frozenset({"go", "revoke"})),
 }
@@ -81,8 +85,8 @@ def round_open(stage: str | None) -> bool:
 
 def dataset_state(stage: str, saved: bool) -> str:
     """The word a person reads for a dataset at `stage`: `in-progress` while a round works by itself, `prepared`
-    once a round ended `done` with its crops saved, `needs-human` whenever a person has to act (a review, a stop,
-    a cancelled round, a `done` round that saved nothing)."""
+    once a round ended `done` with its crops saved, `needs-human` whenever a person has to act (a review, a
+    round that failed, is blocked or was cancelled, a `done` round that saved nothing)."""
     if STAGE_ACTIONS.get(stage, ("",))[0] == "working":
         return "in-progress"
     return "prepared" if stage == "done" and saved else "needs-human"

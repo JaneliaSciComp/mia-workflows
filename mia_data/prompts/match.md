@@ -60,10 +60,20 @@ All in the current directory:
           "what_fails": "<what a new snippet must handle, with the smoke errors>",
           "tried": [{"snippet": "<name>", "params": {}, "error": "<smoke error>"}]}
 
-   - You can't decide, or something outside your control stops you (an undecidable label class, a dependency
-     missing from the allowlist, a host the job may not reach):
+   - A person has to decide or change something before any run can bind this dataset (an undecidable label
+     class, a record that names no data file, a dependency missing from the allowlist, a host the job may not
+     reach). Running the match again unchanged would stop at the same place:
 
          {"outcome": "blocked", "reason": "<what is missing, and what a human must decide or change>"}
+
+   - Something did not work, and running the match again later may pass (a host that did not answer or answered
+     with a server error, a read that timed out, a harness or tool error that is not about this dataset, time
+     or turns running out):
+
+         {"outcome": "failed", "reason": "<what failed, with the error text, and how far you got>"}
+
+   Choose between these two by what a person would have to do: something to decide or fix is `blocked`, nothing
+   but running it again is `failed`.
 
 # Rules
 
@@ -78,4 +88,4 @@ All in the current directory:
   work around it.
 - Your only network access is the harness (`harness smoke`, `harness list`), on the record's hosts; you have no
   GitHub access. Don't try to download files yourself; the harness reads the data.
-- A missing or partial `outcome.json` counts as a failure.
+- A missing or partial `outcome.json` counts as `failed`.

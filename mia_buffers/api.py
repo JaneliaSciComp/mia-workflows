@@ -84,7 +84,8 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
 # kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
 SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
-OFF_LINE = ("needs-human", "cancelled")  # where a round can end from any step: not steps of a lifecycle themselves
+# where a round can end from any step: not steps of a lifecycle themselves
+OFF_LINE = ("failed", "blocked", "needs-human", "cancelled")
 # kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
 LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
 NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists

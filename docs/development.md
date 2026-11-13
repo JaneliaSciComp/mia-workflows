@@ -172,7 +172,7 @@ none has the action refused. The `revoke_dataset` activity writes a `reject` ass
 dataset's approve and one per staged artifact of the record, marks those artifact rows `quarantined`
 (`quarantined_at`, `quarantined_by`), flips the dataset row to `revoked` (`sync_datasets` never merges over it)
 and writes `revoked.json` beside the manifest last, so the folder is not prepared whatever else is on disk; the
-dataset ends in needs-human naming the artifacts and the buffers that drew from the record. From that moment
+dataset ends in `blocked` naming the artifacts and the buffers that drew from the record. From that moment
 buffer-api draws nothing from a quarantined volume and counts it out of `servable` (`Ledger.live_volumes`),
 whatever the buffer's workflow or the keeper have done yet. The keeper holds a quarantined asset for
 `autonomy.quarantine_days` after its references are gone and, for a ready or idle buffer whose status lists
@@ -210,7 +210,7 @@ buffer-api's ledger (`<local_root>/service/buffers.sqlite`) is the registry both
 - one row per **dataset**: state `in-progress`, `needs-human`, `prepared` or `revoked`, with the folder, binding
   hash and crop count of its saved crops. The state is the word a person reads, and the stage decides it
   (`mia_data.config.dataset_state`): `in-progress` while a round works by itself, `needs-human` whenever a person
-  has to act (`review`, `needs-human`, `cancelled`, or a `done` round whose folder has no binding with a matching
+  has to act (`review`, `failed`, `blocked`, `cancelled`, or a `done` round whose folder has no binding with a matching
   manifest, with the row's `reason` saying so), `prepared` after a `done` round with its crops saved. A new round
   on a prepared dataset takes it out of `prepared` until that round ends `done`. Code that asks whether a round
   is open reads the stage (`round_open`: the keeper before it evicts a raw cache, the list of datasets a
@@ -343,7 +343,8 @@ task there. An activity already in flight is left to answer (up to `CANCEL_PATIE
 lock it took or a reservation it opened is known to the code that undoes it. A task that is waiting (a job, a
 lock, quota, a drop, a verdict, a snippet PR) is cancelled at its wait. The job is killed first (`kill_job`),
 then its reservation is settled and its raw lock released: the one-writer rule holds until the job is dead. A
-job that cannot be killed ends the round in `needs-human` naming it, never in `cancelled`. A round that reached
+job that cannot be killed ends the round in `failed` (a dataset) or `needs-human` (a buffer, a request) naming
+it, never in `cancelled`. A round that reached
 its end while the cancel was on its way keeps its stage and the cancel is refused. Clean-up activities pass
 `cleanup=True`; anything a best-effort `except ActivityError` wraps cannot swallow a cancel, because the cancel
 is raised as `asyncio.CancelledError`. A queued cancel is never rolled over (`_roll_due`).
@@ -741,7 +742,8 @@ Each tab is one kind of thing, and each thing has one page:
   buffer's page reads `/buffers/<id>/status`, `/events`, `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
 - **A lifecycle** tops the page of a dataset, a spec, a request and a buffer: the kind's stages as boxes and arrows
   with the current one filled. The stages are `lines` of `/meta`, which is each stage table in its own order
-  without `needs-human` and `cancelled`; those two hang under the step the round stopped at.
+  without the stages a round can end in from any step (`failed`, `blocked`, `needs-human`, `cancelled`); those
+  hang under the step the round stopped at.
 - **Cache** reads `/assets/raw|staged`, `/locks`, `/keeper` and the quotas from `/meta`.
 - **Decisions** reads `/decisions` (newest first, by gate, with the judge/human agreement); a human approve that a
   later reject overrules is marked by the server.

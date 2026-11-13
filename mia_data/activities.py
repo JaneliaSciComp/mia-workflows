@@ -122,7 +122,7 @@ def mia_permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
     """Decorator: autodev's permanent_errors, plus mia-data's own permanent failures.
 
     A moved pin, a host outside the policy, a publication conflict, a bad input (malformed YAML too) or a
-    missing state file send the round to needs-human instead of burning retries."""
+    missing state file stop the round instead of burning retries."""
     inner = permanent_errors(fn)
 
     @functools.wraps(fn)
@@ -818,7 +818,9 @@ class Activities:
         """Read the match agent's outcome.json and, for matched, check its binding.yaml.
 
         A checked binding is stored (with the round's snippets_commit) as
-        state_dir/rounds/<round>/binding-<attempt>.yaml. Anything we can't trust is `blocked` with the reason."""
+        state_dir/rounds/<round>/binding-<attempt>.yaml. The agent says whether it stopped `blocked` (a person has
+        to decide or change something) or `failed` (running again may pass); anything we can't trust is `failed`
+        with the reason."""
         path = Path(workspace)
         if not (match := re.fullmatch(r"match-(\d+)", path.name)):
             raise ValueError(f"{workspace} is not a match workspace")
@@ -826,22 +828,20 @@ class Activities:
         round_dir, pins = self._round_dir(round_id), self._pins(round_id)
         outcome = _job_json(workspace, "outcome.json")
         if not isinstance(outcome, dict):
-            return MatchResult("blocked", "outcome.json is missing, unreadable or not a JSON object")
+            return MatchResult("failed", "outcome.json is missing, unreadable or not a JSON object")
         kind = outcome.get("outcome")
-        if kind == "blocked":
-            return MatchResult(
-                "blocked", _text(outcome.get("reason")) or "the match agent reported blocked, with no reason"
-            )
+        if kind in ("blocked", "failed"):
+            return MatchResult(kind, _text(outcome.get("reason")) or f"the match agent reported {kind}, with no reason")
         if kind == "needs_snippet":
             draft = _small_dict({key: outcome.get(key) for key in ("draft_binding", "what_fails", "tried")}, 32768)
             return MatchResult("needs_snippet", draft=draft or {"what_fails": "(the agent's draft was too large)"})
         if kind != "matched":  # size is the buffer plan's call, not ours: no outcome says a dataset is too small
-            return MatchResult("blocked", f"unknown match outcome {_text(kind, 100)!r}")
+            return MatchResult("failed", f"unknown match outcome {_text(kind, 100)!r}")
         binding, errors = await self._check_binding(
             read_untrusted(path, "binding.yaml", 1 << 20), round_id, pins, pins.snippets_commit
         )
         if errors:
-            return MatchResult("blocked", _text("binding check failed: " + "; ".join(errors)))
+            return MatchResult("failed", _text("binding check failed: " + "; ".join(errors)))
         binding_path, digest = self._store_binding(
             round_dir / f"binding-{match.group(1)}.yaml", {**binding, "snippets_commit": pins.snippets_commit}
         )

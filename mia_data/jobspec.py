@@ -69,7 +69,7 @@ class HarnessPinned(Protocol):
 
 
 class PinMoved(RuntimeError):
-    """The harness environment changed since the round was admitted. Not retryable: the round goes to needs-human."""
+    """The harness environment changed since the round was admitted. Not retryable: the round ends `failed`."""
 
 
 class HostsNotAllowed(RuntimeError):

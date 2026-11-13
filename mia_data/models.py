@@ -118,7 +118,7 @@ class JobArgs:
 class MatchResult:
     """What the match agent concluded about the dataset, after the worker checked its binding."""
 
-    outcome: str  # matched | needs_snippet | blocked (blocked = needs-human, with the reason)
+    outcome: str  # matched | needs_snippet | blocked | failed (the last two stop the round, with the reason)
     reason: str = ""
     binding_path: str | None = None  # matched: the checked binding, under state_dir
     binding_hash: str | None = None

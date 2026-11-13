@@ -155,16 +155,29 @@ async def test_read_match_symlinked_outcome_is_missing(tmp_path):
     real.write_text(json.dumps({"outcome": "matched"}))
     (ws / "outcome.json").symlink_to(real)
     r = await t.a.read_match(str(ws))
-    assert r.outcome == "blocked" and "outcome.json" in r.reason and r.binding_path is None
+    assert r.outcome == "failed" and "outcome.json" in r.reason and r.binding_path is None  # no word from the agent
 
 
-async def test_read_match_foreign_host_needs_human(tmp_path):
+async def test_read_match_foreign_host_fails_the_match(tmp_path):
     t = _setup(tmp_path)
     bad = {**BINDING, "raw": [{**BINDING["raw"][0], "urls": ["https://evil.example.com/a.tif"]}]}
     _, ws = await _match_ws(t, {"outcome": "matched"}, bad)
     r = await t.a.read_match(str(ws))
-    assert r.outcome == "blocked" and "evil.example.com" in r.reason and r.binding_path is None
+    assert r.outcome == "failed" and "evil.example.com" in r.reason and r.binding_path is None
     assert not list((t.cfg.paths.state_dir / "rounds" / ROUND).glob("binding-*"))
+
+
+async def test_read_match_takes_the_agents_word_for_why_it_stopped(tmp_path):
+    """The agent says whether a person has to act first (`blocked`) or another run may pass (`failed`)."""
+    t = _setup(tmp_path)
+    for outcome, reason in (("blocked", "the label classes are not named"), ("failed", "the host timed out")):
+        _, ws = await _match_ws(t, {"outcome": outcome, "reason": reason}, BINDING)
+        r = await t.a.read_match(str(ws))
+        assert (r.outcome, r.reason, r.binding_path) == (outcome, reason, None)
+    _, ws = await _match_ws(t, {"outcome": "failed"}, BINDING)
+    assert (await t.a.read_match(str(ws))).reason == "the match agent reported failed, with no reason"
+    _, ws = await _match_ws(t, {"outcome": "gave up"}, BINDING)
+    assert (await t.a.read_match(str(ws))).outcome == "failed"  # a word that is neither: nothing to act on
 
 
 async def test_prepare_match_malformed_snippet_yaml_is_permanent(tmp_path):

@@ -499,8 +499,8 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>410 buffer retired</td><td>the buffer was retired: by <i>Retire</i>, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
 <tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td><i>Cancel the round</i> on the spec's page; if that gets no answer, <i>Force stop</i>, then <i>Plan</i> again</td></tr>
-<tr><td><code>needs-human</code> whose entry starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then press the button again</td></tr>
-<tr><td><code>needs-human</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a round that saves its crops repairs it</td></tr>
+<tr><td><code>blocked</code> (a dataset) or <code>needs-human</code> (a buffer, a request) whose entry starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then press the button again</td></tr>
+<tr><td><code>blocked</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a round that saves its crops repairs it</td></tr>
 </table></div>
 
 <h2>Words the pages use</h2>
@@ -837,7 +837,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <rect class="b" x="150" y="190" width="130" height="44" rx="8"/><text class="t" x="215" y="209" text-anchor="middle">snippets issue</text><text class="s" x="215" y="224" text-anchor="middle">autodev takes it</text>
 <rect class="un" x="310" y="190" width="150" height="44" rx="8"/><text class="t" x="385" y="209" text-anchor="middle">PR head</text><text class="s" x="385" y="224" text-anchor="middle">autodev's agent wrote it</text>
 <rect class="b" x="490" y="190" width="160" height="44" rx="8"/><text class="t" x="570" y="209" text-anchor="middle">feedback to autodev</text><text class="s" x="570" y="224" text-anchor="middle">/revise the PR, or a new issue</text>
-<rect class="un" x="800" y="190" width="140" height="44" rx="8"/><text class="t" x="870" y="209" text-anchor="middle">needs-human</text><text class="s" x="870" y="224" text-anchor="middle">Run again resumes</text>
+<rect class="un" x="800" y="190" width="140" height="44" rx="8"/><text class="t" x="870" y="209" text-anchor="middle">failed · blocked</text><text class="s" x="870" y="224" text-anchor="middle">Run again resumes</text>
 <line class="e" x1="215" y1="84" x2="215" y2="190" marker-end="url(#f3b)"/><text class="l" x="221" y="164">no snippet fits</text>
 <line class="e" x1="280" y1="212" x2="310" y2="212" marker-end="url(#f3b)"/>
 <line class="ea" x1="490" y1="212" x2="460" y2="212" marker-end="url(#f3b)"/><text class="l" x="475" y="264" text-anchor="middle">a new head</text>
@@ -1248,7 +1248,7 @@ const PILL_HELP = {
   "prepared": "An approved binding and verified crops exist: the dataset can be staged and served.",
   "in-progress": "The preparation pipeline is working on it by itself: nothing here waits for a person. The stage says where it is.",
   "unprepared": "Nobody has asked for this dataset to be prepared.",
-  "needs-human": "A person has to act: its crops wait for a review, or its round stopped. The stage says which, and the newest entry of its timeline says why.",
+  "needs-human": "A person has to act. The stage says what: review (its crops wait for a verdict), failed (a step failed; running it again may pass) or blocked (something has to be decided or changed first). The newest entry of its timeline says why.",
   "revoked": "Withdrawn by a person after its crops were saved (Revoke): nothing is selected or reused from it; Run again on its page repairs it.",
   // a cache directory or a staged pyramid
   "cached": "The dataset's raw files are in the shared cache and no job is writing them; a buffer checks them against its binding before reusing them.",
@@ -1306,6 +1306,8 @@ const STAGE_HELP = {
   "staged": "No job is left to run and the board is in the timeline; the round waits for Approve.",
   "requested": "The request's datasets are handed to the preparation pipeline; it follows them until each has settled.",
   "cancelled": "A person cancelled the round.",
+  "failed": "A step of the round failed; the newest entry of the timeline says which and why. Running it again may be all it needs.",
+  "blocked": "The round stopped until a person decides or changes something; the newest entry of the timeline says what.",
 };
 const stagePill = s => {
   if (!s) return "";
@@ -1845,7 +1847,7 @@ function datasetCards(d) {
 
 // ---- a lifecycle as boxes and arrows: a kind's stages in order (`lines` of GET /meta), the current one filled.
 // It shows where on the line the object is, not the path its round took: a round can skip a step or return to one.
-// A stage off the line (needs-human, cancelled) hangs under the step the round stopped at, which is the newest
+// A stage off the line (failed, blocked, needs-human, cancelled) hangs under the step the round stopped at, which is the newest
 // stage of `history` (newest first) that is on the line; with none, it stands apart at the end.
 // The line is named for what it is: the workflow that prepares a dataset, builds a buffer, or carries a request.
 const FLOW_LABELS = { dataset: "Preparation workflow:", buffer: "Buffer workflow:", prep: "Preparation request workflow:" };
