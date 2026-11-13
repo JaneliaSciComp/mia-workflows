@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("mia_data")
 
-# the catalog's data hosts the broker policy must allow
+# the catalog's data hosts a mia-data job may need: approved on the page when a run starts, or in the base policy
 DATA_HOSTS = [
     "zenodo.org",
     "ftp.ebi.ac.uk",
@@ -78,11 +78,16 @@ def _wanted_hosts(cfg: Config) -> list[str]:
 
 def _csub_problems(cfg: Config, probe: Any, lsf_queues: set[str] | None) -> list[str]:
     """Everything in the broker policy (`csub probe`) that would stop mia-data's jobs: hosts, the agent, env
-    vars, mounts, queues. Each message says what to change in broker.toml."""
+    vars, mounts, queues. Each message says what to change: a host is approved on the page when a run is started
+    (or added to the base policy), everything else is a base policy edit."""
     from .binding import missing_hosts
     from .jobspec import HARNESS_ENV
 
-    problems = [f"host not allowed: {host}" for host in missing_hosts(_wanted_hosts(cfg), list(probe.allowed_hosts))]
+    hint = "approve it on the page when a run is started, or add it to the base policy"
+    problems = [
+        f"host not allowed: {host} ({hint}; a redirect target also goes into network.redirect_hosts)"
+        for host in missing_hosts(_wanted_hosts(cfg), list(probe.allowed_hosts))
+    ]
     if "claude" not in probe.agents:
         problems.append(
             'agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '

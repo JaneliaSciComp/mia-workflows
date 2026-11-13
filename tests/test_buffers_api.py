@@ -2051,6 +2051,47 @@ def test_hosts_missing_for_a_buffer_reads_the_rounds_plan_and_its_bindings(tmp_p
     assert _missing(s, {"spec": "other"})[0] == 404
 
 
+def test_hosts_missing_for_a_request_skips_a_record_no_synced_catalog_holds(tmp_path, _home):
+    s = _checking(tmp_path)
+    text = PREP_TEXT.replace("- rec-a", "- rec-a\n- rec-gone")
+    number = s.ledger.create_subject("prep", None, data={"spec": text})["number"]
+    status, out, _ = _missing(s, {"prep": number})
+    assert (status, out) == (200, {"hosts": [{"host": "data.example.org", "records": ["rec-a"]}]})
+    assert _missing(s, {"records": ["rec-a", "rec-gone"]})[0] == 404
+    s.dispatcher = Gateway()
+    go = {"action": "go", "approve_hosts": ["data.example.org"]}
+    assert act(s, f"/prep/{number}/actions", go)[0] == 202
+    assert act(s, "/prep", {"spec": text, "approve_hosts": ["data.example.org"]})[0] == 202
+
+
+def test_hosts_missing_for_a_buffer_reads_the_newest_plan_review_round(tmp_path, _home):
+    s = _checking(tmp_path)
+    number, plan = _at_plan_review(s, tmp_path)
+    s.ledger.append_entry("buffer", number, body="plan", marker="m2", round_id="i7-e2", stage="plan-review")
+    newer = tmp_path / "rounds" / "i7-e2" / "plan.json"
+    newer.parent.mkdir(parents=True)
+    newer.write_text(json.dumps({"rows": [{"id": "rec-b", "admitted": True, "fit": {"ok": True}}]}))
+    s.ledger.put_dataset("rec-b", {"folder": "rec-b"})
+    (tmp_path / "storage" / "rec-b").mkdir()
+    binding = {"raw": [{"urls": ["https://zenodo.org/b.zip"]}]}
+    (tmp_path / "storage" / "rec-b" / "binding.yaml").write_text(yaml.safe_dump(binding))
+    s.hosts.base_policy.write_text("[broker]\nallowed_hosts = []\n")
+    generate_policy(s.hosts.base_policy, s.hosts.policy_dir)
+    status, out, _ = _missing(s, {"spec": SPEC_NAME})
+    assert (status, out) == (200, {"hosts": [{"host": "zenodo.org", "records": ["rec-b"]}]})
+
+
+@pytest.mark.parametrize("policy", [None, "not = = toml"])
+def test_hosts_missing_with_an_unreadable_generated_policy_is_503(tmp_path, _home, policy):
+    s = _checking(tmp_path)
+    generated = s.hosts.policy_dir / "broker.toml"
+    generated.unlink()
+    if policy is not None:
+        generated.write_text(policy)
+    status, out, _ = _missing(s, {"records": ["rec-a"]})
+    assert status == 503 and "mia up" in out["error"] and str(s.hosts.policy_dir) not in out["error"]
+
+
 def test_hosts_missing_without_a_policy_is_503(tmp_path):
     s, _ = _acting(tmp_path)
     assert _missing(s, {"records": ["rec-a"]})[0] == 503
@@ -2253,6 +2294,13 @@ def test_a_buffers_go_with_approve_hosts_is_refused_before_the_spec_is_saved(tmp
     status, out, _ = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go", "approve_hosts": ["data.example.org"]})
     assert status == 422 and "starts jobs" in out["error"]
     assert s.ledger.subject("buffer", SPEC_NAME) is None and _approvals(s) == [] and gateway.sent == []
+
+
+def test_a_spec_saved_with_approve_hosts_is_refused_and_not_stored(tmp_path, _home):
+    s, _ = _starting(tmp_path)
+    status, out, _ = act(s, "/specs", {"spec": SPEC_TEXT, "approve_hosts": ["data.example.org"]})
+    assert status == 422 and "starts jobs" in out["error"]
+    assert s.ledger.subject("buffer", SPEC_NAME) is None and _approvals(s) == []
 
 
 def test_a_requests_go_approves_its_hosts(tmp_path, _home):

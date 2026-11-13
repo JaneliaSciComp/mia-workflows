@@ -189,9 +189,8 @@ class AgentJobs:
         agent_cfg = self.cfg.agent
         job_key = f"issue-{issue}-{check_key(key)}-r{round_number}"
 
-        async def build_spec() -> (
-            jobs.JobSpec
-        ):  # built lazily: the broker is probed and the API key read only when no id file exists
+        # built lazily: the broker is probed and the API key read only when no id file exists
+        async def build_spec() -> jobs.JobSpec:
             policy_hosts = (await asyncio.to_thread(self.jobs.client.probe)).allowed_hosts
             return jobs.JobSpec(
                 name=f"autodev-{issue}-r{round_number}",  # csub rejects names containing the username; session = deployment

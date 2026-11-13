@@ -1009,14 +1009,25 @@ class BufferService:
         """Record id -> its synced catalog entry, for those of the records a synced catalog holds."""
         return {record: row for record in records if (row := self._catalog_record(record)) is not None}
 
-    def _needed(self, *, records: list[str] | None = None, prep: int | None = None, spec: str | None = None) -> Needed:
-        """The hosts the named catalog records, a request's records or a buffer's planned pool need (host -> the
-        record ids that need it). A buffer's host is one its published binding names that its record's synced
-        catalog entry also names: a binding lies under a root a job can mount read-write."""
+    def _needed(
+        self,
+        *,
+        records: list[str] | None = None,
+        prep: int | None = None,
+        spec: str | None = None,
+        request: list[str] | None = None,
+    ) -> Needed:
+        """The hosts the named catalog records, a request's records (`request`, or the request numbered `prep`)
+        or a buffer's planned pool need (host -> the record ids that need it). A named record no synced catalog
+        holds is a 404; a request's contributes nothing (the worker refuses it). A buffer's host is one its
+        published binding names that its record's synced catalog entry also names: a binding lies under a root a
+        job can mount read-write."""
         if self.hosts is None:
             raise HttpError(503, "this service has no csub policy to check hosts against")
         if prep is not None:
-            records = self._request_records(str(prep))
+            request = self._request_records(str(prep))
+        if request is not None:
+            return self.hosts.for_records(self._catalog_records(request))
         if records is not None:
             if missing := [record for record in records if self._catalog_record(record) is None]:
                 raise HttpError(404, f"{missing[0]!r} is not a record of a synced catalog")
@@ -1051,7 +1062,10 @@ class BufferService:
             raise HttpError(422, "give exactly one of records, prep or spec")
         needed = self._needed(**given)
         assert self.hosts is not None  # _needed answered 503 otherwise
-        absent = self.hosts.missing(needed)
+        try:
+            absent = self.hosts.missing(needed)
+        except (OSError, ValueError):  # a TOMLDecodeError is a ValueError
+            raise HttpError(503, "the generated csub policy cannot be read: `mia up` regenerates it") from None
         return 200, {"hosts": [{"host": host, "records": ids} for host, ids in sorted(absent.items())]}, {}
 
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
@@ -1095,6 +1109,8 @@ class BufferService:
     def _put_spec(self, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(SpecBody, body)
         if parsed.action is None:
+            if parsed.approve_hosts:  # spec host-approval §5: only the four start actions carry hosts
+                raise HttpError(422, "approve_hosts goes with an action that starts jobs")
             return 200, {"subject": self._subject_view(self._save_spec(parsed.spec))}, {}
         name = self._spec_name(parsed.spec)
         go = ActionBody(
@@ -1164,7 +1180,7 @@ class BufferService:
         except SpecError as error:
             raise HttpError(422, f"not a preparation request: {error}") from None
         go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, approve_hosts=parsed.approve_hosts)
-        needed = partial(self._needed, records=records)
+        needed = partial(self._needed, request=records)
         repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
         if repeat is not None and repeat["kind"] == "prep":  # a double click: the request filed by the first one
             subject = self.ledger.find_subjects(kind="prep", number=repeat["number"])[0]
@@ -1187,7 +1203,7 @@ class BufferService:
             except SpecError as error:
                 raise HttpError(422, f"not a preparation request: {error}") from None
             payload = {"spec": text}
-            needed = partial(self._needed, records=records)
+            needed = partial(self._needed, request=records)
         return self._act_on(subject, parsed, self._actor(headers, parsed), payload, needed)
 
     def _stop(self, subject: dict, action: dict, stopped: bool) -> None:

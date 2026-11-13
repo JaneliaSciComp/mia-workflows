@@ -73,13 +73,15 @@ class PinMoved(RuntimeError):
 
 
 class HostsNotAllowed(RuntimeError):
-    """A job needs hosts the csub policy doesn't allow. Not retryable: the fix is a broker.toml edit."""
+    """A job needs hosts the csub policy doesn't allow. Not retryable: the fix is approving them on the page when
+    the run is started again, or adding them to the operator's base policy."""
 
     def __init__(self, missing: list[str]):
         self.missing = missing
         super().__init__(
             f"hosts not allowed by the csub policy: {', '.join(missing)} "
-            "(add them to broker.toml, and to network.redirect_hosts if they are redirect targets)"
+            "(approve them on the page when the run is started, or add them to the base policy; "
+            "a redirect target also goes into network.redirect_hosts)"
         )
 
 

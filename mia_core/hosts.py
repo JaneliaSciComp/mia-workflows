@@ -146,6 +146,7 @@ def _key(name: str) -> str:
 
 
 def _table_lines(dotted: str, table: dict, depth: int) -> list[str]:
+    """The lines of one table: its header, its scalar keys, then each sub-table's lines."""
     scalars = {name: value for name, value in table.items() if not isinstance(value, dict)}
     tables = {name: value for name, value in table.items() if isinstance(value, dict)}
     lines = [f"[{dotted}]"] if dotted and (scalars or not tables) else []
@@ -165,6 +166,7 @@ def dump_toml(data: dict) -> str:
 
 
 def _publish(text: str, policy_dir: Path) -> None:
+    """Write the policy to a temp file of its own in `policy_dir` and rename it over broker.toml."""
     descriptor, temp_name = tempfile.mkstemp(dir=policy_dir, prefix=".broker-", suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w") as temp_file:
