@@ -10,6 +10,7 @@ from mia_buffers.hosts import HostCheck
 from mia_core.hosts import generate_policy
 from mia_data.config import NetworkCfg
 from tests.test_buffers_config import make_cfg
+from tests.test_core_hosts import SHORTHAND_IPS
 
 
 @pytest.fixture(autouse=True)
@@ -96,7 +97,9 @@ def test_an_ip_literal_and_the_deployments_own_hosts_are_left_out_and_the_record
     assert hosts.for_bindings({"rec-a": "rec-a"}) == expected
 
 
-@pytest.mark.parametrize("host", ["buffer-api.internal.example", "temporal.internal.example", "10.1.2.3", "::1"])
+@pytest.mark.parametrize(
+    "host", ["buffer-api.internal.example", "temporal.internal.example", "10.1.2.3", "::1", *SHORTHAND_IPS]
+)
 def test_check_refuses_an_ip_literal_and_the_deployments_own_hosts_though_needed(tmp_path, host):
     with pytest.raises(ValueError, match=re.escape(host)):
         check(tmp_path).check([host], {host: ["rec-a"]})
@@ -114,6 +117,14 @@ def test_from_config_names_the_deployments_own_hosts(tmp_path):
         "temporal.internal.example",
     )
     assert HostCheck.from_config(make_cfg(tmp_path)).own_hosts == ("127.0.0.1", "localhost")
+
+
+def test_the_deployments_own_host_written_with_a_trailing_dot_is_still_never_approved(tmp_path):
+    hosts = HostCheck.from_config(make_cfg(tmp_path, service={"url": "https://Host.Example.:8443"}))
+    assert "host.example" in hosts.own_hosts
+    with pytest.raises(ValueError, match="own host"):
+        hosts.check(["host.example"], {"host.example": ["rec-a"]})
+    assert "host.example" not in hosts.for_records({"rec-a": record("https://host.example/a")})
 
 
 def test_the_pool_is_the_plans_in_pool_rows(tmp_path):

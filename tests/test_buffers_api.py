@@ -25,6 +25,7 @@ from tests.test_buffers_config import make_cfg
 from tests.test_buffers_plan import CATALOG as FIXTURE_CATALOG
 from tests.test_buffers_plan import FIXTURES, ONE_CH, U937
 from tests.test_buffers_sync import write_prepared
+from tests.test_core_hosts import SHORTHAND_IPS
 
 
 def _spec_2d_text() -> str:
@@ -2358,6 +2359,17 @@ def test_an_ip_literal_and_the_deployments_own_hosts_are_never_offered_or_approv
     status, out, _ = act(s, "/datasets/rec-x/actions", {"action": "go", "approve_hosts": [host]})
     assert status == 422 and host in out["error"]
     assert _approvals(s) == [] and s.ledger.subject("dataset", "rec-x") is None and gateway.sent == []
+
+
+@pytest.mark.parametrize("host", [*SHORTHAND_IPS, "1.2.3.4.", "2130706433", "buffer-api.internal.example."])
+def test_a_host_that_cannot_be_approved_is_never_offered(tmp_path, _home, host):
+    s = _checking(tmp_path)
+    record = {"id": "rec-x", "data": {"download_url": [f"http://{host}/a.zip", "https://x.example.org/a.zip"]}}
+    assert worker(s, "PUT", f"/records/{REF_A}", {"records": [{"path": "rec-x.yaml", "record": record}]})[0] == 200
+    assert _missing(s, {"records": ["rec-x"]})[:2] == (
+        200,
+        {"hosts": [{"host": "x.example.org", "records": ["rec-x"]}]},
+    )
 
 
 def test_two_approvals_at_once_both_land(tmp_path, _home):

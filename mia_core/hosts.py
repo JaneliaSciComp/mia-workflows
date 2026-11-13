@@ -32,12 +32,14 @@ class PolicyError(RuntimeError):
 
 
 def is_ip_literal(host: str) -> bool:
-    """Whether the host is an IPv4 or IPv6 address rather than a name."""
+    """Whether the host is an IPv4 or IPv6 address rather than a name: a canonical address, or a name whose last
+    label is a number (decimal, or `0x` and hex digits), which resolvers read as IPv4 (`127.1`, `0x7f.1`)."""
     try:
         ipaddress.ip_address(host)
+        return True
     except ValueError:
-        return False
-    return True
+        pass
+    return bool(re.fullmatch(r"[0-9]+|0x[0-9a-f]*", host.lower().rstrip(".").rsplit(".", 1)[-1]))
 
 
 def missing_hosts(hosts: list[str], patterns: list[str]) -> list[str]:

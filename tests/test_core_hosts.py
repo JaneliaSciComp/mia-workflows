@@ -103,6 +103,25 @@ def test_a_base_that_is_a_symlink_inside_the_policy_dir_is_refused(tmp_path, ope
     assert [path.name for path in directory.iterdir()] == [POLICY_NAME]
 
 
+# names the system resolver reads as IPv4 addresses: their last label is a number (WHATWG "ends in a number")
+SHORTHAND_IPS = [
+    "127.1",
+    "0x7f.1",
+    "0x7f.0.0.1",
+    "0177.0.0.1",
+    "010.0.0.1",
+    "10.1.515",
+    "1.2.3.4.5",
+    "2130706433.example.123",
+    "a.0x",
+]
+
+
+@pytest.mark.parametrize("host", ["data.example.org", "123.example.org", "host-1.example.org", "a.0xz"])
+def test_a_name_whose_last_label_is_not_a_number_is_approved(base, policy_dir, host):
+    assert approve(base, policy_dir, [host]) == [host]
+
+
 @pytest.mark.parametrize(
     "host",
     [
@@ -114,6 +133,7 @@ def test_a_base_that_is_a_symlink_inside_the_policy_dir_is_refused(tmp_path, ope
         "::1",
         "a" * 64 + ".example.org",
         ("a" * 60 + ".") * 4 + "example.org",
+        *SHORTHAND_IPS,
     ],
 )
 def test_an_unapprovable_host_is_refused_before_anything_is_written(base, policy_dir, host):

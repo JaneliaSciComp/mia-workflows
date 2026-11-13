@@ -48,7 +48,7 @@ class HostCheck:
             storage_root=paths.storage_root,
             rounds_dir=paths.state_dir / "rounds",
             writable=(*roots, *([paths.local_root] if paths.local_root else [])),
-            own_hosts=tuple(sorted({host for url in urls if (host := urlsplit(url).hostname)})),
+            own_hosts=tuple(sorted({host.rstrip(".") for url in urls if (host := urlsplit(url).hostname)})),
         )
 
     def _never_approved(self, host: str) -> str | None:
@@ -57,16 +57,16 @@ class HostCheck:
             return "is a GitHub host"
         if is_ip_literal(host):
             return "is an IP address"
-        if host in self.own_hosts:
+        if host.lower().rstrip(".") in self.own_hosts:
             return "is this deployment's own host"
         return None
 
     def _group(self, hosts_by_record: dict[str, list[str]]) -> Needed:
-        """Host -> the sorted ids of the records that need it, leaving out every host that is never approved."""
+        """Host -> the sorted ids of the records that need it, leaving out every host that cannot be approved."""
         needed: dict[str, list[str]] = {}
         for record, hosts in hosts_by_record.items():
             for host in hosts:
-                if self._never_approved(host) is None:
+                if HOST_RE.fullmatch(host) and self._never_approved(host) is None:
                     needed.setdefault(host, []).append(record)
         return {host: sorted(records) for host, records in sorted(needed.items())}
 
