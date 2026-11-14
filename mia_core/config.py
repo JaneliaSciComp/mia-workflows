@@ -101,7 +101,7 @@ class AutonomyCfg(BaseModel):
 
 
 class GateCfg(BaseModel):
-    """One judged gate (spec autonomous-gates §9): `off` is today, `shadow` records the verdict beside the human's and
+    """One judged gate (spec autonomous-gates §9): `off` runs no judge, `shadow` records the verdict beside the human's and
     decides nothing, `active` lets the verdict authorize. `max_suspect` is how many `suspect` crops a set may carry
     and still be approved (§4.2)."""
 

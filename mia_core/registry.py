@@ -146,7 +146,7 @@ class Registry:
     # --- actions: what a person, or a worker for a request, asked of a subject (spec webapp-actions §4.2) ---
 
     def action(self, action_id: int | str) -> dict | None:
-        """The action with this id; None when the id is not an action's (a GitHub label event's, until slice E)."""
+        """The action with this id; None when the id is not an action's."""
         return self._lookup(f"/actions/{action_id}")
 
     def refuse_action(self, action_id: int | str, detail: str) -> dict:

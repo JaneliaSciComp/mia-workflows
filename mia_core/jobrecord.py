@@ -142,8 +142,8 @@ def write_submitted(
 
 def write_finished(work_root: Path | None, workspace: str | Path, *, job_id: str, outcome: dict) -> None:
     """The second half, when the wait saw the job end: how it ended, what LSF says it used, the ends of its
-    stdout and stderr, and for an agent its prompt and reduced conversation. Without a first half (a job
-    submitted before records existed) it writes what it has."""
+    stdout and stderr, and for an agent its prompt and reduced conversation. Without a first half (its
+    write failed) it writes what it has."""
     try:
         where = address(work_root, workspace) if work_root else None
         if where is None or work_root is None:
