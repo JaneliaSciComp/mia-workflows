@@ -40,7 +40,7 @@ from mia_data.binding import record_gaps
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
-from .dispatch import DispatchError
+from .dispatch import DispatchError, dispatcher_for
 from .explore import (
     DATASET_FILTERS,
     DATASET_SORTS,
@@ -66,7 +66,7 @@ from .sync import scan_assets, scan_storage
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
-# no row = unprepared; `ineligible` ended with spec §12; `revoked` since autonomous-gates §6
+# no row = unprepared; `revoked`: withdrawn (spec autonomous-gates §6)
 DATASET_STATES = ("in-progress", "prepared", "needs-human", "revoked")
 CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
 # a job's gzipped record is kilobytes, an agent's with a long conversation a few megabytes; a larger file is not sent
@@ -1267,7 +1267,7 @@ class BufferService:
     def _dropped_record(self, subject: dict, parsed: ActionBody) -> str:
         """The record of a `dropped`, once its files look complete. The workflow takes any non-empty file and
         records its hash, so a click during a copy would record a truncated file as good: refuse while anything
-        under `incoming/` changed in the last minute (the poller waited a whole interval for the same reason)."""
+        under `incoming/` changed in the last minute."""
         record = parsed.record or ""
         if not RECORD_ID_RE.fullmatch(record):
             raise HttpError(422, "`dropped` names the record whose files are in place: `record`")
@@ -1318,7 +1318,7 @@ class BufferService:
     def _stop(self, subject: dict, action: dict, stopped: bool) -> None:
         """The force stop, for a run that does not answer a cancel (one frozen by nondeterminism), once its
         workflow is terminated (`stopped`: one was running): retire the subject's buffers with their `retired`
-        events and set the stage a closed issue got (`retired`, or `done` for a request). The entry says what
+        events and set the stage a stopped subject rests at (`retired`, or `done` for a request). The entry says what
         was done and what is left running."""
         kind, number = subject["kind"], subject["number"]
         retired = []
@@ -1439,7 +1439,7 @@ class BufferService:
         try:
             if parsed.action == "cancel":  # only a running round can be cancelled: nothing is started for it
                 running = self.dispatcher.signal_running(kind, number, "cancel", event)
-            elif parsed.action == "dropped":  # the workflow's plain `dropped(record)`, as the poller sent it
+            elif parsed.action == "dropped":  # the workflow's plain `dropped(record)`
                 if not self.dispatcher.signal_running(kind, number, "dropped", payload["record"]):
                     raise DispatchError("no workflow is running for it")
             elif parsed.action == "stop":  # a terminate needs no replay: it also ends a run nondeterminism froze
@@ -1790,7 +1790,7 @@ class BufferService:
         for buffer in buffers:
             number = _round_of(buffer["id"])[0]
             newest.setdefault(number, buffer["id"])
-            buffer["spec"] = specs.get(number)  # its spec's page; a buffer of a spec never adopted has none
+            buffer["spec"] = specs.get(number)  # its spec's page; a buffer whose spec has no subject has none
             buffer["superseded_by"] = newest[number] if number and newest[number] != buffer["id"] else None
         if "spec" in query:
             if not query["spec"].isdigit():
@@ -2170,8 +2170,6 @@ def serve(cfg: Config) -> None:
         generate_policy(check.base_policy, check.policy_dir, check.writable)
     except PolicyError as error:
         raise SystemExit(str(error)) from error
-    from .dispatch import dispatcher_for  # here, not at the top: it reaches autodev's CLI helpers
-
     service = BufferService(
         ledger,
         token=token,

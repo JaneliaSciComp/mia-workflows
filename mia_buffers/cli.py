@@ -197,8 +197,7 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> i
 
 
 async def cmd_init_labels(cfg: Config, args: argparse.Namespace | None = None) -> int:
-    """Create the stage and human labels of buffers (`buffer:*`) and preparation requests (`prep:*`) on the issue
-    repo."""
+    """Create the stage labels of buffers (`buffer:*`) and preparation requests (`prep:*`) on the issue repo."""
     gh = _gh(cfg, cfg.github.buffers_repo)
     # stage labels only: they filter issue lists and the mirror sets them; nothing reads a label as a command
     labels = {cfg.label(kind): value for kind, value in STAGES.items()}

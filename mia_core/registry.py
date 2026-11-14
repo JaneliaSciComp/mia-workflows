@@ -110,7 +110,7 @@ class Registry:
     # --- subjects: a dataset, a buffer spec or a preparation request (spec webapp-actions §4.1) ------
 
     def adopt_subject(self, kind: str, number: int, key: str, *, stage: str = "new", data: dict | None = None) -> dict:
-        """Make an existing issue a subject (or refresh one no workflow has written a stage to); 409: key taken."""
+        """Create a subject under this number (or refresh one no workflow has written a stage to); 409: key taken."""
         body = {"key": key, "stage": stage, "data": data or {}}
         return self.request("PUT", f"/subjects/{quote(kind, safe='')}/{number}", json=body)
 
@@ -133,7 +133,7 @@ class Registry:
         return self.request("POST", f"/timeline/{quote(kind, safe='')}/{number}", json=fields)
 
     def timeline(self, kind: str, number: int) -> dict | None:
-        """{subject, entries} of the subject with this number; None when there is none."""
+        """{subject, entries, actions} of the subject with this number; None when there is none."""
         return self._lookup(f"/timeline/{quote(kind, safe='')}/{number}")
 
     def mark_mirrored(self, kind: str, number: int, seq: int, comment_url: str | None) -> None:

@@ -36,8 +36,8 @@ TENSORIZERS_ENV = "MIA_BUFFERS_TENSORIZERS"
 
 class BufferNotApproved(RuntimeError):
     """buffer-api answered 409: the buffer refuses consumers, and the message says why. `buffer not approved`: the
-    round is staged but not approved yet (spec §15); `buffer needs a human`: its latest event is `needs-human`, read
-    the issue; `buffer has no approved event`: a registration that never authorized it, re-run `mia-buffers register`
+    round is staged but not approved yet (spec §15); `buffer needs a human`: its latest event is `needs-human`, see
+    its page; `buffer has no approved event`: a registration that never authorized it, re-run `mia-buffers register`
     (spec autonomous-gates §3)."""
 
 

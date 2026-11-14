@@ -2,7 +2,8 @@
 plus the registry: what exists on disk (`assets`, by kind and key: a staged directory, a record's raw cache) and
 which buffers reference it (`refs`), so a buffer can reuse what an earlier round staged and a retire can count
 what is still in use. The registry is an index over the on-disk manifests (stage.json, files.json), rebuildable
-from them; the files stay the source of truth.
+from them; the files stay the source of truth. The subjects (datasets, buffer specs, preparation requests)
+with their timelines and actions, the shelved table, the assessments and the budgets are recorded here alone.
 
 Spec v0.5 §5 and §9.5: the ledger is the record of a run; replaying a run means replaying its descriptors.
 """
@@ -541,7 +542,7 @@ class Ledger:
 
     def adopt_subject(self, kind: str, number: int, key: str, *, stage: str = "new", data: dict | None = None) -> dict:
         """Create the subject, or refresh its stage and data while no workflow has written a stage (revision 0):
-        after that the registry's stage is the truth and an issue's label is not. ValueError: the key is taken."""
+        after that the registry's stage is the truth. ValueError: the key is taken."""
         with self._transaction() as db:
             try:
                 db.execute(

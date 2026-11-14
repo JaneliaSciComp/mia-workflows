@@ -104,7 +104,7 @@ class Dispatcher:
 
     def send(self, kind: str, number: int, signal: str, event: LabelEvent) -> None:
         """Deliver an action as the workflow's signal of that name, starting the subject's workflow if it is not
-        running: what the poller's label delivery did. Blocks until Temporal has it; DispatchError if not."""
+        running. Blocks until Temporal has it; DispatchError if not."""
         self._wait(self._send(kind, number, signal, event))
 
     async def _send(self, kind: str, number: int, signal: str, event: LabelEvent) -> None:
