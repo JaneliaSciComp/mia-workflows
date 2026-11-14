@@ -11,7 +11,13 @@ import pytest
 
 from mia_buffers.api import ROUTES
 
-PAGE = (resources.files("mia_buffers") / "ui" / "index.html").read_text()
+# every file the browser is given, by name, and all of them as one text: what the page is, for a rule about it
+FILES = {
+    entry.name: entry.read_text()
+    for entry in sorted((resources.files("mia_buffers") / "ui").iterdir(), key=lambda entry: entry.name)
+    if entry.name.endswith((".html", ".js", ".css"))
+}
+PAGE = "\n".join(FILES.values())
 
 
 def resolve(method: str, path: str) -> str | None:
@@ -108,7 +114,8 @@ def test_page_names_the_revoked_states_and_the_pause() -> None:
 
 def test_the_docs_describe_the_system_as_it_is() -> None:
     """The Docs tab names buttons, never label commands, and explains nothing by what it replaced."""
-    docs = PAGE[PAGE.index('<section data-view="docs"') : PAGE.index("</main>")]
+    docs = FILES["guide.html"] + FILES["architecture.html"]
+    assert "send(`/ui/${doc}.html`)" in PAGE and resolve("GET", "/ui/guide.html") == "read"
     assert not re.search(r"\b(buffer|data|prep|autodev):[a-z]", docs)
     assert not re.search(r"\b(no longer|any more|anymore|used to|as before|previously|read-only log)\b", docs, re.I)
     for needle in ("Needs you", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):

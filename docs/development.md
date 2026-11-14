@@ -749,8 +749,8 @@ Each tab is one kind of thing, and each thing has one page:
 - **Cache** reads `/assets/raw|staged`, `/locks`, `/keeper` and the quotas from `/meta`.
 - **Decisions** reads `/decisions` (newest first, by gate, with the judge/human agreement); a human approve that a
   later reject overrules is marked by the server.
-- **Docs** is static: the user guide (`#docs`) and the architecture overview (`#docs/architecture`). Both live in
-  `index.html` under `data-view="docs"`.
+- **Docs** is static: the user guide (`#docs`) and the architecture overview (`#docs/architecture`). Each is a file
+  of the page (`ui/guide.html`, `ui/architecture.html`), read when it is first shown.
 
 The page opens `GET /stream` and refetches what an event names.
 
