@@ -1824,7 +1824,7 @@ function datasetCards(d) {
       { label: "when", cell: r => when(r.at) }, { label: "gate", cell: r => r.gate },
       { label: "about", cell: r => el("span", {}, `${(r.subject?.kind || "").replace("_", " ")} `, code(r.subject?.ref, 24)) },
       { label: "verdict", cell: r => pill(r.verdict, VERDICT_KIND[r.verdict] ?? "") }, { label: "by", cell: r => r.by },
-      { label: "confidence", num: true, cell: r => r.confidence == null ? "" : Number(r.confidence).toFixed(2) }, { label: "summary", wrap: true, cell: r => r.summary || "" },
+      { label: "confidence", num: true, cell: r => r.confidence == null ? "" : Number(r.confidence).toFixed(2) }, { label: "summary", wrap: true, cell: r => r.note || r.summary || "" },
     ] })));
   const raw = d.raw_asset;
   cards.push(card("Cache", "Its download in the raw cache, and each staged artifact: this dataset staged for one crop geometry by one recipe.",
@@ -2076,7 +2076,7 @@ function viewDecisions(arg) {
   root.replaceChildren(
     gates,
     card("Judge agreement", "Per gate: subjects with a judge verdict, and whether the newest human label agrees. Shadow mode records the judge's verdict and lets the human decide; a gate goes active on these numbers.", agreement),
-    card("Assessments", "Every decision on record, newest first: human verdicts, judge verdicts, policy events (repairs). A human approve that a later reject overrules is marked.",
+    card("Assessments", "Every decision on record, newest first: human verdicts with what the person wrote, judge verdicts, policy events (repairs). A human approve that a later reject overrules is marked.",
       pagedTable("decisions:" + gate, { source: pageOf("/decisions", "assessments", () => gate ? { gate } : {}), search: false, empty: "No assessment yet.",
         onPage: page => agreement.replaceChildren(...Object.entries(page.out.agreement || {}).map(([g, a]) => agreementLine(g, a))),
         cols: [
@@ -2088,7 +2088,7 @@ function viewDecisions(arg) {
           { label: "by", cell: r => r.by },
           { label: "confidence", num: true, cell: r => r.confidence == null ? "" : Number(r.confidence).toFixed(2) },
           { label: "model", cell: r => r.model ? code(r.model, 24) : "" },
-          { label: "summary", wrap: true, cell: r => r.summary || "" },
+          { label: "summary", wrap: true, cell: r => r.note || r.summary || "" },
         ] })));
 }
 

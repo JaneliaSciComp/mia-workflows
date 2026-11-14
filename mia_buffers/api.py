@@ -408,6 +408,19 @@ def _assessed_record(
     return None
 
 
+def _note_of(row: dict, actions: list[dict]) -> str | None:
+    """The note a person wrote with the verdict `row`: that of their action of the same name on the dataset
+    (`actions`) nearest in time."""
+    # ponytail: paired by time, an assessment does not name its action; store the action's id on the assessment
+    # when one person's verdicts on one dataset come close enough together to be confused
+    made = datetime.fromisoformat(row["at"])
+    theirs = [act for act in actions if act["action"] == row["verdict"] and f"human:{act['actor']}" == row["by"]]
+    if not theirs:
+        return None
+    nearest = min(theirs, key=lambda act: abs(datetime.fromisoformat(act["at"]) - made))
+    return nearest["payload"].get("note") or None
+
+
 def _prep_records(request: dict) -> list[str]:
     """The records a preparation request's stored spec names; none when it selects by rule or does not parse."""
     try:
@@ -1497,6 +1510,11 @@ class BufferService:
         if "record" in query:
             rows = [row for row in rows if row.get("record") == query["record"]]
         found, total = paged(rows, page, {})
+        issues = {record: number for number, record in numbers.items()}
+        for row in found:  # what the person wrote with the verdict is on their action, not on the assessment
+            if str(row.get("by")).startswith("human:") and (number := issues.get(row.get("record"))) is not None:
+                if note := _note_of(row, self.ledger.actions("dataset", number)):
+                    row["note"] = note
         gates = [gate] if gate else list(GATES)
         agreement = {name: self.ledger.agreement(name) for name in gates}
         return 200, {"assessments": found, "total": total, "agreement": agreement}, {}

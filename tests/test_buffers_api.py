@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import threading
+import time
 from urllib.parse import quote
 
 import httpx
@@ -1359,6 +1360,30 @@ def test_only_the_actions_the_stage_accepts_are_taken(tmp_path):
     assert act(s, "/datasets/rec-a/actions", {"action": "revoke"})[0] == 409
     assert gateway.sent == [] and call(s, "GET", "/timeline/dataset/7")[1]["actions"] == []  # nothing recorded
     assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent[0][2] == "cancel"
+
+
+def test_decisions_show_what_the_person_wrote_with_their_verdict(tmp_path):
+    from mia_core.judge.policy import new_assessment
+
+    s, _ = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "review"})
+    assert (
+        act(s, "/datasets/rec-a/actions", {"action": "reject", "revision": 1, "note": "the masks are empty"})[0] == 202
+    )
+    actor = s.ledger.actions("dataset", 7)[-1]["actor"]
+    for by in (f"human:{actor}", "judge"):  # the worker records the verdict a moment after the click
+        row = new_assessment(
+            gate="crops",
+            subject_kind="crop_set",
+            subject_ref="i7-e11:i7-e11-abc",
+            verdict="reject",
+            by=by,
+            at=time.time(),
+        )
+        worker(s, "PUT", f"/assessments/{row['id']}", row)
+    rows = call(s, "GET", "/decisions", {"record": "rec-a"})[1]["assessments"]
+    assert {row["by"]: row.get("note") for row in rows} == {f"human:{actor}": "the masks are empty", "judge": None}
 
 
 def test_a_verdict_names_the_revision_the_person_saw(tmp_path):
