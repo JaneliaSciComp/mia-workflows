@@ -1,7 +1,8 @@
 # MIA: a record of every job and every agent conversation — Spec
 
 **Status:** v0.2 · 2026-11-14 · awaiting the user's approval. v0.2: no list of jobs on the page; a job's link
-sits next to what the job produced (the user's ruling on v0.1).
+sits next to what the job produced (the user's ruling on v0.1). v0.3: the timeline reads stage by stage, each
+stage with what happened in it (§3.6; the user's ruling on v0.2).
 
 ## 1. Intent
 
@@ -21,6 +22,9 @@ buried in a workspace. Each job should leave a small permanent record, and the p
 - buffer-api serves a record as it is on disk (gzip passed through); the page renders it in the browser.
 - On the page a job's link sits next to what the job produced: `Stage: data:matching` links to the job that
   did the matching, a crop judge's verdict to the judge's conversation. There is no separate list of jobs.
+
+- A stage on a subject's page says what happened in it: `data:testing` holds its crops report, `data:matching`
+  what the agent matched and why.
 
 **Non-goals**
 
@@ -148,8 +152,8 @@ is not among the things it removes.
 
 There is no card or tab that lists jobs. A link to a job's record sits where the page shows what that job did:
 
-- **An entry of the timeline shows the jobs that ran under it:** the jobs of the entry's round that were
-  submitted from that entry until the round's next one. `Stage: data:matching` so carries the match agent's job,
+- **A stage of the timeline (§3.6) shows the jobs that ran under it:** the jobs of the stage entry's round that
+  were submitted from that entry until the round's next stage entry. `Stage: data:matching` so carries the match agent's job,
   a testing or cropping entry its smoke, crop and verify jobs, a debugging entry the debugging agent's, a
   buffer round's staging entry its stage jobs. Each is a short link beside the entry's folders (name, state,
   how long), folded when an entry has many; the folder link to the workspace stays. The page works this out
@@ -172,6 +176,32 @@ theirs.
 
 Everything from a record is inserted as text, never parsed as HTML or as markdown. The new module follows the
 page's rules: no build step, imports only modules below it, read routes only.
+
+### 3.6 The timeline, stage by stage
+
+A stage's entry is written when the stage begins, so that the registry's stage is never behind the round, and
+an entry is never edited. What the stage found is therefore a later entry of its own, and today nothing ties
+the two together: `Stage: data:testing` is a bare line, and the report of its crops (`Crops at <sha>: passed,
+12 of 12 verified …`, with the crops table) reads as if it belonged to no stage. A successful match writes
+nothing at all.
+
+- **The page shows a subject's timeline in stage blocks.** A stage entry opens a block; every entry written
+  after it and before the next stage entry is shown inside that block, under the stage's line. The crops report
+  is so the body of `data:testing`, the judge's verdict of `data:review`, a debugging agent's diagnosis of
+  `data:debugging`; the block also carries the stage's job links (§3.5). Entries before a subject's first stage
+  entry (an action a person took, a refusal) stand alone, as they do now. This is the page's reading of the
+  order the entries were written in: the ledger, its `timeline` rows and the copy on GitHub stay a flat log.
+- **Matching says what it found.** `read_match`, which reads the agent's outcome, writes one entry (once, by
+  marker): for `matched`, the snippet the binding uses and the agent's reasons; for `needs_snippet`, what fails
+  with the existing ones. A match that stopped `blocked` or `failed` already has its reason in the stage the
+  round ends at. The entry is written by the activity, like every other entry, so no workflow hears of it; a
+  `test-pr` round has no subject and gets none.
+- **Testing** needs no new text: its report opens with the sentence that says what happened, and now sits in
+  its block.
+
+*(My calls: grouping on the page rather than a stored tie, and no new sentence for stages other than matching.
+ponytail: a stage entered a second time in one round writes no second entry, as today, so what its second pass
+writes shows under the stage before it; the upgrade is a stage entry per pass.)*
 
 ## 4. What does not change
 
