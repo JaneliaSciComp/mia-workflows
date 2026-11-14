@@ -33,6 +33,8 @@ import yaml
 
 from autodev.gitops import GitError, Mirror, git
 from autodev.jobs import JobSpec
+from mia_core.jobrecord import STREAM_FLAGS, TRANSCRIPT_FILE, keep_result
+from mia_core.judge.evidence import EVIDENCE_DIR, QUESTION_FILE
 from mia_core.judge.evidence import command as judge_command
 from mia_core.locks import LockDir
 
@@ -396,9 +398,9 @@ def _agent_job(cfg: Config, kind: str, args: JobArgs) -> JobSpec:
     body = (
         f"ln -sfn {quote(str(snapshot_dir))} snapshot && \\\n"
         f'claude -p "$(cat prompt.md)" --model {quote(cfg.agent.model)} '
-        f"--max-budget-usd {cfg.limits.agent_max_budget_usd} --output-format json \\\n"
+        f"--max-budget-usd {cfg.limits.agent_max_budget_usd} {STREAM_FLAGS} \\\n"
         f'  --allowedTools "{MATCH_TOOLS}" --tools "{MATCH_AVAILABLE}" --restricted --strict-mcp-config \\\n'
-        f"  --add-dir {quote(str(snapshot_dir))} > claude.json 2> claude.err"
+        f"  --add-dir {quote(str(snapshot_dir))} > {TRANSCRIPT_FILE} 2> claude.err\n" + keep_result("claude.json")
     )
     return _spec(
         cfg,
@@ -412,6 +414,8 @@ def _agent_job(cfg: Config, kind: str, args: JobArgs) -> JobSpec:
         agent="claude",
         cpus=cfg.agent.cpus,
         mem_mb=cfg.agent.mem_mb,
+        prompt_file="prompt.md",
+        transcript_file=TRANSCRIPT_FILE,
     )
 
 
@@ -476,4 +480,6 @@ def judge_job(cfg: Config, args: JobArgs) -> JobSpec:
         agent="claude",
         cpus=1,
         mem_mb=cfg.agent.mem_mb,
+        prompt_file=f"{EVIDENCE_DIR}/{QUESTION_FILE}",
+        transcript_file=TRANSCRIPT_FILE,
     )

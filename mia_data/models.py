@@ -95,6 +95,13 @@ class DatasetState:
     published: bool = False  # some round of this issue published crops: there is something a data:revoke withdraws
     restart: LabelEvent | None = None  # the go a run was rolled over for: the new run's first step is its round
     debugs: int = 0  # debugging cycles used since the last go that was not the debugger's
+    # the stage pass whose result entry is still to be written, and what the round has gathered for it; each
+    # stage write carries it out (spec job-records §3.6)
+    passes: dict[str, int] = field(default_factory=dict)  # stage -> passes begun this round
+    pass_stage: str = ""  # the open pass; "" when no result is due
+    pass_jobs: list[str] = field(default_factory=list)  # workspaces of the jobs the open pass submitted
+    result: str = ""  # what the open pass found
+    result_binding: bool = False  # whether its result entry shows the round's binding
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:

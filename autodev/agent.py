@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mia_core.hosts import HOST_RE
+from mia_core.jobrecord import STREAM_FLAGS, TRANSCRIPT_FILE
+from mia_core.judge.evidence import EVIDENCE_DIR, QUESTION_FILE
 from mia_core.judge.evidence import command as judge_command
 
 from . import jobs
@@ -83,8 +85,9 @@ def render_prompt(
 def job_script(cfg: Config, base_sha: str) -> str:
     """The shell script the csub job runs, with cwd = the round directory.
 
-    It runs Claude Code on the prompt, bundles whatever was committed since `base_sha`, and records the
-    exit code for the worker to read."""
+    It runs Claude Code on the prompt (its whole conversation goes to claude.jsonl for the job's record, the
+    result object to result.json), bundles whatever was committed since `base_sha`, and records the exit code
+    for the worker to read."""
     quote = shlex.quote
     path = (
         f'export PATH={":".join(quote(entry) for entry in cfg.agent.path_prepend)}:"$PATH"\n'
@@ -94,9 +97,10 @@ def job_script(cfg: Config, base_sha: str) -> str:
     budget = f" --max-budget-usd {cfg.agent.max_budget_usd}" if cfg.agent.max_budget_usd is not None else ""
     return f"""set -u
 {path}cd repo || exit 1
-claude -p "$(cat ../prompt.md)" --model {quote(cfg.agent.model)} --output-format json{budget} \\
-  --allowedTools "Bash,Read,Edit,Write,Glob,Grep" > ../result.json 2> ../claude.err
+claude -p "$(cat ../prompt.md)" --model {quote(cfg.agent.model)} {STREAM_FLAGS}{budget} \\
+  --allowedTools "Bash,Read,Edit,Write,Glob,Grep" > ../{TRANSCRIPT_FILE} 2> ../claude.err
 rc=$?
+tail -n 1 ../{TRANSCRIPT_FILE} > ../result.json
 git bundle create -q ../result.bundle {quote(base_sha)}..HEAD 2>> ../claude.err
 echo "$rc" > ../exit_code
 exit "$rc"
@@ -181,7 +185,12 @@ class AgentJobs:
     ):
         self.cfg = cfg
         self.jobs = jobs.CsubJobs(
-            cfg.deployment, cfg.paths.state_dir / "jobs", client_factory or (lambda: csub_client(cfg)), sleep, poll_s
+            cfg.deployment,
+            cfg.paths.state_dir / "jobs",
+            client_factory or (lambda: csub_client(cfg)),
+            sleep,
+            poll_s,
+            work_root=cfg.paths.work_root,
         )
 
     async def submit(self, issue: int, key: str, round_number: int, workspace: Workspace) -> JobRef:
@@ -203,6 +212,8 @@ class AgentJobs:
                 agent="claude",
                 ro_mounts=[mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts],  # Config guarantees ":ro"
                 env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
+                prompt_file="prompt.md",
+                transcript_file=TRANSCRIPT_FILE,
             )
 
         return JobRef(await self.jobs.submit(job_key, build_spec), agent_cfg.walltime_min)
@@ -225,6 +236,8 @@ class AgentJobs:
                 agent="claude",
                 ro_mounts=[],
                 env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
+                prompt_file=f"{EVIDENCE_DIR}/{QUESTION_FILE}",
+                transcript_file=TRANSCRIPT_FILE,
             )
 
         return JobRef(await self.jobs.submit(job_key, build_spec), judge_cfg.walltime_min)

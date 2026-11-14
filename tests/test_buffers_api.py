@@ -18,6 +18,7 @@ from mia_buffers.hosts import HostCheck
 from mia_buffers.ledger import Ledger
 from mia_buffers.plan import load_records
 from mia_core.hosts import generate_policy
+from mia_core.jobrecord import record_path
 from mia_core.locks import LockDir
 from mia_data.config import NetworkCfg
 from mia_data.models import LabelEvent
@@ -485,6 +486,52 @@ def test_crop_png_route_serves_storage_root_only(tmp_path):
     assert s.handle("GET", "/crops/.hidden/c1/overlay.png", {}, b"")[0] == 404
     assert s.handle("GET", "/crops/confocal-human-u937/c1/labels.png", {}, b"")[0] == 404
     assert BufferService(Ledger(tmp_path / "l2.sqlite")).handle("GET", "/crops/a/b/raw.png", {}, b"")[0] == 503
+
+
+def test_job_record_route_serves_the_file_as_it_is_and_nothing_outside_the_records(tmp_path, monkeypatch):
+    """A job's record goes out as the gzip on disk, under the address of its workspace; an address that leaves the
+    records directory, names a symlink or names nothing is a 404."""
+    work, where = tmp_path / "work", "issue-12/i12-e345/match-1"
+    record = {"schema": 1, "request": {"name": "match", "command": "claude -p …"}, "outcome": {"state": "DONE"}}
+    path = record_path(work, where)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(gzip.compress(json.dumps(record).encode()))
+    path.with_name("linked.json.gz").symlink_to(path)
+    (work / "secret.json.gz").write_bytes(path.read_bytes())  # beside the records, not among them
+    (work / "_jobs" / "out").symlink_to(work)  # a directory that leads out of the records
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), work_root=work)
+    status, body, headers = s.handle("GET", f"/jobs/{where}", {}, b"")
+    assert status == 200 and body == path.read_bytes() and json.loads(gzip.decompress(body)) == record
+    assert headers == {"Content-Type": "application/json", "Content-Encoding": "gzip", "Cache-Control": "no-cache"}
+    for missing in (
+        "/jobs/../secret",
+        "/jobs/%2E%2E/secret",
+        "/jobs/issue-12/..%2F..%2Fsecret",
+        f"/jobs/issue-12/../{where}",
+        f"/jobs/{path.with_suffix('').with_suffix('')}",  # an absolute path
+        f"/jobs//{where}",
+        f"/jobs/{where}/",
+        "/jobs/issue-12/i12-e345/.match-1",
+        "/jobs/issue-12/i12-e345/match-1%0A",
+        "/jobs/issue-12/i12-e345/linked",  # a symlink
+        "/jobs/out/secret",
+        "/jobs/issue-12/i12-e345/match-2",  # a job that left no record
+        "/jobs/issue-12/i12-e345",  # a directory
+        "/jobs/",
+    ):
+        assert s.handle("GET", missing, {}, b"")[0] == 404, missing
+    assert BufferService(Ledger(tmp_path / "l2.sqlite")).handle("GET", f"/jobs/{where}", {}, b"")[0] == 503
+
+    server = make_server(s, "127.0.0.1", 0)  # over a socket the gzip goes out untouched and a client inflates it
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with httpx.stream("GET", f"http://127.0.0.1:{server.server_address[1]}/jobs/{where}") as answer:
+            assert answer.headers["content-encoding"] == "gzip" and b"".join(answer.iter_raw()) == path.read_bytes()
+        assert httpx.get(f"http://127.0.0.1:{server.server_address[1]}/jobs/{where}").json() == record
+    finally:
+        server.shutdown()
+    monkeypatch.setattr(api_module, "JOB_RECORD_LIMIT", len(body) - 1)  # a record over the cap is never sent cut
+    assert s.handle("GET", f"/jobs/{where}", {}, b"")[0] == 500
 
 
 def test_sync_keeps_a_row_prepared_during_the_scan(tmp_path, monkeypatch):

@@ -55,11 +55,13 @@ const ghMark = () => {
   svg.append(svgEl("path", { d: GH_MARK }));
   return svg;
 };
+// a link into this page (a job's record in a timeline: `<this origin>/#job/…`) opens here, any other in a new tab
+const intoThisPage = href => typeof location !== "undefined" && String(href).startsWith(`${location.origin}/#`);
 export const link = (href, text, title) =>
   /^https?:\/\//i.test(String(href || ""))
     ? el(
         "a",
-        { href, target: "_blank", rel: "noopener", title },
+        intoThisPage(href) ? { href, title } : { href, target: "_blank", rel: "noopener", title },
         ...(/^https:\/\/github\.com\//i.test(href) ? [ghMark(), " "] : []),
         ...[].concat(text),
       )

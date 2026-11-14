@@ -120,7 +120,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     activities = Activities(
         cfg,
         *clients[:3],
-        jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"),
+        jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs", work_root=cfg.paths.work_root),
         bot=bot,
         client=client,
         gh_datasets=clients[3],
@@ -355,7 +355,7 @@ async def cmd_assets_sync(cfg: Config, args: argparse.Namespace) -> int:
         activities = Activities(
             cfg,
             *clients[:3],
-            jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"),
+            jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs", work_root=cfg.paths.work_root),
             bot=await bot_login(cfg),
             gh_datasets=clients[3],
         )

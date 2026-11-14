@@ -1,12 +1,12 @@
 # Working in this repository
 
 Four Python packages: `mia_core/` (what every package shares: the `mia.yaml` loader, filesystem checks,
-untrusted-output helpers), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → saved crops),
-both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and `mia_buffers/` (training
-buffers: the `MiaBuffer` and `MiaPrep` workflows, the planner, the cache keeper, the buffer-api service with its ledger,
-registry and page, and the `BufferDataset` client). `mia_data` imports from `autodev`, `mia_buffers` from
-both, never the reverse; every package may import `mia_core`, which imports none of them. Full guide:
-[`docs/development.md`](docs/development.md); what each part is for: the [README](README.md).
+untrusted-output helpers, the job record), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset →
+saved crops), both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and
+`mia_buffers/` (training buffers: the `MiaBuffer` and `MiaPrep` workflows, the planner, the cache keeper, the
+buffer-api service with its ledger, registry and page, and the `BufferDataset` client). `mia_data` imports from
+`autodev`, `mia_buffers` from both, never the reverse; every package may import `mia_core`, which imports none of them.
+Full guide: [`docs/development.md`](docs/development.md); what each part is for: the [README](README.md).
 
 How the pieces meet: mia-data prepares a dataset (approved binding, reviewed crops) and writes its row to buffer-api's
 registry; a buffer plans over prepared rows only, fetches raw files into the shared raw cache, stages one **sparse
@@ -50,6 +50,19 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `mia_buffers/api.py`). No workflow hears of either. The hold is a row of the ledger's `shelved` table; a shelved
   dataset reads `state: shelved` from `Ledger.dataset(s)` while its stored row stays, so no plan and no request
   takes it. Anything new that selects or starts datasets reads their state through those two.
+- **A stage pass writes its start and its result.** A stage a round works or waits at (`STAGE_ACTIONS`) writes
+  a start entry and, when it ends, a result entry that says what happened and links its jobs' records. The
+  workflow keeps the open pass in its state (`pass_stage`, `passes`, `pass_jobs`, `result`) and the stage write
+  carries its result out (`mia_data.status.stage_entries`); a failed or cancelled pass's result is also the entry
+  that moves the subject to the stage it rests at, so no stage ends without saying how. A new ending or a new
+  stage sets the result (`_found`) before its stage write, or calls `_flush` where none follows.
+- **Every job leaves a record, and only the job runner writes it.** `CsubJobs` writes
+  `<work_root>/_jobs/<workspace relative to work_root>.json.gz` (`mia_core.jobrecord`): the request with `env` as
+  names only, csub's answer, the outcome, LSF usage, log ends, and for an agent its prompt and conversation with
+  tool output dropped and credentials scrubbed. No job gets `_jobs` writable (`CsubJobs` refuses the mount),
+  nothing deletes a record, buffer-api serves the file as it is (`GET /jobs/<address>`) and the page shows it at
+  `#job/<address>`. Writing one is best effort and never fails a submit or a wait. An agent command prints
+  `stream-json` to `claude.jsonl` and `keep_result` copies its last line to the file the result is read from.
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
   (`Activities._post`); the `MiaMirror` workflow copies them to GitHub.
 - **Nothing reads a data or buffers issue.** No label, comment, body, close or reopen is input: nothing polls

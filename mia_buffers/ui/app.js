@@ -8,6 +8,7 @@ import { bindControls, viewDesigner } from "./designer.js";
 import { viewBuffers } from "./buffers.js";
 import { viewDatasetList } from "./datasets.js";
 import { viewCache, viewDecisions, viewPreparation } from "./operations.js";
+import { viewJob } from "./job.js";
 import { viewFind, viewNeeds, viewSubject } from "./subjects.js";
 
 // ---- the Docs view
@@ -91,6 +92,7 @@ const VIEWS = {
   preparation: viewPreparation,
   decisions: viewDecisions,
   docs: viewDocs,
+  job: viewJob, // #job/<address>: a job's record; the address is everything after the first slash
 };
 const REFRESH_MS = 30000; // the buffer views poll; the others reload when their tab is clicked
 let refreshTimer = 0;

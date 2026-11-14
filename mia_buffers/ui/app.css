@@ -109,6 +109,14 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .md .sev-suspect{color:var(--s4)} .md .sev-bad{color:var(--warn)}  /* a finding's severity word, and its picture's border */
 .md img.sev-suspect,.md img.sev-bad{border:3px solid}
 .md summary{cursor:pointer;color:var(--fg2);margin:4px 0}
+/* a job's record: an agent's turns one under the other (a sub-agent's indented), a tool call folded to one line,
+   and the script, the tool inputs and the log ends as written */
+.job dl.kv{margin:8px 0 14px}
+.job .turn{border-top:1px solid var(--grid);padding:6px 0;font-size:13.5px}
+.job .said{white-space:pre-wrap;overflow-wrap:anywhere}
+.job .subagent{margin-left:24px}
+.job summary{cursor:pointer;color:var(--fg2);overflow-wrap:anywhere}
+.job pre{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px;margin:6px 0;padding:8px 10px;border:1px solid var(--grid);border-radius:6px;max-height:480px;overflow:auto}
 
 /* filters: one row above the plan, wraps on narrow screens; a <details> so the row folds to its summary line.
    It sticks 14px under the topbar. The box-shadow fills that gap in the page colour while the content scrolls under,

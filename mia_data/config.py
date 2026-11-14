@@ -80,6 +80,18 @@ STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
 }
 
 
+# What a round is doing at each stage it works or waits at: the sentence of the stage's start entry when the round
+# has nothing more specific to say.
+STAGE_SENTENCES = {
+    "matching": "An agent looks for an existing reader snippet that fits the dataset's files.",
+    "developing": "autodev writes a reader snippet for the dataset; each head of its pull request is tested here.",
+    "testing": "The worker makes the sample crops a reviewer will look at.",
+    "review": "The sample crops are ready and wait for a reviewer to approve or reject them.",
+    "merging": "The crops are approved; the reader's pull request is being merged.",
+    "debugging": "A debugging agent looks into why the round failed.",
+}
+
+
 def round_open(stage: str | None) -> bool:
     """Whether a dataset at `stage` has a round open: working, or waiting for its review. This is what code asks
     (the keeper before it evicts a raw cache, the planner before it offers a dataset for preparation); a
