@@ -152,6 +152,7 @@ class VerifyResult:
     n_effective: int | None = None  # the crop job's n, lowered by capacity (its report.json); None if unknown
     bytes_fetched: int = 0  # the crop job's, from its report.json
     crop_errors: list[str] = field(default_factory=list)  # the crop job's own errors (report.json): why it failed
+    host_not_allowed: str | None = None  # the host the crop job was refused (report.json), with its redirect chain
 
 
 @dataclass

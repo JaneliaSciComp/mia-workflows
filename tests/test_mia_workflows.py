@@ -34,7 +34,6 @@ from mia_data.models import (
     Reservation,
     Revocation,
     RoundLimits,
-    SmokeResult,
     VerifyResult,
 )
 from mia_data.workflows import MiaDataDataset
@@ -71,7 +70,7 @@ class Mocks:
     def __init__(
         self,
         outcome="matched",
-        smoke=None,
+        host_not_allowed=None,
         states=None,
         test_ok=16,
         set_ok=16,
@@ -101,7 +100,8 @@ class Mocks:
         self.kill_error = kill_error  # a message: kill_job fails with it
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
-        self.outcome, self.smoke, self.states = outcome, smoke or SmokeResult(True, True), states or {}
+        self.outcome, self.states = outcome, states or {}
+        self.host_not_allowed = host_not_allowed  # the host a trusted crop job was refused, in its report
         self.test_ok, self.set_ok, self.n_effective = test_ok, set_ok, n_effective
         self.crop_jobs: dict[str, JobArgs] = {}  # crop workspace -> its args (trusted = the dataset's set)
         self.await_failures, self.gate, self.gate_on = await_failures, gate, gate_on
@@ -188,11 +188,6 @@ class Mocks:
                 reasons=["axes from conversion.json"],
             )
 
-        @activity.defn(name="read_smoke")
-        async def read_smoke(ws: str, record: str | None = None) -> SmokeResult:
-            rec("read_smoke", ws, record)
-            return self.smoke
-
         @activity.defn(name="take_lock")
         async def take_lock(kind: str, key: str, owner: str, ttl_s: int) -> LockTaken:
             rec("take_lock", kind, key, owner, ttl_s)
@@ -220,6 +215,7 @@ class Mocks:
                 [{"crop_id": f"c{i}", "files": {}} for i in range(k)],
                 self.n_effective if trusted else n,
                 bytes_fetched=1234,
+                host_not_allowed=self.host_not_allowed if trusted else None,
             )
 
         @activity.defn(name="publish_gallery")
@@ -339,7 +335,6 @@ class Mocks:
             prepare_job,
             submit,
             read_match,
-            read_smoke,
             take_lock,
             release_lock,
             read_verify,
@@ -465,7 +460,7 @@ async def test_match_crops_review_approve_publishes_that_set(env):
         await approve_review(h, m)
         await idle(h, m, "done")
     assert m.stages == ["matching", "testing", "review", "done"]
-    assert [a[1] for a in m.of("submit")] == ["match", "smoke", "crop", "verify"]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify"]  # no job between the match and the crops
     (the_set,) = [a for a in m.jobs() if a.n_crops]
     assert (the_set.n_crops, the_set.batch, the_set.trusted, the_set.sha, the_set.existing) == (16, 0, True, SHA, True)
     assert [a[0] for a in m.of("publish_gallery")] == [SHA]
@@ -477,10 +472,10 @@ async def test_match_crops_review_approve_publishes_that_set(env):
         f"/w/i7-e11/crop-{SHA}-1",
     )  # read back for publishing
     assert "16 crops saved" in m.of("set_stage")[-1][2]
-    owners = ["mia-data i7-e11 smoke", "mia-data i7-e11 crop"]
+    owners = ["mia-data i7-e11 crop"]
     assert [a[2] for a in m.of("take_lock")] == owners and [a[2] for a in m.of("release_lock")] == owners
-    smoke_lock, crop_lock = ["raw", "rec-1", owners[0]], ["raw", "rec-1", owners[1]]
-    assert [a[2] for a in m.of("await")] == [None, smoke_lock, *[crop_lock] * 2]  # match: none; crop and verify jobs
+    crop_lock = ["raw", "rec-1", owners[0]]
+    assert [a[2] for a in m.of("await")] == [None, crop_lock, crop_lock]  # match: none; crop and verify jobs
     report = m.of("comment")[0][0]
     assert "table" in report and "axes from conversion.json" in report and "1234 bytes" in report
     done = m.of("set_stage")[-1]
@@ -566,16 +561,8 @@ async def test_a_set_with_at_least_half_verified_is_reviewed_and_published(env):
     assert m.of("publish_crops")[0][1] == 12 and "12 crops saved" in m.of("set_stage")[-1][2]
 
 
-async def test_a_small_raw_is_cropped_not_judged(env):
-    """Size is the buffer plan's decision (spec §12): smoke's old `eligible` flag changes nothing in the round."""
-    m = Mocks(smoke=SmokeResult(True, False, shapes={"raw": [[10, 10]]}))
-    async with started(env, m) as h:
-        await idle(h, m, "review")
-    assert "ineligible" not in m.stages and [a for a in m.jobs() if a.n_crops]
-
-
 async def test_an_ineligible_outcome_is_an_unknown_one_now(env):
-    m = Mocks(outcome="ineligible", smoke=SmokeResult(True, False))
+    m = Mocks(outcome="ineligible")
     async with started(env, m) as h:
         await idle(h, m, "blocked")
     assert m.stages == ["matching", "blocked"] and not [a for a in m.jobs() if a.n_crops]
@@ -588,8 +575,8 @@ async def test_an_ineligible_outcome_is_an_unknown_one_now(env):
         ({"outcome": "failed"}, ["matching", "failed"], "match failed: label class undecidable"),
         # a host waits for a person's approval
         (
-            {"smoke": SmokeResult(False, errors=["refused"], host_not_allowed="h.example.org")},
-            ["matching", "blocked"],
+            {"set_ok": 0, "host_not_allowed": "h.example.org"},
+            ["matching", "testing", "blocked"],
             "host not allowed: h.example.org",
         ),
         # admission refuses the record: it will again until someone changes it
@@ -620,7 +607,6 @@ async def test_blocked_goes_needs_human(env):
     "states, stages, published",
     [
         ({"match": ("EXIT", 1)}, ["matching", "failed"], []),
-        ({"smoke": ("EXIT", 1)}, ["matching", "failed"], []),  # even though smoke.json says ok
         ({f"crop-{SHA}": ("EXIT", 1)}, ["matching", "testing", "failed"], []),
         ({f"verify-{SHA}": ("UNKNOWN", None)}, ["matching", "testing", "failed"], []),
     ],
@@ -671,7 +657,7 @@ async def test_worker_death_mid_await_reattaches(env):
         await approve_review(h, m)
         await idle(h, m, "done")
     keys = [a[0] for a in m.of("submit")]
-    assert len(keys) == len(set(keys)) == 4 and len(m.of("await")) == 5  # one await retried, no job resubmitted
+    assert len(keys) == len(set(keys)) == 3 and len(m.of("await")) == 4  # one await retried, no job resubmitted
 
 
 async def test_continue_as_new_keeps_handled(env, monkeypatch):
@@ -741,8 +727,8 @@ async def test_a_restart_at_review_of_a_pr_heads_set_tests_that_head_again(env):
     assert (st.round_id, st.snippet_issue) == ("i7-e12", 100) and not m.of("refuse_label")
 
 
-async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke(env):
-    m = Mocks(smoke=SmokeResult(False, errors=["no data"]), lock_busy=2)
+async def test_the_crop_job_waits_for_the_raw_lock_and_releases_it_after_a_failed_set(env):
+    m = Mocks(set_ok=0, lock_busy=2)
     async with started(env, m) as h:
         for tries in (1, 2):  # a refused take sleeps poll_minutes (2), doubling with each try
             await until(lambda tries=tries: len(m.of("take_lock")) == tries)
@@ -750,7 +736,7 @@ async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke
         await idle(h, m, "failed")
         timers = [e for e in (await h.fetch_history()).events if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED]
         assert [e.timer_started_event_attributes.start_to_fire_timeout.seconds for e in timers] == [120, 240]
-    owner = "mia-data i7-e11 smoke"
+    owner = "mia-data i7-e11 crop"
     assert m.of("take_lock") == [("raw", "rec-1", owner, 900)] * 3
     waiting = [a for a in m.of("comment") if a[1] == "lock i7-e11"]
     assert waiting == [
@@ -758,25 +744,13 @@ async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke
     ]
     names = [(name, args[1] if name == "submit" else None) for name, args in m.calls]
     last_take = max(i for i, (name, _) in enumerate(names) if name == "take_lock")
-    assert names.index(("submit", "smoke")) > last_take > names.index(("comment", None))
-    assert [a for a in m.of("await") if "smoke" in a[1]] == [
-        ("job-mia-7-i7-e11-smoke-1", "/w/i7-e11/smoke-1", ["raw", "rec-1", owner])
-    ]
-    assert m.of("read_smoke") == [("/w/i7-e11/smoke-1", "rec-1")]
+    assert names.index(("submit", "crop")) > last_take > names.index(("comment", None))
+    lock = ["raw", "rec-1", owner]
+    assert [a[2] for a in m.of("await")] == [None, lock, lock]  # the crop and verify jobs run under it
+    assert m.of("read_verify") == [(f"/w/i7-e11/verify-{SHA}-1", f"/w/i7-e11/crop-{SHA}-1", "rec-1")]  # the asset row
     assert m.of("release_lock") == [("raw", "rec-1", owner)]
-    assert names.index(("read_smoke", None)) < names.index(("release_lock", None))
-    assert m.stages == ["matching", "failed"] and "no data" in m.of("set_stage")[-1][1]
-
-
-async def test_a_failed_smoke_job_still_releases_the_raw_lock_and_posts_its_own_errors(env):
-    """harness smoke exits 1 on any error: the issue gets smoke.json's errors, read after the lock is released."""
-    m = Mocks(states={"smoke": ("EXIT", 2)}, smoke=SmokeResult(False, errors=["peer closed connection"]))
-    async with started(env, m) as h:
-        await idle(h, m, "failed")
-    assert m.of("release_lock") == [("raw", "rec-1", "mia-data i7-e11 smoke")]
-    assert m.of("read_smoke") == [("/w/i7-e11/smoke-1", None)]  # no raw asset row for a failed job
-    assert m.names().index("release_lock") < m.names().index("read_smoke")
-    assert m.of("set_stage")[-1][1] == "smoke job job-mia-7-i7-e11-smoke-1 ended EXIT (exit 2): peer closed connection"
+    assert names.index(("read_verify", None)) < names.index(("release_lock", None))
+    assert m.stages == ["matching", "testing", "failed"] and "the crops failed" in m.of("set_stage")[-1][1]
 
 
 # --- the development path (§7.3) ------------------------------------------------------------
@@ -909,7 +883,7 @@ async def test_reject_in_matched_review_asks_for_a_superseding_snippet(env):
         ("i7-e11", None, "/s/binding-1.yaml", {"what_fails": "alice wrote:\nthe masks are shifted by one pixel"})
     ]
     assert "superseding" in m.of("set_stage")[3][1]
-    assert [a[1] for a in m.of("submit")] == ["match", "smoke", "crop", "verify", "crop", "verify"]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]
     assert [(a.sha, a.trusted) for a in m.jobs() if a.n_crops] == [(PINS.snippets_commit, True), (H1, False)]
     assert m.of("publish_crops")[0][2] == MC and st.pins.snippets_commit == MC and st.snippet_issue == 100
 
@@ -1382,9 +1356,9 @@ async def test_a_job_that_cannot_be_killed_is_said_and_the_dataset_needs_a_human
 
 async def test_cancel_kills_the_job_before_the_raw_lock_is_released(env):
     """One writer per raw cache: the lock a job ran under is given up only once the job is dead."""
-    m = Mocks(gate=asyncio.Event(), gate_on="smoke")
+    m = Mocks(gate=asyncio.Event(), gate_on="crop")
     async with started(env, m) as h:
-        await until(lambda: any("smoke" in call[1] for call in m.of("await")))
+        await until(lambda: any("crop" in call[1] for call in m.of("await")))
         await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
         await idle(h, m, "cancelled")
         m.gate.set()
@@ -1439,9 +1413,9 @@ async def test_every_job_is_reserved_against_the_root_and_settled(env):
     async with started(env, m) as h:
         await approve_review(h, m)
         await idle(h, m, "done")
-    assert [a[2] for a in m.of("reserve")] == ["match", "smoke", "crop", "verify"]
+    assert [a[2] for a in m.of("reserve")] == ["match", "crop", "verify"]
     assert [a[1] for a in m.of("reserve")] == [a[0] for a in m.of("submit")]  # the reservation id is the job key
-    assert [a[0] for a in m.of("reserve")] == [PINS.root] * 4 and m.of("reserve")[0][3] == 5.0  # the agent's cap
+    assert [a[0] for a in m.of("reserve")] == [PINS.root] * 3 and m.of("reserve")[0][3] == 5.0  # the agent's cap
     assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")]  # one settle per reservation
     assert m.names().index("reserve") < m.names().index("submit")
 
@@ -1578,7 +1552,7 @@ async def test_a_concurrency_refusal_waits_and_tries_again(env):
         await until(lambda: m.of("reserve"))
         await env.sleep(timedelta(minutes=3))  # past the first wait (poll_minutes)
         await idle(h, m, "review")
-    assert [a[2] for a in m.of("reserve")][:2] == ["match", "match"] and len(m.of("submit")) == 4
+    assert [a[2] for a in m.of("reserve")][:2] == ["match", "match"] and len(m.of("submit")) == 3
 
 
 # --- the crop judge in shadow (spec autonomous-gates §9) -------------------------------------------------

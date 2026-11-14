@@ -554,7 +554,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="hd" x="262" y="56">one host · mia.yaml · local disk for locks and SQLite</text>
 <rect class="b" x="280" y="66" width="175" height="55" rx="4"/>
 <text class="t" x="288" y="86">mia-data worker</text>
-<text class="s" x="288" y="102">match · smoke · crops · save</text>
+<text class="s" x="288" y="102">match · crops · save</text>
 <rect class="b" x="280" y="140" width="175" height="55" rx="4"/>
 <text class="t" x="288" y="160">mia-buffers worker</text>
 <text class="s" x="288" y="176">plan · fetch · stage · keeper</text>
@@ -570,7 +570,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <!-- jobs -->
 <rect class="b" x="280" y="300" width="110" height="50" rx="4"/>
 <text class="t" x="288" y="320">mia-data jobs</text>
-<text class="s" x="288" y="337">match · smoke · crop</text>
+<text class="s" x="288" y="337">match · crop</text>
 <rect class="b" x="410" y="300" width="110" height="50" rx="4"/>
 <text class="t" x="418" y="320">fetch job</text>
 <text class="s" x="418" y="337">files → raw cache</text>
@@ -653,7 +653,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="48" y="110">or a preparation request</text>
 <text class="s" x="48" y="124">ends at done</text>
 <rect class="b" x="225" y="58" width="150" height="90" rx="4"/>
-<text class="t" x="233" y="78">match · smoke</text>
+<text class="t" x="233" y="78">match</text>
 <text class="s" x="233" y="96">an agent writes the binding;</text>
 <text class="s" x="233" y="110">a job opens every array</text>
 <text class="s" x="233" y="124">and reads one patch</text>
@@ -768,7 +768,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <path class="ea" d="M60 478 V460 H30 V103 H40" marker-end="url(#f2)"/>
 <text class="l" transform="rotate(-90 12 300)" x="12" y="300" text-anchor="middle">a preparation request sends each dataset a go</text>
 </svg>
-<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is saved together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The smoke job and the trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
+<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is saved together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
 </figure>
 
 <h2>3. How a dataset becomes prepared</h2>
@@ -778,7 +778,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="36">mia-data · a dataset's round</text>
 <rect class="b" x="20" y="48" width="110" height="40" rx="8"/><text class="t" x="75" y="73" text-anchor="middle">Start</text>
-<rect class="b" x="160" y="48" width="130" height="40" rx="8"/><text class="t" x="225" y="73" text-anchor="middle">match · smoke</text>
+<rect class="b" x="160" y="48" width="130" height="40" rx="8"/><text class="t" x="225" y="73" text-anchor="middle">match</text>
 <rect class="b" x="320" y="48" width="150" height="40" rx="8"/><text class="t" x="395" y="73" text-anchor="middle">crops · review</text>
 <path class="ea" d="M450 48 V34 H340 V48" marker-end="url(#f2)"/><text class="l" x="395" y="30" text-anchor="middle">Reject → fix → new crops (fig. 3b)</text>
 <rect class="bs" x="500" y="48" width="150" height="40" rx="8"/><text class="t" x="575" y="73" text-anchor="middle">save · done</text>
@@ -819,11 +819,11 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <p>Every set of crops waits at <code>review</code>, including a set made from a snippet PR. <i>Approve</i> on the dataset's page saves the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are saved under the merge commit. <i>Reject</i> sends the feedback typed with it to the agent. When the round is following a PR, the feedback goes as <code>/revise</code> on that PR. Otherwise it goes as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves.</p>
 <p>Every verdict is written to the registry as an assessment before anything acts on it. A judge, a second model that reads the same gallery, can look at each set first: in shadow mode its verdict is recorded beside the person's and decides nothing, and the <a href="#decisions">Decisions</a> tab shows how often the two agree. <i>Revoke</i> at any later time withdraws a saved set: its artifacts are quarantined, the buffers that drew from it unregister the dataset, and <i>Run again</i> on the dataset's page repairs it.</p>
 <figure>
-<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Start, match and smoke, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are saved.">
+<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Start, match, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are saved.">
 <defs><marker id="f3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="18">mia-data · the dataset's stages</text>
 <rect class="b" x="20" y="44" width="100" height="40" rx="8"/><text class="t" x="70" y="69" text-anchor="middle">Start</text>
-<rect class="b" x="150" y="44" width="130" height="40" rx="8"/><text class="t" x="215" y="69" text-anchor="middle">match · smoke</text>
+<rect class="b" x="150" y="44" width="130" height="40" rx="8"/><text class="t" x="215" y="69" text-anchor="middle">match</text>
 <rect class="b" x="310" y="44" width="150" height="40" rx="8"/><text class="t" x="385" y="63" text-anchor="middle">crops · verify</text><text class="s" x="385" y="77" text-anchor="middle">the set, its gallery</text>
 <rect class="bs" x="490" y="44" width="130" height="40" rx="8"/><text class="t" x="555" y="69" text-anchor="middle">review</text>
 <rect class="b" x="650" y="44" width="120" height="40" rx="8"/><text class="t" x="710" y="69" text-anchor="middle">merging</text>

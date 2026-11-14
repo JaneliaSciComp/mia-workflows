@@ -369,7 +369,7 @@ key the running service does not know gets 422 on `PUT /buffers/<id>`.
 
 ## A dataset round
 
-[`mia-data-workflow.md`](mia-data-workflow.md) walks through a dataset's round: match, smoke, crops, review,
+[`mia-data-workflow.md`](mia-data-workflow.md) walks through a dataset's round: match, crops, review,
 saving, and the snippet PR loop.
 
 ## A buffer round
@@ -470,7 +470,7 @@ dataset changes status, to at most 30 minutes, and runs only while someone waits
 file with `{owner, taken_at, heartbeat_at, ttl_s}` (TTL 900 s). Every `await_job` poll heartbeats it; a stale file
 is renamed aside as `<key>.stale-<time>`. A wait whose heartbeat finds the lock gone (`mia_core.locks.LockLost`)
 kills its job (`csub kill`) and fails the round; a stale lease is never evidence that its writer stopped. mia-data
-takes it around smoke and trusted crop jobs (owner `mia-data <round> smoke|crop`); mia-buffers from before the
+takes it around trusted crop jobs (owner `mia-data <round> crop`); mia-buffers from before the
 fetch through the stage (owner `mia-buffers <round> <record>`), released while the dataset is blocked on quota and
 re-taken after; the keeper takes it (owner `keeper`) before evicting a record's assets and skips a held record.
 Snapshot extraction uses `snapshot/<sha>`. `GET /locks` lists the holders. A worker waiting for a lock (or for

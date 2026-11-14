@@ -20,13 +20,12 @@ flowchart TD
 
     subgraph cluster["LSF via csub, each job in its own sandbox"]
         match["match: Claude agent<br/>picks a snippet, writes the binding"]
-        smoke["smoke: harness smoke<br/>checks the agent's claim"]
         tcrop["crops: harness crop --n 16<br/>+ harness verify"]
     end
 
-    wf -->|matching| match --> smoke
-    smoke -->|matched| tcrop
-    smoke -->|no snippet fits| dev
+    wf -->|matching| match
+    match -->|matched| tcrop
+    match -->|no snippet fits| dev
     tcrop -->|at least half verified| review["review"]
     tcrop --> gallery[("galleries branch<br/>the round's PNGs")]
     review --> timeline
@@ -103,18 +102,11 @@ person would have to do: `blocked` when something has to be decided or changed b
 `failed` when running the match again may pass.
 
 The worker never trusts the agent's claim. It checks the binding (right record and commit, URLs from the
-record, https only, snippets exist) and runs its own **smoke job**, a plain `harness smoke` with no agent. Only
-if both agree does the round continue. Components: `autodev.jobs` (the csub runner), csub broker and LSF,
-agentic-sandbox, the harness from mia-snippets.
-
-The smoke job writes the record's raw download cache (`paths.work_root/_cache/<record>`), so the worker first
-takes the record's **raw lock**, the lock file `paths.local_root/locks/raw/<record>` with the owner
-`mia-data <round> smoke`. The wait for the job heartbeats it (TTL 900 s) and the lock is released after the smoke
-report is read, whatever it says. When another job holds it (a buffers stage or fetch, another round), the
-timeline gets one entry per round, ``waiting for the raw cache of `<record>`: held by <owner>``, and the workflow
-tries again every `temporal.poll_minutes`. After the smoke report the worker puts the cache's `raw` asset row
-(files, bytes, `ready` or `partial`, `last_used`) to buffer-api. The match agent mounts no writable cache and
-takes no lock.
+record, https only, snippets exist), and the crop job of step 4, a plain `harness crop` with no agent, opens
+every array itself and makes `harness smoke`'s checks before it samples: a binding that cannot be read, or a
+label that is not on its raw's grid, ends the round `failed` with the crop job's errors. Components:
+`autodev.jobs` (the csub runner), csub broker and LSF, agentic-sandbox, the harness from mia-snippets. The match
+agent mounts no writable cache and takes no lock.
 
 ### 3. Develop (only when no snippet fits)
 
@@ -178,8 +170,14 @@ rebuilds the dataset's `manifest.json`. The final entry carries the totals and l
 gallery and the round's workspace. The stage is `done` and the registry row `prepared`; *Run again* later starts
 another round and adds more crops.
 
-The trusted crop job holds the record's raw lock as in step 2, owner `mia-data <round> crop`, from before the
-crop job until its verify report is read, and puts the `raw` asset row afterwards; a PR head's crop job mounts
+The trusted crop job writes the record's raw download cache (`paths.work_root/_cache/<record>`), so the worker
+first takes the record's **raw lock**, the lock file `paths.local_root/locks/raw/<record>` with the owner
+`mia-data <round> crop`. The waits for the crop and verify jobs heartbeat it (TTL 900 s) and the lock is released
+after the verify report is read, whatever it says. When another job holds it (a buffers stage or fetch, another
+round), the timeline gets one entry per round, ``waiting for the raw cache of `<record>`: held by <owner>``, and
+the workflow tries again every `temporal.poll_minutes`. After the verify report the worker puts the cache's `raw`
+asset row (files, bytes, `ready` or `partial`, `last_used`) to buffer-api. A trusted crop job that was refused a
+host (a redirect to one that is not allowed) ends the round `blocked`, naming the host. A PR head's crop job mounts
 the cache read-only, writes a private one and takes no lock.
 
 ## How the timeline reads

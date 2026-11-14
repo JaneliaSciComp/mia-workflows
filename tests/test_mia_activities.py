@@ -532,6 +532,10 @@ async def test_read_verify_reports_the_lowered_n(tmp_path):
     (cw / "crops" / "report.json").write_text(json.dumps({"requested_n": 16, "n": 3, "errors": ["ReadTimeout: x"]}))
     assert (await t.a.read_verify(str(ws), str(cw))).n_effective == 3
     assert (await t.a.read_verify(str(ws), str(cw))).crop_errors == ["ReadTimeout: x"]  # why the crop job failed
+    assert (await t.a.read_verify(str(ws), str(cw))).host_not_allowed is None
+    refused = {"host": "evil.invalid", "chain": ["https://a.example.org/x", "http://evil.invalid/x"]}
+    (cw / "crops" / "report.json").write_text(json.dumps({"n": 3, "errors": ["x"], "host_not_allowed": refused}))
+    assert "evil.invalid" in ((await t.a.read_verify(str(ws), str(cw))).host_not_allowed or "")
     assert (await t.a.read_verify(str(ws))).n_effective is None
 
 

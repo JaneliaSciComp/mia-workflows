@@ -1,7 +1,7 @@
 """The Temporal workflows that take a dataset from its `go` action to published crops.
 
 `MiaDataDataset` lives as long as the dataset's subject does. Each `go` starts a round: an agent matches the
-dataset to a loader snippet, the worker smoke-tests that match, the round's crops are made and shown in the
+dataset to a loader snippet, the round's crops are made by the worker's own job and shown in the
 dataset's timeline, and a human approves them (published) or rejects them with feedback (spec §14: autodev
 gets the feedback and a superseding snippet's PR is followed). When no snippet fits, the round instead opens an issue in mia-snippets
 for autodev to write one and follows that PR: every head's crops are reviewed the same way, the approve merges
@@ -106,7 +106,7 @@ def _parse_time(iso: str | None) -> datetime | None:
 
 @workflow.defn(name="MiaDataDataset")
 class MiaDataDataset:
-    """One workflow per dataset issue, forever: each new `go` runs a round (match → smoke → crops → review →
+    """One workflow per dataset issue, forever: each new `go` runs a round (match → crops → review →
     approve → publish those crops) that ends in a dataset stage (done, failed or blocked), then waits for the next
     `go`. One set of crops per round (spec §13): the crops a human validated are the crops published. Size is no
     verdict of this pipeline: a small raw is cropped whole, and a buffer plan decides what fits it (spec §12)."""
@@ -691,6 +691,12 @@ class MiaDataDataset:
         else:
             needed = None
             passed, failed_jobs = judge(verify, [crop_job, verify_job])
+        if trusted and not passed and verify.host_not_allowed:  # a host waits for a person's approval
+            raise RoundFailed(
+                f"{describe_failure('crop', crop_job, verify.crop_errors)} "
+                f"(host not allowed: {verify.host_not_allowed})",
+                blocked=True,
+            )
         gallery = await self._gallery(sha, crop_workspace, verify_workspace, verify) if verify.crops else None
         test = Test(
             sha,
@@ -717,7 +723,7 @@ class MiaDataDataset:
     # --- the round -------------------------------------------------------------------------
 
     async def _round(self, event: LabelEvent, restarted: bool = False) -> None:
-        """One round from a `go`: admit, match, smoke, test crops, then wait for review.
+        """One round from a `go`: admit, match, test crops, then wait for review.
 
         After a develop round stopped, the `go` resumes its snippet PR instead when that PR is still
         open (see _resume_pr); its snippets issue is remembered either way, so a retry never opens a second one."""
@@ -746,7 +752,7 @@ class MiaDataDataset:
             return
         await self._stage("matching")
 
-        # Match: the agent picks a snippet and writes a binding, then the worker smoke-tests that binding itself.
+        # Match: the agent picks a snippet and writes a binding; the worker's crop job is what tests that binding.
         workspace = await self._act(
             "prepare_match", state.issue, state.round_id, state.pins, 1, seconds=600, result_type=str
         )
@@ -762,39 +768,8 @@ class MiaDataDataset:
             stopped = "failed" if match.outcome == "failed" else "blocked"  # the agent says which of the two
             return await self._finish(stopped, f"match {stopped}: {match.reason}")
         state.binding, state.binding_hash = match.binding_path, match.binding_hash
-        if workflow.patched("c-raw-lock"):  # smoke writes the record's raw cache: under its lock
-            lock = await self._hold_raw("smoke")
-            try:
-                workspace = await self._prepare("smoke")
-                job = await self._job("smoke", workspace, lock=lock)
-                ran = job_succeeded(job)
-                if ran:
-                    smoke = await self._act("read_smoke", workspace, state.pins.record, result_type=SmokeResult)
-            finally:
-                await self._release_raw(lock)
-            if not ran:
-                return await self._finish("failed", await self._smoke_failure(job, workspace))
-        else:
-            workspace = await self._prepare("smoke")
-            if not job_succeeded(job := await self._job("smoke", workspace)):
-                return await self._finish("failed", await self._smoke_failure(job, workspace))
-            smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
-        if not smoke.ok:
-            why = "; ".join(smoke.errors) or "no errors reported"
-            return await self._finish(
-                "blocked" if smoke.host_not_allowed else "failed",  # a host waits for a person's approval
-                f"smoke failed: {why}"
-                + (f" (host not allowed: {smoke.host_not_allowed})" if smoke.host_not_allowed else ""),
-            )
-        if not no_size_verdict:  # only a history without the patch reads smoke's `eligible`
-            if smoke.eligible != (match.outcome == "matched"):
-                return await self._finish(
-                    "failed",
-                    f"the match agent says {match.outcome}, but smoke found the data "
-                    f"{'eligible' if smoke.eligible else 'ineligible'}",
-                )
-            if not smoke.eligible:
-                return await self._finish("ineligible", f"no raw volume is at least 256×256; shapes: {smoke.shapes}")
+        if not workflow.patched("crop-checks-binding") and await self._smoke(match, no_size_verdict):
+            return  # a history without the patch ran a smoke job first
 
         # The round's crops at the matched snippets commit, shown on the issue for review; approved, they are published.
         sha = state.pins.snippets_commit
@@ -815,6 +790,51 @@ class MiaDataDataset:
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
         await self._judge_crops(test)  # in shadow: after the gate opens, so a human verdict is only queued, never held
         await self._from_review()
+
+    async def _smoke(self, match: MatchResult, no_size_verdict: bool) -> bool:
+        """A smoke job on the matched binding, before the crops; True when it ended the round. Replayed only: a
+        history without the `crop-checks-binding` patch ran one."""
+        state = self.state
+        assert state.pins  # a round is admitted before any job runs
+        if workflow.patched("c-raw-lock"):  # smoke writes the record's raw cache: under its lock
+            lock = await self._hold_raw("smoke")
+            try:
+                workspace = await self._prepare("smoke")
+                job = await self._job("smoke", workspace, lock=lock)
+                ran = job_succeeded(job)
+                if ran:
+                    smoke = await self._act("read_smoke", workspace, state.pins.record, result_type=SmokeResult)
+            finally:
+                await self._release_raw(lock)
+            if not ran:
+                return await self._stopped("failed", await self._smoke_failure(job, workspace))
+        else:
+            workspace = await self._prepare("smoke")
+            if not job_succeeded(job := await self._job("smoke", workspace)):
+                return await self._stopped("failed", await self._smoke_failure(job, workspace))
+            smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
+        if not smoke.ok:
+            why = "; ".join(smoke.errors) or "no errors reported"
+            return await self._stopped(
+                "blocked" if smoke.host_not_allowed else "failed",  # a host waits for a person's approval
+                f"smoke failed: {why}"
+                + (f" (host not allowed: {smoke.host_not_allowed})" if smoke.host_not_allowed else ""),
+            )
+        if not no_size_verdict:  # only a history without the patch reads smoke's `eligible`
+            if smoke.eligible != (match.outcome == "matched"):
+                return await self._stopped(
+                    "failed",
+                    f"the match agent says {match.outcome}, but smoke found the data "
+                    f"{'eligible' if smoke.eligible else 'ineligible'}",
+                )
+            if not smoke.eligible:
+                return await self._stopped("ineligible", f"no raw volume is at least 256×256; shapes: {smoke.shapes}")
+        return False
+
+    async def _stopped(self, stage: str, detail: str) -> bool:
+        """End the round in `stage`; True, for a caller that reports whether the round ended."""
+        await self._finish(stage, detail)
+        return True
 
     async def _smoke_failure(self, job: JobDone, workspace: str) -> str:
         """Why a smoke job failed: its end state and the errors of its own smoke.json, when it wrote one. `harness

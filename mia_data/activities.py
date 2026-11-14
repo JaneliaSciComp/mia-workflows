@@ -925,8 +925,8 @@ class Activities:
     ) -> VerifyResult:
         """Read verify.json: only crops with ok, a valid id and sha256s for crop.json and raw.png count.
 
-        Top-level errors or n == 0 mean nothing was verified. With `crop_workspace`, n_effective and
-        bytes_fetched come from the crop job's report.json. With `record` (a trusted crop job that held the raw-cache
+        Top-level errors or n == 0 mean nothing was verified. With `crop_workspace`, n_effective, bytes_fetched,
+        crop_errors and host_not_allowed come from the crop job's report.json. With `record` (a trusted crop job that held the raw-cache
         lock), the record's raw asset row is put to the registry first, with the urls of the crop job's binding."""
         if record is not None:
             await asyncio.to_thread(self._put_raw_asset, record, crop_workspace or workspace)
@@ -977,6 +977,7 @@ class Activities:
             count("n"),
             count("bytes_fetched") or 0,
             _texts(crop_report.get("errors"))[:10],
+            _text(crop_report.get("host_not_allowed"), 300) or None,
         )
 
     # --- publication -------------------------------------------------------------------------
