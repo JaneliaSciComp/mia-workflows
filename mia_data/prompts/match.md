@@ -75,6 +75,11 @@ All in the current directory:
    Choose between these two by what a person would have to do: something to decide or fix is `blocked`, nothing
    but running it again is `failed`.
 
+   A person reads a `reason` on the dataset's page, as markdown. Start with one sentence that says what they
+   have to decide or change (for `failed`: what failed). Then a blank line (`\n\n` in the JSON string) and the
+   evidence as at most six `- ` items, one sentence each, one per line (`\n`). Leave out what worked and what
+   you tried unless the decision depends on it. Keep the whole reason under 1200 characters.
+
 # Rules
 
 - Never invent values. Every axis, shape, dtype, voxel size, URL and label class comes from `record.yaml`,
