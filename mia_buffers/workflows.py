@@ -33,7 +33,7 @@ with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
     from mia_data.models import JobDone, LabelEvent, LockTaken, Reservation
 
-    from .config import PREP_STAGE_ACTIONS, stage_pass
+    from .config import CANCELLABLE, PREP_STAGE_ACTIONS, stage_pass
     from .models import (
         MAX_POLL_MINUTES,
         BindingInfo,
@@ -83,8 +83,6 @@ CANCEL, PREP_CANCEL = "buffer:cancel", "prep:cancel"  # actions only: there neve
 NO_ROUND = "there is no round in progress to cancel"
 ROUND_ENDED = "the round ended before the cancel reached it"
 CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the activities in flight to answer
-# the stages a `cancel` ends a round at (mia_buffers.config.CANCELLABLE; a ready or idle buffer keeps serving)
-CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")
 RETIRED_WHILE = "abandoned: the buffer was retired"
 NO_BUFFER = "this spec has no ready or idle buffer"
 SOURCING = "{count} datasets still sourcing; ask for `{label}` again once they settle"
@@ -1687,7 +1685,7 @@ class MiaBuffer:
         )
 
     async def _await_drop(self, dataset: DatasetStatus, mark: bool = False) -> None:
-        """Ask for the files and wait for the poller's `dropped` signal until the drop verifies. `mark` (c-cache):
+        """Ask for the files and wait for the `dropped` signal (*Files are in place*) until the drop verifies. `mark` (c-cache):
         the raw asset row says `waiting-drop` first."""
         state = self.state
         assert state.round_id
@@ -1695,7 +1693,6 @@ class MiaBuffer:
         if mark:
             await self._act("mark_asset", "raw", dataset.record, {"state": "waiting-drop"})
         await self._act("comment_drop", state.issue, state.round_id, dataset.record, [], seconds=300)
-        attempt = 0
         while True:
             await workflow.wait_condition(lambda: dataset.record in self.drops)
             self.drops.discard(dataset.record)
@@ -1704,7 +1701,6 @@ class MiaBuffer:
             )
             if result.ok:
                 return
-            attempt += 1
             await self._act("comment_drop", state.issue, state.round_id, dataset.record, result.missing, seconds=300)
 
     async def _fail(self, dataset: DatasetStatus, reason: str) -> None:

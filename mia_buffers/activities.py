@@ -163,9 +163,9 @@ def voxel_size_json(row: dict) -> dict[str, dict]:
 
 
 class Activities:
-    """The activity implementations, bound to the GitHub clients (issue, snippets, catalog and mia-data's
-    datasets repos), the csub job runner, buffer-api's registry (from the config's `service`) and the Temporal
-    client (for the poller)."""
+    """The activity implementations, bound to the GitHub clients (issue, snippets and catalog repos), the csub
+    job runner, buffer-api's registry (from the config's `service`) and the Temporal client (the keeper signals
+    the buffers' workflows with it)."""
 
     def __init__(
         self,
@@ -177,35 +177,11 @@ class Activities:
         bot: str,
         client: Client | None = None,
         probe: Callable[[], list[str]] | None = None,
-        gh_datasets: GitHub | None = None,
     ):
         self.cfg, self.gh_issues, self.gh_snippets, self.gh_catalog = cfg, gh_issues, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
-        self._gh_datasets = gh_datasets
         self.registry = Registry.from_config(cfg.service)  # synchronous: call it through asyncio.to_thread
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
-
-    @property
-    def gh_data(self) -> GitHub:
-        """mia-data's name for the issue repo client."""
-        return self.gh_issues
-
-    @property
-    def gh_datasets(self) -> GitHub:
-        """The client for mia-data's issue repo (`github.datasets_repo`)."""
-        if self._gh_datasets is None:
-            raise RuntimeError("no datasets-repo client: this activity runs only inside the worker")
-        return self._gh_datasets
-
-    @gh_datasets.setter
-    def gh_datasets(self, gh: GitHub) -> None:
-        self._gh_datasets = gh
-
-    @property
-    def temporal(self) -> Client:
-        if self.client is None:
-            raise RuntimeError("no Temporal client: this activity runs only inside the worker")
-        return self.client
 
     def all(self) -> list:
         """The main queue's activities; await_job runs on the -await queue."""

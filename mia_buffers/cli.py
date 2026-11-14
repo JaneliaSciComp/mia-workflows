@@ -115,15 +115,14 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     from .workflows import MiaBuffer, MiaCacheKeeper, MiaPrep
 
     client = await _client(cfg)
-    clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
+    clients = _github_clients(cfg)
     bot = await bot_login(cfg)
     activities = Activities(
         cfg,
-        *clients[:3],
+        *clients,
         jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs", work_root=cfg.paths.work_root),
         bot=bot,
         client=client,
-        gh_datasets=clients[3],
     )
     # the buffer and request issues' mirror (spec webapp-actions §7)
     labels = {"buffer": (cfg.label, STAGES), "prep": (cfg.prep_label, PREP_STAGES)}
@@ -350,14 +349,13 @@ async def cmd_assets_sync(cfg: Config, args: argparse.Namespace) -> int:
         )
         return 2
 
-    clients = (*_github_clients(cfg), _gh(cfg, cfg.github.datasets_repo))
+    clients = _github_clients(cfg)
     try:
         activities = Activities(
             cfg,
-            *clients[:3],
+            *clients,
             jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs", work_root=cfg.paths.work_root),
             bot=await bot_login(cfg),
-            gh_datasets=clients[3],
         )
         report = await activities.keep(dry_run=args.dry_run)
     finally:

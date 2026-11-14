@@ -382,27 +382,12 @@ def test_plan_comment_lists_dropped_records():
 # -- the dataset hand-off
 
 
-def with_datasets(acts, issues=None):
-    """Give the activities a datasets-repo client holding `issues` (number -> labels)."""
-    gh = FakeGH(
-        "o/data",
-        issues={
-            n: {"number": n, "body": f"<!-- mia-data:record={rid} -->\n", "labels": [{"name": x} for x in labels]}
-            for n, (rid, labels) in (issues or {}).items()
-        },
-    )
-    acts.gh_datasets = gh
-    return gh
-
-
 async def test_nudge_dataset_sends_a_go_through_the_registry_once(acts, gateway):
     await acts.plan(7, ROUND, await admitted(acts))
-    gh = with_datasets(acts)
     info = await acts.nudge_dataset(ROUND, U937)
     assert (info.stage, info.nudged) == ("new", True) and info.folder == "lm-human-u937-edu-h2ax-dapi"
     subject = acts.registry.subject("dataset", U937)
     assert (subject["number"], subject["issue"]) == (info.number, None)  # no issue is opened or labelled
-    assert gh.created == [] and gh.issues == {}
     ((kind, number, signal, event),) = gateway.sent
     assert (kind, number, signal, event.actor) == ("dataset", info.number, "restart", "buffer:7")
     again = await acts.nudge_dataset(ROUND, U937)  # a retried activity: the same key, the same action, no second go
@@ -1743,9 +1728,8 @@ async def test_prep_admit_and_nudge_report_prepared_records(acts):
     round_dir = acts.cfg.paths.state_dir / "rounds" / PREP_ROUND
     assert {row["id"] for row in json.loads((round_dir / "plan.json").read_text())["rows"]} == {U937, BCSS}
     assert acts._record(PREP_ROUND, U937)["id"] == U937  # nudge_dataset reads the record through the round dir
-    gh = with_datasets(acts)
     outcome = await acts.prep_nudge(PREP_ROUND, U937)  # the fixture's registry knows every record as prepared
-    assert outcome == PrepOutcome(U937, "prepared") and gh.created == [] and gh.issues == {}
+    assert outcome == PrepOutcome(U937, "prepared")
     await acts.comment_prep(8, PREP_ROUND, [outcome, PrepOutcome(BCSS, "opened", 100)])
     await acts.comment_prep(8, PREP_ROUND, [outcome])  # once per round
     (comment,) = posted(acts, "prep", 8)
