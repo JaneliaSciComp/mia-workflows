@@ -14,7 +14,7 @@ const DS_FILTER = { state: "", modality: "", dims: "", licence: "" };
 const CHOSEN = new Set(), SETTLED = new Set();  // the ticked datasets, and those of them that are prepared or in a round
 export const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging", "debugging"]);  // the stages of a round under way or at review
 const PREPARABLE = row => row.state !== "prepared" && !ROUND_OPEN.has(row.stage);
-export function viewDatasetList(arg, params) {
+export function viewDatasetList(_arg, params) {
   const root = $("datasetsBody");
   if (!S.ref) { root.replaceChildren(el("div", { class: "empty" }, "No catalog synced; run ", el("code", {}, "mia-buffers catalog sync"), ".")); return; }
   // a link into the list (Preparation's "in progress") names its filters; a bare #datasets keeps what was set

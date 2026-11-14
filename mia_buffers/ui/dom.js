@@ -115,7 +115,7 @@ export const stagePill = s => {
 // an asset's `ready` only says its directory is there and no job writes it: the page says "cached"
 export const assetPill = s => statePill(s === "ready" ? "cached" : s);
 // ---- times: the ledger stores epoch seconds; keep ISO strings working too
-export function toEpoch(t) { if (t == null || t === "") return null; if (typeof t === "number") return t; const ms = Date.parse(t); return isNaN(ms) ? null : ms / 1000; }
+export function toEpoch(t) { if (t == null || t === "") return null; if (typeof t === "number") return t; const ms = Date.parse(t); return Number.isNaN(ms) ? null : ms / 1000; }
 export function ago(t) {
   const s = toEpoch(t); if (s == null) return "";
   const d = Date.now() / 1000 - s, a = Math.abs(d);

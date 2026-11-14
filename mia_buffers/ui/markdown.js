@@ -67,7 +67,7 @@ export function markdown(text, crops) {
       const rows = [];
       for (i += 2; i < lines.length && lines[i].includes("|"); i++) rows.push(lines[i]);
       // a judge's findings: folded like a crops table, each finding with the pictures of the crop it names
-      const judged = texts(line).join("|") === "item|severity|note", at = row => (crops || {})[texts(row)[0]];
+      const judged = texts(line).join("|") === "item|severity|note", at = row => crops?.[texts(row)[0]];
       const pictured = judged && rows.some(at);
       const pictures = row => ["raw", "overlay"].map(kind => at(row) ? [cropImage(at(row).round, at(row).sha, texts(row)[0], kind)] : []);
       const head = [...(pictured ? [["raw"], ["overlay"]] : []), ...cells(line)];

@@ -127,7 +127,7 @@ export async function askHosts(run, send) {
   refresh();
   await new Promise(settle => {
   box.addEventListener("close", () => {
-    if (box.returnValue === "approve") send(missing.filter((m, n) => ticks[n].checked).map(m => m.host));
+    if (box.returnValue === "approve") send(missing.filter((_host, n) => ticks[n].checked).map(m => m.host));
     else if (box.returnValue === "start") send([]);
     box.remove();
     settle();

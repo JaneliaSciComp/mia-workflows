@@ -12,7 +12,7 @@ export const levelsKey = c => `p${c.patch}-l${levelsOf(c.level).join("-")}`;  //
 export function yq(value) {
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   const s = String(value ?? "");
-  const risky = s === "" || /[:#,\[\]{}&!|>'"%@`\u0000-\u001f\u007f]/.test(s) || /^[\s*?-]/.test(s) || /\s$/.test(s)
+  const risky = s === "" || /[:#,[\]{}&!|>'"%@`\u0000-\u001f\u007f]/.test(s) || /^[\s*?-]/.test(s) || /\s$/.test(s)
     || /^(true|false|yes|no|on|off|y|n|null|~)$/i.test(s)
     || /^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(s) || /^0[xob]/i.test(s) || /^[-+]?\.(inf|nan)$/i.test(s);
   return risky ? JSON.stringify(s) : s;

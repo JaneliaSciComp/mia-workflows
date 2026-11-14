@@ -14,7 +14,7 @@ function meter(label, used, quota) {
       el("i", { style: `width:${quota > 0 ? Math.min(100, used / quota * 100) : 0}%` })),
     el("div", { class: "small" }, quota > 0 ? `${fmtBytes(used)} of ${fmtBytes(quota)} (${pct(used / quota)})` : `${fmtBytes(used)} · unlimited`));
 }
-const list = xs => xs && xs.length ? el("div", {}, ...xs.map(x => el("div", { class: "mono" }, x))) : "none";
+const list = xs => xs?.length ? el("div", {}, ...xs.map(x => el("div", { class: "mono" }, x))) : "none";
 export async function viewCache() {
   const root = $("cacheBody");
   root.replaceChildren(el("div", { class: "empty" }, "loading…"));
@@ -77,7 +77,7 @@ export async function viewPreparation() {
 }
 // ---- decisions: every assessment (spec autonomous-gates §5, §10) and how the judge agrees with the humans
 function agreementLine(gate, a) {
-  if (!a || !a.judged) return el("div", { class: "small" }, `${gate}: no judge verdict yet`);
+  if (!a?.judged) return el("div", { class: "small" }, `${gate}: no judge verdict yet`);
   return el("div", { class: "small" }, `${gate}: ${num(a.judged)} judged · ${num(a.agree)} agree · ${num(a.disagree)} disagree · ${num(a.abstain)} abstained · ${num(a.pending)} awaiting a human`);
 }
 export function viewDecisions(arg) {

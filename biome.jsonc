@@ -1,0 +1,30 @@
+// Biome lints the page's modules (mia_buffers/ui/*.js); `pixi run lint` runs it.
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.7/schema.json",
+  "files": { "includes": ["mia_buffers/ui/*.js"] },
+  "formatter": { "enabled": false },
+  // imports stay in the order of the layers (docs/development.md), not the alphabet's
+  "assist": { "enabled": false },
+  "linter": {
+    "rules": {
+      "preset": "recommended",
+      // a name that is nowhere, or a `const` read before its line, fails here and not in someone's browser
+      "correctness": {
+        "noUndeclaredVariables": "error",
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
+        "noInvalidUseBeforeDeclaration": "error"
+      },
+      // `a + b` is as plain as a template
+      "style": { "useTemplate": "off" },
+      "suspicious": {
+        // the markdown parser reads `(m = rule.exec(line))` down a chain of branches
+        "noAssignInExpressions": "off",
+        // `forEach(box => box.reload())`: nothing reads the value
+        "useIterableCallbackReturn": "off",
+        // the YAML quoting names the control characters on purpose
+        "noControlCharactersInRegex": "off"
+      }
+    }
+  }
+}

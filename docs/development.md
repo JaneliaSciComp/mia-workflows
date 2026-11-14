@@ -38,12 +38,13 @@ Run all of these before pushing. CI runs the last three in this order on every p
 | command | what it does |
 |---|---|
 | `pixi run fmt` | formats with ruff and applies its safe autofixes |
-| `pixi run lint` | `ruff check` plus a formatting check; fails on drift |
+| `pixi run lint` | `ruff check` plus a formatting check, and Biome's lint of the page's modules; fails on drift |
 | `pixi run typecheck` | mypy over `autodev/`, `mia_core/`, `mia_data/`, `mia_ops/` and `mia_buffers/` with `check_untyped_defs` |
 | `pixi run test` | pytest over `tests/`, including the Temporal replay tests |
 
-Configuration for all four is in `pyproject.toml`. Keep them clean rather than suppressing: a `type: ignore` or
-`noqa` comment needs a reason next to it.
+Configuration for all four is in `pyproject.toml`, and Biome's in `biome.jsonc`. Keep them clean rather than
+suppressing: a `type: ignore` or `noqa` comment needs a reason next to it, and so does a rule turned off in
+`biome.jsonc`.
 
 ## Layout
 
