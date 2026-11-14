@@ -1167,6 +1167,12 @@ class BufferService:
             # workflow id, rounds and budget root are built from it
             known = (self.ledger.dataset(record) or {}).get("issue")
             subject = self.ledger.create_subject("dataset", record, number=known if isinstance(known, int) else None)
+        # a subject no workflow has written (revision 0) is at the stage its dataset's row holds: a round that
+        # runs without a subject writes its stage there alone, and it takes what that stage takes
+        stage = (self.ledger.dataset(record) or {}).get("data_stage")
+        if subject["revision"] == 0 and stage in SUBJECT_RULES["dataset"] and stage != subject["stage"]:
+            subject = self.ledger.adopt_subject("dataset", subject["number"], record, stage=stage, data=subject["data"])
+            self.changes.announce("dataset", subject["number"])
         payload = {name: value for name, value in (("note", parsed.note), ("root", parsed.root)) if value}
         needed = (partial(self._needed, records=[record])) if parsed.action == "go" else None
         return self._act_on(subject, parsed, actor, payload, needed)
