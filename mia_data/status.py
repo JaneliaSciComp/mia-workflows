@@ -113,12 +113,22 @@ def render_crops_table(rows: list[dict]) -> str:
     return f"<details><summary>{len(rows)} crops</summary>\n\n{table}\n</details>\n" if len(rows) > 4 else table
 
 
+BINDING_SHOWN = 20_000  # characters of a binding an entry shows: GitHub refuses a comment over 65,536, report included
+
+
 def render_binding(path: str | None, digest: str | None) -> str:
-    """The binding YAML in a fence longer than any backtick run inside it."""
+    """The binding YAML in a fence longer than any backtick run inside it. A binding longer than BINDING_SHOWN
+    is cut at a line end, and its last line says how much is shown; the sha256 is always the whole file's."""
     binding_file = Path(path) if path else None
     if not (binding_file and binding_file.is_file()):
         return "**Binding:** (none)\n"
     text = neutralize(binding_file.read_text())
+    if len(text) > BINDING_SHOWN:
+        shown = text[:BINDING_SHOWN]
+        shown = shown.rpartition("\n")[0] or shown
+        text = (
+            f"{shown}\n# cut here: {len(shown):,} of {len(text):,} characters shown; the sha256 is the whole binding's"
+        )
     fence = "`" * max(3, 1 + max(map(len, re.findall(r"`+", text)), default=0))
     return f"**Binding** (sha256 `{safe_text(digest)}`):\n{fence}yaml\n{text.rstrip(chr(10))}\n{fence}\n"
 

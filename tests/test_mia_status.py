@@ -42,6 +42,18 @@ def test_binding_block_fences_and_neutralizes(tmp_path):
     assert render_binding(str(tmp_path / "missing.yaml"), None) == "**Binding:** (none)\n"
 
 
+def test_a_long_binding_is_cut_to_fit_a_comment(tmp_path):
+    """GitHub refuses a comment over 65,536 characters: a binding of a thousand urls is shown in part."""
+    p = tmp_path / "binding.yaml"
+    p.write_text("raw:\n" + "".join(f"- https://example.org/slice.{n:04d}.tif\n" for n in range(10000)))
+    out = render_binding(str(p), "ab" * 32)
+    assert len(out) < 25000 and out.rstrip().endswith("```")
+    assert "slice.0000.tif\n" in out and "slice.9999.tif" not in out
+    cut = out.splitlines()[-2]  # the fence's last line says what is missing, and no url is cut in half
+    assert cut.startswith("# ") and f"of {p.stat().st_size:,} characters" in cut
+    assert out.splitlines()[-3].endswith(".tif")
+
+
 def test_links_line_lists_only_given_urls():
     assert (
         render_links({"Workspace": None, "Crops": "https://fg.example/b/c d", "Gallery": "https://g/x"})
