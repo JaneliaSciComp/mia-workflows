@@ -258,13 +258,60 @@ def test_a_rounds_crops_are_pictures_served_by_this_origin() -> None:
         "![logo](https://tracker.example/pixel.png) and ![raw](https://github.com/o/data/blob/galleries/x/raw.png?raw=true)",
     )
     local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
-    assert table.startswith('<details open=""><summary>2 crops</summary><div') and "<p>after the fold</p>" in table
+    assert table.startswith("<details><summary>2 crops</summary><div") and "<p>after the fold</p>" in table
     assert "&lt;" not in table and "!" not in table and "github.com" not in table
     for name in ("raw", "overlay"):
         assert f'<a href="{local}/{name}.png" target="_blank" rel="noopener"' in table
         assert f'<img class="crop" src="{local}/{name}.png" loading="lazy" alt="{name} of crop i7-e99-b0-000">' in table
     assert "<img" not in other and "!" not in other
     assert '<a href="https://tracker.example/pixel.png" target="_blank" rel="noopener">logo</a>' in other
+
+
+def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
+    """A findings table names crops by id: the timeline gives `markdown` where each crop's pictures are, read from
+    the crops tables before it, and the findings are folded like a crops table. Only the newest fold starts open."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    sha = "c" * 40
+    gallery = f"https://github.com/o/data/blob/galleries/galleries/rec-1/i7-e99/{sha}/i7-e99-b0-000"
+    crops = (
+        "| raw | overlay | caption |\n|---|---|---|\n"
+        f"| ![raw]({gallery}/raw.png?raw=true) | ![overlay]({gallery}/overlay.png?raw=true) | i7-e99-b0-000 |\n"
+    )
+    judge = (
+        "**Crop judge:** `approve`\n\n| item | severity | note |\n|---|---|---|\n"
+        "| i7-e99-b0-000 | ok | sharp membranes |\n| binding | suspect | no crop of this name |\n"
+    )
+    names = ("el", "svgEl", "GH_MARK", "ghMark", "link")
+    helpers = "\n".join(
+        line for line in PAGE.splitlines() if line.startswith(tuple(f"const {name} = " for name in names))
+    )
+    renderer = PAGE[PAGE.index("// ---- a timeline entry's markdown") : PAGE.index("function actionBar(")]
+    script = (
+        f"{FAKE_DOM}\n{helpers}\n{renderer}\n"
+        'const [crops, judge] = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
+        "const show = nodes => nodes.map(html).join('');\n"
+        "console.log(JSON.stringify([show(markdown(judge, cropsOf(crops, {}))), show(markdown(judge))]));\n"
+    )
+    done = subprocess.run(
+        [node, "-e", script], input=json.dumps([crops, judge]), capture_output=True, text=True, check=True
+    )
+    pictured, plain = json.loads(done.stdout)
+    local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
+    assert pictured.startswith(
+        "<p><strong>Crop judge:</strong> <code>approve</code></p><details><summary>2 findings</summary>"
+    )
+    assert "<th>raw</th><th>overlay</th><th>item</th><th>severity</th><th>note</th>" in pictured
+    for name in ("raw", "overlay"):
+        assert (
+            f'<img class="crop" src="{local}/{name}.png" loading="lazy" alt="{name} of crop i7-e99-b0-000">' in pictured
+        )
+    # a finding about something that is no crop has no picture, and a timeline with no crops table adds no column
+    assert "<tr><td></td><td></td><td>binding</td><td>suspect</td>" in pictured
+    assert "<img" not in plain and "<details><summary>2 findings</summary>" in plain and "<th>raw</th>" not in plain
+    assert "markdown(e.body, cropsOf(e.body, crops))" in PAGE and "log.append(...shown.reverse())" in PAGE
+    assert 'log.querySelectorAll("details").forEach((fold, n) => { fold.open = n === 0; });' in PAGE
 
 
 def test_a_github_issue_is_the_mark_with_a_tooltip() -> None:
