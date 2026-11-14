@@ -476,6 +476,16 @@ def test_a_datasets_page_leads_with_its_links_then_its_preparation_workflow() ->
     assert "const [links = null, ...cards] = " in PAGE
 
 
+def test_a_dataset_whose_record_has_a_gap_offers_no_start_and_says_why() -> None:
+    """The page reads `gaps` from the dataset's subject or row: a never-started one stands blocked at `new` with no
+    Start, a notice says what the record lacks, and the Datasets list marks it."""
+    assert "const gaps = (subject || detail?.row)?.gaps || [];" in PAGE
+    assert 'actions: kind === "dataset" && !gaps.length ? ["go"] : []' in PAGE
+    assert 'gaps.length ? "blocked" : detail?.row.stage || "new", ["new"]' in PAGE
+    assert PAGE.count("gapsNotice(gaps)") == 2 and '"cannot start":' in PAGE
+    assert 'pill("cannot start", "warn", x.gaps.map(t => ({ t })))' in PAGE
+
+
 def test_a_subjects_page_says_where_it_stands_with_its_lifecycle_alone() -> None:
     """No status pill, no "waiting on you", no "workflow running" under the line: every link of a subject stands
     in the row under its name, and a table names a subject's stage, not a status word."""

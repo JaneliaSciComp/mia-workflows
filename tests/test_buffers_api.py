@@ -1310,9 +1310,45 @@ def _acting(tmp_path, **gateway_kwargs):
     """A service with a worker token, a gateway stand-in and a synced catalog holding rec-a and rec-b."""
     gateway = Gateway(**gateway_kwargs)
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", dispatcher=gateway)
-    records = [{"path": f"{name}.yaml", "record": {"id": name}} for name in ("rec-a", "rec-b")]
+    records = [
+        {
+            "path": f"{name}.yaml",
+            "record": {"id": name, "data": {"download_url": f"https://data.example.org/{name}.zip"}},
+        }
+        for name in ("rec-a", "rec-b")
+    ]
     assert worker(s, "PUT", f"/records/{REF_A}", {"records": records})[0] == 200
     return s, gateway
+
+
+def test_a_dataset_whose_record_names_no_data_url_cannot_be_started(tmp_path):
+    """The record is read from the newest synced catalog on every request: while it names no data URL the dataset
+    has no Start and its go is refused, and a sync that brings a record with one makes it startable again."""
+    s, gateway = _acting(tmp_path)
+
+    def sync(ref, record):
+        assert worker(s, "PUT", f"/records/{ref}", {"records": [{"path": "rec-a.yaml", "record": record}]})[0] == 200
+
+    assert act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-1"})[0] == 202
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["gaps"] == []
+    sync("b" * 40, {"id": "rec-a", "landing_url": "https://data.example.org/rec-a"})
+    status, refused, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-2"})
+    assert status == 409 and "the record cannot be run: it names no data URL" in refused["error"]
+    subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert "go" not in subject["actions"] and subject["gaps"] and len(gateway.sent) == 1
+    assert call(s, "GET", "/catalog/datasets/rec-a")[1]["row"]["gaps"] == subject["gaps"]
+    sync("c" * 40, {"id": "rec-a", "data": {"download_url": "https://data.example.org/rec-a.zip"}})
+    subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert "go" in subject["actions"] and subject["gaps"] == []
+    assert call(s, "GET", "/catalog/datasets/rec-a")[1]["row"]["gaps"] == []
+
+
+def test_a_record_with_a_gap_gets_no_subject(tmp_path):
+    s, gateway = _acting(tmp_path)
+    bare = [{"path": "rec-c.yaml", "record": {"id": "rec-c"}}]
+    assert worker(s, "PUT", f"/records/{'b' * 40}", {"records": bare})[0] == 200
+    assert act(s, "/datasets/rec-c/actions", {"action": "go", "key": "click-1"})[0] == 409
+    assert call(s, "GET", "/subjects/dataset/rec-c")[0] == 404 and not gateway.sent
 
 
 def test_a_first_go_creates_the_dataset_subject_and_starts_its_workflow(tmp_path):

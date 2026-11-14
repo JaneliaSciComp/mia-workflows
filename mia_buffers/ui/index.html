@@ -772,7 +772,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 </figure>
 
 <h2>3. How a dataset becomes prepared</h2>
-<p>A dataset is <b>prepared</b> when its latest round ended <code>done</code> with a binding and a manifest saved. Its state is the word for a person: <code>in-progress</code> while a round works by itself, <code>needs-human</code> whenever a person has to act (crops to review, a stopped or cancelled round), <code>prepared</code> after that. Running a prepared dataset again takes it out of <code>prepared</code> until the new round's crops are approved. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer. The only place preparation stops is a <code>needs-human</code> stage.</p>
+<p>A dataset is <b>prepared</b> when its latest round ended <code>done</code> with a binding and a manifest saved. Its state is the word for a person: <code>in-progress</code> while a round works by itself, <code>needs-human</code> whenever a person has to act (crops to review, a stopped or cancelled round), <code>prepared</code> after that. Running a prepared dataset again takes it out of <code>prepared</code> until the new round's crops are approved. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer. The only place preparation stops is a <code>needs-human</code> stage. A dataset whose catalog record lacks what a round needs (a data URL with a host) cannot be started at all: its page says what is missing and offers no <i>Start</i>, and it can be started once a catalog sync brings a record that has it.</p>
 <figure>
 <svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: a dataset's round in mia-data runs from Start to done and saves a binding; the registry row moves from unprepared through in-progress to prepared, or to needs-human when a person has to act; the buffer plans over prepared rows, and a preparation request bridges unprepared datasets to mia-data.">
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -1250,6 +1250,7 @@ const PILL_HELP = {
   "prepared": "An approved binding and verified crops exist: the dataset can be staged and served.",
   "in-progress": "The preparation pipeline is working on it by itself: nothing here waits for a person. The stage says where it is.",
   "unprepared": "Nobody has asked for this dataset to be prepared.",
+  "cannot start": "The dataset's catalog record lacks what a preparation round needs; the lines below say what. No round can be started for it. It can be started once a catalog sync brings a record that has it.",
   "needs-human": "A person has to act. The stage says what: review (its crops wait for a verdict), failed (a step failed; running it again may pass) or blocked (something has to be decided or changed first). The newest entry of its timeline says why.",
   "revoked": "Withdrawn by a person after its crops were saved (Revoke): nothing is selected or reused from it; Run again on its page repairs it.",
   // a cache directory or a staged pyramid
@@ -1776,7 +1777,7 @@ function viewDatasetList(arg, params) {
       { label: "files", cell: x => folderLink(roots.storage_root, x.folder) },
       { key: "crops", label: "preview", cell: x => thumb(x) },
       { key: "state", label: "state", title: "preparation, then the raw cache's state, then \"staged\" when a pyramid of it exists",
-        cell: x => { const pills = el("span", { class: "pills" }, statePill(x.state)); if (x.raw) pills.append(" ", assetPill(x.raw.state)); if (x.staged) pills.append(" ", pill("staged", "pool")); if (x.quarantined) pills.append(" ", assetPill("quarantined")); return pills; } },
+        cell: x => { const pills = el("span", { class: "pills" }, statePill(x.state)); if (x.raw) pills.append(" ", assetPill(x.raw.state)); if (x.staged) pills.append(" ", pill("staged", "pool")); if (x.quarantined) pills.append(" ", assetPill("quarantined")); if (x.gaps?.length) pills.append(" ", pill("cannot start", "warn", x.gaps.map(t => ({ t })))); return pills; } },
       { key: "stage", label: "stage", cell: x => x.stage || "" },
       { key: "dims", label: "dims", cell: x => x.dims || "" },
       { key: "modality", label: "modality", cell: x => x.modality || "" },
@@ -2405,6 +2406,10 @@ function keepTyping(root, refresh, reload) {
   if (!root.querySelector(".stale")) root.prepend(el("div", { class: "notice stale" }, "This changed while you were typing; what you typed is kept. ", el("button", { type: "button", class: "btn", title: BUTTON_HELP.showChange, onclick: reload }, "Show the change")));
   return true;
 }
+// A dataset whose catalog record lacks what a round needs (`gaps`, on its row and on its subject) cannot be started:
+// the service offers no Start for it and refuses a go. The service reads the record from the synced catalog each
+// time, so a record fixed in the catalog can be started after the next catalog sync.
+const gapsNotice = gaps => el("div", { class: "notice" }, el("b", {}, "Cannot be started. "), "Its catalog record lacks what a round needs: ", ...mdInline(gaps.join("; ")), ". Start is offered once a catalog sync brings a record that has it; nothing has to be done here.");
 async function viewSubject(kind, key, refresh) {
   const root = $("subjectBody"), hash = location.hash;
   if (keepTyping(root, refresh, () => viewSubject(kind, key, true))) return;
@@ -2417,10 +2422,11 @@ async function viewSubject(kind, key, refresh) {
   const about = detail ? datasetCards(detail) : [];
   const [links = null, ...cards] = about;  // a dataset's links stand right under its name, its cards at the end
   const again = !!detail && detail.row.state !== "unprepared";  // Start, or Start again: the same word before and after the click
+  const gaps = (subject || detail?.row)?.gaps || [];
   if (!subject) {  // nothing was ever asked of it on this page: the first Start creates it
-    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again };
+    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" && !gaps.length ? ["go"] : [], again };
     const missing = kind === "dataset" ? (detail ? null : "No dataset with this id in the newest catalog or the registry.") : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
-    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new")), missing ? null : actionBar(fresh),
+    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], gaps.length ? "blocked" : detail?.row.stage || "new", ["new"])), missing ? null : actionBar(fresh), gaps.length ? gapsNotice(gaps) : null,
       missing ? el("div", { class: "empty" }, missing) : null, ...cards].filter(Boolean));
     return;
   }
@@ -2436,6 +2442,7 @@ async function viewSubject(kind, key, refresh) {
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
   if (subject.status === "working" && run && run.status !== "RUNNING") parts.push(el("div", { class: "notice" }, `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`));
   parts.push(actionBar(subject, null, kind === "buffer" ? ["go", "revoke"] : []), undelivered(subject, timeline?.actions || []));
+  if (gaps.length) parts.push(gapsNotice(gaps));
   if (extras) parts.push(extras);
   parts.push(...cards);
   if (kind === "prep") parts.push(card("Datasets of this request", "Each dataset the request names, with where its preparation stands.", pagedTable("request-datasets:" + key, {

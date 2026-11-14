@@ -136,6 +136,9 @@ def test_the_plan_summary_counts_over_every_row() -> None:
     for stage, offered in (("review", []), ("testing", []), ("needs-human", ["c"]), ("cancelled", ["c"])):
         waiting = plan_view(PLAN, {**DATASETS, "c": {"stage": stage}}, "p256-l1-2", ALL)["summary"]
         assert waiting["to_prepare"] == offered, stage
+    # nor is one whose catalog record cannot be run
+    gapped = plan_view(PLAN, {**DATASETS, "c": {"gaps": ["it names no data URL"]}}, "p256-l1-2", ALL)["summary"]
+    assert gapped["to_prepare"] == []
 
 
 def test_the_plan_rows_are_joined_sorted_and_cut() -> None:

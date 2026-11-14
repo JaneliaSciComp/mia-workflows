@@ -11,6 +11,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from mia_data.binding import record_gaps
 from mia_data.config import round_open
 
 from .plan import NOT_PREPARED
@@ -98,7 +99,8 @@ UNUSABLE = ("evicted", "missing")  # a staged artifact in one of these states is
 
 
 def record_row(path: str | None, record: dict) -> dict:
-    """What a dataset's row takes from its catalog record; it never changes for a catalog ref. `path` None: a
+    """What a dataset's row takes from its catalog record; it never changes for a catalog ref. `gaps` is what
+    the record lacks for a round to run (`record_gaps`): a dataset with any cannot be started. `path` None: a
     dataset the registry knows whose record is in no synced catalog."""
     row: dict[str, Any] = {
         "id": str(record.get("id") or (path or "").rsplit("/", 1)[-1].removesuffix(".yaml")),
@@ -110,6 +112,7 @@ def record_row(path: str | None, record: dict) -> dict:
         "modality": None,
         "licence": None,
         "bytes": None,
+        "gaps": record_gaps(record) if path is not None else [],
     }
     if path is not None:
         try:
@@ -356,6 +359,7 @@ def plan_view(
             for row in fitting
             if row.get("prepared") != "prepared"
             and not round_open(row.get("stage"))  # in a round or at review: a request would start nothing
+            and not (datasets.get(row["id"]) or {}).get("gaps")  # the record cannot be run: nor would it there
             and (not page.text or matches(page.text, _plan_haystack(row)))
         ),
     }

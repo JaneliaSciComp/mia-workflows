@@ -89,11 +89,14 @@ in progress accepts only *Cancel the round*; `debugging`, between a failed round
 The round pins the record at the catalog's commit: the commit in the catalog's downloads state when the record
 has an entry there, else the head of `main`.
 
-Admission then checks that the pinned record has what a round needs (`record_gaps` in `mia_data/binding.py`): a
-data URL with a host, in `data.download_url`, `technical.sample.urls` or an array's `path_pattern`. A binding may
-only use URLs on hosts those name, and a job reaches no other host, so a record with none (file names and a
-landing page only) can never be bound. Such a round ends `blocked` with the reason before any job runs; once the
-catalog record is fixed, *Run again* admits it.
+A record must have what a round needs before it can be started (`record_gaps` in `mia_data/binding.py`): a data
+URL with a host, in `data.download_url`, `technical.sample.urls` or an array's `path_pattern`. A binding may only
+use URLs on hosts those name, and a job reaches no other host, so a record with none (file names and a landing
+page only) can never be bound. buffer-api reads the record from the newest synced catalog on every request: a
+dataset whose record has such a gap gets no *Start* (its page and the Datasets list say what is missing), a `go`
+for it is refused, and a preparation request that names it settles it at once with the reason. Nothing is stored,
+so a record fixed in the catalog can be started after the next catalog sync (`keeper.catalog_sync_hours`).
+The worker checks the pinned record again at admission, where a gap ends the round `blocked` before any job runs.
 
 ### 2. Match
 

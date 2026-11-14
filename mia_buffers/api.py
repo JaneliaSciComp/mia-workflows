@@ -35,6 +35,7 @@ from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
+from mia_data.binding import record_gaps
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
@@ -862,12 +863,22 @@ class BufferService:
         the action that was sent to its workflow and that the workflow has not answered yet. Until it does the
         stage is still the old one, and the page must not offer that stage's buttons as if nothing was clicked."""
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
+        gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
+        if gaps:  # the record cannot be run: no Start until a synced catalog holds one that can
+            actions = actions - {"go"}
         asked = None
         if (held := self._asked.get((row["kind"], row["number"]))) is not None:
             action, since = held
             if (wait_s := ASKED_WAIT_S - (time.monotonic() - since)) > 0:
                 asked = {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
-        return {**row, "status": status, "actions": sorted(actions), "asked": asked}
+        return {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps}
+
+    def _gaps(self, record: str) -> list[str]:
+        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for a round to run
+        (`record_gaps`); none for a record no synced catalog holds. Read from the catalog on every call, so a
+        record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
+        found = self._catalog_record(record)
+        return record_gaps(found) if found is not None else []
 
     def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
         if kind not in SUBJECT_RULES:
@@ -1086,6 +1097,8 @@ class BufferService:
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
         actor = self._actor(headers, parsed)
+        if parsed.action == "go" and (gaps := self._gaps(record)):  # before a subject is created for it
+            raise HttpError(409, f"the record cannot be run: {'; '.join(gaps)}")
         subject = self.ledger.subject("dataset", record)
         if subject is None:
             if parsed.action != "go":

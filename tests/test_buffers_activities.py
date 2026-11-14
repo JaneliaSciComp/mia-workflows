@@ -1742,6 +1742,19 @@ async def test_prep_nudge_maps_where_the_dataset_stands(acts, gateway):
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "needs-human", 6)
 
 
+async def test_prep_nudge_sends_no_go_for_a_record_that_cannot_be_run(acts, gateway, monkeypatch):
+    """buffer-api would refuse the go: the request hears why at once and settles the dataset as needing a human."""
+    acts.registry.put_dataset(U937, state="in-progress")
+    prep_issue(acts, records=[U937])
+    await acts.prep_admit(8, "21")
+    monkeypatch.setattr(
+        acts, "_record", lambda round_id, record: {"id": record, "landing_url": "https://x.example.org"}
+    )
+    with pytest.raises(ApplicationError, match="the record cannot be run: it names no data URL") as refused:
+        await acts.prep_nudge(PREP_ROUND, U937)
+    assert refused.value.non_retryable and not gateway.sent
+
+
 async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_too(acts, gateway):
     """Without `again` a prepared dataset settles at once (the fixture's registry knows every record as prepared).
     With it the dataset gets a new round, and its row says in-progress so that the request follows that round."""
