@@ -700,3 +700,48 @@ def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked(
     assert has("box.hidden = !CHOSEN.size") and has('"Create buffer")')
     # Select all takes the rows of the page that is showing, and asks the server for nothing
     assert not has("datasets match; the first") and not has('ids: "1"')
+
+
+# strings a person can type into a spec's name or paths, or that a record's id can be: each reads as something
+# else, or as nothing, when YAML is handed it bare
+AWKWARD = [
+    "plain", "with space", "a: b", "#hash", "- dash", "-", "? q", "*star", "&anchor", "!tag", "|", ">", "@at", "`tick",
+    "%pct", "it's", 'say "hi"', "a,b", "[x]", "{y}", "é ü", "", " lead", "trail ", "tab\there", "two\nlines",
+    "yes", "No", "ON", "true", "null", "~", "12", "+12", "-1.5", ".5", "1e3", "1_000", "017", "0x1f", "0b11", "0o17",
+    ".inf", "-.INF", ".NaN", "1:30", "2026-11-14", "2026-11-14 10:00:00", "<<", "=",
+]  # fmt: skip
+
+
+def test_the_yaml_the_page_writes_is_what_the_service_reads() -> None:
+    """The page writes a buffer spec and a preparation request as YAML by hand (spec.js). The service's own parsers
+    read them back: the controls land in the fields they name, and every string arrives as it was typed."""
+    from mia_buffers.spec import load_prep_text, load_spec_text
+
+    ref, controls = "a" * 40, {
+        "name": "em pool", "paths": "datasets/2D/** */u937.yaml", "dims": ["2D", "3D"], "lic": ["CC0-1.0", "MIT"],
+        "allowUnknown": True, "annRequired": True, "sources": ["manual", "proofread"], "minVox": 1000000,
+        "patch": 256, "level": 4, "patchZ": 32, "dedup": True, "T": 0.25,
+    }  # fmt: skip
+    spec_text, named, prep_text = run_js(
+        "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources) });\n"
+        "print([toSpecYaml(filled(input.controls), input.ref, 'o/catalog'),\n"
+        "  input.awkward.map(text => toSpecYaml(filled({ ...input.controls, name: 'n ' + text + ' n', paths: 'p' }), input.ref, text)),\n"
+        "  toPrepYaml(input.awkward.filter(Boolean), input.ref, 'o/catalog')]);",
+        {"spec.js": "toSpecYaml, toPrepYaml"},
+        {"controls": controls, "ref": ref, "awkward": AWKWARD},
+    )
+    spec = load_spec_text(spec_text)
+    assert (spec.name, spec.catalog.repo, spec.catalog.ref) == ("em pool", "o/catalog", ref)
+    assert spec.select.paths == ["datasets/2D/**", "*/u937.yaml"] and spec.select.dedup.by == ["doi"]
+    where = spec.select.where.model_dump(by_alias=True)
+    assert where["dims"] == {"in": ["2D", "3D"]} and where["min_size_voxels"] == 1000000
+    assert where["license"] == {"in": ["CC0-1.0", "MIT"], "allow_unknown": True}
+    assert (where["annotations"]["required"], where["annotations"]["source"]) == (True, {"in": ["manual", "proofread"]})
+    patch = spec.sampling.patch.model_dump(by_alias=True, exclude_none=True)
+    assert patch == {"2D": {"y": 256, "x": 256}, "3D": {"z": 32, "y": 256, "x": 256}, "c": 1}
+    assert spec.sampling.levels == [1, 2, 4] and spec.sampling.weighting.temperature == 0.25
+    # a catalog repo is any string, and a name is trimmed: what was typed between the n's comes back
+    for text, written in zip(AWKWARD, named, strict=True):
+        read = load_spec_text(written)
+        assert (read.catalog.repo, read.name) == (text, f"n {text} n"), text
+    assert load_prep_text(prep_text).records == [text for text in AWKWARD if text]

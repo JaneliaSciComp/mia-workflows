@@ -29,10 +29,11 @@ export function yq(value) {
     /[:#,[\]{}&!|>'"%@`\u0000-\u001f\u007f]/.test(s) ||
     /^[\s*?-]/.test(s) ||
     /\s$/.test(s) ||
-    /^(true|false|yes|no|on|off|y|n|null|~)$/i.test(s) ||
+    /^(true|false|yes|no|on|off|y|n|null|~|<<|=)$/i.test(s) || // a word YAML gives a meaning of its own
     /^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(s) ||
     /^0[xob]/i.test(s) ||
-    /^[-+]?\.(inf|nan)$/i.test(s);
+    /^[-+]?\.(inf|nan)$/i.test(s) ||
+    /^\d{4}-\d\d-\d\d$/.test(s); // a date
   return risky ? JSON.stringify(s) : s;
 }
 const flow = xs => `[${xs.map(yq).join(", ")}]`;
