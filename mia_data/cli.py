@@ -465,8 +465,6 @@ async def cmd_collect_judge_set(cfg: Config, args: argparse.Namespace) -> int:
     the newest human verdict on each crop set in the registry, the round's crop and verify workspaces still on disk
     become `<dir>/<item>/evidence/` through the worker's own builder, and expected.json carries the human verdict and
     the category `<modality family>/<label kind>`. Rounds whose workspaces are gone are listed as skipped."""
-    import yaml
-
     from mia_core.judge.evidence import build as build_evidence
     from mia_core.judge.schema import prompt_text
     from mia_core.registry import Registry

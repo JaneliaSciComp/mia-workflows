@@ -273,7 +273,6 @@ class Activities:
             self.read_debug,
             self.debug_go,
             self.prepare_job,
-            self.probe_hosts,
             self.submit,
             self.read_match,
             self.read_smoke,
@@ -909,12 +908,6 @@ class Activities:
                 raise ValueError(f"binding {binding} is not one of round {round_id}'s")
             shutil.copyfile(binding, workspace / "binding.yaml")
         return str(workspace)
-
-    @activity.defn(name="probe_hosts")
-    @mia_permanent_errors
-    async def probe_hosts(self) -> list[str]:
-        """`csub probe`: the policy's allowed_hosts patterns."""
-        return list(await asyncio.to_thread(self.probe))
 
     def _spec(self, kind: str, args: JobArgs, snapshot_dir: Path | None) -> JobSpec:
         """Build the JobSpec for one job kind from its arguments."""
