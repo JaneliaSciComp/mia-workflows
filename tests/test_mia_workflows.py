@@ -182,11 +182,9 @@ class Mocks:
             return f"/w/{round_id}/match-{attempt}"
 
         @activity.defn(name="prepare_debug")
-        async def prepare_debug(
-            issue: int, round_id: str, pins: Pins, failure: str, binding: str | None, attempt: int = 1
-        ) -> str:
+        async def prepare_debug(issue: int, round_id: str, pins: Pins, failure: str, binding: str | None) -> str:
             rec("prepare_debug", round_id, failure, binding)
-            return f"/w/{round_id}/debug-{attempt}"
+            return f"/w/{round_id}/debug-1"
 
         @activity.defn(name="read_debug")
         async def read_debug(issue: int, round_id: str, ws: str) -> DebugResult:

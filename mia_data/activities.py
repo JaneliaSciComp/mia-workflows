@@ -826,14 +826,15 @@ class Activities:
 
     @activity.defn(name="prepare_debug")
     @mia_permanent_errors
-    async def prepare_debug(
-        self, issue: int, round_id: str, pins: Pins, failure: str, binding: str | None, attempt: int = 1
-    ) -> str:
+    async def prepare_debug(self, issue: int, round_id: str, pins: Pins, failure: str, binding: str | None) -> str:
         """Make the debugging agent's workspace: what the match agent reads, `failure.md` (what stopped the round
         and the limits its jobs ran under), the round's checked binding when it got that far, and `round/<job>/`
         with what each job of the round left (ROUND_FILES and the end of its stdout and stderr), read as untrusted,
-        cut to size and cleaned of anything that looks like a credential. Returns its path."""
-        workspace = self._make_workspace(issue, round_id, "debug", attempt)
+        cut to size and cleaned of anything that looks like a credential. Returns its path.
+
+        It takes exactly the arguments the workflow sends: Temporal converts an argument to its annotated type
+        only when their number matches the parameters', and `pins` must arrive as `Pins`."""
+        workspace = self._make_workspace(issue, round_id, "debug", 1)
         await self._agent_inputs(workspace, round_id, pins)
         (workspace / "binding.yaml").unlink(missing_ok=True)
         if binding:
