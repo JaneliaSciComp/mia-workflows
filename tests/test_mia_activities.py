@@ -720,8 +720,12 @@ async def test_assess_writes_the_human_verdict_and_asks_the_policy(tmp_path, tok
     rows = t.a.registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
     assert [r["verdict"] for r in rows] == ["approve"] and rows[0]["by"] == "human:alice" and rows[0]["gate"] == "crops"
     assert t.a.registry.dataset("rec-1")["assessment"] == first.id
-    second = await t.a.assess(1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "reject", "human:bob", "data:reject")
+    second = await t.a.assess(
+        1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "reject", "human:bob", "data:reject", None, "1794621340330"
+    )
     assert not second.authorized and second.reason.startswith("rejected by human:bob")
+    newest, oldest = t.a.registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
+    assert (newest["action"], oldest["action"]) == (1794621340330, None)  # the action the verdict came from
 
 
 async def test_revoke_dataset_rejects_quarantines_and_finds_the_buffers(tmp_path, token_server):  # noqa: F811
@@ -746,7 +750,7 @@ async def test_revoke_dataset_rejects_quarantines_and_finds_the_buffers(tmp_path
     assert (row["state"], row["revoked_by"], row["assessment"]) == ("revoked", "human:alice", out.assessment)
     crop_set = registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
     assert crop_set[0]["verdict"] == "reject" and crop_set[0]["supersedes"] == approve.id
-    assert crop_set[0]["id"] == out.assessment
+    assert crop_set[0]["id"] == out.assessment and crop_set[0]["action"] == 77
     assert registry.assessments(subject_kind="artifact", subject_ref="art1")[0]["verdict"] == "reject"
     art1 = registry.asset("staged", "art1")
     assert art1["quarantined"] is True and art1["quarantined_by"] == "human:alice"

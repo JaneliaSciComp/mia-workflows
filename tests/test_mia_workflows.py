@@ -289,8 +289,9 @@ class Mocks:
             by: str,
             summary: str = "",
             supersedes: str | None = None,
+            action_id: str | None = None,
         ) -> AssessmentWritten:
-            rec("assess", gate, subject_kind, subject_ref, verdict, by, summary)
+            rec("assess", gate, subject_kind, subject_ref, verdict, by, summary, action_id)
             refused = "rejected by human:bob at t: wrong channel"
             return AssessmentWritten("as-1", self.assess_authorized, "" if self.assess_authorized else refused)
 
@@ -1446,7 +1447,7 @@ async def test_an_approve_is_written_as_an_assessment_before_the_crops_are_publi
         await idle(h, m, "done")
     (assessed,) = m.of("assess")  # the subject is <round id>:<test id>
     assert assessed[:2] == ("crops", "crop_set") and assessed[2].startswith("i7-e11:")
-    assert assessed[3:5] == ("approve", "human:alice")
+    assert assessed[3:5] == ("approve", "human:alice") and assessed[6] == "12"  # the approve action's own id
     assert m.names().index("assess") < m.names().index("publish_crops")
 
 

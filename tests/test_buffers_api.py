@@ -5,7 +5,6 @@ import json
 import re
 import shutil
 import threading
-import time
 from urllib.parse import quote
 
 import httpx
@@ -1363,27 +1362,39 @@ def test_only_the_actions_the_stage_accepts_are_taken(tmp_path):
 
 
 def test_decisions_show_what_the_person_wrote_with_their_verdict(tmp_path):
+    """An assessment names the action it came from, and the note is read from that action, whatever else the
+    person did before or after."""
     from mia_core.judge.policy import new_assessment
 
     s, _ = _acting(tmp_path)
     worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
     worker(s, "POST", "/timeline/dataset/7", {"stage": "review"})
-    assert (
-        act(s, "/datasets/rec-a/actions", {"action": "reject", "revision": 1, "note": "the masks are empty"})[0] == 202
-    )
-    actor = s.ledger.actions("dataset", 7)[-1]["actor"]
-    for by in (f"human:{actor}", "judge"):  # the worker records the verdict a moment after the click
+    for note in ("the masks are empty", "and the axes are swapped"):  # two rejects by one person, moments apart
+        assert act(s, "/datasets/rec-a/actions", {"action": "reject", "revision": 1, "note": note})[0] == 202
+    first, second = s.ledger.actions("dataset", 7)
+
+    def verdict(by, at, action=None):
         row = new_assessment(
             gate="crops",
             subject_kind="crop_set",
             subject_ref="i7-e11:i7-e11-abc",
             verdict="reject",
             by=by,
-            at=time.time(),
+            at=at,
+            action=action,
         )
         worker(s, "PUT", f"/assessments/{row['id']}", row)
+
+    verdict("judge", 10.0)
+    verdict("human:page", 11.0)  # one that names no action shows no note
+    verdict("human:page", 12.0, first["id"])  # written after both actions, and still the first one's
     rows = call(s, "GET", "/decisions", {"record": "rec-a"})[1]["assessments"]
-    assert {row["by"]: row.get("note") for row in rows} == {f"human:{actor}": "the masks are empty", "judge": None}
+    assert [(row["by"], row.get("note")) for row in rows] == [
+        ("human:page", "the masks are empty"),
+        ("human:page", None),
+        ("judge", None),
+    ]
+    assert second["payload"]["note"] == "and the axes are swapped"
 
 
 def test_a_verdict_names_the_revision_the_person_saw(tmp_path):

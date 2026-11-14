@@ -142,7 +142,9 @@ next job with "paused by the operator"; a buffer round met mid-sourcing leaves i
 
 **Approvals are assessments, authorization is a function.** Every human verdict is written to buffer-api's
 `assessments` table (`by: human:<who>`, gate `crops` for a crop set or PR head, `staged` for an artifact) before
-anything acts on it, and the action is allowed only when `mia_core.judge.policy.authorized()` says so over
+anything acts on it. A dataset verdict carries `action`, the id of the action it came from, and `/decisions` reads
+the note the person wrote from that action. The action is allowed only when
+`mia_core.judge.policy.authorized()` says so over
 everything written about that subject: `publish_crops` and the `/approve <head>` comment in mia-data, the
 `approved` event in mia-buffers (one assessment per staged artifact; a refused artifact's volumes are
 unregistered and its dataset fails, the buffer serves at its floor or goes needs-human). A staged pyramid is never

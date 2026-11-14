@@ -148,6 +148,11 @@ def _job_json(workspace: str | Path, rel: str) -> Any:
     return _loads(read_untrusted(Path(workspace), rel, 1 << 20))
 
 
+def _action(event_id: str | None) -> int | None:
+    """The action id an event id is (buffer-api sends an action as an event with its id); None for no event."""
+    return int(event_id) if event_id and event_id.isdecimal() else None
+
+
 def _when(iso: str | None) -> datetime | None:
     """An ISO-8601 time as an aware datetime (GitHub's `Z`, or an offset; none given is UTC); None if unreadable."""
     try:
@@ -467,9 +472,11 @@ class Activities:
         by: str,
         summary: str = "",
         supersedes: str | None = None,
+        action_id: str | None = None,
     ) -> AssessmentWritten:
         """Write the verdict as an assessment in the registry, then ask `authorized()` over everything written about
-        the subject; an approve also names its assessment on the dataset row."""
+        the subject; an approve also names its assessment on the dataset row. `action_id` is the event id of the
+        person's action, written on the assessment so that what they wrote with it can be shown beside it."""
         registry = self.registry
         row = new_assessment(
             gate=gate,
@@ -480,6 +487,7 @@ class Activities:
             at=time.time(),
             summary=summary,
             supersedes=supersedes,
+            action=_action(action_id),
         )
         await asyncio.to_thread(registry.put_assessment, row)
         rows = await asyncio.to_thread(lambda: registry.assessments(subject_kind=subject_kind, subject_ref=subject_ref))
@@ -1118,6 +1126,7 @@ class Activities:
             at=at,
             summary=summary,
             supersedes=approve_id,
+            action=_action(event_id),
         )
         await asyncio.to_thread(registry.put_assessment, reject)
         assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
@@ -1127,7 +1136,14 @@ class Activities:
                 continue
             key = str(asset["key"])
             artifact_reject = new_assessment(
-                gate="staged", subject_kind="artifact", subject_ref=key, verdict="reject", by=by, at=at, summary=summary
+                gate="staged",
+                subject_kind="artifact",
+                subject_ref=key,
+                verdict="reject",
+                by=by,
+                at=at,
+                summary=summary,
+                action=_action(event_id),
             )
             await asyncio.to_thread(registry.put_assessment, artifact_reject)
             quarantine = {"quarantined": True, "quarantined_at": at, "quarantined_by": by}

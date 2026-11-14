@@ -951,6 +951,8 @@ class MiaDataDataset:
             verdict,
             f"human:{event.actor}",
             f"data:{verdict} by {event.actor}",
+            None,  # supersedes nothing
+            event.event_id,  # the action: what the person wrote with the verdict is read from it
             seconds=300,
             result_type=AssessmentWritten,
         )
