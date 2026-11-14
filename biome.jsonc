@@ -1,7 +1,8 @@
 // Biome formats and lints the page's modules (mia_buffers/ui/*.js); `pixi run fmt` and `pixi run lint` run it.
 {
   "$schema": "https://biomejs.dev/schemas/2.6.7/schema.json",
-  "files": { "includes": ["mia_buffers/ui/*.js"] },
+  // `!!.claude`: a git worktree checked out under .claude/ holds its own biome.jsonc, a second root to Biome
+  "files": { "includes": ["mia_buffers/ui/*.js", "!!.claude"] },
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 120 },
   "javascript": {
     "formatter": { "quoteStyle": "double", "quoteProperties": "preserve", "arrowParentheses": "asNeeded" }
