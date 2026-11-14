@@ -1252,6 +1252,40 @@ async def test_go_after_needs_human_resumes_the_snippet_pr(env):
     assert [t.test_id for t in st.tests] == [f"i7-e12-{H1[:12]}"]
 
 
+async def debugged_in_develop(env, h, m):
+    """needs_snippet → snippets issue → h1's crop job is lost → debugging → the debugger asks for its go."""
+    await idle(h, m, "developing")
+    await wake(h, m, head(H1))
+    await debugged(env, h, m)
+
+
+async def test_the_debuggers_go_matches_again_while_the_snippet_pr_is_open(env):
+    """A develop round that failed and was debugged: the debugger's go starts from the match, whose agent reads
+    the advice, and a reader on main that fits ends the round at review. Only a person's go resumes the PR."""
+    m = Mocks(debug_cycles=1, outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
+    async with started(env, m, signal="restart") as h:
+        await debugged_in_develop(env, h, m)
+        m.outcome = "matched"  # the advice names a reader that is on main
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor="debugger"))
+        await idle(h, m, "review")
+    assert m.stages == ["matching", "developing", "testing", "debugging", "matching", "testing", "review"]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "debug", "match", "crop", "verify"]
+    assert not any("resuming" in stage[1] for stage in m.of("set_stage"))
+    assert m.of("open_snippet_issue") == [("i7-e11", None)]
+
+
+async def test_the_debuggers_go_resumes_the_snippet_pr_when_its_match_asks_for_a_reader_again(env):
+    """The advised match finds no reader on main either: the open PR is that reader, and its head is tested."""
+    m = Mocks(debug_cycles=1, outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
+    async with started(env, m, signal="restart") as h:
+        await debugged_in_develop(env, h, m)
+        m.states = {}  # the infrastructure is fixed
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor="debugger"))
+        await idle(h, m, "review")
+    assert m.stages == ["matching", "developing", "testing", "debugging", "matching", "testing", "review"]
+    assert "resuming" in m.of("set_stage")[-2][1] and m.of("open_snippet_issue") == [("i7-e11", None)]
+
+
 @pytest.mark.parametrize("now", [head(H1, "closed"), head(H1, "merged", MC)], ids=["closed", "merged"])
 async def test_go_after_needs_human_with_a_finished_pr_matches_again(env, now):
     """The PR is gone by the time `go` arrives: a new match, which hands the snippets issue back for reuse."""
@@ -1607,7 +1641,7 @@ async def test_run_again_after_cancelling_a_develop_round_reuses_its_snippet_iss
         await until(
             lambda: len(m.of("open_snippet_issue")) == 2 or m.stages[-1:] == ["developing"] and len(m.stages) > 3
         )
-        await until(lambda: m.stages.count("developing") == 2)
+        await until(lambda: m.stages.count("developing") == 2 or m.stages.count("testing") == 2)
     remembered = [call[1] for call in m.of("open_snippet_issue")]
     assert remembered[0] is None and (
         len(remembered) == 1 or remembered[1] == 100

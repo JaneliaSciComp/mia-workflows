@@ -134,7 +134,8 @@ while the PR is still open (a lost job, a failed status write), *Run again* resu
 tested again under a new round, and no second snippets issue is opened. The new round has its own pins: the PR's
 example binding is adopted whatever catalog commit it names (the round that asked for the reader wrote it), and the
 stored binding names the commits of the round that adopted it. A PR closed or merged by then means a new
-match. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
+match. The debugger's go matches first even while the PR is open, so that its advice is read; the PR is resumed
+only if that match asks for a reader again. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
 `/approve` and `/revise` from the worker because its login is in autodev's `github.trusted_bots`), mia-snippets
 CI, the GitHub client.
 
@@ -206,7 +207,8 @@ small `harness smoke` and `harness list` probes, and writes one of two outcomes:
 - `rerun`: a new round can pass. The worker posts the diagnosis and sends the dataset a `go` as `debugger` through
   buffer-api (the debugged round's root, the advice as its note). That go starts a round like any other; its match
   agent finds the advice as `advice.md` and is told to read it first, as a colleague's notes to check, not
-  instructions. The advice can steer the match to another snippet or other params, or to `needs_snippet`.
+  instructions. The advice can steer the match to another snippet or other params, or to `needs_snippet`
+  (which, after a develop round, resumes that round's open snippet PR).
 - `blocked`: no round can pass until a person changes something outside a round (a host, a limit, a harness
   defect, data that is gone). The stage is `blocked`, with the failure, the diagnosis and what it needs.
 

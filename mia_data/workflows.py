@@ -882,8 +882,9 @@ class MiaDataDataset:
     async def _round(self, event: LabelEvent, restarted: bool = False) -> None:
         """One round from a `go`: admit, match, test crops, then wait for review.
 
-        After a develop round stopped, the `go` resumes its snippet PR instead when that PR is still
-        open (see _resume_pr); its snippets issue is remembered either way, so a retry never opens a second one."""
+        After a develop round stopped, a person's `go` resumes its snippet PR instead when that PR is still
+        open (see _resume_pr); the debugger's `go` matches, so its advice is read. The snippets issue is
+        remembered either way, so a retry never opens a second one."""
         state = self.state
         snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
         # (a cancelled develop round left its snippet issue and PR open too: autodev is not asked twice)
@@ -911,7 +912,11 @@ class MiaDataDataset:
         self.limits = await self._act("limits", result_type=RoundLimits)
         if workflow.patched("l-budget") and await self._act("paused", result_type=bool):
             raise RoundFailed(PAUSED, blocked=True)
-        if snippet_issue and snippet_pr and await self._resume_pr(snippet_issue, snippet_pr):
+        # the debugger's go starts from the match, whose agent reads its advice: only a person's go resumes the PR
+        advised = bool(snippet_issue and snippet_pr and event.actor == DEBUGGER) and workflow.patched(
+            "debugger-go-matches"
+        )
+        if snippet_issue and snippet_pr and not advised and await self._resume_pr(snippet_issue, snippet_pr):
             return
         await self._stage("matching")
 
@@ -928,6 +933,8 @@ class MiaDataDataset:
         if match.outcome == "needs_snippet":
             fails = (match.draft or {}).get("what_fails")
             self._found("No existing reader snippet fits this dataset" + (f": {fails}" if fails else "."))
+            if advised and snippet_issue and snippet_pr and await self._resume_pr(snippet_issue, snippet_pr):
+                return  # the reader it asks for is the open PR's: its head is tested, as a person's go would
             return await self._develop(match.draft or {}, snippet_issue)
         if match.outcome not in (("matched",) if no_size_verdict else ("matched", "ineligible")):
             stopped = "failed" if match.outcome == "failed" else "blocked"  # the agent says which of the two
