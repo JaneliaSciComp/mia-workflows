@@ -29,7 +29,7 @@ function mdImage(alt, url) {
 // crops tables of a timeline say where each crop's pictures are: `cropsOf` adds a body's crops to a map of crop id
 // -> {round, sha}, and `markdown` given that map shows a finding's overlay beside it. The timeline reads its entries
 // oldest first, so a finding gets the picture of the newest crops table before it. A `suspect` or `bad` finding
-// has its severity in that severity's colour, and its picture a border of the same; `ok` is plain.
+// has its severity in that severity's colour, and its picture a border of the same; `ok` is plain. A note wraps.
 const FLAGGED = ["suspect", "bad"];
 const GALLERY_CROP =
   /\/galleries\/[^/\s]+\/(i\d+-e\d+)\/([0-9a-f]{40})\/([A-Za-z0-9_-][A-Za-z0-9._-]*)\/raw\.png\?raw=true/g;
@@ -113,9 +113,7 @@ export function markdown(text, crops) {
         flag = row => (judged && FLAGGED.includes(texts(row)[1]) ? `sev-${texts(row)[1]}` : "");
       const pictured = judged && rows.some(at);
       const picture = row =>
-        at(row)
-          ? [cropImage(at(row).round, at(row).sha, texts(row)[0], "overlay", `crop finding ${flag(row)}`.trim())]
-          : [];
+        at(row) ? [cropImage(at(row).round, at(row).sha, texts(row)[0], "overlay", `crop ${flag(row)}`.trim())] : [];
       const marked = row =>
         cells(row).map((cell, n) => (n === 1 && flag(row) ? [el("span", { class: flag(row) }, ...cell)] : cell));
       const head = [...(pictured ? [["overlay"]] : []), ...cells(line)];
@@ -127,7 +125,17 @@ export function markdown(text, crops) {
           "table",
           { class: "plain" },
           el("thead", {}, el("tr", {}, ...head.map(cell => el("th", {}, ...cell)))),
-          el("tbody", {}, ...body.map(row => el("tr", {}, ...row.map(cell => el("td", {}, ...cell))))),
+          el(
+            "tbody",
+            {},
+            ...body.map(row =>
+              el(
+                "tr",
+                {},
+                ...row.map((cell, n) => el("td", judged && n === row.length - 1 ? { class: "wrap" } : {}, ...cell)),
+              ),
+            ),
+          ),
         ),
       );
       out.push(
