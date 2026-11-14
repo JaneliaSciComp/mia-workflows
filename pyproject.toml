@@ -56,7 +56,7 @@ mypy = "*"
 types-PyYAML = "*"
 orjson = "*"  # mypy writes its cache with it; without the real package an empty site-packages dir shadows it
 nodejs = ">=22.12,<25"  # an LTS line; tests/test_buffers_ui.py runs the page's modules under node
-biome = "2.6.*"  # lints the page's modules (biome.jsonc)
+biome = "2.6.*"  # formats and lints the page's modules (biome.jsonc)
 
 [tool.pixi.feature.notebook.dependencies]
 pytorch = "*"
@@ -80,8 +80,8 @@ notebook = { features = ["notebook"] }  # the demo notebook's kernel: `pixi run 
 
 [tool.pixi.tasks]
 test = "pytest tests/"
-lint = "ruff check . && ruff format --check . && biome lint"
-fmt = "ruff format . && ruff check --fix ."
+lint = "ruff check . && ruff format --check . && biome ci"
+fmt = "ruff format . && ruff check --fix . && biome check --write"
 typecheck = "mypy autodev mia_data mia_ops mia_buffers mia_core"
 mia = "mia"
 

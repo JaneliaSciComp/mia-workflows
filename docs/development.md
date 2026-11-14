@@ -37,8 +37,8 @@ Run all of these before pushing. CI runs the last three in this order on every p
 
 | command | what it does |
 |---|---|
-| `pixi run fmt` | formats with ruff and applies its safe autofixes |
-| `pixi run lint` | `ruff check` plus a formatting check, and Biome's lint of the page's modules; fails on drift |
+| `pixi run fmt` | formats with ruff and applies its safe autofixes; Biome does the same for the page's modules |
+| `pixi run lint` | `ruff check` plus a formatting check, and Biome's lint and formatting check of the page's modules; fails on drift |
 | `pixi run typecheck` | mypy over `autodev/`, `mia_core/`, `mia_data/`, `mia_ops/` and `mia_buffers/` with `check_untyped_defs` |
 | `pixi run test` | pytest over `tests/`, including the Temporal replay tests |
 
@@ -742,8 +742,9 @@ above it in this table, never in a circle:
 
 Every file is sent with `Cache-Control: no-cache`, so a browser never runs the modules of two deployments
 together. `tests/test_buffers_ui.py` imports the modules under node (a test dependency in `pyproject.toml`) over a
-small fake DOM, and reads all the files as one text for the rules about the page as a whole. `ui/package.json`
-only tells node that the files are modules; the service does not serve it.
+small fake DOM, and reads all the files as one text for the rules about the page as a whole; a rule about the
+code is compared without whitespace (`has()`, `count()`), so it holds however Biome lays the code out.
+`ui/package.json` only tells node that the files are modules; the service does not serve it.
 
 Each tab is one kind of thing, and each thing has one page:
 

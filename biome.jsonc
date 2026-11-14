@@ -1,8 +1,11 @@
-// Biome lints the page's modules (mia_buffers/ui/*.js); `pixi run lint` runs it.
+// Biome formats and lints the page's modules (mia_buffers/ui/*.js); `pixi run fmt` and `pixi run lint` run it.
 {
   "$schema": "https://biomejs.dev/schemas/2.6.7/schema.json",
   "files": { "includes": ["mia_buffers/ui/*.js"] },
-  "formatter": { "enabled": false },
+  "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 120 },
+  "javascript": {
+    "formatter": { "quoteStyle": "double", "quoteProperties": "preserve", "arrowParentheses": "asNeeded" }
+  },
   // imports stay in the order of the layers (docs/development.md), not the alphabet's
   "assist": { "enabled": false },
   "linter": {

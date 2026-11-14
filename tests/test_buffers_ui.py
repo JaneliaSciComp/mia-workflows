@@ -19,6 +19,28 @@ FILES = {
     entry.name: entry.read_text() for entry in sorted(UI_DIR.iterdir()) if entry.suffix in (".html", ".js", ".css")
 }
 PAGE = "\n".join(FILES.values())
+
+
+def squeezed(text: str) -> str:
+    """`text` as it reads whatever its layout: without whitespace, and without the comma a formatter puts before a
+    closing bracket. Source is compared this way, so a rule about the page's code does not break when it is laid
+    out differently."""
+    return re.sub(r",(?=[)\]}])", "", re.sub(r"\s+", "", text))
+
+
+SQUEEZED = squeezed(PAGE)
+
+
+def has(code: str, text: str = SQUEEZED) -> bool:
+    """Whether the page's source (or `text`, already squeezed) holds `code`, whatever the layout of either."""
+    return squeezed(code) in text
+
+
+def count(code: str, text: str = SQUEEZED) -> int:
+    """How many times the page's source (or `text`, already squeezed) holds `code`, whatever the layout."""
+    return text.count(squeezed(code))
+
+
 # node of the environment that runs the tests (pixi provides it), before any other on the PATH
 NODE = shutil.which("node", path=os.pathsep.join([str(Path(sys.executable).parent), os.environ.get("PATH", "")]))
 
@@ -86,14 +108,14 @@ def test_the_pages_buttons_call_action_routes_and_it_follows_the_stream() -> Non
         assert ("POST", path) in requested and resolve("POST", path) == "action", path
     for path in ("/needs", "/subjects/buffer", "/subjects/prep"):
         assert ("GET", path) in requested, path
-    assert "issues/new" not in PAGE  # nothing is started by opening a GitHub issue
+    assert not has("issues/new")  # nothing is started by opening a GitHub issue
     for path in ("/subjects/x/x", "/timeline/x/x", "/run/x/x", "/lookup?q=x", "/health"):
         assert ("GET", path) in requested, path
-    assert 'new EventSource("/stream")' in PAGE and resolve("GET", "/stream") == "read"
+    assert has('new EventSource("/stream")') and resolve("GET", "/stream") == "read"
     # a click is one key (Retry sends it again) and a verdict names the revision the page is showing
-    assert "key: newKey()" in PAGE and "revision: subject.revision" in PAGE and "key: a.key" in PAGE
-    assert '"Content-Type": "application/json"' in PAGE  # the action routes take nothing else
-    assert "innerHTML" not in PAGE  # timeline text is inserted as text, never parsed
+    assert has("key: newKey()") and has("revision: subject.revision") and has("key: a.key")
+    assert has('"Content-Type": "application/json"')  # the action routes take nothing else
+    assert not has("innerHTML")  # timeline text is inserted as text, never parsed
 
 
 def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
@@ -112,13 +134,13 @@ def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
 
 def test_page_names_the_revoked_states_and_the_pause() -> None:
     for needle in ('"revoked":', '"quarantined":', "Revoke the ticked", "paused by the operator"):
-        assert needle in PAGE, needle
+        assert has(needle), needle
 
 
 def test_the_docs_describe_the_system_as_it_is() -> None:
     """The Docs tab names buttons, never label commands, and explains nothing by what it replaced."""
     docs = FILES["guide.html"] + FILES["architecture.html"]
-    assert "send(`/ui/${doc}.html`)" in PAGE and resolve("GET", "/ui/guide.html") == "read"
+    assert has("send(`/ui/${doc}.html`)") and resolve("GET", "/ui/guide.html") == "read"
     assert not re.search(r"\b(buffer|data|prep|autodev):[a-z]", docs)
     assert not re.search(r"\b(no longer|any more|anymore|used to|as before|previously|read-only log)\b", docs, re.I)
     for needle in ("Needs you", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):
@@ -126,10 +148,10 @@ def test_the_docs_describe_the_system_as_it_is() -> None:
 
 
 def test_page_has_a_decisions_tab() -> None:
-    assert 'data-tab="decisions"' in PAGE and 'data-view="decisions"' in PAGE
-    assert "decisions: viewDecisions" in PAGE
+    assert has('data-tab="decisions"') and has('data-view="decisions"')
+    assert has("decisions: viewDecisions")
     for needle in ("Shadow", "agree", "awaiting a human", "overruled", 'pageOf("/decisions"'):
-        assert needle in PAGE, needle
+        assert has(needle), needle
 
 
 # A DOM small enough to read. The page's modules build nodes with `el()`, so a test sees what they built: `html`
@@ -229,7 +251,7 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
     assert both[0].endswith("pixi run mia restart snippets autodev") and "waits on it is" in one[0]
     assert none == [] and len(no_temporal) == 1 and no_temporal[0].startswith("Temporal does not answer")
     # the lines are replaced by each check, never faded, and the check repeats
-    assert '$("down").replaceChildren(' in PAGE and "setInterval(checkHealth, HEALTH_MS)" in PAGE
+    assert has('$("down").replaceChildren(') and has("setInterval(checkHealth, HEALTH_MS)")
 
 
 def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
@@ -237,22 +259,26 @@ def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
 
     stages = run_js("print([...ROUND_OPEN]);", {"datasets.js": "ROUND_OPEN"})
     assert stages == [stage for stage in STAGES if round_open(stage)]
-    assert 'row.state !== "prepared" && !ROUND_OPEN.has(row.stage)' in PAGE
+    assert has('row.state !== "prepared" && !ROUND_OPEN.has(row.stage)')
 
 
 def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
-    view = FILES["subjects.js"][FILES["subjects.js"].index("function viewNeeds(") :]
-    assert '"aria-pressed": String(kind === needsKind)' in view and "<select" not in view and '"select"' not in view
-    assert 'pageOf("/needs", "needs", () => needsKind ? { kind: needsKind } : {})' in view
-    assert '["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]' in PAGE
-    assert '.toggles .btn[aria-pressed="true"]' in PAGE
+    view = squeezed(FILES["subjects.js"][FILES["subjects.js"].index("function viewNeeds(") :])
+    assert (
+        has('"aria-pressed": String(kind === needsKind)', view)
+        and not has("<select", view)
+        and not has('"select"', view)
+    )
+    assert has('pageOf("/needs", "needs", () => (needsKind ? { kind: needsKind } : {}))', view)
+    assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]')
+    assert has('.toggles .btn[aria-pressed="true"]')
 
 
 def test_a_dataset_at_review_offers_a_restart_beside_its_verdicts() -> None:
     from mia_data.config import STAGE_ACTIONS
 
     assert "go" in STAGE_ACTIONS["review"][1]
-    assert 'action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"' in PAGE
+    assert has('action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"')
     order = run_js("print(ACTION_ORDER);", {"actions.js": "ACTION_ORDER"})
     assert order.index("approve") < order.index("reject") < order.index("go") < order.index("cancel")
 
@@ -351,14 +377,14 @@ def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
     # a finding about something that is no crop has no picture, and a timeline with no crops table adds no column
     assert "<tr><td></td><td></td><td>binding</td><td>suspect</td>" in pictured
     assert "<img" not in plain and "<details><summary>2 findings</summary>" in plain and "<th>raw</th>" not in plain
-    assert "markdown(e.body, cropsOf(e.body, crops))" in PAGE and "log.append(...shown.reverse())" in PAGE
-    assert 'log.querySelectorAll("details").forEach((fold, n) => { fold.open = n === 0; });' in PAGE
+    assert has("markdown(e.body, cropsOf(e.body, crops))") and has("log.append(...shown.reverse())")
+    assert has('log.querySelectorAll("details").forEach((fold, n) => { fold.open = n === 0; });')
 
 
 def test_a_github_issue_is_the_mark_with_a_tooltip() -> None:
     """No link to GitHub is spelled out in words ("log on GitHub"): it is the mark, and the tooltip says what it is."""
-    assert "log on GitHub" not in PAGE and "ghIssue" not in PAGE
-    assert "a read-only copy of the timeline" in PAGE
+    assert not has("log on GitHub") and not has("ghIssue")
+    assert has("a read-only copy of the timeline")
 
 
 def test_markdown_never_becomes_html_or_a_script_link() -> None:
@@ -398,22 +424,22 @@ def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
         + "".join(f"<li>{step(name)}</li>" for name in line)
         + '<li class="apart"><span class="step off" aria-current="step">cancelled</span></li></ol>'
     )
-    assert PAGE.count("lifecycle(") == 4  # the function, a subject's page (twice: one never asked of) and a buffer's
+    assert count("lifecycle(") == 4  # the function, a subject's page (twice: one never asked of) and a buffer's
 
 
 def test_a_buffer_is_always_planned_first() -> None:
     """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
-    assert "Show me the plan first" not in PAGE and "first.checked" not in PAGE
-    assert PAGE.count("plan_first: true") == 2  # New buffer, and a spec's own page
-    assert 'subject.stage === "plan-review" ? "Run"' in PAGE
+    assert not has("Show me the plan first") and not has("first.checked")
+    assert count("plan_first: true") == 2  # New buffer, and a spec's own page
+    assert has('subject.stage === "plan-review" ? "Run"')
 
 
 def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     """A click is not shown as the old stage's buttons again: while the subject says an action is `asked`, every
     button that would send an action is disabled, and a reload that started earlier never paints over a later one."""
-    assert PAGE.count("disabled: !!subject.asked") == 4 and "disabled: !!x.asked" in PAGE
-    assert "waiting for its workflow to answer" in PAGE
-    assert "turn !== subjectTurn" in PAGE
+    assert count("disabled: !!subject.asked") == 4 and has("disabled: !!x.asked")
+    assert has("waiting for its workflow to answer")
+    assert has("turn !== subjectTurn")
 
 
 def test_what_is_typed_while_a_subjects_page_loads_is_kept() -> None:
@@ -450,14 +476,14 @@ def test_what_is_typed_while_a_subjects_page_loads_is_kept() -> None:
 def test_the_page_asks_which_hosts_a_run_lacks_before_it_starts() -> None:
     """A start action first asks the service which hosts the run needs that the policy lacks."""
     assert ("POST", "/hosts/missing") in requested_paths() and resolve("POST", "/hosts/missing") == "read"
-    assert PAGE.count("askHosts(") >= 3
+    assert count("askHosts(") >= 3
     for body in (
         "{ records: [subject.key] }",
         "{ prep: subject.number }",
         "{ spec: subject.key }",
         "{ records: todo }",
     ):
-        assert body in PAGE
+        assert has(body)
 
 
 def test_the_hosts_dialog_offers_approve_start_anyway_and_cancel() -> None:
@@ -469,14 +495,14 @@ def test_the_hosts_dialog_offers_approve_start_anyway_and_cancel() -> None:
         "Hosts to approve",
         "approveButton.disabled = ",
     ):
-        assert text in PAGE
+        assert has(text)
     for key in ("approveHosts:", "startUnapproved:", "cancelHosts:"):
-        assert key in PAGE
+        assert has(key)
 
 
 def test_an_approval_travels_with_the_start_action() -> None:
     """The approved hosts ride on the start action itself; the page has no route of its own to approve them."""
-    assert "approve_hosts" in PAGE and '"/hosts/approve"' not in PAGE
+    assert has("approve_hosts") and not has('"/hosts/approve"')
 
 
 HOSTS_DOM = """
@@ -565,44 +591,44 @@ def test_the_hosts_dialog_works_as_it_runs() -> None:
 
 def test_a_second_click_during_the_host_check_starts_nothing() -> None:
     """Both start buttons hold a flag from the click until `askHosts` settles."""
-    assert PAGE.count("if (checking) return;") == 2 and PAGE.count("checking = true;") == 2
-    assert PAGE.count("checking = false; })") == 2
+    assert count("if (checking) return;") == 2 and count("checking = true;") == 2
+    assert count("checking = false; })") == 2
 
 
 def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
     """Reject has more to enter: its button ends in an ellipsis and opens a dialog for the feedback. No feedback box
     sits beside the buttons, and a rejection with nothing typed cannot be sent."""
-    assert 'reject: "Reject…"' in PAGE and "showModal()" in PAGE
-    assert "bar.append(note)" not in PAGE
-    assert "Send rejection" in PAGE and "sendButton.disabled = !note.value.trim()" in PAGE
+    assert has('reject: "Reject…"') and has("showModal()")
+    assert not has("bar.append(note)")
+    assert has("Send rejection") and has("sendButton.disabled = !note.value.trim()")
 
 
 def test_a_datasets_page_leads_with_its_links_then_its_preparation_workflow() -> None:
     """Under the name come the dataset's links, then the lifecycle labelled as the preparation workflow, then the
     buttons; the button that starts the workflow says Start, and no state pill stands between them."""
-    assert 'dataset: "Preparation workflow:"' in PAGE and "flowRow(kind, " in PAGE
-    assert '(subject.again ? "Start again" : "Start")' in PAGE and '"Prepare again"' not in PAGE
-    assert "statePill(detail ? detail.row.state" not in PAGE
-    assert "const [links = null, ...cards] = " in PAGE
+    assert has('dataset: "Preparation workflow:"') and has("flowRow(kind, ")
+    assert has('subject.again ? "Start again" : "Start"') and not has('"Prepare again"')
+    assert not has("statePill(detail ? detail.row.state")
+    assert has("const [links = null, ...cards] = ")
 
 
 def test_a_dataset_whose_record_has_a_gap_offers_no_start_and_says_why() -> None:
     """The page reads `gaps` from the dataset's subject or row: a never-started one stands blocked at `new` with no
     Start, a notice says what the record lacks, and the Datasets list marks it."""
-    assert "const gaps = (subject || detail?.row)?.gaps || [];" in PAGE
-    assert 'actions: kind === "dataset" && !gaps.length ? ["go"] : []' in PAGE
-    assert 'gaps.length ? "blocked" : detail?.row.stage || "new", ["new"]' in PAGE
-    assert PAGE.count("gapsNotice(gaps)") == 2 and '"cannot start":' in PAGE
-    assert 'pill("cannot start", "warn", x.gaps.map(t => ({ t })))' in PAGE
+    assert has("const gaps = (subject || detail?.row)?.gaps || [];")
+    assert has('actions: kind === "dataset" && !gaps.length ? ["go"] : []')
+    assert has('gaps.length ? "blocked" : detail?.row.stage || "new", ["new"]')
+    assert count("gapsNotice(gaps)") == 2 and has('"cannot start":')
+    assert has('pill("cannot start", "warn", x.gaps.map(t => ({ t })))')
 
 
 def test_a_subjects_page_says_where_it_stands_with_its_lifecycle_alone() -> None:
     """No status pill, no "waiting on you", no "workflow running" under the line: every link of a subject stands
     in the row under its name, and a table names a subject's stage, not a status word."""
-    assert "subjectFacts" not in PAGE and "waiting on you" not in PAGE and '"workflow " +' not in PAGE
-    assert "statePill(subject.status)" not in PAGE and 'statePill(x.status), " ", x.stage' not in PAGE
-    assert PAGE.count("stagePill(x.stage)") == 3  # the specs, the requests and Needs you
-    assert "subjectLinks(subject, entries)" in PAGE
+    assert not has("subjectFacts") and not has("waiting on you") and not has('"workflow " +')
+    assert not has("statePill(subject.status)") and not has('statePill(x.status), " ", x.stage')
+    assert count("stagePill(x.stage)") == 3  # the specs, the requests and Needs you
+    assert has("subjectLinks(subject, entries)")
 
 
 def test_a_lifecycle_marks_the_step_a_round_is_working_at() -> None:
@@ -631,22 +657,24 @@ def test_every_button_that_asks_for_something_says_what_it_does() -> None:
     for kind, table in (("dataset", DATASET_ACTIONS), ("buffer", BUFFER_ACTIONS), ("prep", PREP_STAGE_ACTIONS)):
         offered = set().union(*(actions for _, actions in table.values())) - own_control.get(kind, set())
         assert offered <= set(covered[kind]), (kind, offered - set(covered[kind]))
-    assert "title: actionHelp(subject, action)" in PAGE
+    assert has("title: actionHelp(subject, action)")
     assert {"plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
     for key in keys:
-        assert f"title: BUTTON_HELP.{key}" in PAGE, key
+        assert has(f"title: BUTTON_HELP.{key}"), key
 
 
 def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
     """A buffer's page reads like a dataset's: its id, a row of links (its spec, the spec's GitHub issue with its
     number, the round's workspace and its staged pyramids), then the labelled workflow. No pill beside the id, no
     row of bare root folders."""
-    body = FILES["buffers.js"][FILES["buffers.js"].index("async function viewBuffer(root, id, refresh) {") :]
-    name, links, flow = body.index('el("h2", {}, id)'), body.index('class: "links"'), body.index('flowRow("buffer", ')
+    body = squeezed(FILES["buffers.js"][FILES["buffers.js"].index("async function viewBuffer(root, id, refresh) {") :])
+    name, links, flow = (
+        body.index(squeezed(code)) for code in ('el("h2", {}, id)', 'class: "links"', 'flowRow("buffer", ')
+    )
     assert name < links < flow
-    assert "ghIcon(meta.buffers_repo, spec.issue, true)" in body and "SUBJECT_HASH.buffer(spec.key)" in body
-    assert "Object.entries(roots)" not in body and "all buffers" not in body
-    assert 'buffer: "Buffer workflow:"' in PAGE
+    assert has("ghIcon(meta.buffers_repo, spec.issue, true)", body) and has("SUBJECT_HASH.buffer(spec.key)", body)
+    assert not has("Object.entries(roots)", body) and not has("all buffers", body)
+    assert has('buffer: "Buffer workflow:"')
 
 
 def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> None:
@@ -655,9 +683,9 @@ def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> N
     its record's file name, which no other record's path matches."""
     from mia_buffers.select import _glob
 
-    assert "select: { chosen: CHOSEN, id: row => row.id, onchange: " in PAGE and "can: PREPARABLE" not in PAGE
-    assert "function specFromDatasets(ids)" in PAGE and "ids.map(id => `*/${id}.yaml`)" in PAGE
-    assert "title: BUTTON_HELP.specFrom" in PAGE
+    assert has("select: { chosen: CHOSEN, id: row => row.id, onchange: ") and not has("can: PREPARABLE")
+    assert has("function specFromDatasets(ids)") and has("ids.map(id => `*/${id}.yaml`)")
+    assert has("title: BUTTON_HELP.specFrom")
     patterns = ["*/u937.yaml", "*/bcss.yaml"]
     assert _glob(patterns, "datasets/2D/confocal/u937.yaml") and _glob(patterns, "datasets/bcss.yaml")
     assert not _glob(patterns, "datasets/2D/confocal/not-u937.yaml") and not _glob(patterns, "datasets/u937.yaml.bak")
@@ -666,9 +694,9 @@ def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> N
 def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked() -> None:
     """With nothing ticked the list offers Select all and Clear selection and says nothing more. With a tick, a
     box of its own colour says how many datasets are selected and offers Prepare and Create buffer."""
-    assert '"Select all")' in PAGE and "Select all matching" not in PAGE
-    assert "tick the datasets to prepare first" not in PAGE
-    assert 'class: "chosen", hidden: true' in PAGE and ".chosen[hidden]{display:none}" in PAGE
-    assert "box.hidden = !CHOSEN.size" in PAGE and '"Create buffer")' in PAGE
+    assert has('"Select all")') and not has("Select all matching")
+    assert not has("tick the datasets to prepare first")
+    assert has('class: "chosen", hidden: true') and has(".chosen[hidden]{display:none}")
+    assert has("box.hidden = !CHOSEN.size") and has('"Create buffer")')
     # Select all takes the rows of the page that is showing, and asks the server for nothing
-    assert "datasets match; the first" not in PAGE and 'ids: "1"' not in PAGE
+    assert not has("datasets match; the first") and not has('ids: "1"')
