@@ -151,8 +151,9 @@ export const PILL_HELP = {
   // odds and ends
   "stale": "This consumer has not been seen for longer than expected.",
 };
-function tipOn(node, lines) {
-  // the page's tooltip on hover (no tab stop: tables hold hundreds of pills)
+export function tipOn(node, lines) {
+  // the page's tooltip on hover (no tab stop: tables hold hundreds of pills). A line is {k, b, t, img, full}:
+  // a colour key, a bold word, text, a 256 px picture, a picture at its own size (as far as the window has room)
   node.addEventListener("pointerenter", e => showTip(e, lines));
   node.addEventListener("pointermove", moveTip);
   node.addEventListener("pointerleave", hideTip);
@@ -216,6 +217,7 @@ function showTip(evt, lines) {
     if (l.b) d.append(el("b", {}, l.b), " ");
     if (l.t) d.append(l.t);
     if (l.img) d.append(el("img", { src: l.img, alt: "" }));
+    if (l.full) d.append(el("img", { class: "full", src: l.full, alt: "" }));
     tip.append(d);
   }
   tip.hidden = false;
@@ -224,7 +226,7 @@ function showTip(evt, lines) {
 function moveTip(evt) {
   const x = Math.min(evt.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
   tip.style.left = x + "px";
-  tip.style.top = evt.clientY + 14 + "px";
+  tip.style.top = Math.max(8, Math.min(evt.clientY + 14, window.innerHeight - tip.offsetHeight - 8)) + "px";
 }
 export function hideTip() {
   tip.hidden = true;
