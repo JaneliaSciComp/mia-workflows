@@ -46,7 +46,7 @@ from mia_core.untrusted import write_atomic as write_atomic
 
 from . import catalog
 from . import publish as crop_publish
-from .binding import check_binding, hosts, record_urls
+from .binding import check_binding, hosts, record_gaps, record_urls
 from .config import HUMAN_LABELS, STAGES, dataset_state
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
@@ -427,8 +427,9 @@ class Activities:
         """Pin the round: the record is the subject's key, record_commit comes from the downloads state (or the
         catalog's main when the record was never downloaded: its jobs fetch on demand), then snippets main and the
         harness checkout. The round is charged to whoever asked for it: the root its `go` carries, else the
-        dataset itself. A record whose dataset folder is another record's is refused here. Written once to
-        state_dir/rounds/<round_id>/; a retry returns the same pins."""
+        dataset itself. A record that lacks what a round needs (`record_gaps`), or whose dataset folder is another
+        record's, is refused here, before any job runs. Written once to state_dir/rounds/<round_id>/; a retry
+        returns the same pins."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
@@ -450,6 +451,8 @@ class Activities:
         if path is None:
             raise ValueError(f"{record_id}: no record on main")
         record = await catalog.record(self.gh_catalog, path, entry["record_commit"])
+        if gaps := record_gaps(record):
+            raise ValueError(f"{record_id}: the record cannot be run: {'; '.join(gaps)}")
         crop_publish.check_owner(self.cfg.paths.storage_root / catalog.dataset_folder(record, record_id), record_id)
         pins = Pins(
             record_id,

@@ -89,6 +89,12 @@ in progress accepts only *Cancel the round*; `debugging`, between a failed round
 The round pins the record at the catalog's commit: the commit in the catalog's downloads state when the record
 has an entry there, else the head of `main`.
 
+Admission then checks that the pinned record has what a round needs (`record_gaps` in `mia_data/binding.py`): a
+data URL with a host, in `data.download_url`, `technical.sample.urls` or an array's `path_pattern`. A binding may
+only use URLs on hosts those name, and a job reaches no other host, so a record with none (file names and a
+landing page only) can never be bound. Such a round ends `blocked` with the reason before any job runs; once the
+catalog record is fixed, *Run again* admits it.
+
 ### 2. Match
 
 The workflow sets the stage `matching` and submits the **match job**: a Claude agent, run through csub in a

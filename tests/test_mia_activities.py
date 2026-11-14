@@ -19,6 +19,7 @@ from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
 from mia_core.registry import Registry, RegistryError
 from mia_data.activities import Activities
+from mia_data.binding import record_gaps
 from mia_data.jobspec import lock_dir
 from mia_data.models import (
     DatasetState,
@@ -608,6 +609,20 @@ async def test_read_verify_reports_the_lowered_n(tmp_path):
     (cw / "crops" / "report.json").write_text(json.dumps({"n": 3, "errors": ["x"], "host_not_allowed": refused}))
     assert "evil.invalid" in ((await t.a.read_verify(str(ws), str(cw))).host_not_allowed or "")
     assert (await t.a.read_verify(str(ws))).n_effective is None
+
+
+async def test_admit_refuses_a_record_that_names_no_data_url(tmp_path):
+    """A record with only file names and a landing page can never be bound: the round stops before any job."""
+    t = _setup(tmp_path)
+    bare = {**RECORD, "data": {"download_url": None}, "landing_url": "https://data.example.org/landing"}
+    bare["technical"] = {"arrays": [{"role": "raw", "path_pattern": "stack_*.tif"}]}
+    t.cat.files[("datasets/rec-1.yaml", REC_SHA)] = yaml.safe_dump(bare).encode()
+    with pytest.raises(ApplicationError, match="rec-1: the record cannot be run: it names no data URL") as refused:
+        await t.a.admit(1, "99")
+    assert refused.value.non_retryable  # the workflow ends such a round `blocked`
+    assert not (t.cfg.paths.state_dir / "rounds" / ROUND / "pins.json").exists()
+    assert record_gaps({"technical": {"arrays": "not a list of arrays"}})  # an unreadable record lacks them too
+    assert record_gaps({"technical": {"arrays": [{"path_pattern": "s3://bucket/a/*.tif"}]}}) == []
 
 
 async def test_admit_without_downloads_entry_pins_main(tmp_path):
