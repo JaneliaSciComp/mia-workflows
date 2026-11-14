@@ -368,7 +368,10 @@ async def cmd_test_pr(cfg: Config, args: argparse.Namespace) -> int:
     clients = _github_clients(cfg)
     try:
         activities = Activities(
-            cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=await bot_login(cfg)
+            cfg,
+            *clients,
+            jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs", work_root=cfg.paths.work_root),
+            bot=await bot_login(cfg),
         )
         return await run_test_pr(activities, args.pr, Path(args.binding), args.record)
     finally:
@@ -391,7 +394,11 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     clients = _github_clients(cfg)
     bot = await bot_login(cfg)
     activities = Activities(
-        cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=bot, client=client
+        cfg,
+        *clients,
+        jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs", work_root=cfg.paths.work_root),
+        bot=bot,
+        client=client,
     )
     # the dataset issues' mirror (spec webapp-actions §7)
     labels, openers = {"dataset": (cfg.label, STAGES)}, {"dataset": dataset_issue(cfg, clients[2])}

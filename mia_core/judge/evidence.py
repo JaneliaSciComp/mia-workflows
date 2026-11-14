@@ -15,6 +15,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from mia_core.jobrecord import STREAM_FLAGS, TRANSCRIPT_FILE, keep_result
 from mia_core.untrusted import read_untrusted
 
 EVIDENCE_DIR = "evidence"
@@ -122,12 +123,13 @@ def fenced_agent_text(label: str, text: str) -> str:
 
 def command(model: str, max_budget_usd: float) -> str:
     """The judge's shell command, run with the job workspace as cwd: Claude Code over `evidence/` with read-only
-    tools, the output JSON in claude.json. Anthropic hosts come from the csub policy's [agents] table."""
+    tools, its whole conversation in claude.jsonl (for the job's record) and the result object in claude.json.
+    Anthropic hosts come from the csub policy's [agents] table."""
     return (
         f'claude -p "$(cat {EVIDENCE_DIR}/{QUESTION_FILE})" --model {shlex.quote(model)} '
-        f"--max-budget-usd {max_budget_usd} --output-format json \\\n"
+        f"--max-budget-usd {max_budget_usd} {STREAM_FLAGS} \\\n"
         f'  --allowedTools "{JUDGE_TOOLS}" --tools "{JUDGE_TOOLS}" --restricted --strict-mcp-config \\\n'
-        f"  --add-dir {EVIDENCE_DIR} > claude.json 2> claude.err"
+        f"  --add-dir {EVIDENCE_DIR} > {TRANSCRIPT_FILE} 2> claude.err\n" + keep_result("claude.json")
     )
 
 
