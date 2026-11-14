@@ -747,16 +747,18 @@ def test_the_yaml_the_page_writes_is_what_the_service_reads() -> None:
     assert load_prep_text(prep_text).records == [text for text in AWKWARD if text]
 
 
-def test_a_datasets_page_carries_every_address_of_its_catalog_record() -> None:
-    """Under the name: the dataset's own page, its DOI, each paper, the download, the code, the record and its pull
-    request in the catalog repository. The Links card lists the rest once. A record is untrusted: only an http(s)
-    address is a link, the row leaves any other out, and the card shows it as text."""
+def test_a_datasets_page_lists_every_address_of_its_catalog_record_in_its_links_card() -> None:
+    """Under the name stand only the links to what the workflows made (the issue, the saved crops). The Links card
+    has every address of the catalog record: the dataset's own page, its DOI, each paper, the download, the code,
+    the record and its pull request in the catalog repository, then the longer lists, each address once. A record
+    is untrusted: only an http(s) address is a link, and any other is shown as text."""
     record = {
         "landing_url": "https://zenodo.org/records/1",
         "doi": "10.5281/zenodo.1",
         "publications": [
             {"title": "First <b>paper</b>", "doi": "10.1/a", "url": "https://journal.example/a"},
-            {"title": "Second paper", "doi": "10.1/b", "url": None},
+            {"title": None, "doi": "10.1/b", "url": None},
+            {"title": "No address"},
         ],
         "data": {"download_url": "s3://bucket/data", "download_method": "aws-cli", "access": "open"},
         "ml": {"baseline_code_url": "javascript:alert(1)"},
@@ -767,44 +769,59 @@ def test_a_datasets_page_carries_every_address_of_its_catalog_record() -> None:
         },
     }
     detail = {
-        "row": {"id": "rec 1", "in_catalog": True, "state": "unprepared"},
+        "row": {"id": "rec 1", "in_catalog": True, "state": "prepared", "issue": 9},
         "record": record,
+        "dataset": {"folder": "rec 1"},
         "path": "datasets/2D/confocal/rec 1.yaml",
         "ref": "a" * 40,
         "requests": [],
-        "subject": {},
     }
     row, links, bare = run_js(
         """
         globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => "{}" });
-        S.meta = { catalog_repo: "o/catalog", datasets_repo: "o/data", roots: {} };
+        S.meta = { catalog_repo: "o/catalog", datasets_repo: "o/data", roots: { storage_root: "https://files.example/s" } };
         const titled = cards => cards.find(card => card.kids[0] && textOf(card.kids[0]) === "Links");
         const [links, ...cards] = datasetCards(input.detail);
-        const anchors = links.kids.map(a => [textOf(a).trim(), a.attrs.href, a.attrs.title || ""]);
         const more = titled(cards).kids.at(-1).kids;  // the card's dl: dt, dd, dt, dd, …
-        const listed = more.map(node => node.tag === "dt" ? textOf(node) : node.kids[0].kids.map(line => html(line.kids[0])));
-        const unlinked = datasetCards({ ...input.detail, record: { landing_url: "x" }, path: null });
-        print([anchors, listed, [unlinked[0].kids.length, !!titled(unlinked.slice(1))]]);
+        const listed = more.map(node => node.tag === "dt" ? textOf(node) : node.kids[0].kids.map(line => line.kids.map(html).join("")));
+        const unlinked = datasetCards({ row: { id: "x" }, record: { title: "x" }, path: null, requests: [] });
+        print([html(links), listed, [unlinked[0].kids.length, !!titled(unlinked.slice(1))]]);
         """,
         {"api.js": "S", "datasets.js": "datasetCards"},
         {"detail": detail},
     )
-    assert [text for text, _, _ in row] == [
-        "dataset page", "doi 10.5281/zenodo.1", "paper 1", "paper 2", "catalog record", "catalog PR"
-    ]  # fmt: skip
-    hrefs = {text: href for text, href, _ in row}
-    assert hrefs["dataset page"] == "https://zenodo.org/records/1"
-    assert (hrefs["paper 1"], hrefs["paper 2"]) == ("https://journal.example/a", "https://doi.org/10.1/b")
-    assert hrefs["catalog record"] == f"https://github.com/o/catalog/blob/{'a' * 40}/datasets/2D/confocal/rec%201.yaml"
-    assert hrefs["catalog PR"] == "https://github.com/o/catalog/pulls?q=is%3Apr%20head%3Aclaude%2Fdataset%2Frec%201"
-    assert row[2][2] == "First <b>paper</b>"  # a title is a tooltip's text
-    # the card: what the row could not link, then each further address once, in the record's order
-    link_to = '<a href="{0}" target="_blank" rel="noopener">{0}</a>'.format
+    # the row: the issue and the saved crops, and no address of the record
+    assert "https://github.com/o/data/issues/9" in row and "saved crops" in row
+    assert "zenodo" not in row and "o/catalog" not in row
+
+    def link_to(href: str, text: str = "", title: str = "") -> str:
+        mark = "" if "github.com" not in href else row[row.index("<svg") : row.index("</svg>") + 6] + " "
+        said = f' title="{title}"' if title else ""
+        return f'<a href="{href}" target="_blank" rel="noopener"{said}>{mark}{text or href}</a>'
+
+    catalog = "https://github.com/o/catalog"
     assert links == [
-        "download", ["s3://bucket/data"],
+        "dataset page", [link_to("https://zenodo.org/records/1")],
+        "doi", [link_to("https://doi.org/10.5281/zenodo.1", "10.5281/zenodo.1")],
+        "paper", [
+            link_to("https://journal.example/a", "First &lt;b>paper&lt;/b>"),  # a title is text
+            link_to("https://doi.org/10.1/b"),
+        ],
+        "download", ["s3://bucket/data · aws-cli · open"],  # no address a browser opens: text
+        "code", ["javascript:alert(1)"],
+        "catalog record", [
+            link_to(f"{catalog}/blob/{'a' * 40}/datasets/2D/confocal/rec%201.yaml", "datasets/2D/confocal/rec 1.yaml")
+        ],
+        "catalog PR", [
+            link_to(
+                f"{catalog}/pulls?q=is%3Apr%20head%3Aclaude%2Fdataset%2Frec%201",
+                "pull requests from claude/dataset/rec 1",
+                "the pull request that brought this record into the catalog: the ones opened from its branch",
+            )
+        ],
         "sample files", [link_to("https://zenodo.org/api/records/1/files/a.tif/content")],
-        "evidence", [link_to("https://zenodo.org/api/records/1")],
+        "evidence", [link_to("https://zenodo.org/api/records/1")],  # the dataset's page is not listed again
         "inspected", ["ftp://old.example/x"],
     ]  # fmt: skip
-    assert "javascript:" not in json.dumps([row, links])  # the code address is no link, and is listed nowhere
-    assert bare == [0, False]  # a record with no address a browser can open: an empty row, and no card
+    assert 'href="javascript:' not in json.dumps(links)
+    assert bare == [0, False]  # a record with no address and no place in the catalog: an empty row, and no card

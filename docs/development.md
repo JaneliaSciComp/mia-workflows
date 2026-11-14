@@ -794,21 +794,22 @@ sort. Then `issue` (a GitHub mark linking the issue; empty without one), then `a
 alone in a table, the mark and `#<issue>` on the subject's own page, with a tooltip saying that the issue is a
 copy of the timeline. No link to GitHub is spelled out in words.
 
-**A subject's page says where it stands with its lifecycle.** Under the name comes one row with every link (a
-dataset's own, its GitHub issue, its workflow in Temporal, its round's crops), then the line of stages; the step a
+**A subject's page says where it stands with its lifecycle.** Under the name comes one row with the links to what the
+workflows made (its GitHub issue, its workflow in Temporal, its round's crops), then the line of stages; the step a
 round is working at is marked (`subject.status === "working"`). There is no status word on the page or in a
 table: a table shows the stage as a pill, and the buttons say whose turn it is.
 
 **A button with more to enter ends in an ellipsis.** *Reject…* opens a dialog for the feedback and sends nothing
 until some is typed; the dialog hangs off the body, so a redraw of the view behind it keeps what was typed.
 
-**A dataset's page carries every address of its catalog record.** The row under the name has the ones a person
-opens first: the dataset's own page (`landing_url`), its DOI, each paper (`publications`), the download
-(`data.download_url`), baseline code, the record in the catalog repository, and the catalog PR. The Links card
-lists the rest (sample files, evidence, inspected addresses), each address once. Only an `http(s)` address is a
-link: the row leaves any other out, and the card shows it as text. The catalog PR is a search for the pull
-requests opened from the record's branch (`claude/dataset/<id>`, the catalog agents' convention); a record that
-came into the catalog another way finds none.
+**A dataset's page lists every address of its catalog record in its Links card.** The row under the name has only
+what the workflows made: the GitHub issue, the workflow in Temporal, the round's crops and the saved crops. The
+Links card has the dataset's own page (`landing_url`), its DOI, each paper (`publications`), the download
+(`data.download_url`), baseline code, the record in the catalog repository and the catalog PR, then the sample
+files, evidence and inspected addresses, each address once. Only an `http(s)` address is a link; any other is
+shown as text. The catalog PR is a search for the pull requests opened from the record's branch
+(`claude/dataset/<id>`, the catalog agents' convention); a record that came into the catalog another way finds
+none.
 
 With an empty registry the views say so ("No catalog synced; run `mia-buffers catalog sync`.").
 

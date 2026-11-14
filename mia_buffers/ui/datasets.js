@@ -226,66 +226,75 @@ export function datasetCards(d) {
         .map(axis => `${axis} ${imaging.voxel_size_nm[axis]}`)
         .join(" · ")
     : "";
-  // Every address the catalog record carries. The row under the name has the ones a person opens first; the
-  // Links card lists the rest, each address once. A record is untrusted: `link` makes a link of an http(s)
-  // address only, so the row leaves any other out and the card shows it as text.
-  const seen = new Set();
-  const once = url => url && !seen.has(url) && seen.add(url);
-  const rowLink = (url, text, title) => {
-    const made = link(url, text, title);
-    if (made === text) return null;
-    seen.add(url);
-    return made;
-  };
-  const papers = [].concat(rec.publications ?? []).filter(paper => paper?.url || paper?.doi);
+  // Under the name stand the links to what the workflows made of the dataset: its issue and its saved crops (the
+  // subject's page adds its workflow and its round's crops). Every address of the catalog record is in the Links
+  // card. A record is untrusted: `link` makes a link of an http(s) address only, and any other is shown as text.
   const links = el(
     "div",
     { class: "links" },
-    rowLink(rec.landing_url, "dataset page", "the dataset's own page, as its catalog record names it"),
-    rec.doi ? rowLink(`https://doi.org/${rec.doi}`, `doi ${rec.doi}`) : null,
-    ...papers.map((paper, n) =>
-      rowLink(
-        paper.url || `https://doi.org/${paper.doi}`,
-        papers.length > 1 ? `paper ${n + 1}` : "paper",
-        paper.title || "the publication the catalog record names",
-      ),
-    ),
-    rowLink(
-      files.download_url,
-      "download",
-      ["where the catalog record says the data is downloaded", files.download_method, files.access]
-        .filter(Boolean)
-        .join(" · "),
-    ),
-    rowLink(rec.ml?.baseline_code_url, "code", "the baseline code the catalog record names"),
-    d.path && meta.catalog_repo
-      ? link(
-          `https://github.com/${meta.catalog_repo}/blob/${d.ref}/${d.path.split("/").map(encodeURIComponent).join("/")}`,
-          "catalog record",
-          "this dataset's record in the catalog repository on GitHub",
-        )
-      : null,
-    // ponytail: a search, not the pull request itself. The catalog's agents open one per record from the branch
-    // claude/dataset/<id>; a record that came in another way finds none. The upgrade is the PR's number, read
-    // from the merges of the catalog mirror at catalog sync.
-    d.path && meta.catalog_repo
-      ? link(
-          `https://github.com/${meta.catalog_repo}/pulls?q=${encodeURIComponent(`is:pr head:claude/dataset/${row.id}`)}`,
-          "catalog PR",
-          "the pull request that brought this record into the catalog: the ones opened from its branch, claude/dataset/<id>",
-        )
-      : null,
     !d.subject ? ghIcon(meta.datasets_repo, row.issue, true) || null : null,
     ds.folder && roots.storage_root ? el("span", {}, "saved crops ", folderLink(roots.storage_root, ds.folder)) : null,
   );
-  const more = [
-    ["download", [files.download_url]],
-    ["sample files", rec.technical?.sample?.urls],
-    ["evidence", rec.provenance?.evidence_urls],
-    ["inspected", rec.technical?.inspected_urls],
-  ]
-    .map(([kind, urls]) => [kind, [].concat(urls ?? []).filter(once)])
-    .filter(([, urls]) => urls.length);
+  const seen = new Set();
+  const once = url => url && !seen.has(url) && seen.add(url);
+  // an address with a row of its own
+  const named = (url, text = String(url)) => {
+    seen.add(url);
+    return link(url, text);
+  };
+  const listed = urls =>
+    []
+      .concat(urls ?? [])
+      .filter(once)
+      .map(url => link(url, String(url))); // each address once
+  const inCatalog = d.path && meta.catalog_repo ? `https://github.com/${meta.catalog_repo}` : "";
+  const addresses = [
+    ["dataset page", rec.landing_url ? [named(rec.landing_url)] : []],
+    ["doi", rec.doi ? [named(`https://doi.org/${rec.doi}`, String(rec.doi))] : []],
+    [
+      "paper",
+      [].concat(rec.publications ?? []).flatMap(paper => {
+        const url = paper?.url || (paper?.doi ? `https://doi.org/${paper.doi}` : "");
+        return url ? [named(url, String(paper.title || url))] : [];
+      }),
+    ],
+    [
+      "download",
+      files.download_url
+        ? [
+            [
+              named(files.download_url),
+              ...[files.download_method, files.access].filter(Boolean).map(word => ` · ${word}`),
+            ],
+          ]
+        : [],
+    ],
+    ["code", rec.ml?.baseline_code_url ? [named(rec.ml.baseline_code_url)] : []],
+    [
+      "catalog record",
+      inCatalog
+        ? [link(`${inCatalog}/blob/${d.ref}/${d.path.split("/").map(encodeURIComponent).join("/")}`, d.path)]
+        : [],
+    ],
+    // ponytail: a search, not the pull request itself. The catalog's agents open one per record from the branch
+    // claude/dataset/<id>; a record that came in another way finds none. The upgrade is the PR's number, read
+    // from the merges of the catalog mirror at catalog sync.
+    [
+      "catalog PR",
+      inCatalog
+        ? [
+            link(
+              `${inCatalog}/pulls?q=${encodeURIComponent(`is:pr head:claude/dataset/${row.id}`)}`,
+              `pull requests from claude/dataset/${row.id}`,
+              "the pull request that brought this record into the catalog: the ones opened from its branch",
+            ),
+          ]
+        : [],
+    ],
+    ["sample files", listed(rec.technical?.sample?.urls)],
+    ["evidence", listed(rec.provenance?.evidence_urls)],
+    ["inspected", listed(rec.technical?.inspected_urls)],
+  ].filter(([, lines]) => lines.length);
   const cards = [links];
   if (!row.in_catalog)
     cards.push(
@@ -322,13 +331,16 @@ export function datasetCards(d) {
         ]),
       ),
     );
-  if (more.length)
+  if (addresses.length)
     cards.push(
       card(
         "Links",
-        "The other addresses the catalog record carries; one that stands in the row under the name is not repeated.",
+        "Every address the catalog record carries, and the record's place in the catalog repository.",
         kv(
-          more.map(([kind, urls]) => [kind, el("div", {}, ...urls.map(url => el("div", {}, link(url, String(url)))))]),
+          addresses.map(([kind, lines]) => [
+            kind,
+            el("div", {}, ...lines.map(line => el("div", {}, ...[].concat(line)))),
+          ]),
         ),
       ),
     );
