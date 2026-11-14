@@ -153,15 +153,15 @@ is not among the things it removes.
 There is no card or tab that lists jobs. A link to a job's record sits where the page shows what that job did:
 
 - **A stage of the timeline (§3.6) shows the jobs that ran under it:** the jobs of the stage entry's round that
-  were submitted from that entry until the round's next stage entry. `Stage: data:matching` so carries the match agent's job,
-  a testing or cropping entry its smoke, crop and verify jobs, a debugging entry the debugging agent's, a
-  buffer round's staging entry its stage jobs. Each is a short link beside the entry's folders (name, state,
-  how long), folded when an entry has many; the folder link to the workspace stays. The page works this out
-  from the entry's `round` and `at` and the records' `submitted_at`: no entry stores a job, no workflow or
+  were submitted from that entry until the round's next stage entry. `Stage: data:matching` so carries the match
+  agent's job, a testing or cropping entry its smoke, crop and verify jobs, a debugging entry the debugging
+  agent's, a buffer round's staging entry its stage jobs. Each is a short link beside the entry's folders (name,
+  state, how long), folded when an entry has many; the folder link to the workspace stays. The page works this
+  out from the entry's `round` and `at` and the records' `submitted_at`: no entry stores a job, no workflow or
   activity hears of it, and it holds for every kind of subject and for rounds of any shape. *(My call. A stage's
   entry is written and awaited before its job is submitted, so the order is the workflow's; ponytail: it
-  compares buffer-api's clock with the worker's, so two hosts a few seconds apart can put a job one entry
-  early. The upgrade is the record carrying the stage.)*
+  compares buffer-api's clock with the worker's, so two hosts a few seconds apart can put a job one entry early.
+  The upgrade is the record carrying the stage.)*
 - **What is rendered from a job's output links to that job.** The crop judge's comment ends with a link to the
   judge's record. `read_judge` renders that comment and knows both the workspace and the page's URL, so no
   workflow hears of it, and the copy on GitHub carries the same link. *(My call: the link is in the comment's
