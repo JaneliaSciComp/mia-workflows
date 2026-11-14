@@ -46,6 +46,10 @@ def test_a_buffers_service_learns_where_the_datasets_pipeline_runs():
     cfg = service_config(manifest, "buffers")
     assert cfg["datasets_pipeline"] == {"namespace": "data-ns", "task_queue": "mia-data"}  # the queue is the name
     assert "datasets_pipeline" not in service_config(manifest, "mia-data")
+    # every service's queue (its name) and namespace, for /health: a block's own, else the shared section's
+    assert cfg["workers"] == {"mia-data": "data-ns", "snippets": "default", "buffers": "default"}
+    bare = {"services": {"buffers": {"app": "mia-buffers"}, "dev": {"app": "autodev"}}}  # no temporal section at all
+    assert service_config(bare, "buffers")["workers"] == {"buffers": "mia-buffers", "dev": "default"}
     del manifest["services"]["mia-data"]
     assert "datasets_pipeline" not in service_config(manifest, "buffers")  # no such service: the model's default
 
@@ -119,6 +123,11 @@ def test_service_token_file_is_absolute(tmp_path):
 
     cfg = make_cfg(tmp_path, service={"url": "http://svc.example.org:8765", "token_file": "~/x"})
     assert cfg.service.token_file.is_absolute()
+    # every application reads the token through the shared model: `~` is expanded for all of them (autodev too)
+    from mia_core.config import ServiceCfg
+
+    shared = ServiceCfg(url="http://svc.example.org:8765", token_file="~/.config/mia/service-token")
+    assert shared.token_file == Path.home() / ".config/mia/service-token"
 
 
 def test_service_url_needs_an_explicit_port():

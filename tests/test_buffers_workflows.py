@@ -2035,7 +2035,7 @@ async def test_prep_a_failed_nudge_settles_that_record_alone(env):
     assert [(o.record, o.outcome) for o in outcomes] == [("a", "nudged"), ("b", "unknown"), ("c", "done-unpublished")]
     assert "unclear modality" in outcomes[1].note and m.of("prep_status") == [(["a"],)]
     detail = m.of("set_prep_stage")[-1][1]
-    assert "`b` (unknown: ValueError: record b: unclear modality)" in detail and "`c` (done-unpublished" in detail
+    assert "`b`, `c`" in detail and "unclear modality" not in detail  # the outcomes table has each one's reason
     assert "`a`" not in detail and state.settled == {"a": "prepared", "b": "needs-human", "c": "needs-human"}
 
 

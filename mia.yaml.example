@@ -45,7 +45,7 @@ github:
 # fs is fine. `local_root` must be host-local disk (refused on a network fs): locks/ and buffer-api's service/
 # state. The other roots are a path, or {path, url} with the Fileglancer (or other browser) URL of that folder, so
 # timeline entries can link the round's workspace and the dataset's crops. `work_root`: job workspaces and
-# snapshots, inside the csub policy's allowed_roots. `storage_root`: published crops; mia-buffers reads each
+# snapshots, inside the csub policy's allowed_roots. `storage_root`: saved crops; mia-buffers reads each
 # dataset's binding.yaml there. `raw_root`: the shared raw cache, raw_root/<record id>/, where humans drop files
 # under incoming/; defaults to <work_root>/_cache. `staged_root`: one NGFF pyramid per volume,
 # staged_root/<levels key>/<record id>/.
@@ -73,6 +73,8 @@ harness:
 # `stage_bytes` caps one staged artifact's uncompressed planned bytes and defaults to job_bytes. The fetch_* values
 # bound one fetch job and how many fetch attempts a dataset gets. Also here, outside the per-job rule:
 # `agent_max_budget_usd` (one match-agent run, default 5) and `max_pr_revisions` (one round, default 5).
+# `debug_cycles` (default 1): how often a failed dataset round is handed to a debugging agent and run again before
+# it stops as `failed`; 0 turns that off. `debug_wait_min` (default 5): the wait before the debugging agent starts.
 limits:
   job_bytes: 5e9
   # stage_bytes: 2e9
@@ -191,9 +193,9 @@ services:
       base_branch: main
       protected_paths: [".github/"]
 
-  # mia-data: dataset to published crops. `data_repo` receives one issue per dataset, a copy of its timeline that the
+  # mia-data: dataset to saved crops. `data_repo` receives one issue per dataset, a copy of its timeline that the
   # system writes and nothing reads (datasets are started and steered from the buffers page). `crops`: the round's set
-  # (`per_round`, reviewed and, approved, published), the hand-run `test-pr` command's `test_per_round`, and how
+  # (`per_round`, reviewed and, approved, saved), the hand-run `test-pr` command's `test_per_round`, and how
   # many crops per plane and per file. `gallery.branch` receives the crop galleries. `agent` is the match agent:
   # its walltime is limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not
   # accepted here. `evaluate` is a switch for the evaluate job after cropping; nothing runs behind it yet.

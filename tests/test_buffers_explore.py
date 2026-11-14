@@ -131,6 +131,14 @@ def test_the_plan_summary_counts_over_every_row() -> None:
     assert summary["weight_by_modality"] == [{"label": "TEM", "value": 0.75}, {"label": "confocal", "value": 0.25}]
     assert [(row["id"], row["weight"]) for row in summary["heaviest"]] == [("a", 0.75), ("b", 0.25)]
     assert summary["to_prepare"] == ["c"]
+    # what a request could start is read from the stage: a dataset in a round or at review is not offered, whatever
+    # its state says; one that stopped is
+    for stage, offered in (("review", []), ("testing", []), ("needs-human", ["c"]), ("cancelled", ["c"])):
+        waiting = plan_view(PLAN, {**DATASETS, "c": {"stage": stage}}, "p256-l1-2", ALL)["summary"]
+        assert waiting["to_prepare"] == offered, stage
+    # nor is one whose catalog record cannot be run
+    gapped = plan_view(PLAN, {**DATASETS, "c": {"gaps": ["it names no data URL"]}}, "p256-l1-2", ALL)["summary"]
+    assert gapped["to_prepare"] == []
 
 
 def test_the_plan_rows_are_joined_sorted_and_cut() -> None:

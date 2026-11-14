@@ -403,7 +403,7 @@ async def test_nudge_dataset_sends_a_go_through_the_registry_once(acts, gateway)
     assert (subject["number"], subject["issue"]) == (info.number, None)  # no issue is opened or labelled
     assert gh.created == [] and gh.issues == {}
     ((kind, number, signal, event),) = gateway.sent
-    assert (kind, number, signal, event.actor) == ("dataset", info.number, "go", "buffer:7")
+    assert (kind, number, signal, event.actor) == ("dataset", info.number, "restart", "buffer:7")
     again = await acts.nudge_dataset(ROUND, U937)  # a retried activity: the same key, the same action, no second go
     assert again.number == info.number and len(gateway.sent) == 1
     assert len(acts.registry.timeline("dataset", info.number)["actions"]) == 1
@@ -432,7 +432,7 @@ async def test_nudge_dataset_that_stopped_gets_a_go_again(acts, gateway, stage):
     acts.registry.adopt_subject("dataset", 5, U937, stage=stage)
     info = await acts.nudge_dataset(ROUND, U937)
     assert (info.number, info.stage, info.nudged) == (5, stage, True)
-    assert [(sent[1], sent[2]) for sent in gateway.sent] == [(5, "go")]
+    assert [(sent[1], sent[2]) for sent in gateway.sent] == [(5, "restart")]
 
 
 async def test_nudge_for_a_record_buffer_api_has_not_seen_syncs_the_rounds_catalog_first(acts, gateway):
@@ -1415,7 +1415,7 @@ async def test_publish_refusal_survives_the_error_caps(acts, server):
     out = acts._publish(ROUND, U937, report, building, final)
     assert (
         out["ok"] is False
-        and out["errors"][0] == f"stage.json artifact id {'f' * 64!r} is not the expected {final.name!r}"
+        and out["errors"][0] == f"stage.json artifact id {'f' * 63 + '…'!r} is not the expected {final.name!r}"
     )
     assert texts(out["errors"])[0] == out["errors"][0]
     missing = acts._publish(ROUND, U937, {"ok": True}, building, final)  # no artifact block at all
@@ -1742,6 +1742,19 @@ async def test_prep_nudge_maps_where_the_dataset_stands(acts, gateway):
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "needs-human", 6)
 
 
+async def test_prep_nudge_sends_no_go_for_a_record_that_cannot_be_run(acts, gateway, monkeypatch):
+    """buffer-api would refuse the go: the request hears why at once and settles the dataset as needing a human."""
+    acts.registry.put_dataset(U937, state="in-progress")
+    prep_issue(acts, records=[U937])
+    await acts.prep_admit(8, "21")
+    monkeypatch.setattr(
+        acts, "_record", lambda round_id, record: {"id": record, "landing_url": "https://x.example.org"}
+    )
+    with pytest.raises(ApplicationError, match="the record cannot be run: it names no data URL") as refused:
+        await acts.prep_nudge(PREP_ROUND, U937)
+    assert refused.value.non_retryable and not gateway.sent
+
+
 async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_too(acts, gateway):
     """Without `again` a prepared dataset settles at once (the fixture's registry knows every record as prepared).
     With it the dataset gets a new round, and its row says in-progress so that the request follows that round."""
@@ -1753,7 +1766,7 @@ async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_to
     acts.registry.adopt_subject("dataset", 6, BCSS, stage="needs-human")
     assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "nudged", 5)
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
-    assert [sent[:3] for sent in gateway.sent] == [("dataset", 5, "go"), ("dataset", 6, "go")]
+    assert [sent[:3] for sent in gateway.sent] == [("dataset", 5, "restart"), ("dataset", 6, "restart")]
     assert [acts.registry.dataset(record)["state"] for record in (U937, BCSS)] == ["in-progress", "in-progress"]
     acts.registry.adopt_subject("dataset", 5, U937, stage="review")  # a round is under way: it is left to it
     assert (await acts.prep_nudge(PREP_ROUND, U937)).outcome == "in-progress" and len(gateway.sent) == 2
@@ -1766,6 +1779,8 @@ async def test_prep_status_reads_the_registry(acts):
         BCSS: "prepared",
         "never-seen": "unprepared",
     }
+    acts.registry.put_dataset(U937, state="needs-human", data_stage="review")  # waits for a verdict: still followed
+    assert await acts.prep_status([U937]) == {U937: "in-progress"}
     acts.registry = Registry("http://127.0.0.1:9", "t")  # nothing listens: the outage raises
     with pytest.raises(RegistryError):
         await acts.prep_status([U937])

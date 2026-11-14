@@ -35,6 +35,7 @@ from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
+from mia_data.binding import record_gaps
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
@@ -54,7 +55,7 @@ from .explore import (
 )
 from .hosts import HostCheck, Needed
 from .jobspec import levels_key
-from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
+from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger, head_of
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
@@ -84,7 +85,8 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
 # kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
 SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
-OFF_LINE = ("needs-human", "cancelled")  # where a round can end from any step: not steps of a lifecycle themselves
+# where a round can go from any step: not steps of a lifecycle themselves
+OFF_LINE = ("debugging", "failed", "blocked", "needs-human", "cancelled")
 # kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
 LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
 NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
@@ -304,6 +306,7 @@ class AssessmentBody(_Strict):
     model: str = ""
     prompt_version: str = ""
     coverage: dict | None = None
+    action: int | None = None
 
 
 class ReserveBody(_Strict):
@@ -392,14 +395,18 @@ def _asset_haystack(row: dict) -> tuple:
 ROUND_REF_RE = re.compile(r"^i(\d+)-e")  # a round id starts a crop set's ref: i<subject number>-e<event>
 
 
-def _assessed_record(subject: dict, numbers: dict[int, str], artifacts: dict[str, str]) -> str | None:
-    """The dataset a decision is about: a staged artifact's record, or the dataset of the round a crop set came
-    from. A snippet PR's head (`pr_head`) belongs to no one dataset."""
+def _assessed_record(
+    subject: dict, numbers: dict[int, str], artifacts: dict[str, str], heads: dict[str, str]
+) -> str | None:
+    """The dataset a decision is about: a staged artifact's record, the dataset of the round a crop set came from,
+    or, for a snippet PR's head, the dataset whose crops were made from that head (`heads`: head -> record)."""
     ref = str(subject.get("ref") or "")
     if subject.get("kind") == "artifact":
         return artifacts.get(ref.rsplit("/", 1)[-1])
     if subject.get("kind") == "crop_set" and (found := ROUND_REF_RE.match(ref)):
         return numbers.get(int(found.group(1)))
+    if subject.get("kind") == "pr_head":
+        return heads.get(head_of(subject) or "")
     return None
 
 
@@ -463,6 +470,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
     ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
+    ("GET", re.compile(r"^/gallery/i(\d+)-e(\d+)/([0-9a-f]{40})/([^/]+)/(raw|overlay)\.png$"), "gallery_png", "read"),
     ("POST", re.compile(r"^/plan$"), "plan", "read"),  # a POST only to carry the spec text; it writes nothing
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
     ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
@@ -518,6 +526,7 @@ class BufferService:
         *,
         token: str | None = None,
         storage_root: Path | None = None,
+        work_root: Path | None = None,
         raw_root: Path | None = None,
         staged_root: Path | None = None,
         locks: LockDir | None = None,
@@ -534,6 +543,7 @@ class BufferService:
         self.token = token  # None disables the worker check (tests, a dev service)
         self.stale_s = stale_s
         self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
+        self.work_root = work_root  # the rounds' job workspaces, for a round's crops before it publishes; None: none
         self.raw_root, self.staged_root = raw_root, staged_root  # the assets sync scans these; None skips one
         self.locks = locks  # the workers' lock files, shown read-only; None shows none
         self.archive_dir = archive_dir  # a retire writes the buffer's draws here; None keeps them (a dev service)
@@ -853,12 +863,22 @@ class BufferService:
         the action that was sent to its workflow and that the workflow has not answered yet. Until it does the
         stage is still the old one, and the page must not offer that stage's buttons as if nothing was clicked."""
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
+        gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
+        if gaps:  # the record cannot be run: no Start until a synced catalog holds one that can
+            actions = actions - {"go"}
         asked = None
         if (held := self._asked.get((row["kind"], row["number"]))) is not None:
             action, since = held
             if (wait_s := ASKED_WAIT_S - (time.monotonic() - since)) > 0:
                 asked = {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
-        return {**row, "status": status, "actions": sorted(actions), "asked": asked}
+        return {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps}
+
+    def _gaps(self, record: str) -> list[str]:
+        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for a round to run
+        (`record_gaps`); none for a record no synced catalog holds. Read from the catalog on every call, so a
+        record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
+        found = self._catalog_record(record)
+        return record_gaps(found) if found is not None else []
 
     def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
         if kind not in SUBJECT_RULES:
@@ -892,7 +912,8 @@ class BufferService:
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
         """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
         for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
-        last day that did not reach Temporal (each with its subject, for the Retry)."""
+        last day that did not reach Temporal (each with its subject, for the Retry). `kind` narrows the list to
+        one kind of subject; `kinds` counts every kind's share of the whole list."""
         views = [self._subject_view(row) for row in self.ledger.find_subjects()]
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
         for index, view in enumerate(views):
@@ -907,11 +928,16 @@ class BufferService:
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
             failed.append({**action, "subject": self._subject_view(found[0]) if found else None})
         needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+        kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
+        if (kind := query.get("kind")) is not None:
+            if kind not in SUBJECT_RULES:
+                raise HttpError(422, f"kind must be one of {list(SUBJECT_RULES)}, got {kind!r}")
+            needs = [view for view in needs if view["kind"] == kind]
         page = self._page_of(query, SUBJECT_SORTS)
         if page is None:
-            return 200, {"needs": needs, "failed": failed}, {}
+            return 200, {"needs": needs, "failed": failed, "kinds": kinds}, {}
         rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
-        return 200, {"needs": rows, "total": total, "failed": failed}, {}
+        return 200, {"needs": rows, "total": total, "failed": failed, "kinds": kinds}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
@@ -1071,6 +1097,8 @@ class BufferService:
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
         actor = self._actor(headers, parsed)
+        if parsed.action == "go" and (gaps := self._gaps(record)):  # before a subject is created for it
+            raise HttpError(409, f"the record cannot be run: {'; '.join(gaps)}")
         subject = self.ledger.subject("dataset", record)
         if subject is None:
             if parsed.action != "go":
@@ -1333,7 +1361,8 @@ class BufferService:
                 reason = f"stopped from the page (action {action['id']})"
                 running = self.dispatcher.terminate(kind, number, reason)
             else:
-                self.dispatcher.send(kind, number, signal, event)
+                # a dataset's go is its workflow's `restart`: the round starts in a new run, on today's code
+                self.dispatcher.send(kind, number, "restart" if (kind, signal) == ("dataset", "go") else signal, event)
         except DispatchError as error:
             self._asked.pop((kind, number), None)  # nothing was asked of any workflow
             failed = self.ledger.settle_action(action["id"], "failed", str(error))
@@ -1461,10 +1490,18 @@ class BufferService:
             for asset in self.ledger.assets("staged")
             if asset["data"]
         }
+        heads: dict[str, str] = {}  # a snippet PR head -> the dataset whose crop set was made from it
+        for row in rows if gate is None else self.ledger.assessments(limit=100_000):
+            subject = row.get("subject") or {}
+            if subject.get("kind") == "crop_set" and (head := head_of(subject)):
+                if record := _assessed_record(subject, numbers, artifacts, {}):
+                    heads.setdefault(head, record)
+        approved = {row["assessment"]: row["id"] for row in self.ledger.datasets() if row.get("assessment")}
         rejected: set[tuple] = set()  # subjects with a reject among the rows seen so far, which are the newer ones
         for row in rows:
             subject = row.get("subject") or {}
-            if record := _assessed_record(subject, numbers, artifacts):
+            # an approve names its dataset on the dataset's row, whatever it is recorded on
+            if record := _assessed_record(subject, numbers, artifacts, heads) or approved.get(row.get("id")):
                 row["record"] = record
             about = (subject.get("kind"), subject.get("ref"))
             if row.get("verdict") == "approve" and about in rejected:
@@ -1474,6 +1511,10 @@ class BufferService:
         if "record" in query:
             rows = [row for row in rows if row.get("record") == query["record"]]
         found, total = paged(rows, page, {})
+        for row in found:  # what a person wrote with their verdict is on the action the assessment names
+            action = self.ledger.action(row["action"]) if row.get("action") is not None else None
+            if action and (note := action["payload"].get("note")):
+                row["note"] = note
         gates = [gate] if gate else list(GATES)
         agreement = {name: self.ledger.agreement(name) for name in gates}
         return 200, {"assessments": found, "total": total, "agreement": agreement}, {}
@@ -1539,6 +1580,31 @@ class BufferService:
         if data is None:
             raise HttpError(404, "no such crop")
         return 200, data, {"Content-Type": "image/png", "Cache-Control": "public, max-age=3600"}
+
+    def _gallery_png(
+        self, issue: str, event: str, sha: str, crop_id: str, name: str, *, query: dict[str, str], body: bytes
+    ) -> Response:
+        """A crop of a dataset round that has published nothing yet (one at review), from the round's workspace
+        under work_root: raw.png as its crop job at snippets commit `sha` wrote it, overlay.png as its verify job
+        drew it, each from the newest attempt that has the file. The page shows them in the round's timeline."""
+        if self.work_root is None:
+            raise HttpError(503, "the service has no work_root")
+        if not UI_NAME_RE.match(crop_id):
+            raise HttpError(404, "no such crop")
+        round_rel = f"issue-{int(issue)}/i{issue}-e{event}"
+        job, rel = (
+            ("crop", f"crops/{crop_id}/raw.png") if name == "raw" else ("verify", f"preview/{crop_id}/overlay.png")
+        )
+        attempts = sorted(
+            (self.work_root / round_rel).glob(f"{job}-{sha}-*"),
+            key=lambda path: (len(path.name), path.name),
+            reverse=True,
+        )
+        for workspace in attempts:  # job output is untrusted: no symlink, nothing outside its workspace, a size cap
+            data = None if workspace.is_symlink() else read_untrusted(workspace, rel, CROP_PNG_LIMIT, binary=True)
+            if data is not None:
+                return 200, data, {"Content-Type": "image/png", "Cache-Control": "public, max-age=3600"}
+        raise HttpError(404, "no such crop")
 
     def _list_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         return 200, {"datasets": self.ledger.datasets(query.get("state"))}, {}
@@ -1998,6 +2064,7 @@ def serve(cfg: Config) -> None:
         ledger,
         token=token,
         storage_root=cfg.paths.storage_root,
+        work_root=cfg.paths.work_root,
         raw_root=cfg.paths.raw_root,
         staged_root=cfg.paths.staged_root,
         locks=LockDir(cfg.paths.local_root / "locks"),

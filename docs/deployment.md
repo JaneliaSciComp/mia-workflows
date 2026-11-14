@@ -13,7 +13,7 @@ Temporal is only orchestration state and can live anywhere the workers can reach
 
 - **Shared filesystem, read-write, as the right uid.** The worker creates job workspaces under `work_root`, syncs a
   git mirror in `state_dir`, copies records into workspaces, reads job output back with `read_untrusted`, and
-  mia-data publishes into `storage_root`. All of it must be visible to compute nodes and owned by the account that
+  mia-data saves into `storage_root`. All of it must be visible to compute nodes and owned by the account that
   runs the LSF jobs.
 - **Claude credentials and the broker policy are the account's.** Jobs run `claude` with the broker account's
   credentials; `~/.config/csub/broker.toml`, `~/.csub` and the LSF project belong to that account.

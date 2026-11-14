@@ -96,8 +96,7 @@ def decide_all(all_facts: list[Facts], select: Select) -> list[Decision]:
         lambda f: (  # what mia-data will refuse at sourcing is out of the pool at planning
             None
             if f.folder
-            else f"no dataset folder for mia-data: modality {' '.join(f.modalities) or 'none'} / "
-            f"organism {' '.join(f.organisms) or 'none'} (one of each needed)"
+            else f"no dataset folder for mia-data: modality {' '.join(f.modalities) or 'none'} (one family needed)"
         ),
     ]
     decisions: list[Decision] = []

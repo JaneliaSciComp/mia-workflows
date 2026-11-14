@@ -36,37 +36,65 @@ STAGES = {
     "testing": ("fbca04", "mia-data: making the crops to review"),
     "review": ("1d76db", "mia-data: waiting for review"),
     "merging": ("1d76db", "mia-data: crops approved; autodev is merging the snippet PR"),
-    "done": ("5319e7", "mia-data: crops published"),
-    "needs-human": ("d93f0b", "mia-data: stopped, needs a human"),
+    "debugging": ("fbca04", "mia-data: a round failed; a debugging agent looks at it and runs it again"),
+    "done": ("5319e7", "mia-data: crops saved"),
+    "failed": ("d93f0b", "mia-data: a step failed; running it again may pass"),
+    "blocked": ("b60205", "mia-data: stopped until a person decides or changes something"),
+    "needs-human": ("d93f0b", "mia-data: stopped, with no word on whether it failed or is blocked"),
     "cancelled": ("cccccc", "mia-data: the round was cancelled"),
 }
 HUMAN_LABELS = {  # the actions a person takes
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
-    "approve": ("0e8a16", "Approve the crops under review: they are published (a snippet PR merges first)"),
+    "approve": (
+        "0e8a16",
+        "Approve the crops under review: they are saved to the dataset's folder (a snippet PR merges first)",
+    ),
     "reject": (
         "d93f0b",
         "Reject the crops under review: your feedback goes to the agent fixing the snippet",
     ),
     "revoke": (
         "b60205",
-        "Revoke this dataset's published crops: buffers that drew from it are degraded, nothing is deleted",
+        "Revoke this dataset's saved crops: buffers that drew from it are degraded, nothing is deleted",
     ),
 }
 STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done")
 # stage -> (status word, the actions it accepts); "working" means a round is in progress, and a round in progress
-# accepts only `cancel` (spec webapp-actions §5.1). buffer-api refuses any other action, the page offers only
+# accepts only `cancel` (spec webapp-actions §5.1). `debugging` is between two rounds, so it also takes the `go`
+# that runs the next one: the debugger's own, or a person's who does not want to wait for it. buffer-api refuses any other action, the page offers only
 # these. The workflow stays the code that carries a round out.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
     "matching": ("working", frozenset({"cancel"})),
     "developing": ("working", frozenset({"cancel"})),
     "testing": ("working", frozenset({"cancel"})),
-    "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),
+    "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),  # go: start over, the set is dropped
     "merging": ("working", frozenset({"cancel"})),
+    "debugging": ("working", frozenset({"go", "cancel"})),
     "done": ("done", frozenset({"go", "revoke"})),
+    "failed": ("stuck", frozenset({"go", "revoke"})),
+    "blocked": ("stuck", frozenset({"go", "revoke"})),
     "needs-human": ("stuck", frozenset({"go", "revoke"})),
     "cancelled": ("done", frozenset({"go", "revoke"})),
 }
+
+
+def round_open(stage: str | None) -> bool:
+    """Whether a dataset at `stage` has a round open: working, or waiting for its review. This is what code asks
+    (the keeper before it evicts a raw cache, the planner before it offers a dataset for preparation); a
+    dataset's state is the word a person reads."""
+    return STAGE_ACTIONS.get(stage or "", ("",))[0] in ("working", "waiting")
+
+
+def dataset_state(stage: str, saved: bool) -> str:
+    """The word a person reads for a dataset at `stage`: `in-progress` while a round works by itself, `prepared`
+    once a round ended `done` with its crops saved, `needs-human` whenever a person has to act (a review, a
+    round that failed, is blocked or was cancelled, a `done` round that saved nothing)."""
+    if STAGE_ACTIONS.get(stage, ("",))[0] == "working":
+        return "in-progress"
+    return "prepared" if stage == "done" and saved else "needs-human"
+
+
 EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),
 }
@@ -142,6 +170,8 @@ class LimitsCfg(BaseModel):
     agent_max_budget_usd: float = 5
     max_stage_attempts: int = 1
     max_pr_revisions: int = 5
+    debug_cycles: int = 1  # how often a failed round is debugged and run again before it stops as `failed`; 0 = never
+    debug_wait_min: int = 5  # how long a failed round waits before its debugging agent starts
     fetch_bytes: float = 50e9
     fetch_walltime_min: int = 480
     fetch_attempts: int = 4
@@ -207,10 +237,6 @@ class Config(BaseModel):
             for name, value in vars(section).items():
                 if isinstance(value, Path):
                     setattr(section, name, value.expanduser().resolve())
-        if self.service and self.service.token_file:
-            self.service.token_file = (
-                self.service.token_file.expanduser().absolute()
-            )  # not resolve(): follow no symlink
         for other in (paths.work_root, paths.storage_root):
             if paths.state_dir == other or paths.state_dir in other.parents or other in paths.state_dir.parents:
                 raise ValueError(f"paths.state_dir {paths.state_dir} overlaps {other}")

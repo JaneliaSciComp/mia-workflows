@@ -94,7 +94,7 @@ posting it to GitHub.
 **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
 `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there. buffer-api
 refuses any other action and the page offers only these; a round in progress accepts only `cancel` (and, for a
-buffer, what feeds it: `dropped`, and the force stop). A new stage or action goes into the table first.
+buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round). A new stage or action goes into the table first.
 
 **Every stage write is awaited.** `set_stage` writes the subject's stage, its timeline entry and the dataset's
 registry row, and the workflow waits for it: the registry's stage is what buffer-api checks an action against and
@@ -142,7 +142,9 @@ next job with "paused by the operator"; a buffer round met mid-sourcing leaves i
 
 **Approvals are assessments, authorization is a function.** Every human verdict is written to buffer-api's
 `assessments` table (`by: human:<who>`, gate `crops` for a crop set or PR head, `staged` for an artifact) before
-anything acts on it, and the action is allowed only when `mia_core.judge.policy.authorized()` says so over
+anything acts on it. A dataset verdict carries `action`, the id of the action it came from, and `/decisions` reads
+the note the person wrote from that action. The action is allowed only when
+`mia_core.judge.policy.authorized()` says so over
 everything written about that subject: `publish_crops` and the `/approve <head>` comment in mia-data, the
 `approved` event in mia-buffers (one assessment per staged artifact; a refused artifact's volumes are
 unregistered and its dataset fails, the buffer serves at its floor or goes needs-human). A staged pyramid is never
@@ -167,19 +169,19 @@ verdict on the same subject (`Ledger.agreement`); `mia judge eval <gate> <dir>` 
 set (`mia exec mia-data collect-judge-set <dir>` builds the crops set from human-reviewed rounds on disk).
 
 **Revocation deletes nothing and stops everything.** `revoke` on a dataset (the page's *Revoke*) is accepted once
-the dataset has published crops: the activity looks for `manifest.json` in the dataset folder, and a dataset that
-never published has the action refused. The `revoke_dataset` activity writes a `reject` assessment superseding the
+the dataset has saved crops: the activity looks for `manifest.json` in the dataset folder, and a dataset with
+none has the action refused. The `revoke_dataset` activity writes a `reject` assessment superseding the
 dataset's approve and one per staged artifact of the record, marks those artifact rows `quarantined`
 (`quarantined_at`, `quarantined_by`), flips the dataset row to `revoked` (`sync_datasets` never merges over it)
 and writes `revoked.json` beside the manifest last, so the folder is not prepared whatever else is on disk; the
-dataset ends in needs-human naming the artifacts and the buffers that drew from the record. From that moment
+dataset ends in `blocked` naming the artifacts and the buffers that drew from the record. From that moment
 buffer-api draws nothing from a quarantined volume and counts it out of `servable` (`Ledger.live_volumes`),
 whatever the buffer's workflow or the keeper have done yet. The keeper holds a quarantined asset for
 `autonomy.quarantine_days` after its references are gone and, for a ready or idle buffer whose status lists
 quarantined volumes, sends the `revoked` signal: the buffer unregisters those volumes, fails the dataset with the
 reason and serves on at its floor, or ends in needs-human below it (*Retire* stops it altogether). A board approve
 never writes over an artifact whose newest assessment is a reject: only a repair supersedes a revocation. A new
-`go` on the dataset whose publication succeeds removes `revoked.json`, writes a `policy:repair` approve on each
+`go` on the dataset that saves its crops removes `revoked.json`, writes a `policy:repair` approve on each
 quarantined artifact of the record and clears their quarantine marks, and the next stage write makes the row
 prepared again. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
 page's *Revoke the ticked*; records not in the buffer are ignored), rejects and quarantines those records'
@@ -208,9 +210,16 @@ them on deploy. The autodev bot opens PRs here too; review them like any other.
 buffer-api's ledger (`<local_root>/service/buffers.sqlite`) is the registry both pipelines share. It holds:
 
 - one row per **dataset**: state `in-progress`, `needs-human`, `prepared` or `revoked`, with the folder, binding
-  hash and crop count of a prepared one. mia-data writes it as its stages change (`mia_core.registry.Registry`);
-  `datasets sync` rebuilds the prepared rows from `storage_root`, never merges over a `revoked` row and reports it
-  as `revoked_kept`;
+  hash and crop count of its saved crops. The state is the word a person reads, and the stage decides it
+  (`mia_data.config.dataset_state`): `in-progress` while a round works by itself, `needs-human` whenever a person
+  has to act (`review`, `failed`, `blocked`, `cancelled`, or a `done` round whose folder has no binding with a matching
+  manifest, with the row's `reason` saying so), `prepared` after a `done` round with its crops saved. A new round
+  on a prepared dataset takes it out of `prepared` until that round ends `done`. Code that asks whether a round
+  is open reads the stage (`round_open`: the keeper before it evicts a raw cache, the list of datasets a
+  request could prepare), never the state; the planner's pool is the `prepared` rows. mia-data writes the row
+  as its stages change (`mia_core.registry.Registry`); `datasets sync` rebuilds the prepared rows from
+  `storage_root` for records whose last round ended `done` or that have none, gives the others the folder's
+  facts only, never merges over a `revoked` row and reports it as `revoked_kept`;
 - the **catalog** records of each synced commit;
 - the **assets** (raw caches and staged artifacts), the **buffers** with their volumes, events, boards, consumers
   and draws;
@@ -296,7 +305,7 @@ the reason.
 
 | subject | routes | actions |
 |---|---|---|
-| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
+| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*, at `review` *Restart*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
 | buffer spec (`#specs/<name>`) | `POST /specs`, `POST /specs/<name>/actions` | `go` (*Plan*), `approve` (*Run* at the plan, *Approve* at the board), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel`, `stop` |
 | preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go`, `cancel`, `stop` |
 
@@ -336,12 +345,16 @@ task there. An activity already in flight is left to answer (up to `CANCEL_PATIE
 lock it took or a reservation it opened is known to the code that undoes it. A task that is waiting (a job, a
 lock, quota, a drop, a verdict, a snippet PR) is cancelled at its wait. The job is killed first (`kill_job`),
 then its reservation is settled and its raw lock released: the one-writer rule holds until the job is dead. A
-job that cannot be killed ends the round in `needs-human` naming it, never in `cancelled`. A round that reached
+job that cannot be killed ends the round in `failed` (a dataset) or `needs-human` (a buffer, a request) naming
+it, never in `cancelled`. A round that reached
 its end while the cancel was on its way keeps its stage and the cancel is refused. Clean-up activities pass
 `cleanup=True`; anything a best-effort `except ActivityError` wraps cannot swallow a cancel, because the cancel
 is raised as `asyncio.CancelledError`. A queued cancel is never rolled over (`_roll_due`).
 
-**Health.** `GET /health` says whether Temporal answers and whether a worker polls each task queue;
+**Health.** `GET /health` says whether Temporal answers and whether a worker polls the task queue of each service
+in `mia.yaml` (a queue carries its service's name). The page asks every minute and keeps a line at its top for as
+long as one is away, with the `mia restart` that brings it back. Temporal remembers a poller for about five minutes,
+so a worker that stops is reported that long after; one that never started is reported at once.
 `GET /run/<kind>/<number>` is the Temporal status of a subject's latest run.
 
 **Planning from outside.** `POST /plan` plans a spec against the synced catalog and the registry; datasets that
@@ -358,8 +371,8 @@ key the running service does not know gets 422 on `PUT /buffers/<id>`.
 
 ## A dataset round
 
-[`mia-data-workflow.md`](mia-data-workflow.md) walks through a dataset's round: match, smoke, crops, review,
-publication, and the snippet PR loop.
+[`mia-data-workflow.md`](mia-data-workflow.md) walks through a dataset's round: match, crops, review,
+saving, and the snippet PR loop.
 
 ## A buffer round
 
@@ -375,7 +388,7 @@ sandbox bypasses its proxy for loopback names, and inside it they point at the s
 `mia_core.hosts` generates from the operator's `csub.base_policy` plus `<policy_dir>/approved-hosts.jsonl` (one line per
 host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the hosts
 the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request) or its
-published bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
+saved bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
 pool), their `network.redirect_hosts` targets and the package hosts. Ticked hosts travel as `approve_hosts` on a
 dataset's `go`, filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other
 action carrying a non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender,
@@ -397,16 +410,17 @@ names its `agent.allow_hosts` plus the exact hosts its broker's policy allows, a
    out with the rule `not prepared`). When the registry has never seen the round's catalog ref, the activity
    syncs it first. `plan.md` and `plan.json` land in the round directory and in the browsable
    `work_root/issue-<n>/<round>/`. Everything sourcing needs is checked here: a record mia-data could not place
-   (no single modality family and organism, the rule behind `<dataset folder>`) or whose voxel size is unknown
-   stays out of the pool with that reason, and each pool row's voxel size travels to its stage job (1 nm for the
-   plane axis a 2D stack keeps). The plan is posted to the timeline (pool table, cut at 60k characters); an
+   (no modality family, the rule behind `<dataset folder>`; a record without one organism is filed under
+   `unknown`, one of modality `other` under the family `other`) or whose voxel size is unknown stays out of the
+   pool with that reason, and each pool row's voxel size travels to its stage job (1 nm for the plane axis a 2D
+   stack keeps). The plan is posted to the timeline (pool table, cut at 60k characters); an
    invalid plan, or no `tensorizers/<name>` in the harness checkout, ends in `needs-human`. The plan's hash
    (sha256 of the `plan.json` text) goes to the buffer.
 3. **The plan gate** (a `plan_first` round). The stage is `plan-review`. `approve` (the page's *Run*) starts
    sourcing; a new `go` with an edited spec plans again.
 4. **Sourcing.** The buffer is created in buffer-api (id = round id, `i<number>-e<action id>`). Per dataset, in
    parallel (`sourcing.parallel` stage jobs at a time, heaviest first): the binding is read from
-   `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data published for
+   `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data saved for
    it (`mia_data.publish.prepared_row`, the registry's rule too); the raw files are fetched and the pyramid staged
    (see "The cache"); then every volume is registered. `read_stage` registers what the job left with the registry
    (`PUT assets/staged/<staged dir>` with the binding hash it was built from, `PUT assets/raw/<record>` from
@@ -458,7 +472,7 @@ dataset changes status, to at most 30 minutes, and runs only while someone waits
 file with `{owner, taken_at, heartbeat_at, ttl_s}` (TTL 900 s). Every `await_job` poll heartbeats it; a stale file
 is renamed aside as `<key>.stale-<time>`. A wait whose heartbeat finds the lock gone (`mia_core.locks.LockLost`)
 kills its job (`csub kill`) and fails the round; a stale lease is never evidence that its writer stopped. mia-data
-takes it around smoke and trusted crop jobs (owner `mia-data <round> smoke|crop`); mia-buffers from before the
+takes it around trusted crop jobs (owner `mia-data <round> crop`); mia-buffers from before the
 fetch through the stage (owner `mia-buffers <round> <record>`), released while the dataset is blocked on quota and
 re-taken after; the keeper takes it (owner `keeper`) before evicting a record's assets and skips a held record.
 Snapshot extraction uses `snapshot/<sha>`. `GET /locks` lists the holders. A worker waiting for a lock (or for
@@ -492,10 +506,10 @@ env digest and plan digest. A pyramid on disk is reused only when all of them ma
 derives samples changes plan digests, so every volume restages; a buffer that re-registers a volume under a new
 artifact loses its frozen eval lists by design.
 
-**Publish by rename.** A stage job writes `<staged root>/<levels key>/<record>/.building-<artifact>-<job key>`,
+**Save by rename.** A stage job writes `<staged root>/<levels key>/<record>/.building-<artifact>-<job key>`,
 never the final directory. When `stage.json` says `ok`, the worker checks that its `artifact` block (written by
 the harness: every input the artifact id hashes) names this job's artifact id, refuses a build with no block or a
-foreign id, then renames the build to `<artifact>`. The published directory is never written again. A rebuild
+foreign id, then renames the build to `<artifact>`. The saved directory is never written again. A rebuild
 lands under the same id through the same rename; a retry that finds the final directory reuses it.
 
 **Dataset statuses** during sourcing: `pending`, `waiting-dataset`, `waiting-lock`, `fetching`, `staging`,
@@ -572,7 +586,7 @@ today's draws.
 root) and lists the missing ones, which `draw`, `next` and `split` skip. The keeper signals `degraded(records,
 reason, buffer)`. The workflow asks buffer-api which of those records are still missing (`missing_records`; a
 re-send for one rebuilt, rebuilding or failed is ignored) and stages them again from the raw cache, under the
-same artifact id, with a job key and build directory of their own; the publish sets the broken final directory
+same artifact id, with a job key and build directory of their own; the save sets the broken final directory
 aside as `.building-stale-*`. The rebuild runs alongside the ready loop: a `go` or a retire abandons it. The spec
 goes `needs-human` only if a weighting group falls below its floor; a record whose raw cache is gone fails.
 
@@ -586,7 +600,7 @@ no ready or idle buffer is refused at once: while datasets source with "N datase
 
 **Rebuilds of a shared artifact.** Two buffers whose datasets share an artifact both see it degraded; the first
 to take the raw lock rebuilds it. The second asks buffer-api again under the lock and registers the rebuilt
-pyramid as it is. A failed build next to a published artifact (not a rebuild of it) leaves that artifact's row
+pyramid as it is. A failed build next to a saved artifact (not a rebuild of it) leaves that artifact's row
 `ready`.
 
 ## Preparation requests
@@ -618,8 +632,9 @@ registry state. `cancelled`: a person cancelled it.
 
 **What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or `needs-human`
 settles the record, unless the request says `again`: then the dataset is sent a `go` all the same, and its row is
-set to `in-progress` at once, so the request follows the new round instead of settling on what the last one left. Otherwise the dataset's subject says where it stands: one in a round or at review is left to
-it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
+set to `in-progress` at once, so the request follows the new round instead of settling on what the last one
+left. A dataset whose crops wait for a review is `needs-human`, so it settles too. Otherwise the dataset's
+subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
 any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity
 sends no second go. The outcome is `opened` for a dataset started for the first time and `nudged` otherwise, and
@@ -729,7 +744,8 @@ Each tab is one kind of thing, and each thing has one page:
   buffer's page reads `/buffers/<id>/status`, `/events`, `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
 - **A lifecycle** tops the page of a dataset, a spec, a request and a buffer: the kind's stages as boxes and arrows
   with the current one filled. The stages are `lines` of `/meta`, which is each stage table in its own order
-  without `needs-human` and `cancelled`; those two hang under the step the round stopped at.
+  without the stages a round can end in from any step (`failed`, `blocked`, `needs-human`, `cancelled`); those
+  hang under the step the round stopped at.
 - **Cache** reads `/assets/raw|staged`, `/locks`, `/keeper` and the quotas from `/meta`.
 - **Decisions** reads `/decisions` (newest first, by gate, with the judge/human agreement); a human approve that a
   later reject overrules is marked by the server.

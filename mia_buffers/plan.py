@@ -16,6 +16,8 @@ from pathlib import Path
 
 import yaml
 
+from mia_data.catalog import organism_of
+
 from .assume import channel_recipes, voxel_size
 from .select import Decision, decide_all
 from .spec import Spec
@@ -413,12 +415,17 @@ def _unreadable_row(path: str, record: dict, error: str) -> Row:
     return Row(record_id, path, None, None, None, None, None, 0, False, f"record unreadable: {error}")
 
 
+# libyaml's safe loader where PyYAML is built with it: a catalog of two thousand records parses in 2 s, not 20
+SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
 def load_records(catalog_dir: Path) -> list[tuple[str, dict]]:
-    """Every datasets/**/*.yaml under the checkout, path relative to it, sorted. Records are untrusted: safe_load only."""
+    """Every datasets/**/*.yaml under the checkout, path relative to it, sorted. Records are untrusted: a safe
+    loader only."""
     records = []
     for path in sorted((catalog_dir / "datasets").rglob("*.yaml")):
         try:
-            record = yaml.safe_load(path.read_text())
+            record = yaml.load(path.read_text(), Loader=SAFE_LOADER)
         except yaml.YAMLError as error:
             record = {UNREADABLE: f"{type(error).__name__}: {str(error).splitlines()[0]}"}
         if not isinstance(record, dict):
@@ -461,7 +468,7 @@ def build_plan(
             dims=f.dims,
             modality_group=f.modality_group,
             family=f.family,
-            organism=f.organisms[0] if f.organisms else None,
+            organism=organism_of(f.organisms),
             channels=largest.channels if largest else None,
             n_items=f.n_items,
             admitted=decision.admitted,

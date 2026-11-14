@@ -81,7 +81,9 @@ def make_stack(tmp_path, managed=True, address="localhost:7233"):
 @pytest.fixture
 def fake(monkeypatch, tmp_path):
     """Records every subprocess.run; tmux sessions and Temporal health are simulated."""
-    state = SimpleNamespace(calls=[], running=set(), healthy=False, namespace_rc=0)
+    state = SimpleNamespace(calls=[], running=set(), healthy=False, namespace_rc=0, windows="  worker: alive\n")
+    state.worker_starts = True
+    monkeypatch.setattr(services, "worker_started", lambda svc, since: state.worker_starts)
     for name in ("python", "csub-broker"):
         (tmp_path / name).write_text("#!/bin/sh\n")
         (tmp_path / name).chmod(0o755)
@@ -126,7 +128,7 @@ def fake(monkeypatch, tmp_path):
                 rc = state.namespace_rc
         if kw.get("check") and rc:
             raise subprocess.CalledProcessError(rc, argv)
-        return subprocess.CompletedProcess(argv, rc, stdout="  worker: alive\n", stderr="")
+        return subprocess.CompletedProcess(argv, rc, stdout=state.windows, stderr="")
 
     monkeypatch.setattr(services.subprocess, "run", run)
     return state
@@ -248,7 +250,7 @@ def worker_command(fake, session):
         and c[c.index("-t") + 1] == f"={session}"
         and c[c.index("-n") + 1] == "worker"
     ]
-    return call[-1]
+    return call[call.index("-n") + 2]
 
 
 def schedule_calls(fake):
@@ -267,7 +269,9 @@ def test_up_starts_temporal_then_broker_and_worker(tmp_path, fake):
     assert services.service_up(s.services["autodev"], s, t) == 0
     sessions = [c[c.index("-s") + 1] for c in tmux_calls(fake, "new-session")]
     assert sessions == ["temporal", "autodev"]
-    broker = tmux_calls(fake, "new-session")[1][-1]
+    broker_call = tmux_calls(fake, "new-session")[1]
+    broker = broker_call[broker_call.index("-n") + 2]
+    assert broker_call[-5:] == [";", "set-option", "-w", "remain-on-exit", "on"]  # a dead broker stays, marked dead
     assert "csub-broker" in broker and f"{tmp_path}/scratch/me/autodev/csub.sock" in broker and "broker.log" in broker
     worker = worker_command(fake, "autodev")
     for piece in (
@@ -311,6 +315,22 @@ def test_up_with_external_temporal_down_starts_nothing(tmp_path, fake):
     with pytest.raises(SystemExit, match="unreachable"):
         services.service_up(s.services["autodev"], s, Temporal(s))
     assert not tmux_calls(fake, "new-session")
+
+
+def test_up_fails_when_the_worker_does_not_start(tmp_path, fake, capsys):
+    s = make_stack(tmp_path)
+    fake.worker_starts, fake.windows = False, "  broker: alive\n  worker: dead\n"
+    assert services.service_up(s.services["autodev"], s, Temporal(s)) == 1
+    assert "read -p" not in worker_command(fake, "autodev")  # nothing holds an exited worker's window alive
+    err = capsys.readouterr().err
+    assert "autodev: NOT RUNNING: its worker exited" in err and "mia logs autodev" in err
+    fake.windows = "  broker: alive\n  worker: alive\n"  # alive, but Temporal never saw it poll
+    fake.running.discard("autodev")
+    assert services.service_up(s.services["autodev"], s, Temporal(s)) == 1
+    assert "its worker has not polled Temporal in 90 s" in capsys.readouterr().err
+    fake.windows = "  broker: alive\n  worker: dead\n"  # a later `up` on that session says so too
+    assert services.service_up(s.services["autodev"], s, Temporal(s)) == 1
+    assert "its worker has exited: mia restart autodev" in capsys.readouterr().err
 
 
 def test_up_when_running_only_reapplies_schedule(tmp_path, fake, capsys):
@@ -422,7 +442,7 @@ def make_buffers_stack(tmp_path, url="http://buffer-host.example.org:8765"):
 def test_up_mia_buffers_starts_buffer_api_on_the_host_and_lets_the_worker_reach_it(tmp_path, fake):
     s = make_buffers_stack(tmp_path)
     services.service_up(s.services["mia-buffers"], s, Temporal(s))
-    windows_ = [(c[c.index("-n") + 1], c[-1]) for c in tmux_calls(fake, "new-window")]
+    windows_ = [(c[c.index("-n") + 1], c[c.index("-n") + 2]) for c in tmux_calls(fake, "new-window")]
     assert [name for name, _ in windows_] == ["api", "worker"]
     api = dict(windows_)["api"]
     assert "sandbox-run.sh" not in api
@@ -546,7 +566,7 @@ def test_mia_buffers_app_mounts_include_the_lock_directory(tmp_path, fake):
 
 
 def broker_command(fake):
-    return next(c[-1] for c in tmux_calls(fake, "new-session") if "csub-broker" in c[-1])
+    return next(c for call in tmux_calls(fake, "new-session") if "csub-broker" in (c := call[call.index("-n") + 2]))
 
 
 def test_up_generates_the_policy_and_starts_the_broker_on_it(tmp_path, fake):
@@ -582,7 +602,8 @@ def test_writable_mounts_are_the_rw_binds_of_every_worker(tmp_path, fake):
     for svc in stack.services.values():
         services.service_up(svc, stack, temporal)
     writable = services.writable_mounts(stack)
-    workers = [c[-1] for c in tmux_calls(fake, "new-window") if "sandbox-run.sh" in c[-1]]
+    commands = [call[call.index("-n") + 2] for call in tmux_calls(fake, "new-window")]
+    workers = [command for command in commands if "sandbox-run.sh" in command]
     assert len(workers) == len(stack.services)
     for command in workers:
         words = shlex.split(command)

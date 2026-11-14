@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, cast
 
 from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
 
 from mia_core.judge.comment import render_judge_comment
 from mia_core.judge.evidence import build as build_evidence
@@ -445,10 +445,12 @@ class Activities:
         """Read the PR's state, approvals, pending change requests and CI status into one snapshot.
 
         Raises a retryable error while there is nothing for the workflow to act on, so Temporal's retry
-        policy (not a workflow timer) spaces the polls and the history stays flat."""
+        policy (not a workflow timer) spaces the polls and the history stays flat. The error is benign: a wait is
+        one log line, not a failure with a traceback."""
         snapshot = await self._snapshot(request.pr)
         if decide(snapshot, request.handled, request.revisions, request.max_revisions, request.escalated)[0] == WAIT:
-            raise ApplicationError(f"PR #{request.pr}: nothing to do yet")
+            log.info("PR #%s: nothing to do yet", request.pr)
+            raise ApplicationError(f"PR #{request.pr}: nothing to do yet", category=ApplicationErrorCategory.BENIGN)
         return snapshot
 
     async def _snapshot(self, number: int) -> PrSnapshot:

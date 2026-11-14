@@ -212,7 +212,7 @@ def test_plan_rows_carry_voxel_size_and_recipe(spec_2d_mixed):
     two = build_plan(spec_with(spec_2d_mixed, **{"sampling.patch.c": 2}), "h", None, records())
     assert two.errors == [f"patch.c: 2 needs at least 2 channels; ['{ONE_CH}'] have fewer"]
     assert "| 45.0718×45.0718 |" in plan.render_markdown()
-    placeable = records()  # the fixture lists four organisms; mia-data places one organism and one modality
+    placeable = records()  # the fixture lists two modalities; this row is planned as one organism's FIB-SEM
     for _, record in placeable:
         if record["id"] == MITOLAB:
             record["imaging"].update(organism=["Mus musculus"], modality=["FIB-SEM"])

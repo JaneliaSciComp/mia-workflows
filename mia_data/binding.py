@@ -46,6 +46,21 @@ def record_urls(record: dict) -> list[str]:
     ]
 
 
+def record_gaps(record: dict) -> list[str]:
+    """What a catalog record lacks for a round to run (empty = nothing). A binding may only use URLs on hosts the
+    record's own data URLs name (`check_binding`), and a job reaches no other host, so a record that names no
+    such URL can never be bound. The record is untrusted: one whose URLs cannot be read lacks them."""
+    try:
+        if any(_host(url) for url in record_urls(record)):
+            return []
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return [
+        "it names no data URL with a host (`data.download_url`, `technical.sample.urls` or an array's "
+        "`path_pattern`), so no job could reach its files; add the file URLs to the catalog record"
+    ]
+
+
 def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins: Pins) -> list[str]:
     """Errors in an agent-written binding (empty = ok). Rewrites s3:// URLs to https in place.
 

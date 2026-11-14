@@ -55,6 +55,7 @@ td.pills{white-space:nowrap}
 .banner{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
 .banner div{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--warn);border-radius:8px;padding:6px 10px;background:var(--surface);font-size:13px}
 .banner span{flex:1;overflow-wrap:anywhere}
+#down:empty{display:none}
 .banner button{border:0;background:transparent;cursor:pointer;color:var(--fg2);font-size:16px;line-height:1}
 .notice{border-left:3px solid var(--warn);padding:4px 10px;margin:6px 0;font-size:13px;color:var(--fg2);max-width:80ch}
 pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;background:var(--surface);max-height:240px;overflow:auto}
@@ -69,6 +70,7 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .chosen .btn{background:var(--surface)}
 .btn.danger:disabled{border-color:var(--axis);color:var(--muted)}
 dialog.ask{width:min(560px,calc(100vw - 32px));border:1px solid var(--ring);border-radius:8px;background:var(--surface);color:var(--fg);padding:16px 16px 6px}
+dialog.ask.hosts{width:min(720px,calc(100vw - 32px))}
 dialog.ask::backdrop{background:rgba(11,11,11,.4)}
 dialog.ask h2{margin:0 0 4px;font-size:16px;font-weight:600}
 dialog.ask label{display:block;margin:4px 0}
@@ -102,6 +104,7 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .md{font-size:13.5px;overflow-wrap:anywhere}
 .md>*{margin:0 0 6px}
 .md>:last-child{margin-bottom:0}
+.md p,.md li{max-width:90ch}  /* an entry's prose keeps a readable measure; its tables and code take the card's width */
 .md pre{white-space:pre-wrap;font-family:var(--mono);font-size:12.5px;padding:8px 10px;border:1px solid var(--grid);border-radius:6px;background:var(--surface);max-height:320px;overflow:auto}
 .md :not(pre)>code{background:var(--grid);padding:0 3px;border-radius:3px}
 .md ul,.md ol{padding-left:20px}
@@ -109,6 +112,8 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .md blockquote>*{margin:0 0 4px}
 .md h3,.md h4,.md h5,.md h6{font-size:13.5px;margin-top:6px}
 .md .tablewrap{width:max-content;max-width:100%}
+.md img.crop{display:block;width:256px;max-width:100%;height:auto;border-radius:4px;background:var(--grid)}
+.md summary{cursor:pointer;color:var(--fg2);margin:4px 0}
 
 /* filters: one row above the plan, wraps on narrow screens; a <details> so the row folds to its summary line.
    It sticks 14px under the topbar. The box-shadow fills that gap in the page colour while the content scrolls under,
@@ -150,7 +155,7 @@ input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
 .card{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:14px 14px 10px;min-width:0;margin-bottom:14px}
 .grid2 .card{margin-bottom:0}
 .card .sub{font-size:12.5px;color:var(--fg2);margin-bottom:8px}
-.card svg{display:block;width:100%;height:auto;font-family:var(--sans)}
+.card svg:not(.ghm){display:block;width:100%;height:auto;font-family:var(--sans)}  /* a card's chart; the GitHub mark in a link keeps its own size */
 .card svg text{fill:var(--fg2);font-size:12px}
 .card svg .lbl{fill:var(--fg)}
 .card svg .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
@@ -171,6 +176,8 @@ dl.kv dd{margin:0;overflow-wrap:anywhere;min-width:0}
 .health{font-size:13px;font-weight:500}
 .health.ok{color:var(--s3)} .health.bad{color:var(--warn)}
 .links{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin:4px 0 12px}
+.toggles{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+.toggles .btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);font-weight:600}
 .links a[aria-current="page"]{color:var(--fg);font-weight:600;text-decoration:none}
 
 /* table */
@@ -278,6 +285,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
   <input type="search" class="lookup" id="lookup" placeholder="#234, issue URL, record, spec" aria-label="Find a dataset, buffer spec or request by issue number, issue URL or name">
   <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme" title="Switch between the light and the dark theme">theme</button>
 </header>
+<div class="banner" id="down" role="alert"></div>
 <div class="banner" id="banner" role="alert"></div>
 <noscript><p class="notice">This page needs JavaScript: every number on it comes from the service's routes.</p></noscript>
 
@@ -493,8 +501,8 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>410 buffer retired</td><td>the buffer was retired: by <i>Retire</i>, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
 <tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td><i>Cancel the round</i> on the spec's page; if that gets no answer, <i>Force stop</i>, then <i>Plan</i> again</td></tr>
-<tr><td><code>needs-human</code> whose entry starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then press the button again</td></tr>
-<tr><td><code>needs-human</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a publication that succeeds repairs it</td></tr>
+<tr><td><code>blocked</code> (a dataset) or <code>needs-human</code> (a buffer, a request) whose entry starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then press the button again</td></tr>
+<tr><td><code>blocked</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a round that saves its crops repairs it</td></tr>
 </table></div>
 
 <h2>Words the pages use</h2>
@@ -546,7 +554,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="hd" x="262" y="56">one host · mia.yaml · local disk for locks and SQLite</text>
 <rect class="b" x="280" y="66" width="175" height="55" rx="4"/>
 <text class="t" x="288" y="86">mia-data worker</text>
-<text class="s" x="288" y="102">match · smoke · crops · publish</text>
+<text class="s" x="288" y="102">match · crops · save</text>
 <rect class="b" x="280" y="140" width="175" height="55" rx="4"/>
 <text class="t" x="288" y="160">mia-buffers worker</text>
 <text class="s" x="288" y="176">plan · fetch · stage · keeper</text>
@@ -562,7 +570,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <!-- jobs -->
 <rect class="b" x="280" y="300" width="110" height="50" rx="4"/>
 <text class="t" x="288" y="320">mia-data jobs</text>
-<text class="s" x="288" y="337">match · smoke · crop</text>
+<text class="s" x="288" y="337">match · crop</text>
 <rect class="b" x="410" y="300" width="110" height="50" rx="4"/>
 <text class="t" x="418" y="320">fetch job</text>
 <text class="s" x="418" y="337">files → raw cache</text>
@@ -627,9 +635,9 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 </figure>
 
 <h2>2. Two workflows around shared resources</h2>
-<p>In the figure, data preparation runs along the top and buffering along the bottom. Everything they share sits in the middle: the registry, the raw cache, the staged artifacts, the published crops and the lock directory. Solid arrows are the workflow, read left to right. Dashed arrows say which resource a step reads or writes, and the columns line up so that each dashed arrow stays in its own lane.</p>
+<p>In the figure, data preparation runs along the top and buffering along the bottom. Everything they share sits in the middle: the registry, the raw cache, the staged artifacts, the saved crops and the lock directory. Solid arrows are the workflow, read left to right. Dashed arrows say which resource a step reads or writes, and the columns line up so that each dashed arrow stays in its own lane.</p>
 <figure>
-<svg viewBox="0 0 960 630" role="img" aria-label="Three bands: data preparation steps on top, shared resources in the middle (locks, raw cache, staged artifacts, published crops, registry), buffering steps below; solid arrows join each pipeline's steps left to right, dashed arrows show which step reads or writes which resource, and a preparation request on the left reaches up from buffering to the dataset's round.">
+<svg viewBox="0 0 960 630" role="img" aria-label="Three bands: data preparation steps on top, shared resources in the middle (locks, raw cache, staged artifacts, saved crops, registry), buffering steps below; solid arrows join each pipeline's steps left to right, dashed arrows show which step reads or writes which resource, and a preparation request on the left reaches up from buffering to the dataset's round.">
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <!-- bands -->
 <rect class="band" x="20" y="30" width="920" height="140" rx="6"/>
@@ -645,19 +653,19 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="48" y="110">or a preparation request</text>
 <text class="s" x="48" y="124">ends at done</text>
 <rect class="b" x="225" y="58" width="150" height="90" rx="4"/>
-<text class="t" x="233" y="78">match · smoke</text>
+<text class="t" x="233" y="78">match</text>
 <text class="s" x="233" y="96">an agent writes the binding;</text>
 <text class="s" x="233" y="110">a job opens every array</text>
 <text class="s" x="233" y="124">and reads one patch</text>
 <rect class="b" x="410" y="58" width="150" height="90" rx="4"/>
 <text class="t" x="418" y="78">crops · review</text>
 <text class="s" x="418" y="96">one set, verified, shown; Approve</text>
-<text class="s" x="418" y="110">publishes it, Reject loops (fig. 3b);</text>
+<text class="s" x="418" y="110">saves it, Reject loops (fig. 3b);</text>
 <text class="s" x="418" y="124">downloads land in the raw cache</text>
 <path class="ea" d="M545 58 V44 H425 V58" marker-end="url(#f2)"/>
 <text class="l" x="552" y="40">Reject: fix, then new crops</text>
 <rect class="bs" x="595" y="58" width="150" height="90" rx="4"/>
-<text class="t" x="603" y="78">publish</text>
+<text class="t" x="603" y="78">save</text>
 <text class="s" x="603" y="96">the reviewed crops, binding.yaml</text>
 <text class="s" x="603" y="110">and a manifest naming the</text>
 <text class="s" x="603" y="124">binding: this is "prepared"</text>
@@ -708,7 +716,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <rect class="b" x="410" y="478" width="150" height="100" rx="4"/>
 <text class="t" x="418" y="498">stage</text>
 <text class="s" x="418" y="516">cache read-only, no network;</text>
-<text class="s" x="418" y="530">the worker publishes the</text>
+<text class="s" x="418" y="530">the worker saves the</text>
 <text class="s" x="418" y="544">pyramid by rename</text>
 <rect class="bs" x="595" y="478" width="150" height="100" rx="4"/>
 <text class="t" x="603" y="498">register</text>
@@ -748,7 +756,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="ed" x1="370" y1="348" x2="430" y2="478" marker-end="url(#f2)"/>
 <text class="l" x="408" y="396" text-anchor="start">reads</text>
 <line class="ed" x1="485" y1="478" x2="485" y2="348" marker-end="url(#f2)"/>
-<text class="l" x="491" y="440">publishes by rename</text>
+<text class="l" x="491" y="440">saves by rename</text>
 <line class="ed" x1="670" y1="478" x2="670" y2="348" marker-end="url(#f2)"/>
 <text class="l" x="676" y="418">binding hash</text>
 <line class="ed" x1="730" y1="478" x2="820" y2="348" marker-start="url(#f2)" marker-end="url(#f2)"/>
@@ -760,20 +768,20 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <path class="ea" d="M60 478 V460 H30 V103 H40" marker-end="url(#f2)"/>
 <text class="l" transform="rotate(-90 12 300)" x="12" y="300" text-anchor="middle">a preparation request sends each dataset a go</text>
 </svg>
-<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is published together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The smoke job and the trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
+<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is saved together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
 </figure>
 
 <h2>3. How a dataset becomes prepared</h2>
-<p>A dataset is <b>prepared</b> when mia-data has published a binding and a manifest for it. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer. The only place preparation stops is a <code>needs-human</code> stage.</p>
+<p>A dataset is <b>prepared</b> when its latest round ended <code>done</code> with a binding and a manifest saved. Its state is the word for a person: <code>in-progress</code> while a round works by itself, <code>needs-human</code> whenever a person has to act (crops to review, a stopped or cancelled round), <code>prepared</code> after that. Running a prepared dataset again takes it out of <code>prepared</code> until the new round's crops are approved. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer. The only place preparation stops is a <code>needs-human</code> stage. A dataset whose catalog record lacks what a round needs (a data URL with a host) cannot be started at all: its page says what is missing and offers no <i>Start</i>, and it can be started once a catalog sync brings a record that has it.</p>
 <figure>
-<svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: a dataset's round in mia-data runs from Start to done and publishes a binding; the registry row moves from unprepared through in-progress to prepared; the buffer plans over prepared rows, and a preparation request bridges unprepared datasets to mia-data.">
+<svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: a dataset's round in mia-data runs from Start to done and saves a binding; the registry row moves from unprepared through in-progress to prepared, or to needs-human when a person has to act; the buffer plans over prepared rows, and a preparation request bridges unprepared datasets to mia-data.">
 <defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="36">mia-data · a dataset's round</text>
 <rect class="b" x="20" y="48" width="110" height="40" rx="8"/><text class="t" x="75" y="73" text-anchor="middle">Start</text>
-<rect class="b" x="160" y="48" width="130" height="40" rx="8"/><text class="t" x="225" y="73" text-anchor="middle">match · smoke</text>
+<rect class="b" x="160" y="48" width="130" height="40" rx="8"/><text class="t" x="225" y="73" text-anchor="middle">match</text>
 <rect class="b" x="320" y="48" width="150" height="40" rx="8"/><text class="t" x="395" y="73" text-anchor="middle">crops · review</text>
 <path class="ea" d="M450 48 V34 H340 V48" marker-end="url(#f2)"/><text class="l" x="395" y="30" text-anchor="middle">Reject → fix → new crops (fig. 3b)</text>
-<rect class="bs" x="500" y="48" width="150" height="40" rx="8"/><text class="t" x="575" y="73" text-anchor="middle">publish · done</text>
+<rect class="bs" x="500" y="48" width="150" height="40" rx="8"/><text class="t" x="575" y="73" text-anchor="middle">save · done</text>
 <line class="e" x1="130" y1="68" x2="160" y2="68" marker-end="url(#f2)"/>
 <line class="e" x1="290" y1="68" x2="320" y2="68" marker-end="url(#f2)"/>
 <line class="e" x1="470" y1="68" x2="500" y2="68" marker-end="url(#f2)"/><text class="l" x="485" y="100" text-anchor="middle">Approve</text>
@@ -782,9 +790,9 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <!-- registry lane -->
 <text class="hd" x="20" y="136">registry · datasets row</text>
 <rect class="note" x="20" y="148" width="110" height="40" rx="8"/><text class="t" x="75" y="173" text-anchor="middle">unprepared</text>
-<rect class="b" x="160" y="148" width="310" height="40" rx="8"/><text class="t" x="315" y="167" text-anchor="middle">in-progress</text><text class="s" x="315" y="181" text-anchor="middle">written as the stage changes</text>
+<rect class="b" x="160" y="148" width="310" height="40" rx="8"/><text class="t" x="315" y="167" text-anchor="middle">in-progress</text><text class="s" x="315" y="181" text-anchor="middle">a round working by itself</text>
 <rect class="bs" x="500" y="148" width="150" height="40" rx="8"/><text class="t" x="575" y="173" text-anchor="middle">prepared</text>
-<rect class="un" x="690" y="148" width="130" height="40" rx="8"/><text class="t" x="755" y="167" text-anchor="middle">needs-human</text><text class="s" x="755" y="181" text-anchor="middle">the only other end</text>
+<rect class="un" x="690" y="148" width="130" height="40" rx="8"/><text class="t" x="755" y="167" text-anchor="middle">needs-human</text><text class="s" x="755" y="181" text-anchor="middle">a person has to act</text>
 <line class="e" x1="130" y1="168" x2="160" y2="168" marker-end="url(#f2)"/>
 <line class="e" x1="470" y1="168" x2="500" y2="168" marker-end="url(#f2)"/>
 <line class="ed" x1="75" y1="88" x2="75" y2="148" marker-end="url(#f2)"/>
@@ -804,34 +812,34 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="l" x="410" y="262" text-anchor="middle">"not prepared": out of the pool,</text>
 <text class="l" x="410" y="276" text-anchor="middle">listed under its own heading</text>
 </svg>
-<figcaption><b>Figure 3.</b> The registry row is derived state. mia-data writes it as its stages change, and <code>datasets sync</code> rebuilds it from the published files. A buffer never asks mia-data for a dataset. A preparation request does that instead: it sends each of its datasets a <code>go</code> through buffer-api, charged to the request, and follows the rows until each dataset is <code>prepared</code> or <code>needs-human</code>; then the request is <code>done</code>. Hand-placed bindings do not count as prepared. There is no <code>ineligible</code> state, because a size or licence verdict taken here would bind every buffer that ever asks. Each buffer's plan takes that verdict instead.</figcaption>
+<figcaption><b>Figure 3.</b> The registry row is derived state. mia-data writes it as its stages change, and <code>datasets sync</code> rebuilds it from the saved files. A buffer never asks mia-data for a dataset. A preparation request does that instead: it sends each of its datasets a <code>go</code> through buffer-api, charged to the request, and follows the rows until each dataset is <code>prepared</code> or <code>needs-human</code>, which includes one whose crops wait for a review; then the request ends, <code>done</code> when all are prepared. Hand-placed bindings do not count as prepared. There is no <code>ineligible</code> state, because a size or licence verdict taken here would bind every buffer that ever asks. Each buffer's plan takes that verdict instead.</figcaption>
 </figure>
 
 <h3 style="font-size:16px;font-weight:600;margin:28px 0 6px">3b. The review loop</h3>
-<p>Every set of crops waits at <code>review</code>, including a set made from a snippet PR. <i>Approve</i> on the dataset's page publishes the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are published under the merge commit. <i>Reject</i> sends the feedback typed with it to the agent. When the round is following a PR, the feedback goes as <code>/revise</code> on that PR. Otherwise it goes as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves.</p>
-<p>Every verdict is written to the registry as an assessment before anything acts on it. A judge, a second model that reads the same gallery, can look at each set first: in shadow mode its verdict is recorded beside the person's and decides nothing, and the <a href="#decisions">Decisions</a> tab shows how often the two agree. <i>Revoke</i> at any later time withdraws a published set: its artifacts are quarantined, the buffers that drew from it unregister the dataset, and <i>Run again</i> on the dataset's page repairs it.</p>
+<p>Every set of crops waits at <code>review</code>, including a set made from a snippet PR. <i>Approve</i> on the dataset's page saves the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are saved under the merge commit. <i>Reject</i> sends the feedback typed with it to the agent. When the round is following a PR, the feedback goes as <code>/revise</code> on that PR. Otherwise it goes as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves.</p>
+<p>Every verdict is written to the registry as an assessment before anything acts on it. A judge, a second model that reads the same gallery, can look at each set first: in shadow mode its verdict is recorded beside the person's and decides nothing, and the <a href="#decisions">Decisions</a> tab shows how often the two agree. <i>Revoke</i> at any later time withdraws a saved set: its artifacts are quarantined, the buffers that drew from it unregister the dataset, and <i>Run again</i> on the dataset's page repairs it.</p>
 <figure>
-<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Start, match and smoke, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are published.">
+<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Start, match, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are saved.">
 <defs><marker id="f3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="18">mia-data · the dataset's stages</text>
 <rect class="b" x="20" y="44" width="100" height="40" rx="8"/><text class="t" x="70" y="69" text-anchor="middle">Start</text>
-<rect class="b" x="150" y="44" width="130" height="40" rx="8"/><text class="t" x="215" y="69" text-anchor="middle">match · smoke</text>
+<rect class="b" x="150" y="44" width="130" height="40" rx="8"/><text class="t" x="215" y="69" text-anchor="middle">match</text>
 <rect class="b" x="310" y="44" width="150" height="40" rx="8"/><text class="t" x="385" y="63" text-anchor="middle">crops · verify</text><text class="s" x="385" y="77" text-anchor="middle">the set, its gallery</text>
 <rect class="bs" x="490" y="44" width="130" height="40" rx="8"/><text class="t" x="555" y="69" text-anchor="middle">review</text>
 <rect class="b" x="650" y="44" width="120" height="40" rx="8"/><text class="t" x="710" y="69" text-anchor="middle">merging</text>
-<rect class="bs" x="800" y="44" width="140" height="40" rx="8"/><text class="t" x="870" y="63" text-anchor="middle">done</text><text class="s" x="870" y="77" text-anchor="middle">crops published</text>
+<rect class="bs" x="800" y="44" width="140" height="40" rx="8"/><text class="t" x="870" y="63" text-anchor="middle">done</text><text class="s" x="870" y="77" text-anchor="middle">crops saved</text>
 <line class="e" x1="120" y1="64" x2="150" y2="64" marker-end="url(#f3b)"/>
 <line class="e" x1="280" y1="64" x2="310" y2="64" marker-end="url(#f3b)"/><text class="l" x="295" y="100" text-anchor="middle">matched</text>
 <line class="e" x1="460" y1="64" x2="490" y2="64" marker-end="url(#f3b)"/><text class="l" x="475" y="100" text-anchor="middle">≥ half verified</text>
 <line class="ea" x1="620" y1="64" x2="650" y2="64" marker-end="url(#f3b)"/><text class="l" x="635" y="100" text-anchor="middle">Approve, PR head:</text><text class="lm" x="635" y="113" text-anchor="middle">/approve &lt;head&gt;</text>
 <line class="ea" x1="770" y1="64" x2="800" y2="64" marker-end="url(#f3b)"/><text class="l" x="785" y="100" text-anchor="middle">autodev merges</text>
-<path class="ea" d="M555 44 V28 H870 V44" marker-end="url(#f3b)"/><text class="l" x="712" y="24" text-anchor="middle">Approve, matched binding: publish</text>
+<path class="ea" d="M555 44 V28 H870 V44" marker-end="url(#f3b)"/><text class="l" x="712" y="24" text-anchor="middle">Approve, matched binding: save</text>
 <!-- mia-snippets lane -->
 <text class="hd" x="20" y="170">mia-snippets · autodev</text>
 <rect class="b" x="150" y="190" width="130" height="44" rx="8"/><text class="t" x="215" y="209" text-anchor="middle">snippets issue</text><text class="s" x="215" y="224" text-anchor="middle">autodev takes it</text>
 <rect class="un" x="310" y="190" width="150" height="44" rx="8"/><text class="t" x="385" y="209" text-anchor="middle">PR head</text><text class="s" x="385" y="224" text-anchor="middle">autodev's agent wrote it</text>
 <rect class="b" x="490" y="190" width="160" height="44" rx="8"/><text class="t" x="570" y="209" text-anchor="middle">feedback to autodev</text><text class="s" x="570" y="224" text-anchor="middle">/revise the PR, or a new issue</text>
-<rect class="un" x="800" y="190" width="140" height="44" rx="8"/><text class="t" x="870" y="209" text-anchor="middle">needs-human</text><text class="s" x="870" y="224" text-anchor="middle">Run again resumes</text>
+<rect class="un" x="800" y="190" width="140" height="44" rx="8"/><text class="t" x="870" y="209" text-anchor="middle">failed · blocked</text><text class="s" x="870" y="224" text-anchor="middle">Run again resumes</text>
 <line class="e" x1="215" y1="84" x2="215" y2="190" marker-end="url(#f3b)"/><text class="l" x="221" y="164">no snippet fits</text>
 <line class="e" x1="280" y1="212" x2="310" y2="212" marker-end="url(#f3b)"/>
 <line class="ea" x1="490" y1="212" x2="460" y2="212" marker-end="url(#f3b)"/><text class="l" x="475" y="264" text-anchor="middle">a new head</text>
@@ -841,7 +849,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="l" x="570" y="248" text-anchor="middle">no PR yet: an issue to supersede the snippet</text>
 <line class="ed" x1="650" y1="212" x2="800" y2="212" marker-end="url(#f3b)"/><text class="l" x="725" y="206" text-anchor="middle">revision limit,</text><text class="l" x="725" y="228" text-anchor="middle">PR closed</text>
 </svg>
-<figcaption><b>Figure 3b.</b> There are two loops, and both end in the reviewer's approve. The inner loop belongs to autodev and has no person in it: a head whose crops fail verification receives the report as <code>/revise</code>, and the next head is tested again. The outer loop belongs to the reviewer: they reject with feedback, the agent revises, new crops are made, and the set comes back to review. Rejecting a matched binding starts a PR where there was none, through an issue asking autodev to supersede the binding's snippet, and from there it is the same loop. autodev merges only on the worker's <code>/approve</code> of the exact head whose crops the reviewer approved, and the published crops are those files under the merge commit. One rare case is not drawn: a merge whose snippet tree differs from the approved head's, because someone pushed more commits, makes its own set and goes back through review. The loop stops at autodev's revision limit, after five heads in one round, or when the PR is closed. mia-snippets is the one repository whose issues and pull requests drive anything: autodev works there.</figcaption>
+<figcaption><b>Figure 3b.</b> There are two loops, and both end in the reviewer's approve. The inner loop belongs to autodev and has no person in it: a head whose crops fail verification receives the report as <code>/revise</code>, and the next head is tested again. The outer loop belongs to the reviewer: they reject with feedback, the agent revises, new crops are made, and the set comes back to review. Rejecting a matched binding starts a PR where there was none, through an issue asking autodev to supersede the binding's snippet, and from there it is the same loop. autodev merges only on the worker's <code>/approve</code> of the exact head whose crops the reviewer approved, and the saved crops are those files under the merge commit. One rare case is not drawn: a merge whose snippet tree differs from the approved head's, because someone pushed more commits, makes its own set and goes back through review. The loop stops at autodev's revision limit, after five heads in one round, or when the PR is closed. mia-snippets is the one repository whose issues and pull requests drive anything: autodev works there.</figcaption>
 </figure>
 
 <h2>4. From a click to a stage</h2>
@@ -886,7 +894,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 </figure>
 <div class="tw"><table>
 <tr><th>subject</th><th>its page</th><th>action route</th><th>actions</th></tr>
-<tr><td>dataset</td><td><code>#datasets/&lt;record&gt;</code></td><td><code>POST /datasets/&lt;record&gt;/actions</code></td><td><code>go</code> (<i>Start</i>, <i>Run again</i>), <code>approve</code>, <code>reject</code> with a note, <code>revoke</code>, <code>cancel</code></td></tr>
+<tr><td>dataset</td><td><code>#datasets/&lt;record&gt;</code></td><td><code>POST /datasets/&lt;record&gt;/actions</code></td><td><code>go</code> (<i>Start</i>, <i>Run again</i>, <i>Restart</i> at review), <code>approve</code>, <code>reject</code> with a note, <code>revoke</code>, <code>cancel</code></td></tr>
 <tr><td>buffer spec</td><td><code>#specs/&lt;name&gt;</code></td><td><code>POST /specs</code> · <code>POST /specs/&lt;name&gt;/actions</code></td><td><code>go</code> with <code>plan_first</code> (<i>Plan</i>), <code>approve</code> (<i>Run</i> at the plan, <i>Approve</i> at the board), <code>keep</code>, <code>retire</code>, <code>revoke</code>, <code>dropped</code> (<i>Files are in place</i>), <code>cancel</code>, <code>stop</code></td></tr>
 <tr><td>preparation request</td><td><code>#requests/&lt;key&gt;</code></td><td><code>POST /prep</code> · <code>POST /prep/&lt;number&gt;/actions</code></td><td><code>go</code>, <code>cancel</code>, <code>stop</code></td></tr>
 </table></div>
@@ -962,7 +970,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <h2>6. Sourcing one dataset</h2>
 <p>Once a round is running, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the two phases shown in figure 6, a fetch and a stage. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
 <figure>
-<svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, fetch what is missing into the raw cache, stage offline into a build directory, publish by rename, register the volumes, release the lock.">
+<svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, fetch what is missing into the raw cache, stage offline into a build directory, save by rename, register the volumes, release the lock.">
 <defs><marker id="f4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <rect class="b" x="20" y="40" width="150" height="56" rx="4"/>
 <text class="ts" x="28" y="62">binding + pins →</text><text class="ts" x="28" y="79">artifact id</text>
@@ -993,14 +1001,14 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <text class="s" x="618" y="92">writes .building-&lt;id&gt;-…</text>
 <line class="e" x1="685" y1="96" x2="685" y2="140" marker-end="url(#f4)"/>
 <rect class="b" x="610" y="140" width="150" height="56" rx="4"/>
-<text class="t" x="618" y="162">worker publishes</text><text class="s" x="618" y="179">verify stage.json, add the</text>
+<text class="t" x="618" y="162">worker saves</text><text class="s" x="618" y="179">verify stage.json, add the</text>
 <text class="s" x="618" y="192">artifact block, rename to &lt;id&gt;</text>
 <line class="e" x1="685" y1="196" x2="685" y2="250" marker-end="url(#f4)"/>
 <rect class="bs" x="610" y="250" width="150" height="56" rx="4"/>
 <text class="t" x="618" y="272">register volumes</text><text class="s" x="618" y="289">split from the plan row</text>
 <text class="s" x="618" y="302">refs to the artifact and the raw</text>
 <line class="e" x1="170" y1="275" x2="610" y2="275" marker-end="url(#f4)"/>
-<text class="l" x="390" y="268" text-anchor="middle">yes: read the published stage.json and register</text>
+<text class="l" x="390" y="268" text-anchor="middle">yes: read the saved stage.json and register</text>
 <rect class="note" x="790" y="40" width="150" height="266" rx="4"/>
 <text class="hd" x="800" y="60">while locked</text>
 <text class="s" x="800" y="82">the lock is heartbeated</text>
@@ -1019,7 +1027,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <line class="e" x1="760" y1="278" x2="790" y2="278" marker-end="url(#f4)"/>
 <text class="l" x="775" y="271" text-anchor="middle">release</text>
 </svg>
-<figcaption><b>Figure 6.</b> Fetch and stage are two phases per dataset, so one slow download never holds up the others. The stage job runs with the cache read-only: <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker publishes it. The one exception to "no network" is a URL that the fetch could not get as a whole file, and for that URL alone the stage job stays online. A published pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
+<figcaption><b>Figure 6.</b> Fetch and stage are two phases per dataset, so one slow download never holds up the others. The stage job runs with the cache read-only: <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker saves it. The one exception to "no network" is a URL that the fetch could not get as a whole file, and for that URL alone the stage job stays online. A saved pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
 </figure>
 
 <h2>7. The cache and its keeper</h2>
@@ -1229,7 +1237,7 @@ const PILL_HELP = {
   "annotation types": "The record's annotation types (masks, boxes, points, …) are not among those the spec asks for.",
   "annotation source": "The record's annotation source (manual, proofread, automatic, …) is not among those the spec asks for.",
   "array below minimum": "The record's largest array has fewer voxels than the spec's where.min_size_voxels.",
-  "no mia-data folder": "The record does not name exactly one modality family and one organism, which is how a prepared dataset's folder is named, so the preparation pipeline cannot place it.",
+  "no mia-data folder": "The record names no modality the preparation pipeline knows, and a prepared dataset's folder is named after its modality family, so the pipeline cannot place it.",
   "duplicate DOI": "Another record with the same DOI is already in the pool; dedup keeps the first.",
   "record unreadable": "The record's YAML could not be parsed; the planner skipped it.",
   "no patch for dims": "The spec has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
@@ -1240,10 +1248,11 @@ const PILL_HELP = {
   "not prepared": "Fits the spec, but no reader exists for the dataset's files yet; prepare it, and a later round will pick it up.",
   // the preparation pipeline's view of a dataset
   "prepared": "An approved binding and verified crops exist: the dataset can be staged and served.",
-  "in-progress": "The preparation pipeline is working on it; the stage column or the dataset's page says where it is.",
+  "in-progress": "The preparation pipeline is working on it by itself: nothing here waits for a person. The stage says where it is.",
   "unprepared": "Nobody has asked for this dataset to be prepared.",
-  "needs-human": "Stopped. The newest entry of its timeline says what it needs from a person.",
-  "revoked": "Withdrawn by a person after publication (Revoke): nothing is selected or reused from it; Run again on its page repairs it.",
+  "cannot start": "The dataset's catalog record lacks what a preparation round needs; the lines below say what. No round can be started for it. It can be started once a catalog sync brings a record that has it.",
+  "needs-human": "A person has to act. The stage says what: review (its crops wait for a verdict), failed (a step failed; running it again may pass) or blocked (something has to be decided or changed first). The newest entry of its timeline says why.",
+  "revoked": "Withdrawn by a person after its crops were saved (Revoke): nothing is selected or reused from it; Run again on its page repairs it.",
   // a cache directory or a staged pyramid
   "cached": "The dataset's raw files are in the shared cache and no job is writing them; a buffer checks them against its binding before reusing them.",
   "fetching": "A fetch job is downloading the dataset's raw files into the cache.",
@@ -1277,7 +1286,8 @@ const PILL_HELP = {
   "testing": "Making the sample crops a reviewer will look at.",
   "review": "Sample crops are ready; the dataset's page waits for a reviewer to approve or reject them.",
   "merging": "The crops were approved; the reader's pull request is being merged.",
-  "done": "The dataset is prepared: its crops and binding are published.",
+  "debugging": "The round failed. A debugging agent looks into it and, if a new round can pass, runs one; nothing is needed from you.",
+  "done": "The dataset is prepared: its crops and binding are saved.",
   // odds and ends
   "stale": "This consumer has not been seen for longer than expected.",
 };
@@ -1300,6 +1310,8 @@ const STAGE_HELP = {
   "staged": "No job is left to run and the board is in the timeline; the round waits for Approve.",
   "requested": "The request's datasets are handed to the preparation pipeline; it follows them until each has settled.",
   "cancelled": "A person cancelled the round.",
+  "failed": "A step of the round failed; the newest entry of the timeline says which and why. Running it again may be all it needs.",
+  "blocked": "The round stopped until a person decides or changes something; the newest entry of the timeline says what.",
 };
 const stagePill = s => {
   if (!s) return "";
@@ -1383,7 +1395,7 @@ const bufferLink = id => el("a", { href: "#buffers/" + encodeURIComponent(id) },
 const cropPng = (d, id, name) => `/crops/${encodeURIComponent(d.folder)}/${encodeURIComponent(id)}/${name}.png`;
 const thumb = d => { if (!d?.folder || !d.previews?.length) return ""; const src = cropPng(d, d.previews[0], "overlay");
   return tipOn(el("a", { href: src, target: "_blank", rel: "noopener" }, el("img", { class: "thumb", src, loading: "lazy", alt: "crop overlay" })),
-    [{ t: `${plural(d.crops || d.previews.length, "crop")} published · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
+    [{ t: `${plural(d.crops || d.previews.length, "crop")} saved · overlay of ${d.previews[0]} · click to open it` }, { img: src }]); };
 // a browse link under one of the roots `/meta` names (each segment encoded), or nothing when that root has no URL
 const folderLink = (root, folder, text, title) => root && folder ? link(`${root.replace(/\/$/, "")}/${String(folder).split("/").map(encodeURIComponent).join("/")}`, text || "files", title) : "";
 // how every table names a dataset: its id links to its page; its GitHub issue (a read-only log) is a small mark
@@ -1566,13 +1578,12 @@ function prepareButton(container, all, blocker, done, again, text) {  // `text`:
   if (why) { container.replaceChildren(el("button", { type: "button", class: "btn", disabled: true, title: why }, label), el("span", { class: "small" }, why)); return; }
   container.replaceChildren(el("button", { type: "button", class: "btn", ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }), onclick: async e => {
     if (checking) return;
-    if (!confirm(`Start preparing ${plural(todo.length, "dataset")}?${again ? ` ${again} of them ${again === 1 ? "is" : "are"} prepared or in a round already: the prepared get a new round, one in a round is left to it.` : ""} Each one costs an agent run.`)) return;
     checking = true;
     askHosts({ records: todo }, hosts => start(e.target, hosts)).finally(() => { checking = false; });
   } }, label));
   async function start(button, hosts) {
     button.disabled = true;
-    // more than 25 records need the count written into the request: the confirmation above is that
+    // more than 25 records need the count written into the request: the button's label names it
     const yaml = toPrepYaml(todo, S.ref, S.meta.catalog_repo) + (again == null ? "" : "again: true\n") + (todo.length > 25 ? `max_records: ${todo.length}\n` : "");
     try {
       const action = await api("/prep", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: yaml, key: newKey(), ...(hosts.length ? { approve_hosts: hosts } : {}) }) });
@@ -1714,7 +1725,8 @@ function viewDesigner() {
 // ---- datasets: every dataset of the catalog with what the registry knows about it, one page at a time
 const DS_FILTER = { state: "", modality: "", dims: "", licence: "" };
 const CHOSEN = new Set(), SETTLED = new Set();  // the ticked datasets, and those of them that are prepared or in a round
-const PREPARABLE = row => row.state !== "prepared" && row.state !== "in-progress";
+const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging", "debugging"]);  // the stages of a round under way or at review
+const PREPARABLE = row => row.state !== "prepared" && !ROUND_OPEN.has(row.stage);
 function viewDatasetList(arg, params) {
   const root = $("datasetsBody");
   if (!S.ref) { root.replaceChildren(el("div", { class: "empty" }, "No catalog synced; run ", el("code", {}, "mia-buffers catalog sync"), ".")); return; }
@@ -1765,7 +1777,7 @@ function viewDatasetList(arg, params) {
       { label: "files", cell: x => folderLink(roots.storage_root, x.folder) },
       { key: "crops", label: "preview", cell: x => thumb(x) },
       { key: "state", label: "state", title: "preparation, then the raw cache's state, then \"staged\" when a pyramid of it exists",
-        cell: x => { const pills = el("span", { class: "pills" }, statePill(x.state)); if (x.raw) pills.append(" ", assetPill(x.raw.state)); if (x.staged) pills.append(" ", pill("staged", "pool")); if (x.quarantined) pills.append(" ", assetPill("quarantined")); return pills; } },
+        cell: x => { const pills = el("span", { class: "pills" }, statePill(x.state)); if (x.raw) pills.append(" ", assetPill(x.raw.state)); if (x.staged) pills.append(" ", pill("staged", "pool")); if (x.quarantined) pills.append(" ", assetPill("quarantined")); if (x.gaps?.length) pills.append(" ", pill("cannot start", "warn", x.gaps.map(t => ({ t })))); return pills; } },
       { key: "stage", label: "stage", cell: x => x.stage || "" },
       { key: "dims", label: "dims", cell: x => x.dims || "" },
       { key: "modality", label: "modality", cell: x => x.modality || "" },
@@ -1790,7 +1802,7 @@ function datasetCards(d) {
     link(rec.landing_url, "source"), rec.doi ? link(`https://doi.org/${rec.doi}`, `doi ${rec.doi}`) : null,
     d.path && meta.catalog_repo ? link(`https://github.com/${meta.catalog_repo}/blob/${d.ref}/${d.path.split("/").map(encodeURIComponent).join("/")}`, "catalog record", "this dataset's record in the catalog repository on GitHub") : null,
     !d.subject ? ghIcon(meta.datasets_repo, row.issue, true) || null : null,
-    ds.folder && roots.storage_root ? el("span", {}, "published crops ", folderLink(roots.storage_root, ds.folder)) : null);
+    ds.folder && roots.storage_root ? el("span", {}, "saved crops ", folderLink(roots.storage_root, ds.folder)) : null);
   const cards = [links];
   if (!row.in_catalog) cards.push(el("div", { class: "notice" }, "This dataset's record is not in the newest synced catalog: only what the registry holds is shown."));
   if (d.record) cards.push(card("Record", null, el("p", {}, el("b", {}, rec.title || row.id)), rec.description ? el("p", { class: "small" }, rec.description) : null, kv([
@@ -1801,20 +1813,20 @@ function datasetCards(d) {
   ])));
   cards.push(card("Preparation", "What mia-data made of it: a binding to a reader, and reviewed crops.", kv([
     ["state", el("span", { class: "pills" }, statePill(row.state))], ["stage", row.stage], ["reason", ds.reason],
-    ["crops published", ds.crops == null ? "" : num(ds.crops)], ["published", ds.published_at ? when(ds.published_at) : ""],
+    ["crops saved", ds.crops == null ? "" : num(ds.crops)], ["saved", ds.published_at ? when(ds.published_at) : ""],
     ["binding", ds.binding_hash ? el("span", {}, code(ds.binding_hash, 12), ds.binding_commit ? " at snippets " : "", code(ds.binding_commit, 10)) : ""],
     ds.revoked_at ? ["revoked", el("span", {}, when(ds.revoked_at), ds.revoked_by ? ` by ${ds.revoked_by}` : "")] : null,
     ["updated", when(row.updated_at)],
     ["preparation requests", d.requests.length ? el("span", {}, ...d.requests.flatMap((r, i) => [i ? " " : "", el("a", { href: SUBJECT_HASH.prep(r.key) }, r.key)])) : "none named it"],
   ])));
-  if (ds.folder && (ds.previews || []).length) cards.push(card("Crops", `${num(ds.crops || ds.previews.length)} published; the first ${num(ds.previews.length)} with their annotation overlay. Click one to open it.`,
+  if (ds.folder && (ds.previews || []).length) cards.push(card("Crops", `${num(ds.crops || ds.previews.length)} saved; the first ${num(ds.previews.length)} with their annotation overlay. Click one to open it.`,
     el("div", { class: "gallery" }, ...ds.previews.map(id => el("a", { href: cropPng(ds, id, "overlay"), target: "_blank", rel: "noopener", title: id }, el("img", { src: cropPng(ds, id, "overlay"), loading: "lazy", alt: `crop ${id} with its overlay` }))))));
   cards.push(card("Decisions", "Every verdict about this dataset, newest first: its crops and its staged artifacts, by a person or a judge.", pagedTable("dataset-decisions:" + row.id, {
     source: pageOf("/decisions", "assessments", () => ({ record: row.id })), search: false, empty: "No decision yet.", cols: [
       { label: "when", cell: r => when(r.at) }, { label: "gate", cell: r => r.gate },
       { label: "about", cell: r => el("span", {}, `${(r.subject?.kind || "").replace("_", " ")} `, code(r.subject?.ref, 24)) },
       { label: "verdict", cell: r => pill(r.verdict, VERDICT_KIND[r.verdict] ?? "") }, { label: "by", cell: r => r.by },
-      { label: "confidence", num: true, cell: r => r.confidence == null ? "" : Number(r.confidence).toFixed(2) }, { label: "summary", wrap: true, cell: r => r.summary || "" },
+      { label: "confidence", num: true, cell: r => r.confidence == null ? "" : Number(r.confidence).toFixed(2) }, { label: "summary", wrap: true, cell: r => r.note || r.summary || "" },
     ] })));
   const raw = d.raw_asset;
   cards.push(card("Cache", "Its download in the raw cache, and each staged artifact: this dataset staged for one crop geometry by one recipe.",
@@ -1839,7 +1851,7 @@ function datasetCards(d) {
 
 // ---- a lifecycle as boxes and arrows: a kind's stages in order (`lines` of GET /meta), the current one filled.
 // It shows where on the line the object is, not the path its round took: a round can skip a step or return to one.
-// A stage off the line (needs-human, cancelled) hangs under the step the round stopped at, which is the newest
+// A stage off the line (failed, blocked, needs-human, cancelled) hangs under the step the round stopped at, which is the newest
 // stage of `history` (newest first) that is on the line; with none, it stands apart at the end.
 // The line is named for what it is: the workflow that prepares a dataset, builds a buffer, or carries a request.
 const FLOW_LABELS = { dataset: "Preparation workflow:", buffer: "Buffer workflow:", prep: "Preparation request workflow:" };
@@ -1963,7 +1975,7 @@ async function viewBuffer(root, id, refresh) {
     ] })),
     status ? card("Dataset pool", "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.", pagedTable("buffer-pool:" + id, { source: pageOf(`/buffers/${e}/datasets`, "datasets"), sort: "dataset", empty: "No dataset in the pool yet.", cols: [
       { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) }, { label: "issue", cell: x => ghIcon(meta.datasets_repo, x.issue) },
-      { label: "files", title: "the dataset's published crops", cell: x => folderLink(roots.storage_root, x.folder) },
+      { label: "files", title: "the dataset's saved crops", cell: x => folderLink(roots.storage_root, x.folder) },
       { label: "staged", title: "the staged artifact this buffer draws from", cell: x => folderLink(roots.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)) },
       { label: "preview", cell: x => thumb(x) },
       { key: "status", label: "status", cell: x => statePill(x.status) }, { label: "reason", wrap: true, cell: x => x.reason || "" },
@@ -2066,7 +2078,7 @@ function viewDecisions(arg) {
   root.replaceChildren(
     gates,
     card("Judge agreement", "Per gate: subjects with a judge verdict, and whether the newest human label agrees. Shadow mode records the judge's verdict and lets the human decide; a gate goes active on these numbers.", agreement),
-    card("Assessments", "Every decision on record, newest first: human verdicts, judge verdicts, policy events (repairs). A human approve that a later reject overrules is marked.",
+    card("Assessments", "Every decision on record, newest first: human verdicts with what the person wrote, judge verdicts, policy events (repairs). A human approve that a later reject overrules is marked.",
       pagedTable("decisions:" + gate, { source: pageOf("/decisions", "assessments", () => gate ? { gate } : {}), search: false, empty: "No assessment yet.",
         onPage: page => agreement.replaceChildren(...Object.entries(page.out.agreement || {}).map(([g, a]) => agreementLine(g, a))),
         cols: [
@@ -2078,7 +2090,7 @@ function viewDecisions(arg) {
           { label: "by", cell: r => r.by },
           { label: "confidence", num: true, cell: r => r.confidence == null ? "" : Number(r.confidence).toFixed(2) },
           { label: "model", cell: r => r.model ? code(r.model, 24) : "" },
-          { label: "summary", wrap: true, cell: r => r.summary || "" },
+          { label: "summary", wrap: true, cell: r => r.note || r.summary || "" },
         ] })));
 }
 
@@ -2113,13 +2125,15 @@ const BUTTON_HELP = {
 };
 const ACTION_HELP = {
   dataset: {
-    go: s => s.stage !== "new" ? "Start a new round of the preparation workflow from the beginning. After a stop it picks up the reader's open pull request, if there is one."
-      : s.again ? "Run the preparation workflow again: a new round makes more sample crops, which are published once you approve them."
+    go: s => s.stage === "debugging" ? "Run a new round now, without waiting for the debugging agent. Use it when you already know what was wrong and have fixed it."
+      : s.stage === "review" ? "Start over: the crops under review are dropped unsaved and a new round prepares the dataset again, with a judge's verdict on its crops. If a reader's pull request made these crops, its current head is tested again."
+      : s.stage !== "new" ? "Start a new round of the preparation workflow from the beginning. After a stop it picks up the reader's open pull request, if there is one." + (s.stage === "done" ? " Until its new crops are approved the dataset is not prepared, and a new buffer plan leaves it out." : "")
+      : s.again ? "Run the preparation workflow again: a new round makes more sample crops, which are saved once you approve them. Until then the dataset is not prepared, and a new buffer plan leaves it out."
       : "Start the preparation workflow: an agent matches the dataset to a reader, then sample crops are made for you to review.",
-    approve: "Publish the crops under review: the dataset becomes prepared and buffers can use it. If a new reader made them, its pull request is merged first.",
+    approve: "Save the crops under review: the dataset becomes prepared and buffers can use it. If a new reader made them, its pull request is merged first.",
     reject: "Send the crops back with your feedback: the agent fixes the reader, and new crops come back for review.",
-    revoke: "Withdraw this dataset's published crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Run again repairs it.",
-    cancel: "Stop the round in progress: its cluster jobs are killed and nothing is published.",
+    revoke: "Withdraw this dataset's saved crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Run again repairs it.",
+    cancel: "Stop the round in progress: its cluster jobs are killed and nothing is saved.",
   },
   buffer: {
     approve: s => s.stage === "plan-review" ? "Accept the plan and start the jobs: the pool's datasets are downloaded and converted, then the round stops for your approval."
@@ -2141,9 +2155,11 @@ const ACTION_WORDS = { approve: "Approve", reject: "Reject…", keep: "Keep", go
 // the word on an action's button; the Buffers list names what a spec waits for by the same words
 const actionWord = (subject, action) => action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
   : action === "go" && subject.kind === "buffer" ? "Plan" : action === "dropped" ? "Files are in place"  // a spec's own controls
+  : action === "go" && subject.kind === "dataset" && subject.stage === "debugging" ? "Run again now"  // or wait: the debugger runs it again itself
+  : action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"  // beside Approve and Reject: neither verdict, the set is dropped
   : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {
-  revoke: "Revoke this dataset's published crops? Buffers that drew from it are degraded; nothing is deleted.",
+  revoke: "Revoke this dataset's saved crops? Buffers that drew from it are degraded; nothing is deleted.",
   retire: "Retire this buffer? Training jobs reading it are refused and its staged data is released.",
   cancel: s => s.kind === "prep" ? "Cancel the request's round in progress? The dataset rounds it started are stopped too."
     : "Cancel the round in progress? Its cluster jobs are killed and the work so far is not kept.",
@@ -2168,8 +2184,29 @@ async function sendAction(subject, body, after) {  // the answer is shown by the
 }
 // ---- a timeline entry's markdown: the subset a round writes, built as DOM nodes. Nothing here is ever parsed as
 // HTML (a body can carry text from a sandboxed job), and only an http(s) URL becomes a link.
-function mdInline(text) {  // `code`, **bold**, *italic*, [text](url) and bare URLs
-  const out = [], token = /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]+/g;
+// A round's crops table names its images in the gallery repo on GitHub, which a browser cannot read. buffer-api
+// serves the same files from the round's workspace (`GET /gallery/…`), so such an image is a picture from this
+// origin. Any other image is a link: the page loads nothing from a host a timeline body names.
+const GALLERY_IMAGE = /^https:\/\/github\.com\/[^/]+\/[^/]+\/blob\/[^/]+\/galleries\/[^/]+\/(i\d+-e\d+)\/([0-9a-f]{40})\/([A-Za-z0-9_-][A-Za-z0-9._-]*)\/(raw|overlay)\.png\?raw=true$/;
+function cropImage(round, sha, crop, kind) {  // kind: raw or overlay
+  const src = `/gallery/${round}/${sha}/${crop}/${kind}.png`;
+  return el("a", { href: src, target: "_blank", rel: "noopener", title: `${kind} of crop ${crop}: click to open it` }, el("img", { class: "crop", src, loading: "lazy", alt: `${kind} of crop ${crop}` }));
+}
+function mdImage(alt, url) {
+  const m = GALLERY_IMAGE.exec(url);
+  return m ? cropImage(m[1], m[2], m[3], m[4]) : link(url, alt || url);
+}
+// A judge's findings table (`item | severity | note`) names the crops it judged by id and carries no picture. The
+// crops tables of a timeline say where each crop's pictures are: `cropsOf` adds a body's crops to a map of crop id
+// -> {round, sha}, and `markdown` given that map shows a finding's raw and overlay beside it. The timeline reads
+// its entries oldest first, so a finding gets the pictures of the newest crops table before it.
+const GALLERY_CROP = /\/galleries\/[^/\s]+\/(i\d+-e\d+)\/([0-9a-f]{40})\/([A-Za-z0-9_-][A-Za-z0-9._-]*)\/raw\.png\?raw=true/g;
+function cropsOf(text, crops) {
+  for (const m of text.matchAll(GALLERY_CROP)) crops[m[3]] = { round: m[1], sha: m[2] };
+  return crops;
+}
+function mdInline(text) {  // `code`, **bold**, *italic*, [text](url), ![alt](url) and bare URLs
+  const out = [], token = /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]+/g;
   let last = 0, m;
   while ((m = token.exec(text))) {
     out.push(text.slice(last, m.index)); last = m.index + m[0].length;
@@ -2177,18 +2214,22 @@ function mdInline(text) {  // `code`, **bold**, *italic*, [text](url) and bare U
     else if (m[3] != null) out.push(el("strong", {}, ...mdInline(m[3])));
     else if (m[4] != null) out.push(el("em", {}, ...mdInline(m[4])));
     else if (m[5] != null) out.push(link(m[6], m[5].includes("://") ? m[5] : mdInline(m[5])));
+    else if (m[8] != null) out.push(mdImage(m[7], m[8]));
     else out.push(link(m[0], m[0]));
   }
   out.push(text.slice(last));
   return out.filter(part => part !== "");
 }
-function markdown(text) {  // paragraphs, headings, fenced code, pipe tables, lists and quotes; comments (markers) are dropped
+// paragraphs, headings, fenced code, pipe tables, lists, quotes and a <details> fold; comments (markers) are dropped.
+// A fold is built closed: whoever shows the nodes says which one is open. `crops` (see cropsOf) is optional.
+function markdown(text, crops) {
   // ponytail: a nested list is flattened into its parent and `---` is a paragraph; a real parser when a round writes more
   const lines = text.replace(/<!--[\s\S]*?-->/g, "").split("\n"), out = [];
-  const fence = /^\s*(`{3,}|~{3,})/, heading = /^(#{1,6})\s+(.*)$/, item = /^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/, rule = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  const fence = /^\s*(`{3,}|~{3,})/, heading = /^(#{1,6})\s+(.*)$/, item = /^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/, fold = /^<details><summary>(.*)<\/summary>\s*$/, rule = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
   const tableAt = i => lines[i].includes("|") && (lines[i + 1] || "").includes("|") && rule.test(lines[i + 1]);
-  const starts = i => !lines[i].trim() || fence.test(lines[i]) || heading.test(lines[i]) || lines[i].startsWith(">") || item.test(lines[i]) || tableAt(i);
-  const cells = row => row.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map(cell => mdInline(cell.trim().replace(/\\\|/g, "|")));
+  const starts = i => !lines[i].trim() || fence.test(lines[i]) || heading.test(lines[i]) || lines[i].startsWith(">") || item.test(lines[i]) || tableAt(i) || fold.test(lines[i]);
+  const texts = row => row.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map(cell => cell.trim().replace(/\\\|/g, "|"));
+  const cells = row => texts(row).map(mdInline);
   const broken = rows => rows.flatMap((row, n) => n ? [el("br"), ...mdInline(row)] : mdInline(row));  // a newline is a line break, as in an issue comment
   for (let i = 0; i < lines.length;) {
     const line = lines[i]; let m;
@@ -2198,16 +2239,28 @@ function markdown(text) {  // paragraphs, headings, fenced code, pipe tables, li
       for (i++; i < lines.length && !closes(lines[i]); i++) code.push(lines[i]);
       i++; out.push(el("pre", {}, el("code", {}, code.join("\n"))));
     } else if ((m = heading.exec(line))) { out.push(el("h" + Math.min(6, m[1].length + 2), {}, ...mdInline(m[2]))); i++; }
+    else if ((m = fold.exec(line))) {  // the one tag a round writes (a long crops table)
+      const folded = [];
+      for (i++; i < lines.length && lines[i].trim() !== "</details>"; i++) folded.push(lines[i]);
+      i++; out.push(el("details", {}, el("summary", {}, ...mdInline(m[1])), ...markdown(folded.join("\n"), crops)));
+    }
     else if (tableAt(i)) {
-      const head = cells(line), body = [];
-      for (i += 2; i < lines.length && lines[i].includes("|"); i++) body.push(cells(lines[i]));
-      out.push(el("div", { class: "tablewrap" }, el("table", { class: "plain" },
+      const rows = [];
+      for (i += 2; i < lines.length && lines[i].includes("|"); i++) rows.push(lines[i]);
+      // a judge's findings: folded like a crops table, each finding with the pictures of the crop it names
+      const judged = texts(line).join("|") === "item|severity|note", at = row => (crops || {})[texts(row)[0]];
+      const pictured = judged && rows.some(at);
+      const pictures = row => ["raw", "overlay"].map(kind => at(row) ? [cropImage(at(row).round, at(row).sha, texts(row)[0], kind)] : []);
+      const head = [...(pictured ? [["raw"], ["overlay"]] : []), ...cells(line)];
+      const body = rows.map(row => [...(pictured ? pictures(row) : []), ...cells(row)]);
+      const table = el("div", { class: "tablewrap" }, el("table", { class: "plain" },
         el("thead", {}, el("tr", {}, ...head.map(cell => el("th", {}, ...cell)))),
-        el("tbody", {}, ...body.map(row => el("tr", {}, ...row.map(cell => el("td", {}, ...cell))))))));
+        el("tbody", {}, ...body.map(row => el("tr", {}, ...row.map(cell => el("td", {}, ...cell)))))));
+      out.push(judged ? el("details", {}, el("summary", {}, `${rows.length} ${rows.length === 1 ? "finding" : "findings"}`), table) : table);
     } else if (line.startsWith(">")) {
       const quoted = [];
       for (; i < lines.length && lines[i].startsWith(">"); i++) quoted.push(lines[i].replace(/^> ?/, ""));
-      out.push(el("blockquote", {}, ...markdown(quoted.join("\n"))));
+      out.push(el("blockquote", {}, ...markdown(quoted.join("\n"), crops)));
     } else if ((m = item.exec(line))) {
       const list = el(m[1] ? "ol" : "ul", {}), items = [];
       for (; i < lines.length && lines[i].trim(); i++) {
@@ -2256,7 +2309,7 @@ async function askHosts(run, send) {
   ticks.forEach(tick => tick.addEventListener("change", refresh));
   const rows = missing.map((m, n) => el("label", { class: "row" }, ticks[n], " ", el("span", { class: "mono" }, m.host), " ",
     el("span", { class: "small", title: m.records.join(", ") }, `${m.records.length} ${m.records.length === 1 ? "dataset" : "datasets"}`)));
-  const box = el("dialog", { class: "ask", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
+  const box = el("dialog", { class: "ask hosts", "aria-labelledby": "askTitle" }, el("form", { method: "dialog" },
     el("h2", { id: "askTitle" }, "Hosts to approve"),
     el("p", { class: "small" }, "Jobs of this deployment may download from an approved host from then on."),
     el("label", {}, all, " Select all"), ...rows,
@@ -2374,6 +2427,10 @@ function keepTyping(root, refresh, reload) {
   if (!root.querySelector(".stale")) root.prepend(el("div", { class: "notice stale" }, "This changed while you were typing; what you typed is kept. ", el("button", { type: "button", class: "btn", title: BUTTON_HELP.showChange, onclick: reload }, "Show the change")));
   return true;
 }
+// A dataset whose catalog record lacks what a round needs (`gaps`, on its row and on its subject) cannot be started:
+// the service offers no Start for it and refuses a go. The service reads the record from the synced catalog each
+// time, so a record fixed in the catalog can be started after the next catalog sync.
+const gapsNotice = gaps => el("div", { class: "notice" }, el("b", {}, "Cannot be started. "), "Its catalog record lacks what a round needs: ", ...mdInline(gaps.join("; ")), ". Start is offered once a catalog sync brings a record that has it; nothing has to be done here.");
 async function viewSubject(kind, key, refresh) {
   const root = $("subjectBody"), hash = location.hash;
   if (keepTyping(root, refresh, () => viewSubject(kind, key, true))) return;
@@ -2386,10 +2443,11 @@ async function viewSubject(kind, key, refresh) {
   const about = detail ? datasetCards(detail) : [];
   const [links = null, ...cards] = about;  // a dataset's links stand right under its name, its cards at the end
   const again = !!detail && detail.row.state !== "unprepared";  // Start, or Start again: the same word before and after the click
+  const gaps = (subject || detail?.row)?.gaps || [];
   if (!subject) {  // nothing was ever asked of it on this page: the first Start creates it
-    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" ? ["go"] : [], again };
+    const fresh = { kind, key, stage: "new", status: "not started", revision: 0, actions: kind === "dataset" && !gaps.length ? ["go"] : [], again };
     const missing = kind === "dataset" ? (detail ? null : "No dataset with this id in the newest catalog or the registry.") : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
-    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], detail?.row.stage || "new")), missing ? null : actionBar(fresh),
+    root.replaceChildren(...[el("h2", {}, key), links, missing ? null : flowRow(kind, lifecycle(S.meta.lines?.[kind], gaps.length ? "blocked" : detail?.row.stage || "new", ["new"])), missing ? null : actionBar(fresh), gaps.length ? gapsNotice(gaps) : null,
       missing ? el("div", { class: "empty" }, missing) : null, ...cards].filter(Boolean));
     return;
   }
@@ -2405,6 +2463,7 @@ async function viewSubject(kind, key, refresh) {
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
   if (subject.status === "working" && run && run.status !== "RUNNING") parts.push(el("div", { class: "notice" }, `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`));
   parts.push(actionBar(subject, null, kind === "buffer" ? ["go", "revoke"] : []), undelivered(subject, timeline?.actions || []));
+  if (gaps.length) parts.push(gapsNotice(gaps));
   if (extras) parts.push(extras);
   parts.push(...cards);
   if (kind === "prep") parts.push(card("Datasets of this request", "Each dataset the request names, with where its preparation stands.", pagedTable("request-datasets:" + key, {
@@ -2415,7 +2474,12 @@ async function viewSubject(kind, key, refresh) {
     ] })));
   if (kind === "prep" && subject.data?.spec) parts.push(card("The request", "As it was filed.", el("pre", { class: "err" }, subject.data.spec)));
   const log = el("div", { class: "card" }, el("h2", {}, "Timeline"), el("div", { class: "sub" }, "What was asked and what each round did, newest first. The issue on GitHub is a copy of this."));
-  for (const e of [...entries].reverse()) log.append(el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("div", { class: "md" }, ...markdown(e.body))));
+  // entries are read oldest first, so a judge's findings get the pictures of the crops table before them, and shown
+  // newest first; of the folds (crops tables, judges' findings) only the newest starts open
+  const crops = {};
+  const shown = entries.map(e => el("div", { class: "entry" }, el("div", { class: "at" }, when(e.at), e.round ? ` · ${e.round}` : "", e.mirrored_at ? "" : " · not on GitHub yet"), el("div", { class: "md" }, ...markdown(e.body, cropsOf(e.body, crops)))));
+  log.append(...shown.reverse());
+  log.querySelectorAll("details").forEach((fold, n) => { fold.open = n === 0; });
   if (!entries.length) log.append(el("div", { class: "empty" }, "Nothing yet."));
   parts.push(log);
   root.replaceChildren(...parts);
@@ -2433,15 +2497,32 @@ async function viewFind(text) {  // the lookup box: an issue number, an issue UR
 }
 // ---- Needs you: everything that waits on a person, with the button that answers it (spec webapp-actions §8.2)
 const KIND_WORDS = { dataset: "dataset", buffer: "buffer spec", prep: "request" };
+const NEEDS_KINDS = [["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]];  // the "what" a person can narrow the list to
+let needsKind = "";  // the kind shown; kept while the list redraws itself, cleared by opening the tab
+let needsCounts = {};  // how many wait under each kind, as last heard: a redrawn button starts with its number
 function viewNeeds(arg, refresh) {
   const root = $("needsBody");
   if (keepTyping(root, refresh, () => viewNeeds("", true))) return;
   delete root.dataset.dirty;
+  if (!refresh) needsKind = NEEDS_KINDS.some(([kind]) => kind === arg) ? arg : "";
   const again = () => viewNeeds("", true);
   const failed = el("div");
-  root.replaceChildren(el("h2", {}, "Needs you"), el("p", { class: "small" }, "Everything that waits on a person or has stopped, newest first, each with what it will take. Open one for its timeline."), failed,
-    pagedTable("needs", { source: pageOf("/needs", "needs"), sort: "updated", dir: "desc", empty: "Nothing waits on you.",
-      onPage: page => failed.replaceChildren(...(page.out.failed || []).filter(a => a.subject).map(a => el("div", {}, el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.key), undelivered(a.subject, [a], again)))),
+  const show = kind => {  // the address keeps the choice across a reload; it is set without a new route
+    needsKind = kind;
+    if (TABLE_STATE.has("needs")) TABLE_STATE.get("needs").offset = 0;
+    history.replaceState(null, "", "#needs" + (kind ? "/" + kind : ""));
+    again();
+  };
+  const kinds = el("div", { class: "toggles", role: "group", "aria-label": "Show" }, ...NEEDS_KINDS.map(([kind, word]) =>
+    el("button", { type: "button", class: "btn", "aria-pressed": String(kind === needsKind), "data-kind": kind, "data-word": word, onclick: () => show(kind) }, word)));
+  const count = counts => kinds.querySelectorAll("button").forEach(b => {  // each button says how many wait under it
+    const all = Object.values(counts), n = b.dataset.kind ? counts[b.dataset.kind] : all.length ? all.reduce((a, c) => a + c, 0) : null;
+    b.textContent = n == null ? b.dataset.word : `${b.dataset.word} ${num(n)}`;
+  });
+  count(needsCounts);
+  root.replaceChildren(el("h2", {}, "Needs you"), el("p", { class: "small" }, "Everything that waits on a person or has stopped, newest first, each with what it will take. Open one for its timeline."), kinds, failed,
+    pagedTable("needs", { source: pageOf("/needs", "needs", () => needsKind ? { kind: needsKind } : {}), sort: "updated", dir: "desc", empty: needsKind ? "Nothing of this kind waits on you." : "Nothing waits on you.",
+      onPage: page => { count(needsCounts = page.out.kinds || {}); failed.replaceChildren(...(page.out.failed || []).filter(a => a.subject).map(a => el("div", {}, el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.key), undelivered(a.subject, [a], again)))); },
       cols: [
         { key: "kind", label: "what", cell: x => KIND_WORDS[x.kind] },
         { key: "key", label: "name", cell: x => el("a", { href: SUBJECT_HASH[x.kind](x.key) }, x.key) },
@@ -2452,11 +2533,17 @@ function viewNeeds(arg, refresh) {
             el("button", { type: "button", class: "btn", title: BUTTON_HELP.dropped, disabled: !!x.asked, onclick: e => { e.target.disabled = true; sendAction(x, { action: "dropped", record, key: newKey() }, again); } }, "Files are in place")))) },
       ] }));
 }
-async function checkHealth() {  // so that "working" is true: say when nothing can start, or nothing is being worked on
+const HEALTH_MS = 60000;  // how often the page asks whether Temporal and every worker are still there
+function downLines(health) {  // what is away, in words; a service's task queue carries its name
+  const away = Object.keys(health.queues || {}).filter(queue => !health.queues[queue]);
+  return [
+    !health.temporal && "Temporal does not answer: nothing can be started or cancelled from this page right now.",
+    away.length && `No worker is running for ${away.join(", ")}: nothing that waits on ${away.length > 1 ? "them" : "it"} is moving. On the host: pixi run mia restart ${away.join(" ")}`,
+  ].filter(Boolean);
+}
+async function checkHealth() {  // so that "working" is true: these lines stay until a later check finds everything back
   const health = await load("/health");
-  if (!health) return;
-  if (!health.temporal) banner("Temporal does not answer: nothing can be started or cancelled from this page right now.");
-  for (const [queue, polled] of Object.entries(health.queues || {})) if (!polled) banner(`No worker is polling “${queue}”: its rounds are not moving.`);
+  if (health) $("down").replaceChildren(...downLines(health).map(line => el("div", {}, el("span", {}, line))));
 }
 function followStream() {  // told what changed, the page refetches it; a lost stream reconnects by itself
   const stream = new EventSource("/stream");
@@ -2530,6 +2617,7 @@ async function boot() {
   $("lookup").addEventListener("keydown", e => { const text = e.target.value.trim(); if (e.key === "Enter" && text) { location.hash = "#find/" + encodeURIComponent(text); e.target.value = ""; } });
   route();
   followStream();  // its first open also reads /health
+  setInterval(checkHealth, HEALTH_MS);
 }
 boot();
 })();

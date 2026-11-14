@@ -67,8 +67,9 @@ def write_atomic(path: Path, data: str | bytes) -> None:
 
 
 def text(value: Any, limit: int = 2000) -> str:
-    """A job-reported value as a bounded string ("" for None)."""
-    return "" if value is None else str(value)[:limit]
+    """A job-reported value as a string of at most `limit` characters ("" for None); one that was cut ends in "…"."""
+    whole = "" if value is None else str(value)
+    return whole if len(whole) <= limit else whole[: limit - 1] + "…"
 
 
 def texts(value: Any, limit: int = 20) -> list[str]:

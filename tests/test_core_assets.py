@@ -38,6 +38,6 @@ def test_untrusted_files_json_is_reduced(tmp_path):
         json.dumps({"u1": {"validators": "x", "source": "s" * 99}, "u2": {"validators": {"size": "big"}}, "u3": 5})
     )
     files = raw_asset(tmp_path, [])["files"]
-    assert files == {"u1": {"size": None, "source": "s" * 50}, "u2": {"size": None, "source": None}}
+    assert files == {"u1": {"size": None, "source": "s" * 49 + "…"}, "u2": {"size": None, "source": None}}
     (tmp_path / "files.json").write_text("[1]")
     assert read_files_json(tmp_path) == {}

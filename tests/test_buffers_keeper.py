@@ -15,7 +15,7 @@ def test_plan_evictions_skips_referenced_and_held_assets():
         {"key": "d", "data": {"state": "staging", "bytes": 40, "job": "9"}, "refs": []},
     ]
     picked = plan_evictions(
-        rows, quota_bytes=100, headroom_bytes=0, hold_s=3600, now=now, in_progress=set(), kind="staged"
+        rows, quota_bytes=100, headroom_bytes=0, hold_s=3600, now=now, in_round=set(), kind="staged"
     )
     # 160 live → evict a (120) … b referenced, c held, d building; still over, nothing else free
     assert [r["key"] for r in picked] == ["a"]
@@ -36,7 +36,7 @@ def test_a_blocked_fetch_larger_than_the_headroom_sets_the_target():
         },
     ]
     assert demand(rows, hold_s=hold_s, now=now) == 50  # stale, non-numeric and cleared marks do not count
-    rules = {"hold_s": hold_s, "now": now, "in_progress": set(), "kind": "raw"}
+    rules = {"hold_s": hold_s, "now": now, "in_round": set(), "kind": "raw"}
     # 60 live under a quota of 100: the headroom of 10 needs nothing, the blocked fetch's 50 needs one eviction
     assert plan_evictions(rows, quota_bytes=100, headroom_bytes=10, **rules) == []
     picked = plan_evictions(rows, quota_bytes=100, headroom_bytes=10, demand_bytes=50, **rules)
@@ -46,16 +46,13 @@ def test_a_blocked_fetch_larger_than_the_headroom_sets_the_target():
 def test_zero_quota_never_evicts():
     rows = [{"key": "a", "data": {"state": "ready", "bytes": 1e12, "last_used": 0}, "refs": []}]
     assert (
-        plan_evictions(rows, quota_bytes=0, headroom_bytes=200e9, hold_s=0, now=1e9, in_progress=set(), kind="raw")
-        == []
+        plan_evictions(rows, quota_bytes=0, headroom_bytes=200e9, hold_s=0, now=1e9, in_round=set(), kind="raw") == []
     )
 
 
-def test_raw_eviction_spares_a_record_in_progress():
+def test_raw_eviction_spares_a_record_with_a_round_open():
     rows = [{"key": "rec", "data": {"state": "ready", "bytes": 10, "last_used": 0}, "refs": []}]
-    assert (
-        plan_evictions(rows, quota_bytes=5, headroom_bytes=0, hold_s=0, now=100, in_progress={"rec"}, kind="raw") == []
-    )
+    assert plan_evictions(rows, quota_bytes=5, headroom_bytes=0, hold_s=0, now=100, in_round={"rec"}, kind="raw") == []
 
 
 def test_evict_refuses_paths_outside_the_roots(tmp_path):
@@ -97,7 +94,7 @@ def test_a_row_without_last_used_counts_as_never_used():
         {"key": "a", "data": {"state": "ready", "bytes": 1, "scanned_at": 99.0}, "refs": []},
         {"key": "b", "data": {"state": "ready", "bytes": 1, "last_used": 99.0}, "refs": []},
     ]
-    assert [row["key"] for row in free_assets(rows, hold_s=10, now=100, in_progress=set(), kind="staged")] == ["a"]
+    assert [row["key"] for row in free_assets(rows, hold_s=10, now=100, in_round=set(), kind="staged")] == ["a"]
 
 
 def test_stale_builds():
@@ -114,7 +111,7 @@ def test_a_quarantined_asset_is_held_for_the_quarantine_then_free():
     held = {"state": "ready", "bytes": 40, "last_used": 1.0, "quarantined": True, "quarantined_at": now - 100}
     done = {"state": "ready", "bytes": 40, "last_used": 1.0, "quarantined": True, "quarantined_at": now - 5000}
     rows = [{"key": "q", "data": held, "refs": []}, {"key": "old", "data": done, "refs": []}]
-    rules = {"hold_s": 3600, "now": now, "in_progress": set(), "kind": "staged"}
+    rules = {"hold_s": 3600, "now": now, "in_round": set(), "kind": "staged"}
     assert [r["key"] for r in free_assets(rows, **rules)] == ["q", "old"]  # no quarantine window
     assert [r["key"] for r in free_assets(rows, quarantine_s=1000, **rules)] == ["old"]
     picked = plan_evictions(rows, quota_bytes=10, headroom_bytes=0, quarantine_s=1000, **rules)

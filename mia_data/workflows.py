@@ -1,7 +1,7 @@
 """The Temporal workflows that take a dataset from its `go` action to published crops.
 
 `MiaDataDataset` lives as long as the dataset's subject does. Each `go` starts a round: an agent matches the
-dataset to a loader snippet, the worker smoke-tests that match, the round's crops are made and shown in the
+dataset to a loader snippet, the round's crops are made by the worker's own job and shown in the
 dataset's timeline, and a human approves them (published) or rejects them with feedback (spec §14: autodev
 gets the feedback and a superseding snippet's PR is followed). When no snippet fits, the round instead opens an issue in mia-snippets
 for autodev to write one and follows that PR: every head's crops are reviewed the same way, the approve merges
@@ -23,15 +23,17 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, CancelledError
+from temporalio.exceptions import ActivityError, ApplicationError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
 
     from .crop_test import describe_failure, job_succeeded, judge
     from .models import (
+        DEBUGGER,
         AssessmentWritten,
         DatasetState,
+        DebugResult,
         GalleryResult,
         JobArgs,
         JobDone,
@@ -55,19 +57,44 @@ CANCEL = "data:cancel"  # an action only: there was never such a label
 NO_ROUND = "there is no round in progress to cancel"
 ROUND_ENDED = "the round ended before the cancel reached it"
 CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the round's activity in flight to answer
-NOTHING_TO_REVOKE = "nothing to revoke: this dataset has published no crops"
+NOTHING_TO_REVOKE = "nothing to revoke: this dataset has no saved crops"
 REVOKED = "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; running it again repairs it"
 BUSY = "busy, ignored: a round is already running. Cancel it first, or ask again once it has ended."
 NOT_REVIEW = "an approve or a reject counts only while the dataset is at `review`, for the set under review."
+DEBUG_NEXT = (
+    "A debugging agent looks into this in {minutes} minutes and, if a new round can pass, runs one. Nothing is "
+    "needed from you; *Run again* skips the wait and the debugger."
+)
+DEBUGGED = "This round was the re-run after debugging; nothing more is tried automatically."
+GO_PATIENCE = timedelta(minutes=30)  # how long the debugger's own go may take to arrive as a signal
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
-NOT_AUTHORIZED = "approve recorded as {id}, but publication is not authorized: {why}"
+NOT_AUTHORIZED = "approve recorded as {id}, but saving the crops is not authorized: {why}"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then run it again"
 RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
 
 
+STOPPED = ("failed", "blocked", "needs-human")  # a round that stopped; `needs-human` is a stop of unrecorded kind
+# activity errors a person has to resolve: the same run would stop on them again
+BLOCKING = ("Conflict", "HostsNotAllowed")
+
+
 class RoundFailed(Exception):
-    """A job ended in a state the round cannot continue from."""
+    """The round cannot continue. `blocked`: a person has to decide or change something before a new round can
+    pass this point (a pause, a budget, a refused record); otherwise something failed."""
+
+    def __init__(self, message: str, blocked: bool = False) -> None:
+        super().__init__(message)
+        self.blocked = blocked
+
+
+def stop_stage(error: BaseException) -> str:
+    """The stage a round stops in on `error`: `blocked` when a person has to resolve it first, else `failed`."""
+    if isinstance(error, RoundFailed):
+        return "blocked" if error.blocked else "failed"
+    while isinstance(error, ActivityError) and error.cause:
+        error = error.cause
+    return "blocked" if getattr(error, "type", None) in BLOCKING else "failed"
 
 
 def _rollover_due() -> bool:
@@ -87,8 +114,8 @@ def _parse_time(iso: str | None) -> datetime | None:
 
 @workflow.defn(name="MiaDataDataset")
 class MiaDataDataset:
-    """One workflow per dataset issue, forever: each new `go` runs a round (match → smoke → crops → review →
-    approve → publish those crops) that ends in a dataset stage (done or needs-human), then waits for the next
+    """One workflow per dataset issue, forever: each new `go` runs a round (match → crops → review →
+    approve → publish those crops) that ends in a dataset stage (done, failed or blocked), then waits for the next
     `go`. One set of crops per round (spec §13): the crops a human validated are the crops published. Size is no
     verdict of this pipeline: a small raw is cropped whole, and a buffer plan decides what fits it (spec §12)."""
 
@@ -100,6 +127,7 @@ class MiaDataDataset:
         self.reject_events: list[LabelEvent] = []
         self.revoke_events: list[LabelEvent] = []
         self.cancel_events: list[LabelEvent] = []
+        self.restarts: set[str] = set()  # ids of the gos that came as `restart`: each starts its round in a new run
         # a cancel in progress (see _cancel_round): the round starts no new activity, the one in flight answers
         self.cancelling = False
         self.unwinding = False  # the round's task has been told to stop: what it runs from here on is clean-up
@@ -108,9 +136,18 @@ class MiaDataDataset:
         self.unkilled: list[str] = []  # jobs a cancel could not kill, each with the reason
         self.limits: RoundLimits | None = None  # read from config at the start of a round
         self.stage_write: Any = None  # the handle of a stage write still running beside the round (see _stage)
+        self.failure: str | None = None  # why the round just failed, while its debugging cycle is still to run
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
+        self.go_events.append(event)
+
+    @workflow.signal
+    def restart(self, event: LabelEvent) -> None:
+        """A go whose round starts in a new run of this workflow (see `run`). A run keeps the code paths it began
+        with for as long as it lives (its patches), so only a new run does everything today's code does. At
+        `review` it also ends the round that waits there, whichever path made its crops."""
+        self.restarts.add(event.event_id)
         self.go_events.append(event)
 
     @workflow.signal
@@ -145,10 +182,16 @@ class MiaDataDataset:
     @workflow.run
     async def run(self, state: DatasetState) -> None:
         rounds = 0
-        if state.stage == "review" and state.tests and not state.pr:  # rolled over while waiting for a verdict
+        worked = True  # whether this run has carried a round yet: one it started, or one it took over
+        if state.restart:  # rolled over for this go: its round is the run's first step
+            event, state.restart = state.restart, None
+            await self._guard(self._round(event, restarted=True))
+        elif state.stage == "review" and state.tests and not state.pr:  # rolled over while waiting for a verdict
             await self._guard(self._from_review())
         elif (state.stage in DEVELOP or state.stage == "review") and state.snippet_issue:  # ... or following the PR
             await self._guard(self._follow_pr())
+        else:
+            worked = False
         while True:
             await workflow.wait_condition(lambda: bool(self._labels() or self.cancel_events) or self._roll_due())
             if not (self._labels() or self.cancel_events):
@@ -161,8 +204,13 @@ class MiaDataDataset:
             event = self.go_events.pop(0)
             if self._seen(event):  # redelivery
                 continue
+            restarted = event.event_id in self.restarts
+            if restarted and worked and not (self._labels() or self.cancel_events):
+                state.restart = event  # this run has carried a round: the next one starts in a new run
+                await self._rollover()
             rounds += 1
-            await self._guard(self._round(event))
+            worked = True
+            await self._guard(self._round(event, restarted))
             if (rounds >= MAX_ROUNDS_PER_EXECUTION or self._roll_due()) and not (self._labels() or self.cancel_events):
                 await self._rollover()
 
@@ -220,7 +268,7 @@ class MiaDataDataset:
         return self.limits
 
     async def _guard(self, step: Coroutine[Any, Any, None]) -> None:
-        """Run a step of the round; any failure ends the round in needs-human instead of failing the workflow.
+        """Run a step of the round; any failure stops the round (`stop_stage`) instead of failing the workflow.
 
         The step runs as a task so a `cancel` can end it wherever it is waiting (a job, a lock, a verdict, a PR):
         see `_cancel_round` (spec webapp-actions §5)."""
@@ -237,7 +285,7 @@ class MiaDataDataset:
             else:
                 await self._cancel_round(round_task)
         except (ActivityError, RoundFailed) as error:
-            await self._finish("needs-human", error_message(error))
+            await self._finish(stop_stage(error), error_message(error))
         except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up
             self.unwinding = True
             round_task.cancel()
@@ -247,6 +295,9 @@ class MiaDataDataset:
             cancel.cancel()
             self.round_task, self.cancelling, self.unwinding = None, False, False
         await self._settle_stage_write(cancel=False)  # quiet point: the last stage write lands before a rollover
+        if (failure := self.failure) is not None:  # the step failed with a debugging cycle left: that runs now
+            self.failure = None
+            await self._guard(self._debug(failure))
 
     async def _cancel_round(self, round_task: asyncio.Future[None]) -> None:
         """End the round a `cancel` was sent for, leaving nothing of it behind.
@@ -256,7 +307,7 @@ class MiaDataDataset:
         step and cleans up as it unwinds. A task that is waiting (a job, a lock, a verdict, a snippet PR) is
         cancelled there. Its cluster job is killed first, then its reservation settled and its raw lock
         released (`_job`): one writer per raw cache holds until the job is dead. A job that cannot be killed
-        makes the dataset `needs-human`, saying so, never `cancelled` over a job that runs on."""
+        makes the dataset `failed`, saying so, never `cancelled` over a job that runs on."""
         events, self.cancel_events = self.cancel_events, []
         self.cancelling, self.unkilled = True, []
         if self.in_flight:
@@ -282,8 +333,9 @@ class MiaDataDataset:
         if self.unkilled:
             jobs = "; ".join(self.unkilled)
             return await self._finish(
-                "needs-human",
+                "failed",
                 f"cancelled by {events[-1].actor}, but a job could not be killed and may still be running: {jobs}",
+                debug=False,  # a person ended this round
             )
         await self._finish("cancelled", f"cancelled by {events[-1].actor}")
 
@@ -315,14 +367,14 @@ class MiaDataDataset:
             try:
                 ended = await self._revoke(event) or ended
             except (ActivityError, RoundFailed) as error:
-                await self._finish("needs-human", error_message(error))
+                await self._finish(stop_stage(error), error_message(error))
                 ended = True
             await self._settle_stage_write(cancel=False)
         return ended
 
     async def _revoke(self, event: LabelEvent) -> bool:
         """Withdraw the dataset: the activity writes the reject assessments, quarantines the staged artifacts and
-        flips the row; the issue ends in needs-human naming the blast radius. Returns whether the round ended: an
+        flips the row; the dataset ends `blocked` naming the blast radius. Returns whether the round ended: an
         issue that never published anything (no round, or no manifest on disk) only has the label refused."""
         state = self.state
         if not workflow.patched("l-revoke"):
@@ -347,7 +399,7 @@ class MiaDataDataset:
         extra = f"**Quarantined artifacts:** {artifacts}\n**Buffers that drew from it:** {buffers}\n"
         count = len(out.artifacts)
         detail = REVOKED.format(actor=event.actor, count=count, plural="" if count == 1 else "s")
-        await self._finish("needs-human", detail, extra=extra)
+        await self._finish("blocked", detail, extra=extra)
         return True
 
     def _seen(self, event: LabelEvent) -> bool:
@@ -381,7 +433,7 @@ class MiaDataDataset:
             schedule_to_close_timeout=budget,
             retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
             # stage-write-wait: a cancelled write already inside its GitHub call finishes before the next write
-            # starts, so two writes never swap labels at once (two issues once kept `matching` and `needs-human`)
+            # starts, so two writes never swap labels at once (two issues once kept `matching` and a stop stage)
             cancellation_type=(
                 workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
                 if workflow.patched("stage-write-wait")
@@ -433,13 +485,90 @@ class MiaDataDataset:
                 "issue #%d: could not refuse %s %s: %s", self.state.issue, label, event.event_id, error_message(error)
             )
 
-    async def _finish(self, stage: str, detail: str = "", extra: str = "") -> None:
-        """End the round in a dataset stage, then refuse whatever queued up while it ran. Never raises."""
+    async def _finish(self, stage: str, detail: str = "", extra: str = "", debug: bool = True) -> None:
+        """End the round in a dataset stage, then refuse whatever queued up while it ran. Never raises.
+
+        A round that failed goes to `debugging` instead while a debugging cycle is left (`debug`: unless the
+        caller rules that out): `_guard` then runs `_debug`, which ends in a new round or in a stop stage."""
+        if stage == "failed" and debug and await self._debuggable():
+            self.failure = detail
+            minutes = (await self._limits()).debug_wait_min
+            stage, detail = "debugging", f"{detail}\n\n{DEBUG_NEXT.format(minutes=minutes)}"
+        elif stage == "failed" and self.state.debugs:
+            detail = f"{detail}\n\n{DEBUGGED}"
         try:
             await self._stage(stage, detail, budget=timedelta(hours=24), extra=extra, wait=True)
         except ActivityError as error:
             workflow.logger.error("issue #%d: could not set %s: %s", self.state.issue, stage, error_message(error))
         await self._refuse_queued()
+
+    async def _debuggable(self) -> bool:
+        """Whether the round that just failed gets a debugging cycle: it was admitted (a debugger's job needs its
+        pins) and `limits.debug_cycles` are not used up since the last go that was not the debugger's."""
+        state = self.state
+        if not (state.pins and state.round_id) or not workflow.patched("auto-debug"):
+            return False
+        try:
+            return state.debugs < (await self._limits()).debug_cycles
+        except ActivityError:
+            return False
+
+    async def _go_within(self, patience: timedelta) -> bool:
+        """Wait up to `patience` for a go; whether one is queued."""
+        with contextlib.suppress(TimeoutError):
+            await workflow.wait_condition(lambda: bool(self.go_events), timeout=patience)
+        return bool(self.go_events)
+
+    async def _debug(self, failure: str) -> None:
+        """One debugging cycle of a round that failed with `failure`, at stage `debugging`: wait
+        `limits.debug_wait_min`, run the debugging agent over what the round's jobs left, and act on its outcome.
+        `rerun`: its go starts a new round, whose match agent reads its advice. `blocked`, or a debugger that did
+        not finish: the round stops there, with the failure and what the debugger said. A go that arrives
+        meanwhile (a person's *Run again*) ends the cycle at once: that round is what runs next."""
+        state = self.state
+        assert state.round_id and state.pins  # _debuggable
+        state.debugs += 1
+        if await self._go_within(timedelta(minutes=(await self._limits()).debug_wait_min)):
+            return
+        try:
+            workspace = await self._act(
+                "prepare_debug",
+                state.issue,
+                state.round_id,
+                state.pins,
+                failure,
+                state.binding,
+                seconds=600,
+                result_type=str,
+            )
+            job = await self._job("debug", workspace)
+            result = await self._act(
+                "read_debug", state.issue, state.round_id, workspace, seconds=300, result_type=DebugResult
+            )
+        except (ActivityError, RoundFailed) as error:
+            if self.go_events:
+                return
+            why = f"{failure}\n\nThe debugging agent did not run: {error_message(error)}"
+            return await self._finish(stop_stage(error), why, debug=False)
+        if self.go_events:
+            return
+        if result.outcome == "failed":
+            why = result.diagnosis if job_succeeded(job) else describe_failure("debug", job)
+            return await self._finish("failed", f"{failure}\n\nThe debugging agent did not finish: {why}", debug=False)
+        found = f"**Debugger:** {result.diagnosis}"
+        if result.outcome == "blocked":
+            needs = f"\n\n**What it needs:** {result.advice}" if result.advice else ""
+            return await self._finish("blocked", f"{failure}\n\n{found}{needs}", debug=False)
+        try:
+            await self._act("comment", state.issue, found, f"debug {state.round_id}")
+            await self._act(
+                "debug_go", state.issue, state.round_id, result.advice, seconds=120, budget=timedelta(minutes=30)
+            )
+        except ActivityError as error:
+            why = f"{failure}\n\nThe debugger's new round could not be asked for: {error_message(error)}"
+            return await self._finish("failed", why, debug=False)
+        if not await self._go_within(GO_PATIENCE):
+            await self._finish("failed", f"{failure}\n\nThe debugger's new round did not start.", debug=False)
 
     async def _prepare(self, kind: str) -> str:
         """Make the workspace for a smoke/crop/verify job. Returns its path."""
@@ -467,7 +596,8 @@ class MiaDataDataset:
         limits = await self._limits()
         budgeted = workflow.patched("l-budget")
         if budgeted:  # the operator's switches first: the pause, then the root budget (spec autonomous-gates §8)
-            usd = {"match": limits.agent_max_budget_usd, "judge": limits.judge_max_budget_usd}.get(kind, 0.0)
+            agent = limits.agent_max_budget_usd
+            usd = {"match": agent, "debug": agent, "judge": limits.judge_max_budget_usd}.get(kind, 0.0)
             await self._reserve(key, kind, usd)
         walltime = timedelta(minutes=limits.walltime_min)
         job_id = None
@@ -514,12 +644,12 @@ class MiaDataDataset:
         assert state.pins
         while True:
             if await self._act("paused", result_type=bool):
-                raise RoundFailed(PAUSED)
+                raise RoundFailed(PAUSED, blocked=True)
             reservation = await self._act("reserve", state.pins.root, key, kind, usd, result_type=Reservation)
             if reservation.ok:
                 return
             if not reservation.wait:
-                raise RoundFailed(f"root budget: {reservation.reason}")
+                raise RoundFailed(f"root budget: {reservation.reason}", blocked=True)
             poll_minutes = (await self._limits()).poll_minutes
             await workflow.sleep(timedelta(minutes=min(poll_minutes * 2**tries, 30)))
             tries += 1
@@ -652,6 +782,12 @@ class MiaDataDataset:
         else:
             needed = None
             passed, failed_jobs = judge(verify, [crop_job, verify_job])
+        if trusted and not passed and verify.host_not_allowed:  # a host waits for a person's approval
+            raise RoundFailed(
+                f"{describe_failure('crop', crop_job, verify.crop_errors)} "
+                f"(host not allowed: {verify.host_not_allowed})",
+                blocked=True,
+            )
         gallery = await self._gallery(sha, crop_workspace, verify_workspace, verify) if verify.crops else None
         test = Test(
             sha,
@@ -677,37 +813,44 @@ class MiaDataDataset:
 
     # --- the round -------------------------------------------------------------------------
 
-    async def _round(self, event: LabelEvent) -> None:
-        """One round from a `go`: admit, match, smoke, test crops, then wait for review.
+    async def _round(self, event: LabelEvent, restarted: bool = False) -> None:
+        """One round from a `go`: admit, match, test crops, then wait for review.
 
-        After a develop round ended in needs-human, the `go` resumes its snippet PR instead when that PR is still
+        After a develop round stopped, the `go` resumes its snippet PR instead when that PR is still
         open (see _resume_pr); its snippets issue is remembered either way, so a retry never opens a second one."""
         state = self.state
         snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
         # (a cancelled develop round left its snippet issue and PR open too: autodev is not asked twice)
-        if (
-            state.stage in ("needs-human", "cancelled")
-            and state.snippet_issue
-            and workflow.patched("resume-snippet-pr")
-        ):
+        # (a restart at review leaves them open as well)
+        left = (*STOPPED, "cancelled", "debugging", *(("review",) if restarted else ()))
+        if event.actor != DEBUGGER:
+            state.debugs = 0  # somebody asked for this round: it has its own debugging cycles
+        if state.stage in left and state.snippet_issue and workflow.patched("resume-snippet-pr"):
             snippet_issue, snippet_pr = state.snippet_issue, state.pr
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
         state.tests, state.attempts, state.pending = [], {}, []
-        state.pins = await self._act("admit", state.issue, event.event_id, seconds=300, result_type=Pins)
+        try:
+            state.pins = await self._act("admit", state.issue, event.event_id, seconds=300, result_type=Pins)
+        except ActivityError as error:
+            if isinstance(error.cause, ApplicationError) and error.cause.non_retryable:
+                # a record admission refuses (not in the catalog, no folder, another record's folder) is refused
+                # again until someone changes it
+                raise RoundFailed(error_message(error), blocked=True) from error
+            raise
         self.limits = await self._act("limits", result_type=RoundLimits)
         if workflow.patched("l-budget") and await self._act("paused", result_type=bool):
-            raise RoundFailed(PAUSED)
+            raise RoundFailed(PAUSED, blocked=True)
         if snippet_issue and snippet_pr and await self._resume_pr(snippet_issue, snippet_pr):
             return
         await self._stage("matching")
 
-        # Match: the agent picks a snippet and writes a binding, then the worker smoke-tests that binding itself.
+        # Match: the agent picks a snippet and writes a binding; the worker's crop job is what tests that binding.
         workspace = await self._act(
             "prepare_match", state.issue, state.round_id, state.pins, 1, seconds=600, result_type=str
         )
         if not job_succeeded(job := await self._job("match", workspace)):
-            return await self._finish("needs-human", describe_failure("match", job))
+            return await self._finish("failed", describe_failure("match", job))
         match = await self._act("read_match", workspace, seconds=300, result_type=MatchResult)
         no_size_verdict = workflow.patched(
             "h-no-eligibility"
@@ -715,41 +858,11 @@ class MiaDataDataset:
         if match.outcome == "needs_snippet":
             return await self._develop(match.draft or {}, snippet_issue)
         if match.outcome not in (("matched",) if no_size_verdict else ("matched", "ineligible")):
-            return await self._finish("needs-human", f"match blocked: {match.reason}")
+            stopped = "failed" if match.outcome == "failed" else "blocked"  # the agent says which of the two
+            return await self._finish(stopped, f"match {stopped}: {match.reason}")
         state.binding, state.binding_hash = match.binding_path, match.binding_hash
-        if workflow.patched("c-raw-lock"):  # smoke writes the record's raw cache: under its lock
-            lock = await self._hold_raw("smoke")
-            try:
-                workspace = await self._prepare("smoke")
-                job = await self._job("smoke", workspace, lock=lock)
-                ran = job_succeeded(job)
-                if ran:
-                    smoke = await self._act("read_smoke", workspace, state.pins.record, result_type=SmokeResult)
-            finally:
-                await self._release_raw(lock)
-            if not ran:
-                return await self._finish("needs-human", await self._smoke_failure(job, workspace))
-        else:
-            workspace = await self._prepare("smoke")
-            if not job_succeeded(job := await self._job("smoke", workspace)):
-                return await self._finish("needs-human", await self._smoke_failure(job, workspace))
-            smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
-        if not smoke.ok:
-            why = "; ".join(smoke.errors) or "no errors reported"
-            return await self._finish(
-                "needs-human",
-                f"smoke failed: {why}"
-                + (f" (host not allowed: {smoke.host_not_allowed})" if smoke.host_not_allowed else ""),
-            )
-        if not no_size_verdict:  # only a history without the patch reads smoke's `eligible`
-            if smoke.eligible != (match.outcome == "matched"):
-                return await self._finish(
-                    "needs-human",
-                    f"the match agent says {match.outcome}, but smoke found the data "
-                    f"{'eligible' if smoke.eligible else 'ineligible'}",
-                )
-            if not smoke.eligible:
-                return await self._finish("ineligible", f"no raw volume is at least 256×256; shapes: {smoke.shapes}")
+        if not workflow.patched("crop-checks-binding") and await self._smoke(match, no_size_verdict):
+            return  # a history without the patch ran a smoke job first
 
         # The round's crops at the matched snippets commit, shown on the issue for review; approved, they are published.
         sha = state.pins.snippets_commit
@@ -765,13 +878,56 @@ class MiaDataDataset:
             "comment", state.issue, report, f"test {state.round_id} {sha}", "data", state.binding, state.binding_hash
         )
         if not test.ok:
-            return await self._finish(
-                "needs-human", "; ".join(["the crops failed; nothing is published", *failed_jobs])
-            )
+            return await self._finish("failed", "; ".join(["the crops failed; nothing is saved", *failed_jobs]))
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
         await self._judge_crops(test)  # in shadow: after the gate opens, so a human verdict is only queued, never held
         await self._from_review()
+
+    async def _smoke(self, match: MatchResult, no_size_verdict: bool) -> bool:
+        """A smoke job on the matched binding, before the crops; True when it ended the round. Replayed only: a
+        history without the `crop-checks-binding` patch ran one."""
+        state = self.state
+        assert state.pins  # a round is admitted before any job runs
+        if workflow.patched("c-raw-lock"):  # smoke writes the record's raw cache: under its lock
+            lock = await self._hold_raw("smoke")
+            try:
+                workspace = await self._prepare("smoke")
+                job = await self._job("smoke", workspace, lock=lock)
+                ran = job_succeeded(job)
+                if ran:
+                    smoke = await self._act("read_smoke", workspace, state.pins.record, result_type=SmokeResult)
+            finally:
+                await self._release_raw(lock)
+            if not ran:
+                return await self._stopped("failed", await self._smoke_failure(job, workspace))
+        else:
+            workspace = await self._prepare("smoke")
+            if not job_succeeded(job := await self._job("smoke", workspace)):
+                return await self._stopped("failed", await self._smoke_failure(job, workspace))
+            smoke = await self._act("read_smoke", workspace, result_type=SmokeResult)
+        if not smoke.ok:
+            why = "; ".join(smoke.errors) or "no errors reported"
+            return await self._stopped(
+                "blocked" if smoke.host_not_allowed else "failed",  # a host waits for a person's approval
+                f"smoke failed: {why}"
+                + (f" (host not allowed: {smoke.host_not_allowed})" if smoke.host_not_allowed else ""),
+            )
+        if not no_size_verdict:  # only a history without the patch reads smoke's `eligible`
+            if smoke.eligible != (match.outcome == "matched"):
+                return await self._stopped(
+                    "failed",
+                    f"the match agent says {match.outcome}, but smoke found the data "
+                    f"{'eligible' if smoke.eligible else 'ineligible'}",
+                )
+            if not smoke.eligible:
+                return await self._stopped("ineligible", f"no raw volume is at least 256×256; shapes: {smoke.shapes}")
+        return False
+
+    async def _stopped(self, stage: str, detail: str) -> bool:
+        """End the round in `stage`; True, for a caller that reports whether the round ended."""
+        await self._finish(stage, detail)
+        return True
 
     async def _smoke_failure(self, job: JobDone, workspace: str) -> str:
         """Why a smoke job failed: its end state and the errors of its own smoke.json, when it wrote one. `harness
@@ -794,7 +950,7 @@ class MiaDataDataset:
         if kind == "approve" and event:
             written = await self._assess("approve", event, subject)
             if not written.authorized:
-                return await self._finish("needs-human", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
+                return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
             state.tests[-1].approved_at = event.at
             await self._publish_set()
         elif kind == "reject" and event:
@@ -888,6 +1044,8 @@ class MiaDataDataset:
             verdict,
             f"human:{event.actor}",
             f"data:{verdict} by {event.actor}",
+            None,  # supersedes nothing
+            event.event_id,  # the action: what the person wrote with the verdict is read from it
             seconds=300,
             result_type=AssessmentWritten,
         )
@@ -922,14 +1080,14 @@ class MiaDataDataset:
         )
         state.published = True
         extra = (
-            f"**Totals:** {len(published['published'])} crops published this round ({verify.ok_count} verified); "
+            f"**Totals:** {len(published['published'])} crops saved this round ({verify.ok_count} verified); "
             f"{published['total']} in the dataset\n"
         )
         await self._finish("done", extra=extra)
 
     async def _produce(self) -> None:
         """Pre-I (spec §13): a second, production set after the approve. Replayed by histories that hold one; no
-        new round takes this path. Passing crops stay published even when the round ends in needs-human."""
+        new round takes this path. Passing crops stay published even when the round ends `failed`."""
         state = self.state
         assert state.pins and state.seed  # set at admission; carried in the durable state across rollovers
         sha = state.pins.snippets_commit
@@ -957,24 +1115,24 @@ class MiaDataDataset:
         n_effective = n_crops if verify.n_effective is None else min(n_crops, verify.n_effective)
         needed = max(1, math.ceil(n_effective / 2))
         extra = (
-            f"{table}\n**Totals:** {len(published['published'])} new crops published this round "
+            f"{table}\n**Totals:** {len(published['published'])} new crops saved this round "
             f"({verify.ok_count} of {n_effective} passed); {published['total']} in the dataset\n"
         )
         if not job_succeeded(
             crop_job
         ):  # a limit or a crash: the surviving crops are published, the round needs a human
             return await self._finish(
-                "needs-human",
+                "failed",
                 f"{describe_failure('crop', crop_job, verify.crop_errors)}; "
-                f"the {verify.ok_count} crops that passed are published",
+                f"the {verify.ok_count} crops that passed are saved",
                 extra,
             )
         if verify.ok_count >= needed:
             return await self._finish("done", extra=extra)
         await self._finish(
-            "needs-human",
+            "failed",
             f"only {verify.ok_count} of {n_effective} crops passed (at least {needed} "
-            f"needed); the ones that passed are published",
+            f"needed); the ones that passed are saved",
             extra,
         )
 
@@ -1011,7 +1169,7 @@ class MiaDataDataset:
             if not self._labels():
                 await self._rollover()  # stage review: the next run resumes here
             if await self._revokes():
-                return "revoked", None  # the round ended in needs-human; nothing under review any more
+                return "revoked", None  # the round ended `blocked`; nothing under review any more
             if verdict := await self._verdict():
                 return verdict
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
@@ -1041,7 +1199,7 @@ class MiaDataDataset:
         await self._follow_pr()
 
     async def _resume_pr(self, snippet_issue: int, pr_number: int) -> bool:
-        """A `go` after a develop round ended in needs-human: pick its snippet PR up again if it is still open,
+        """A `go` after a develop round stopped: pick its snippet PR up again if it is still open,
         and test the current head afresh under the new round and pins (spec §7.4, "comment and re-trigger").
 
         Returns False when the PR was merged or closed meanwhile, or is not this snippets issue's: the round
@@ -1061,8 +1219,8 @@ class MiaDataDataset:
 
     async def _follow_pr(self) -> None:
         """The develop round's one wait: wake on pr_update and on labels until the round ends. At `review` (the
-        PR head's set passed) an approve or reject is the verdict (spec §14); any other label is refused (a go is
-        busy throughout). Rolls over only here, idle."""
+        PR head's set passed) an approve or reject is the verdict (spec §14) and a `restart` ends the round; any
+        other label is refused (a plain go is busy throughout). Rolls over only here, idle."""
         state = self.state
         await self._limits()
         loop = workflow.patched("review-loop")
@@ -1071,10 +1229,12 @@ class MiaDataDataset:
             if not (state.pending or self._labels()):
                 await self._rollover()  # the develop state is all in `state`: the next run resumes here
             if await self._revokes():
-                return  # the round ended in needs-human
+                return  # the round stopped
             if loop and state.stage == "review" and state.pr and (verdict := await self._verdict()):
                 kind, event = verdict
                 await (self._approve_pr(event) if kind == "approve" else self._revise_pr(event))
+            if state.stage == "review" and any(go.event_id in self.restarts for go in self.go_events):
+                return  # a restart of the set under review: the round ends here, and `run` starts the next
             await self._refuse_queued()
             while state.pending:
                 if await self._on_pr(state.pending.pop(0).pr):
@@ -1086,11 +1246,11 @@ class MiaDataDataset:
         state, test = self.state, self.state.tests[-1]
         written = await self._assess("approve", event, ("pr_head", test.sha))
         if not written.authorized:
-            return await self._finish("needs-human", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
+            return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
         test.approved_at = event.at
         await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
         await self._stage(
-            "merging", f"the crops at `{test.sha}` are approved; autodev merges the snippet PR, then they are published"
+            "merging", f"the crops at `{test.sha}` are approved; autodev merges the snippet PR, then they are saved"
         )
 
     async def _revise_pr(self, event: LabelEvent) -> None:
@@ -1119,7 +1279,7 @@ class MiaDataDataset:
             where = f"snippet PR {pr.url or f'#{pr.pr}'}"
             if pr.needs_human or pr.state == "closed":
                 why = "its issue has `snippets:needs-human`" if pr.needs_human else "it was closed without merging"
-                await self._finish("needs-human", f"{where}: {why}")
+                await self._finish("blocked", f"{where}: {why}")
                 return True
             if pr.state == "merged":
                 await self._merged(pr)
@@ -1128,7 +1288,7 @@ class MiaDataDataset:
                 return False  # tested: its status stands until a new head
             if len(state.tests) >= (await self._limits()).max_pr_revisions:
                 await self._finish(
-                    "needs-human", f"{where}: revision limit, {len(state.tests)} heads tested and none merged"
+                    "failed", f"{where}: revision limit, {len(state.tests)} heads tested and none merged"
                 )
                 return True
             pr = await self._test_head(pr)
@@ -1198,7 +1358,7 @@ class MiaDataDataset:
         binding = await self._act("adopt_pr_binding", state.round_id, pr.pr, merge_sha, seconds=600, result_type=dict)
         if binding["errors"]:
             return await self._finish(
-                "needs-human", "; ".join(["the merged example binding was not adopted", *binding["errors"]])
+                "failed", "; ".join(["the merged example binding was not adopted", *binding["errors"]])
             )
         state.binding, state.binding_hash, state.snippet_name = binding["path"], binding["hash"], binding["name"]
         if workflow.patched("review-loop"):
@@ -1227,7 +1387,7 @@ class MiaDataDataset:
             )
             if not test.ok:
                 return await self._finish(
-                    "needs-human", "; ".join(["the merge commit's crops failed; nothing is published", *failed_jobs])
+                    "failed", "; ".join(["the merge commit's crops failed; nothing is saved", *failed_jobs])
                 )
             await self._stage("review")
             await self._refuse_queued(approves=False)
@@ -1254,8 +1414,8 @@ class MiaDataDataset:
             )
             if not test.ok:
                 return await self._finish(
-                    "needs-human",
-                    "; ".join(["the merge commit's crops failed; nothing is published", *failed_jobs]),
+                    "failed",
+                    "; ".join(["the merge commit's crops failed; nothing is saved", *failed_jobs]),
                 )
         state.pins = dataclasses.replace(state.pins, snippets_commit=merge_sha)
         await self._publish_set()

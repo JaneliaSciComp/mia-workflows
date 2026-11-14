@@ -65,6 +65,7 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
     }
     assert ("POST", "/plan") in requested
     assert resolve("GET", "/crops/folder/crop/overlay.png") == "read"  # the thumbnails' <img src>, not an api() call
+    assert resolve("GET", f"/gallery/i1-e2/{'a' * 40}/crop/raw.png") == "read"  # a round's crops in its timeline
     for method, path in requested:
         assert resolve(method, path) in {"read", "consumer", "action"}, (method, path)
 
@@ -155,6 +156,54 @@ def rendered(*bodies: str) -> list[str]:
     return json.loads(done.stdout)
 
 
+def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    lines = PAGE[PAGE.index("function downLines(") : PAGE.index("async function checkHealth(")]
+    healths = [
+        {"temporal": True, "queues": {"mia-data": True, "snippets": False, "autodev": False}},
+        {"temporal": True, "queues": {"mia-data": True, "snippets": False}},
+        {"temporal": True, "queues": {"mia-data": True}},
+        {"temporal": False, "queues": {}},
+    ]
+    script = f'{lines}\nconsole.log(JSON.stringify(JSON.parse(require("fs").readFileSync(0, "utf8")).map(downLines)));'
+    done = subprocess.run([node, "-e", script], input=json.dumps(healths), capture_output=True, text=True, check=True)
+    both, one, none, no_temporal = json.loads(done.stdout)
+    assert len(both) == 1 and both[0].startswith(
+        "No worker is running for snippets, autodev: nothing that waits on them"
+    )
+    assert both[0].endswith("pixi run mia restart snippets autodev") and "waits on it is" in one[0]
+    assert none == [] and len(no_temporal) == 1 and no_temporal[0].startswith("Temporal does not answer")
+    # the lines are replaced by each check, never faded, and the check repeats
+    assert '$("down").replaceChildren(' in PAGE and "setInterval(checkHealth, HEALTH_MS)" in PAGE
+
+
+def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
+    from mia_data.config import STAGES, round_open
+
+    stages = re.search(r"const ROUND_OPEN = new Set\(\[([^\]]*)\]\)", PAGE)
+    assert stages and re.findall(r'"([a-z-]+)"', stages.group(1)) == [stage for stage in STAGES if round_open(stage)]
+    assert 'row.state !== "prepared" && !ROUND_OPEN.has(row.stage)' in PAGE
+
+
+def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
+    view = PAGE[PAGE.index("function viewNeeds(") : PAGE.index("const HEALTH_MS")]
+    assert '"aria-pressed": String(kind === needsKind)' in view and "<select" not in view and '"select"' not in view
+    assert 'pageOf("/needs", "needs", () => needsKind ? { kind: needsKind } : {})' in view
+    assert '["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]' in PAGE
+    assert '.toggles .btn[aria-pressed="true"]' in PAGE
+
+
+def test_a_dataset_at_review_offers_a_restart_beside_its_verdicts() -> None:
+    from mia_data.config import STAGE_ACTIONS
+
+    assert "go" in STAGE_ACTIONS["review"][1]
+    assert 'action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"' in PAGE
+    order = PAGE[PAGE.index("const ACTION_ORDER = ") :].split("\n")[0]
+    assert order.index('"approve"') < order.index('"reject"') < order.index('"go"') < order.index('"cancel"')
+
+
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
     stage, spec, plan, notes = rendered(
         "**Stage:** `buffer:planning`\n\n**Folders:** [Workspace](https://files.example/w) · [Staged](https://files.example/s)\n\n"
@@ -195,6 +244,74 @@ def test_a_link_to_github_carries_the_github_mark() -> None:
     assert "</svg> the PR</a>" in body
     assert "</svg> https://github.com/o/r/issues/4</a>" in body
     assert '<a href="https://github.com.evil.example/x" target="_blank" rel="noopener">https://github.com.evil' in body
+
+
+def test_a_rounds_crops_are_pictures_served_by_this_origin() -> None:
+    """A round's crops table names images in the gallery repo, which a browser cannot read: each one is shown from
+    buffer-api's own copy. Any other image is a link, never a picture loaded from somewhere else."""
+    sha = "c" * 40
+    gallery = f"https://github.com/o/data/blob/galleries/galleries/rec-1/i7-e99/{sha}/i7-e99-b0-000"
+    table, other = rendered(
+        "<details><summary>2 crops</summary>\n\n| raw | overlay | caption |\n|---|---|---|\n"
+        f"| ![raw]({gallery}/raw.png?raw=true) | ![overlay]({gallery}/overlay.png?raw=true) | i7-e99-b0-000 · z=3 |\n"
+        "\n</details>\n\nafter the fold",
+        "![logo](https://tracker.example/pixel.png) and ![raw](https://github.com/o/data/blob/galleries/x/raw.png?raw=true)",
+    )
+    local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
+    assert table.startswith("<details><summary>2 crops</summary><div") and "<p>after the fold</p>" in table
+    assert "&lt;" not in table and "!" not in table and "github.com" not in table
+    for name in ("raw", "overlay"):
+        assert f'<a href="{local}/{name}.png" target="_blank" rel="noopener"' in table
+        assert f'<img class="crop" src="{local}/{name}.png" loading="lazy" alt="{name} of crop i7-e99-b0-000">' in table
+    assert "<img" not in other and "!" not in other
+    assert '<a href="https://tracker.example/pixel.png" target="_blank" rel="noopener">logo</a>' in other
+
+
+def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
+    """A findings table names crops by id: the timeline gives `markdown` where each crop's pictures are, read from
+    the crops tables before it, and the findings are folded like a crops table. Only the newest fold starts open."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    sha = "c" * 40
+    gallery = f"https://github.com/o/data/blob/galleries/galleries/rec-1/i7-e99/{sha}/i7-e99-b0-000"
+    crops = (
+        "| raw | overlay | caption |\n|---|---|---|\n"
+        f"| ![raw]({gallery}/raw.png?raw=true) | ![overlay]({gallery}/overlay.png?raw=true) | i7-e99-b0-000 |\n"
+    )
+    judge = (
+        "**Crop judge:** `approve`\n\n| item | severity | note |\n|---|---|---|\n"
+        "| i7-e99-b0-000 | ok | sharp membranes |\n| binding | suspect | no crop of this name |\n"
+    )
+    names = ("el", "svgEl", "GH_MARK", "ghMark", "link")
+    helpers = "\n".join(
+        line for line in PAGE.splitlines() if line.startswith(tuple(f"const {name} = " for name in names))
+    )
+    renderer = PAGE[PAGE.index("// ---- a timeline entry's markdown") : PAGE.index("function actionBar(")]
+    script = (
+        f"{FAKE_DOM}\n{helpers}\n{renderer}\n"
+        'const [crops, judge] = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
+        "const show = nodes => nodes.map(html).join('');\n"
+        "console.log(JSON.stringify([show(markdown(judge, cropsOf(crops, {}))), show(markdown(judge))]));\n"
+    )
+    done = subprocess.run(
+        [node, "-e", script], input=json.dumps([crops, judge]), capture_output=True, text=True, check=True
+    )
+    pictured, plain = json.loads(done.stdout)
+    local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
+    assert pictured.startswith(
+        "<p><strong>Crop judge:</strong> <code>approve</code></p><details><summary>2 findings</summary>"
+    )
+    assert "<th>raw</th><th>overlay</th><th>item</th><th>severity</th><th>note</th>" in pictured
+    for name in ("raw", "overlay"):
+        assert (
+            f'<img class="crop" src="{local}/{name}.png" loading="lazy" alt="{name} of crop i7-e99-b0-000">' in pictured
+        )
+    # a finding about something that is no crop has no picture, and a timeline with no crops table adds no column
+    assert "<tr><td></td><td></td><td>binding</td><td>suspect</td>" in pictured
+    assert "<img" not in plain and "<details><summary>2 findings</summary>" in plain and "<th>raw</th>" not in plain
+    assert "markdown(e.body, cropsOf(e.body, crops))" in PAGE and "log.append(...shown.reverse())" in PAGE
+    assert 'log.querySelectorAll("details").forEach((fold, n) => { fold.open = n === 0; });' in PAGE
 
 
 def test_a_github_issue_is_the_mark_with_a_tooltip() -> None:
@@ -404,6 +521,16 @@ def test_a_datasets_page_leads_with_its_links_then_its_preparation_workflow() ->
     assert '(subject.again ? "Start again" : "Start")' in PAGE and '"Prepare again"' not in PAGE
     assert "statePill(detail ? detail.row.state" not in PAGE
     assert "const [links = null, ...cards] = " in PAGE
+
+
+def test_a_dataset_whose_record_has_a_gap_offers_no_start_and_says_why() -> None:
+    """The page reads `gaps` from the dataset's subject or row: a never-started one stands blocked at `new` with no
+    Start, a notice says what the record lacks, and the Datasets list marks it."""
+    assert "const gaps = (subject || detail?.row)?.gaps || [];" in PAGE
+    assert 'actions: kind === "dataset" && !gaps.length ? ["go"] : []' in PAGE
+    assert 'gaps.length ? "blocked" : detail?.row.stage || "new", ["new"]' in PAGE
+    assert PAGE.count("gapsNotice(gaps)") == 2 and '"cannot start":' in PAGE
+    assert 'pill("cannot start", "warn", x.gaps.map(t => ({ t })))' in PAGE
 
 
 def test_a_subjects_page_says_where_it_stands_with_its_lifecycle_alone() -> None:

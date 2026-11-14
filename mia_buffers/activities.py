@@ -40,10 +40,11 @@ from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
 from mia_data.binding import hosts as job_hosts
-from mia_data.binding import missing_hosts
+from mia_data.binding import missing_hosts, record_gaps
 from mia_data.catalog import dataset_folder
+from mia_data.config import round_open
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
-from mia_data.models import JobDone, LockTaken, Reservation
+from mia_data.models import DEBUGGER, JobDone, LockTaken, Reservation
 from mia_data.publish import prepared_row
 from mia_data.seed import ID_RE
 from mia_data.status import render_links, render_stage
@@ -669,14 +670,17 @@ class Activities:
         actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
         `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). No issue is
         searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
-        registry, folder = self.registry, dataset_folder(self._record(round_id, record), record)
+        entry = self._record(round_id, record)
+        if gaps := record_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
+            raise ValueError(f"{record}: the record cannot be run: {'; '.join(gaps)}")
+        registry, folder = self.registry, dataset_folder(entry, record)
         subject = await asyncio.to_thread(registry.subject, "dataset", record)
         number, stage = (subject["number"], subject["stage"]) if subject else (0, "new")
         if stage == "done" and not again:  # `again`: a dataset that is done gets a new round all the same
             path = self.cfg.paths.storage_root / folder
             note = (
                 f"the dataset is `done` but `{path}` has no binding.yaml with a matching manifest.json: "
-                "run it again from its page so mia-data publishes both"
+                "run it again from its page so mia-data saves both"
             )
             return DatasetIssue(number, stage, False, note, folder), False
         if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
@@ -774,7 +778,7 @@ class Activities:
         except RegistryError as error:  # best effort: the dataset issue tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        settled = (state := (row or {}).get("state")) in ("prepared", "needs-human")
+        settled = (state := _followed_state(row)) in ("prepared", "needs-human")
         if settled and not again:
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
@@ -792,8 +796,9 @@ class Activities:
     @activity.defn(name="prep_status")
     @mia_permanent_errors
     async def prep_status(self, records: list[str]) -> dict[str, str]:
-        """Each record's registry state, `unprepared` when it has no row. A registry outage raises."""
-        states = {row["id"]: row.get("state", "unprepared") for row in await asyncio.to_thread(self.registry.datasets)}
+        """Each record's state as a request follows it (`_followed_state`), `unprepared` when it has no row. A
+        registry outage raises."""
+        states = {row["id"]: _followed_state(row) for row in await asyncio.to_thread(self.registry.datasets)}
         return {record: states.get(record, "unprepared") for record in records}
 
     @activity.defn(name="set_prep_stage")
@@ -874,7 +879,12 @@ class Activities:
             if subject is None or "cancel" not in subject["actions"]:
                 continue
             found = await asyncio.to_thread(registry.timeline, "dataset", subject["number"])
-            gos = [a for a in (found or {}).get("actions", []) if a["action"] == "go" and a["state"] == "sent"]
+            # the debugger runs a round again for whoever asked for the one that failed: its go is not looked at
+            gos = [
+                a
+                for a in (found or {}).get("actions", [])
+                if a["action"] == "go" and a["state"] == "sent" and a["actor"] != DEBUGGER
+            ]
             if not gos or gos[-1]["actor"] != actor:
                 continue
             cancel = functools.partial(
@@ -911,7 +921,7 @@ class Activities:
             return BindingInfo(
                 False,
                 errors=[
-                    f"no prepared dataset at {dataset_dir}: mia-data publishes binding.yaml with a matching manifest.json"
+                    f"no prepared dataset at {dataset_dir}: mia-data saves binding.yaml with a matching manifest.json"
                     " (the dataset is not data:done)"
                 ],
             )
@@ -1651,14 +1661,17 @@ class Activities:
         if limit <= 0:
             return
         rows = (await asyncio.to_thread(registry.assets, kind))["assets"]
-        in_progress: set[str] = set()
-        if kind == "raw":  # a prep job may be reading the raw cache of a record mia-data is working on
-            in_progress = {row["id"] for row in await asyncio.to_thread(registry.datasets, "in-progress")}
+        in_round: set[str] = set()
+        if (
+            kind == "raw"
+        ):  # a job of an open round may be reading the record's raw cache; a rejected set is made again from it
+            datasets = await asyncio.to_thread(registry.datasets)
+            in_round = {row["id"] for row in datasets if round_open(row.get("data_stage"))}
         quarantine_s = self.cfg.autonomy.quarantine_days * 86400  # a revoked artifact is evidence for this long
         rules: dict[str, Any] = {
             "hold_s": hold_s,
             "now": now,
-            "in_progress": in_progress,
+            "in_round": in_round,
             "kind": kind,
             "quarantine_s": quarantine_s,
         }
@@ -1726,6 +1739,14 @@ class Activities:
         await asyncio.to_thread(registry.put_asset, kind, key, {"state": "evicted", "evicted_at": now, "bytes": 0})
         log.info("keeper: evicted %s %s (%s bytes, last used %s)", kind, key, data.get("bytes"), data.get("last_used"))
         return True
+
+
+def _followed_state(row: dict | None) -> str:
+    """A dataset's state as a preparation request follows it: `in-progress` while its round is open, which
+    includes one waiting at review (the round goes on once a person gives the verdict); else the row's state,
+    `unprepared` without one."""
+    row = row or {}
+    return "in-progress" if round_open(row.get("data_stage")) else row.get("state", "unprepared")
 
 
 def _issue_of(round_id: str) -> int:

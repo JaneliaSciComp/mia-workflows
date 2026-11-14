@@ -49,6 +49,11 @@ follow), `mia logs temporal`, `mia attach <service>`, `mia down [<service>...]`,
 `mia up [<service>...]`. Without a service name each command acts on everything, Temporal first on the way up and
 last on the way down.
 
+A service counts as running only while its processes do. `mia up` waits up to 90 s for each new worker's first poll
+of its task queue and exits 1, printing the worker's last lines, when the worker exits or never polls. A window
+whose process has exited stays in the tmux session marked dead: `mia ps` then reports the service as `BROKEN` and
+exits 1, and `mia attach <service>` shows what the process last wrote.
+
 Files: the Temporal CLI binary, `temporal.db` and its log live in `temporal.state_dir` from `mia.yaml` (default
 `~/.local/state/temporal`); the broker log is in `<state_dir>-host/logs`, which the sandbox never binds; worker logs
 are in `<state_dir>/logs`.
@@ -160,6 +165,6 @@ names what is missing); P4 see the plan.
    the first time its dataset has something to say.
 5. `pixi run mia exec mia-data test-pr <pr> --binding <file> --record <id>` (all required) runs the crop check on a snippet PR's
    head with that binding and catalog record, and reports on the PR.
-6. Buttons on a dataset's page: *Start* starts a round; *Approve* publishes the crops under review (and merges
+6. Buttons on a dataset's page: *Start* starts a round; *Approve* saves the crops under review (and merges
    the snippet PR that made them); *Reject…* asks for your feedback and sends it to the agent fixing the snippet,
    and the next crops come back for review; *Cancel the round* ends a round in progress.

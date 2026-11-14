@@ -19,9 +19,11 @@ from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
 from mia_core.registry import Registry, RegistryError
 from mia_data.activities import Activities
+from mia_data.binding import record_gaps
 from mia_data.jobspec import lock_dir
 from mia_data.models import (
     DatasetState,
+    DebugResult,
     JobArgs,
     JobDone,
     LockTaken,
@@ -117,7 +119,7 @@ async def test_admit_charges_the_root_its_go_carries_or_the_dataset_itself(tmp_p
     assert (await t.a.admit(1, "11")).root == f"{t.cfg.github.data_repo}#1"
     with pytest.raises(ApplicationError, match="event 12 is not an action") as error:
         await t.a.admit(1, "12")
-    assert error.value.non_retryable
+    assert error.value.non_retryable and str(error.value).count("ValueError") == 1  # the type is named once
 
 
 async def _match_ws(t, outcome, binding=None):
@@ -130,6 +132,76 @@ async def _match_ws(t, outcome, binding=None):
     if binding is not None:
         (ws / "binding.yaml").write_text(yaml.safe_dump(binding))
     return pins, ws
+
+
+async def test_prepare_debug_gives_the_agent_what_the_rounds_jobs_left(tmp_path):
+    t = _setup(tmp_path)
+    pins, ws = await _match_ws(t, {"outcome": "matched"}, BINDING)
+    match = await t.a.read_match(str(ws))
+    crop = Path(await t.a.prepare_job(1, ROUND, "crop-abc", 1, match.binding_path))
+    (crop / "crops").mkdir()
+    (crop / "crops" / "report.json").write_text('{"errors": ["ReadTimeout"]}')
+    (crop / "exit_code").write_text("1\n")
+    (crop / ".csub" / "jobs" / "155").mkdir(parents=True)
+    (crop / ".csub" / "jobs" / "155" / "stderr").write_text("x" * 100_000 + "the end")
+    (crop / "notes.txt").write_text("not one of a job's reports")
+    (tmp_path / "elsewhere.json").write_text("{}")
+    (crop / "verify.json").symlink_to(tmp_path / "elsewhere.json")  # a job could plant a link
+    failure = "crop job 155 ended EXIT (exit 1): ReadTimeout"
+    debug = Path(await t.a.prepare_debug(1, ROUND, pins, failure, match.binding_path))
+    assert debug.name == "debug-1" and sorted(p.name for p in (debug / "round").iterdir()) == ["crop-abc-1", "match-1"]
+    left = debug / "round" / "crop-abc-1"
+    assert sorted(p.name for p in left.iterdir()) == ["binding.yaml", "crops", "exit_code", "stderr"]
+    assert json.loads((left / "crops" / "report.json").read_text()) == {"errors": ["ReadTimeout"]}
+    stderr = (left / "stderr").read_text()
+    assert stderr.endswith("the end") and len(stderr) == 64 << 10  # the end of the job's output
+    assert json.loads((debug / "round" / "match-1" / "outcome.json").read_text()) == {"outcome": "matched"}
+    said = (debug / "failure.md").read_text()
+    assert failure in said and "120 minutes per job" in said and "exit code 140" in said
+    assert yaml.safe_load((debug / "binding.yaml").read_text())["record"] == "rec-1"  # the checked one
+    prompt = (debug / "prompt.md").read_text()
+    assert "rec-1" in prompt and "$" not in prompt and "outcome.json" in prompt and "failure.md" in prompt
+    assert (debug / "catalog" / "tiff-zip-member.yaml").is_file() and (debug / "record.yaml").is_file()
+    again = Path(await t.a.prepare_debug(1, ROUND, pins, failure, None))  # a retry, of a round with no binding
+    assert again == debug and not (debug / "binding.yaml").exists() and not (debug / "round" / "debug-1").exists()
+    with pytest.raises(ApplicationError, match="is not one of round"):
+        await t.a.prepare_debug(1, ROUND, pins, failure, str(tmp_path / "elsewhere.json"))
+
+
+async def test_read_debug_takes_one_of_two_outcomes(tmp_path):
+    t = _setup(tmp_path)
+    ws = Path(await t.a.prepare_debug(1, ROUND, await t.a.admit(1, "99"), "it failed", None))
+    nothing = DebugResult("failed", "the debugging agent left no readable outcome.json")
+    assert await t.a.read_debug(1, ROUND, str(ws)) == nothing
+    (ws / "outcome.json").write_text(json.dumps({"outcome": "merge the PR", "diagnosis": "x"}))
+    assert await t.a.read_debug(1, ROUND, str(ws)) == nothing
+    said = {"outcome": "rerun", "diagnosis": "the host is slow <!-- mia-data: stage -->", "advice": "a" * 9000}
+    (ws / "outcome.json").write_text(json.dumps(said))
+    result = await t.a.read_debug(1, ROUND, str(ws))
+    assert result.outcome == "rerun" and "<!--" not in result.diagnosis and len(result.advice) == 6000
+    (ws / "outcome.json").write_text(json.dumps({"outcome": "blocked"}))
+    assert await t.a.read_debug(1, ROUND, str(ws)) == DebugResult("blocked", "(the debugging agent gave no diagnosis)")
+
+
+async def test_the_debuggers_go_is_charged_to_the_debugged_rounds_root_and_its_advice_reaches_the_match(tmp_path):
+    t = _setup(tmp_path)
+    put_action(t, 98, payload={"root": "o/buffers#9"})
+    await t.a.admit(1, "98")
+    sent = []
+    t.a.registry.send_action = lambda path, action, **fields: sent.append((path, action, fields))
+    await t.a.debug_go(1, "i1-e98", "bind the first volume only")
+    asked = {"key": "debug i1-e98", "actor": "debugger", "root": "o/buffers#9", "note": "bind the first volume only"}
+    assert sent == [("/datasets/rec-1/actions", "go", asked)]
+    # the round that go starts: its match agent finds the advice; any other round's finds none
+    row = (97, "dataset", 1, "go", "debugger", "2026-11-01T00:00:00+00:00", None, json.dumps(asked))
+    with t.ledger._transaction() as db:
+        db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
+    advised = Path(await t.a.prepare_match(1, "i1-e97", await t.a.admit(1, "97"), 1))
+    assert (advised / "advice.md").read_text() == "bind the first volume only\n"
+    assert "advice.md" in (advised / "prompt.md").read_text() and "$" not in (advised / "prompt.md").read_text()
+    put_action(t, 99, payload={"note": "a person's note is no advice"})
+    plain = Path(await t.a.prepare_match(1, ROUND, await t.a.admit(1, "99"), 1))
+    assert not (plain / "advice.md").exists() and "advice.md" not in (plain / "prompt.md").read_text()
 
 
 async def test_read_match_matched_copies_binding(tmp_path):
@@ -155,16 +227,29 @@ async def test_read_match_symlinked_outcome_is_missing(tmp_path):
     real.write_text(json.dumps({"outcome": "matched"}))
     (ws / "outcome.json").symlink_to(real)
     r = await t.a.read_match(str(ws))
-    assert r.outcome == "blocked" and "outcome.json" in r.reason and r.binding_path is None
+    assert r.outcome == "failed" and "outcome.json" in r.reason and r.binding_path is None  # no word from the agent
 
 
-async def test_read_match_foreign_host_needs_human(tmp_path):
+async def test_read_match_foreign_host_fails_the_match(tmp_path):
     t = _setup(tmp_path)
     bad = {**BINDING, "raw": [{**BINDING["raw"][0], "urls": ["https://evil.example.com/a.tif"]}]}
     _, ws = await _match_ws(t, {"outcome": "matched"}, bad)
     r = await t.a.read_match(str(ws))
-    assert r.outcome == "blocked" and "evil.example.com" in r.reason and r.binding_path is None
+    assert r.outcome == "failed" and "evil.example.com" in r.reason and r.binding_path is None
     assert not list((t.cfg.paths.state_dir / "rounds" / ROUND).glob("binding-*"))
+
+
+async def test_read_match_takes_the_agents_word_for_why_it_stopped(tmp_path):
+    """The agent says whether a person has to act first (`blocked`) or another run may pass (`failed`)."""
+    t = _setup(tmp_path)
+    for outcome, reason in (("blocked", "the label classes are not named"), ("failed", "the host timed out")):
+        _, ws = await _match_ws(t, {"outcome": outcome, "reason": reason}, BINDING)
+        r = await t.a.read_match(str(ws))
+        assert (r.outcome, r.reason, r.binding_path) == (outcome, reason, None)
+    _, ws = await _match_ws(t, {"outcome": "failed"}, BINDING)
+    assert (await t.a.read_match(str(ws))).reason == "the match agent reported failed, with no reason"
+    _, ws = await _match_ws(t, {"outcome": "gave up"}, BINDING)
+    assert (await t.a.read_match(str(ws))).outcome == "failed"  # a word that is neither: nothing to act on
 
 
 async def test_prepare_match_malformed_snippet_yaml_is_permanent(tmp_path):
@@ -249,10 +334,16 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     seen = _registry_seen(t)
     await t.a.set_stage(1, "matching", state)
-    assert seen[-2] == ("/datasets/rec-1", {"state": "in-progress", "data_stage": "matching", "issue": 1})
+    working = {"state": "in-progress", "reason": None, "data_stage": "matching", "issue": 1}
+    assert seen[-2] == ("/datasets/rec-1", working)
     assert seen[-1][0] == "/timeline/dataset/1" and seen[-1][1]["stage"] == "matching"  # then the stage itself
-    await t.a.set_stage(1, "needs-human", state)
-    assert seen[-2][1]["state"] == "needs-human"
+    for stage in ("needs-human", "review", "cancelled"):  # a person has to act
+        await t.a.set_stage(1, stage, state)
+        assert seen[-2][1]["state"] == "needs-human" and seen[-2][1]["reason"] is None
+    await t.a.set_stage(1, "done", state)  # done, and the folder holds nothing: not prepared, and the row says why
+    unsaved = seen[-2][1]
+    assert unsaved["state"] == "needs-human" and "its crops are not saved" in unsaved["reason"]
+    assert "`lm-human-rec-1` holds no binding.yaml with a matching manifest.json" in unsaved["reason"]
     dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"  # binding.yaml + a manifest that matches it
     dataset_dir.mkdir(parents=True)
     binding_bytes = yaml.safe_dump(BINDING).encode()
@@ -262,9 +353,14 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     await t.a.set_stage(1, "done", state)
     row = seen[-2][1]
     assert row["state"] == "prepared" and row["crops"] == 2 and row["binding_hash"] and row["folder"]
-    assert "record" not in row and row["issue"] == 1
+    assert "record" not in row and row["issue"] == 1 and row["reason"] is None
+    # a new round on the prepared dataset: its state follows the stage again, the folder's facts stay on the row
+    for stage, word in (("matching", "in-progress"), ("review", "needs-human"), ("needs-human", "needs-human")):
+        await t.a.set_stage(1, stage, state)
+        assert seen[-2][1]["state"] == word and seen[-2][1]["crops"] == 2
+    written = [path for path, _ in seen].count("/datasets/rec-1")
     await t.a.set_stage(1, "matching", None)  # no round: no dataset row, the stage alone
-    assert [path for path, _ in seen].count("/datasets/rec-1") == 3
+    assert [path for path, _ in seen].count("/datasets/rec-1") == written
     assert seen[-1] == ("/timeline/dataset/1", {"body": "", "marker": "", "round": None, "stage": "matching"})
     assert t.data.comments == {} and t.data.issues[1]["labels"] == []  # nothing goes to the issue from a round
 
@@ -288,9 +384,12 @@ async def test_set_stage_needs_human_with_an_unclear_record_still_comments(tmp_p
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     seen = _registry_seen(t)
     record_file = t.cfg.paths.state_dir / "rounds" / ROUND / "record.yaml"
-    record_file.write_text(yaml.safe_dump({"imaging": {"modality": ["confocal"], "organism": []}}))  # no folder
+    record_file.write_text(yaml.safe_dump({"imaging": {"modality": [], "organism": []}}))  # no folder
     await t.a.set_stage(1, "needs-human", state, "why")
-    assert seen[0] == ("/datasets/rec-1", {"state": "needs-human", "data_stage": "needs-human", "issue": 1})
+    assert seen[0] == (
+        "/datasets/rec-1",
+        {"state": "needs-human", "reason": None, "data_stage": "needs-human", "issue": 1},
+    )
     (path, entry) = seen[1]
     assert path == "/timeline/dataset/1" and entry["stage"] == "needs-human" and "why" in entry["body"]
 
@@ -505,7 +604,25 @@ async def test_read_verify_reports_the_lowered_n(tmp_path):
     (cw / "crops" / "report.json").write_text(json.dumps({"requested_n": 16, "n": 3, "errors": ["ReadTimeout: x"]}))
     assert (await t.a.read_verify(str(ws), str(cw))).n_effective == 3
     assert (await t.a.read_verify(str(ws), str(cw))).crop_errors == ["ReadTimeout: x"]  # why the crop job failed
+    assert (await t.a.read_verify(str(ws), str(cw))).host_not_allowed is None
+    refused = {"host": "evil.invalid", "chain": ["https://a.example.org/x", "http://evil.invalid/x"]}
+    (cw / "crops" / "report.json").write_text(json.dumps({"n": 3, "errors": ["x"], "host_not_allowed": refused}))
+    assert "evil.invalid" in ((await t.a.read_verify(str(ws), str(cw))).host_not_allowed or "")
     assert (await t.a.read_verify(str(ws))).n_effective is None
+
+
+async def test_admit_refuses_a_record_that_names_no_data_url(tmp_path):
+    """A record with only file names and a landing page can never be bound: the round stops before any job."""
+    t = _setup(tmp_path)
+    bare = {**RECORD, "data": {"download_url": None}, "landing_url": "https://data.example.org/landing"}
+    bare["technical"] = {"arrays": [{"role": "raw", "path_pattern": "stack_*.tif"}]}
+    t.cat.files[("datasets/rec-1.yaml", REC_SHA)] = yaml.safe_dump(bare).encode()
+    with pytest.raises(ApplicationError, match="rec-1: the record cannot be run: it names no data URL") as refused:
+        await t.a.admit(1, "99")
+    assert refused.value.non_retryable  # the workflow ends such a round `blocked`
+    assert not (t.cfg.paths.state_dir / "rounds" / ROUND / "pins.json").exists()
+    assert record_gaps({"technical": {"arrays": "not a list of arrays"}})  # an unreadable record lacks them too
+    assert record_gaps({"technical": {"arrays": [{"path_pattern": "s3://bucket/a/*.tif"}]}}) == []
 
 
 async def test_admit_without_downloads_entry_pins_main(tmp_path):
@@ -518,6 +635,31 @@ async def test_admit_without_downloads_entry_pins_main(tmp_path):
     assert pins.record_commit == main_sha
     downloads = json.loads((t.cfg.paths.state_dir / "rounds" / ROUND / "downloads.json").read_text())
     assert downloads == {"record_commit": main_sha, "downloaders": []}
+
+
+async def test_a_folder_another_record_prepared_is_refused(tmp_path):
+    """Two catalog records can share a folder name; the one prepared first owns the folder."""
+    t = _setup(tmp_path)
+    state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
+    cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
+    dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"
+    dataset_dir.mkdir(parents=True)
+    binding_bytes = yaml.safe_dump({**BINDING, "record": "zenodo-1-rec-1"}).encode()
+    (dataset_dir / "binding.yaml").write_bytes(binding_bytes)
+    manifest = {"count": 2, "binding": {"sha256": hashlib.sha256(binding_bytes).hexdigest()}}
+    (dataset_dir / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ApplicationError, match="lm-human-rec-1 belongs to record zenodo-1-rec-1") as error:
+        await t.a.admit(1, "11")  # a new round stops at admission
+    assert error.value.non_retryable
+    with pytest.raises(ApplicationError, match="belongs to record zenodo-1-rec-1"):  # a round under way: at publish
+        await t.a.publish_crops(1, ROUND, str(cw), [_crop(cw, "c1", 0)], SNIP_SHA)
+    assert (dataset_dir / "binding.yaml").read_bytes() == binding_bytes and not (dataset_dir / "c1").exists()
+    seen = _registry_seen(t)
+    await t.a.set_stage(1, "needs-human", state)  # the other record's publication is not this one's
+    assert seen[0] == (
+        "/datasets/rec-1",
+        {"state": "needs-human", "reason": None, "data_stage": "needs-human", "issue": 1},
+    )
 
 
 async def test_publish_crops_publishes_the_binding(tmp_path):
@@ -664,8 +806,12 @@ async def test_assess_writes_the_human_verdict_and_asks_the_policy(tmp_path, tok
     rows = t.a.registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
     assert [r["verdict"] for r in rows] == ["approve"] and rows[0]["by"] == "human:alice" and rows[0]["gate"] == "crops"
     assert t.a.registry.dataset("rec-1")["assessment"] == first.id
-    second = await t.a.assess(1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "reject", "human:bob", "data:reject")
+    second = await t.a.assess(
+        1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "reject", "human:bob", "data:reject", None, "1794621340330"
+    )
     assert not second.authorized and second.reason.startswith("rejected by human:bob")
+    newest, oldest = t.a.registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
+    assert (newest["action"], oldest["action"]) == (1794621340330, None)  # the action the verdict came from
 
 
 async def test_revoke_dataset_rejects_quarantines_and_finds_the_buffers(tmp_path, token_server):  # noqa: F811
@@ -690,7 +836,7 @@ async def test_revoke_dataset_rejects_quarantines_and_finds_the_buffers(tmp_path
     assert (row["state"], row["revoked_by"], row["assessment"]) == ("revoked", "human:alice", out.assessment)
     crop_set = registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
     assert crop_set[0]["verdict"] == "reject" and crop_set[0]["supersedes"] == approve.id
-    assert crop_set[0]["id"] == out.assessment
+    assert crop_set[0]["id"] == out.assessment and crop_set[0]["action"] == 77
     assert registry.assessments(subject_kind="artifact", subject_ref="art1")[0]["verdict"] == "reject"
     art1 = registry.asset("staged", "art1")
     assert art1["quarantined"] is True and art1["quarantined_by"] == "human:alice"
@@ -955,6 +1101,13 @@ async def test_admit_for_an_action_reads_the_record_and_the_root_from_the_regist
     other = ledger.create_subject("dataset", "rec-2")["number"]
     with pytest.raises(ApplicationError, match="is not an action on dataset"):
         await t.a.admit(other, str(go["id"]))
+
+
+def test_every_activity_is_registered_on_a_worker(tmp_path):
+    """An activity the workflow calls but no worker registers is retried for hours, with the round stuck."""
+    acts = _setup(tmp_path).a
+    defined = {name for name, member in vars(type(acts)).items() if hasattr(member, "__temporal_activity_definition")}
+    assert defined and defined == {method.__name__ for method in [*acts.all(), acts.await_job]}
 
 
 async def test_read_feedback_is_the_note_of_the_reject_action_in_the_window(tmp_path, monkeypatch):

@@ -53,7 +53,8 @@ class FakeClient:
         return SimpleNamespace(status=SimpleNamespace(name="RUNNING"))
 
     async def _describe_task_queue(self, request):
-        return SimpleNamespace(pollers=list(self.pollers))
+        polled = SimpleNamespace(seconds=1800000000, nanos=0)
+        return SimpleNamespace(pollers=[SimpleNamespace(last_access_time=polled) for _ in self.pollers])
 
 
 def gateway(calls, **client_kwargs):
@@ -148,6 +149,14 @@ def test_health_names_each_queue_and_whether_a_worker_polls_it():
     assert Dispatcher(away, TARGETS).health() == {"temporal": False, "queues": {}}
 
 
+def test_health_watches_the_worker_of_every_service_it_is_told_of():
+    async def connect(namespace):
+        return FakeClient(namespace, [], pollers=("worker",) if namespace == "buf-ns" else ())
+
+    watched = Dispatcher(connect, TARGETS, {"snippets": "snip-ns", "buf-q": "buf-ns"}).health()["queues"]
+    assert watched == {"data-q": False, "buf-q": True, "snippets": False}  # a queue no workflow of ours runs on, too
+
+
 def test_targets_come_from_the_config(tmp_path):
     cfg = make_cfg(tmp_path, datasets_pipeline={"namespace": "data-ns", "task_queue": "data-q"})
     targets = dispatcher_for(cfg).targets
@@ -159,3 +168,4 @@ def test_targets_come_from_the_config(tmp_path):
     assert targets["dataset"].workflow_id(7) == "mia-data/o/data/issue-7"  # mia-data's own id for the dataset
     assert targets["buffer"].workflow_id(7) == cfg.workflow_id(7) and targets["prep"].make_state(7) == PrepState(7)
     assert make_cfg(tmp_path).datasets_pipeline.task_queue == "mia-data"  # the default: mia-data's own names
+    assert dispatcher_for(make_cfg(tmp_path, workers={"snippets": "snip-ns"})).queues["snippets"] == "snip-ns"

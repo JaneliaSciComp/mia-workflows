@@ -1,7 +1,7 @@
 # Working in this repository
 
 Four Python packages: `mia_core/` (what every package shares: the `mia.yaml` loader, filesystem checks,
-untrusted-output helpers), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → published crops),
+untrusted-output helpers), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → saved crops),
 both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and `mia_buffers/` (training
 buffers: the `MiaBuffer` and `MiaPrep` workflows, the planner, the cache keeper, the buffer-api service with its ledger,
 registry and page, and the `BufferDataset` client). `mia_data` imports from `autodev`, `mia_buffers` from
@@ -41,7 +41,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   call.
 - **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
   `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there.
-  buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`.
+  buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`
+  (a dataset at `debugging` also the `go` of its next round).
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
@@ -55,7 +56,7 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   evidence that its writer stopped. Hand-run harness commands bypass it.
 - **Only the keeper deletes.** The buffers worker's `MiaCacheKeeper` is the only code that removes anything under
   `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.
-- **A staged artifact is published by the worker's rename and never written again.** Stage jobs write
+- **A staged artifact is saved by the worker's rename and never written again.** Stage jobs write
   `.building-<artifact>-<job key>`; a rebuild lands under the same id through the same rename.
 - **An artifact id is a recipe hash.** Binding, levels key, voxel size, harness commit, env digest and plan digest.
   Changing how the harness derives samples (`plan.py`) changes plan digests, so every volume restages; a buffer that

@@ -142,6 +142,8 @@ class Config(mia_data_config.Config):
     temporal: TemporalCfg = TemporalCfg(namespace="mia-buffers")
     # mia-data's namespace and task queue; the mia.yaml loader fills it from the service whose app is mia-data
     datasets_pipeline: PipelineCfg = PipelineCfg(namespace="mia-data", task_queue="mia-data")
+    # every service of mia.yaml, task queue (the service's name) -> namespace: the workers /health watches
+    workers: dict[str, str] = {}
     paths: PathsCfg
     service: ServiceCfg
     quota: QuotaCfg = QuotaCfg()
