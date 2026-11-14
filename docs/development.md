@@ -724,6 +724,26 @@ read routes (and `POST /plan`, which carries the spec text and writes nothing), 
 routes. `tests/test_buffers_ui.py` fails if the page requests a route that does not exist or is a worker route,
 uses an `Authorization` header, or calls a host other than github.com and Google Fonts.
 
+The page is plain files under `mia_buffers/ui/`, with no build step: `index.html` (the shell), `app.css`, the two
+documents of the Docs view, and ES modules that the browser loads as they are. A module imports only modules
+above it in this table, never in a circle:
+
+| module | |
+|---|---|
+| `spec.js` | the YAML the page writes (a buffer spec, a preparation request); no DOM |
+| `dom.js` | nodes built from text (never parsed HTML), numbers and times, links and addresses, pills, the tooltip, cards, a lifecycle's line |
+| `api.js` | the page's one `fetch`, the banner its errors go to, and what the service said at boot |
+| `table.js` | a table paged by the server |
+| `markdown.js` | a timeline entry's markdown as DOM nodes |
+| `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
+| `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views |
+| `app.js` | the Docs view, health, the stream, hash routing and boot |
+
+Every file is sent with `Cache-Control: no-cache`, so a browser never runs the modules of two deployments
+together. `tests/test_buffers_ui.py` imports the modules under node (a test dependency in `pyproject.toml`) over a
+small fake DOM, and reads all the files as one text for the rules about the page as a whole. `ui/package.json`
+only tells node that the files are modules; the service does not serve it.
+
 Each tab is one kind of thing, and each thing has one page:
 
 - **Needs you** reads `/needs`: everything that waits on a person, with the buttons that answer it.

@@ -2,22 +2,25 @@
 itself, and calls no stray host."""
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from importlib import resources
-
-import pytest
+from pathlib import Path
+from typing import Any
 
 from mia_buffers.api import ROUTES
 
 # every file the browser is given, by name, and all of them as one text: what the page is, for a rule about it
+UI_DIR = Path(str(resources.files("mia_buffers") / "ui")).resolve()
 FILES = {
-    entry.name: entry.read_text()
-    for entry in sorted((resources.files("mia_buffers") / "ui").iterdir(), key=lambda entry: entry.name)
-    if entry.name.endswith((".html", ".js", ".css"))
+    entry.name: entry.read_text() for entry in sorted(UI_DIR.iterdir()) if entry.suffix in (".html", ".js", ".css")
 }
 PAGE = "\n".join(FILES.values())
+# node of the environment that runs the tests (pixi provides it), before any other on the PATH
+NODE = shutil.which("node", path=os.pathsep.join([str(Path(sys.executable).parent), os.environ.get("PATH", "")]))
 
 
 def resolve(method: str, path: str) -> str | None:
@@ -129,54 +132,97 @@ def test_page_has_a_decisions_tab() -> None:
         assert needle in PAGE, needle
 
 
+# A DOM small enough to read. The page's modules build nodes with `el()`, so a test sees what they built: `html`
+# writes a node as text, `walk`, `textOf` and `byText` look into one, and `fire` and `close` stand for a person.
 FAKE_DOM = """
 class FakeNode {
-  constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; }
-  setAttribute(name, value) { this.attrs[name] = value; }
+  constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; this.listeners = {}; this.dataset = {}; this.checked = false; this.disabled = false; }
+  setAttribute(name, value) { this.attrs[name] = value; if (name.startsWith("data-")) this.dataset[name.slice(5)] = value; }
   set className(value) { this.attrs.class = value; }
-  addEventListener() {}
-  append(...kids) { this.kids.push(...kids); }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  fire(type) { (this.listeners[type] || []).forEach(fn => fn({ target: this })); }
+  append(...kids) { for (const kid of kids) { if (kid instanceof FakeNode) kid.parent = this; this.kids.push(kid); } }
+  prepend(...kids) { const rest = this.kids; this.kids = []; this.append(...kids, ...rest); }
+  replaceChildren(...kids) { this.kids = []; this.append(...kids); }
+  remove() { if (this.parent) this.parent.kids = this.parent.kids.filter(kid => kid !== this); }
+  get children() { return this.kids.filter(kid => kid instanceof FakeNode); }
+  get firstChild() { return this.kids[0]; }
+  querySelector(selector) { return walk(this).slice(1).find(node => (node.attrs.class || "").split(" ").includes(selector.slice(1))) || null; }
+  showModal() {}
+  close(value) { this.returnValue = value; this.fire("close"); }
 }
-const document = { createElement: tag => new FakeNode(tag), createElementNS: (space, tag) => new FakeNode(tag) };
+const nodes = {};
+globalThis.document = {
+  body: new FakeNode("body"), createElement: tag => new FakeNode(tag), createElementNS: (space, tag) => new FakeNode(tag),
+  getElementById: id => (nodes[id] ||= new FakeNode("#" + id)),
+};
+const walk = (node, found = []) => { if (typeof node === "string") return found; found.push(node); node.kids.forEach(kid => walk(kid, found)); return found; };
+const textOf = node => typeof node === "string" ? node : node.kids.map(textOf).join("");
+const byText = (root, text) => walk(root).find(node => node.tag === "button" && textOf(node) === text);
 const escaped = text => text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 const html = node => typeof node === "string" ? escaped(node)
   : `<${node.tag}${Object.entries(node.attrs).map(([k, v]) => ` ${k}="${v}"`).join("")}>${node.kids.map(html).join("")}</${node.tag}>`;
 """
 
 
-def rendered(*bodies: str) -> list[str]:
-    """What the page's `markdown()` builds for each timeline body, as HTML text (a string child is a text node)."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    names = ("el", "svgEl", "GH_MARK", "ghMark", "link")
-    helpers = "\n".join(
-        line for line in PAGE.splitlines() if line.startswith(tuple(f"const {name} = " for name in names))
+def run_js(body: str, imports: dict[str, str], payload: object = None) -> Any:
+    """Run `body` under node as the browser would run it: the page's own modules, imported by file name (`imports`
+    maps a file to the names taken from it), over the fake DOM. The body reads `input` (the payload) and calls
+    `print(value)` once; that value is returned."""
+    assert NODE, "node is a test dependency: pixi provides it (pyproject.toml)"
+    loads = "".join(
+        f'const {{ {names} }} = await import("{(UI_DIR / file).as_uri()}");\n' for file, names in imports.items()
     )
-    renderer = PAGE[PAGE.index("// ---- a timeline entry's markdown") : PAGE.index("function actionBar(")]
     script = (
-        f"{FAKE_DOM}\n{helpers}\n{renderer}\n"
-        'const bodies = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
-        'console.log(JSON.stringify(bodies.map(body => markdown(body).map(html).join(""))));\n'
+        'import { readFileSync } from "node:fs";\n'
+        f"{FAKE_DOM}\n"
+        'const input = JSON.parse(readFileSync(0, "utf8"));\n'
+        "const print = value => console.log(JSON.stringify(value));\n"
+        f"{loads}{body}\n"
+        "process.exit(0);\n"  # a module may leave a timer running (a banner fades after 20 s)
     )
-    done = subprocess.run([node, "-e", script], input=json.dumps(bodies), capture_output=True, text=True, check=True)
+    done = subprocess.run(
+        [NODE, "--input-type=module", "-e", script], input=json.dumps(payload), capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
     return json.loads(done.stdout)
 
 
+def test_every_file_the_page_loads_is_one_of_its_own() -> None:
+    """index.html links app.css and boots app.js; a module imports only modules beside it, and never in a circle:
+    a module can be read, and imported by a test, without the modules above it."""
+    index = FILES["index.html"]
+    assert '<link rel="stylesheet" href="/ui/app.css">' in index and 'import { boot } from "/ui/app.js"' in index
+    assert index.count("<script") == 1 and "<style" not in index
+    modules = {name: text for name, text in FILES.items() if name.endswith(".js")}
+    needs = {
+        name: set(re.findall(r'^(?:import|\} from) .*"\./([\w.]+)";$', text, re.M)) for name, text in modules.items()
+    }
+    assert not re.search(r'\bimport\(|from "(?!\./)', "\n".join(modules.values())), "an import from somewhere else"
+    for name, wanted in needs.items():
+        assert wanted <= set(modules), (name, wanted - set(modules))
+        assert resolve("GET", f"/ui/{name}") == "read"
+    ordered: list[str] = []
+    while len(ordered) < len(modules):  # each pass places the modules whose imports are all placed
+        ready = [name for name in modules if name not in ordered and needs[name] <= set(ordered)]
+        assert ready, f"modules import each other in a circle: {sorted(set(modules) - set(ordered))}"
+        ordered += ready
+    assert ordered[0] in ("dom.js", "spec.js") and ordered[-1] == "app.js"
+
+
+def rendered(*bodies: str) -> list[str]:
+    """What the page's `markdown()` builds for each timeline body, as HTML text (a string child is a text node)."""
+    return run_js("print(input.map(body => markdown(body).map(html).join('')));", {"markdown.js": "markdown"}, bodies)
+
+
 def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    lines = PAGE[PAGE.index("function downLines(") : PAGE.index("async function checkHealth(")]
     healths = [
         {"temporal": True, "queues": {"mia-data": True, "snippets": False, "autodev": False}},
         {"temporal": True, "queues": {"mia-data": True, "snippets": False}},
         {"temporal": True, "queues": {"mia-data": True}},
         {"temporal": False, "queues": {}},
     ]
-    script = f'{lines}\nconsole.log(JSON.stringify(JSON.parse(require("fs").readFileSync(0, "utf8")).map(downLines)));'
-    done = subprocess.run([node, "-e", script], input=json.dumps(healths), capture_output=True, text=True, check=True)
-    both, one, none, no_temporal = json.loads(done.stdout)
+    both, one, none, no_temporal = run_js("print(input.map(downLines));", {"app.js": "downLines"}, healths)
     assert len(both) == 1 and both[0].startswith(
         "No worker is running for snippets, autodev: nothing that waits on them"
     )
@@ -189,13 +235,13 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
 def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
     from mia_data.config import STAGES, round_open
 
-    stages = re.search(r"const ROUND_OPEN = new Set\(\[([^\]]*)\]\)", PAGE)
-    assert stages and re.findall(r'"([a-z-]+)"', stages.group(1)) == [stage for stage in STAGES if round_open(stage)]
+    stages = run_js("print([...ROUND_OPEN]);", {"datasets.js": "ROUND_OPEN"})
+    assert stages == [stage for stage in STAGES if round_open(stage)]
     assert 'row.state !== "prepared" && !ROUND_OPEN.has(row.stage)' in PAGE
 
 
 def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
-    view = PAGE[PAGE.index("function viewNeeds(") : PAGE.index("const HEALTH_MS")]
+    view = FILES["subjects.js"][FILES["subjects.js"].index("function viewNeeds(") :]
     assert '"aria-pressed": String(kind === needsKind)' in view and "<select" not in view and '"select"' not in view
     assert 'pageOf("/needs", "needs", () => needsKind ? { kind: needsKind } : {})' in view
     assert '["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]' in PAGE
@@ -207,8 +253,8 @@ def test_a_dataset_at_review_offers_a_restart_beside_its_verdicts() -> None:
 
     assert "go" in STAGE_ACTIONS["review"][1]
     assert 'action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"' in PAGE
-    order = PAGE[PAGE.index("const ACTION_ORDER = ") :].split("\n")[0]
-    assert order.index('"approve"') < order.index('"reject"') < order.index('"go"') < order.index('"cancel"')
+    order = run_js("print(ACTION_ORDER);", {"actions.js": "ACTION_ORDER"})
+    assert order.index("approve") < order.index("reject") < order.index("go") < order.index("cancel")
 
 
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
@@ -277,9 +323,6 @@ def test_a_rounds_crops_are_pictures_served_by_this_origin() -> None:
 def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
     """A findings table names crops by id: the timeline gives `markdown` where each crop's pictures are, read from
     the crops tables before it, and the findings are folded like a crops table. Only the newest fold starts open."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
     sha = "c" * 40
     gallery = f"https://github.com/o/data/blob/galleries/galleries/rec-1/i7-e99/{sha}/i7-e99-b0-000"
     crops = (
@@ -290,21 +333,12 @@ def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
         "**Crop judge:** `approve`\n\n| item | severity | note |\n|---|---|---|\n"
         "| i7-e99-b0-000 | ok | sharp membranes |\n| binding | suspect | no crop of this name |\n"
     )
-    names = ("el", "svgEl", "GH_MARK", "ghMark", "link")
-    helpers = "\n".join(
-        line for line in PAGE.splitlines() if line.startswith(tuple(f"const {name} = " for name in names))
+    pictured, plain = run_js(
+        "const [crops, judge] = input, show = nodes => nodes.map(html).join('');\n"
+        "print([show(markdown(judge, cropsOf(crops, {}))), show(markdown(judge))]);",
+        {"markdown.js": "markdown, cropsOf"},
+        [crops, judge],
     )
-    renderer = PAGE[PAGE.index("// ---- a timeline entry's markdown") : PAGE.index("function actionBar(")]
-    script = (
-        f"{FAKE_DOM}\n{helpers}\n{renderer}\n"
-        'const [crops, judge] = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
-        "const show = nodes => nodes.map(html).join('');\n"
-        "console.log(JSON.stringify([show(markdown(judge, cropsOf(crops, {}))), show(markdown(judge))]));\n"
-    )
-    done = subprocess.run(
-        [node, "-e", script], input=json.dumps([crops, judge]), capture_output=True, text=True, check=True
-    )
-    pictured, plain = json.loads(done.stdout)
     local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
     assert pictured.startswith(
         "<p><strong>Crop judge:</strong> <code>approve</code></p><details><summary>2 findings</summary>"
@@ -337,18 +371,7 @@ def test_markdown_never_becomes_html_or_a_script_link() -> None:
 
 def lifecycle(*calls: list) -> list[str]:
     """What the page's `lifecycle()` builds for each (line, stage, history), as HTML text."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith(("const el = ", "const BAD = ")))
-    drawer = PAGE[PAGE.index("// ---- a lifecycle as boxes and arrows") : PAGE.index("// ---- buffers")]
-    script = (
-        f"{FAKE_DOM}\n{helpers}\n{drawer}\n"
-        'const calls = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
-        "console.log(JSON.stringify(calls.map(call => html(lifecycle(...call)))));\n"
-    )
-    done = subprocess.run([node, "-e", script], input=json.dumps(calls), capture_output=True, text=True, check=True)
-    return json.loads(done.stdout)
+    return run_js("print(input.map(call => html(lifecycle(...call))));", {"dom.js": "lifecycle"}, calls)
 
 
 def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
@@ -394,31 +417,34 @@ def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
 
 
 def test_what_is_typed_while_a_subjects_page_loads_is_kept() -> None:
-    """A redraw the stream asked for leaves a view someone is typing into alone. So does any load that ends after
-    someone typed into the view: it is not painted over them, and one notice offers the change."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith("const el = "))
-    help_texts = PAGE[PAGE.index("const BUTTON_HELP = {") : PAGE.index("const ACTION_HELP = {")]
-    keeping = PAGE[PAGE.index("function keepTyping(") : PAGE.index("// A dataset whose catalog record lacks")]
-    script = (
-        f"{FAKE_DOM}\n{helpers}\n{help_texts}\n{keeping}\n"
-        "const root = new FakeNode('div'); root.dataset = {};\n"
-        "root.querySelector = () => root.kids.find(kid => kid.attrs.class.includes('stale')) || null;\n"
-        "root.prepend = (...kids) => root.kids.unshift(...kids);\n"
-        "const clean = keepTyping(root, () => {}), untouched = root.kids.length;\n"
-        "root.dataset.dirty = '1';\n"
-        "console.log(JSON.stringify([clean, untouched, keepTyping(root, () => {}), keepTyping(root, () => {}), root.kids.length]));\n"
+    """A redraw the stream asked for leaves a view someone is typing into alone. So does a load that ends after
+    someone typed into the view: it is not painted over them, one notice offers the change, and taking the offer
+    draws the page."""
+    kept, shown = run_js(
+        """
+        const root = document.getElementById("subjectBody"), was = el("p", {}, "what was there");
+        root.append(was);
+        let answer;  // the service answers when the test says so: no request named k
+        globalThis.fetch = () => new Promise(settle => { answer = () => settle({ ok: false, status: 404, statusText: "Not Found", text: async () => "" }); });
+        globalThis.location = { hash: "#requests/k" };
+        const typing = [];
+        for (let turn = 0; turn < 2; turn++) {  // typed during the load, then before a later stream redraw
+            const drawn = viewSubject("prep", "k", "stream");
+            root.dataset.dirty = "1";
+            if (answer) answer();
+            answer = null;
+            await drawn;
+            typing.push(root.kids.map(kid => kid.attrs.class || textOf(kid)));
+        }
+        const offered = viewSubject("prep", "k", true);  // Show the change
+        answer();
+        await offered;
+        print([typing, root.kids.map(textOf)]);
+        """,
+        {"dom.js": "el", "subjects.js": "viewSubject"},
     )
-    done = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True)
-    assert json.loads(done.stdout) == [False, 0, True, True, 1]
-    view = PAGE[PAGE.index("async function viewSubject(") : PAGE.index("async function viewFind(")]
-    # asked before a stream's redraw starts, and again after each of the two loads, before anything is painted
-    assert 'if (refresh === "stream" && keepTyping(root, redraw)) return;' in view
-    assert view.count("if (keepTyping(root, redraw)) return;") == 2
-    for load_ended in view.split("turn !== subjectTurn) return;")[1:]:
-        assert load_ended.index("keepTyping(root, redraw)") < load_ended.index("root.replaceChildren(")
+    assert kept == [["notice stale", "what was there"], ["notice stale", "what was there"]]
+    assert shown == ["k", "No such request."]
 
 
 def test_the_page_asks_which_hosts_a_run_lacks_before_it_starts() -> None:
@@ -474,37 +500,39 @@ const byText = (root, text) => walk(root).find(node => node.tag === "button" && 
 
 
 def hosts_dialog(scenarios: list[dict]) -> list[dict]:
-    """Run the page's `askHosts` under node with a fake DOM, `api` and `banner`: for each scenario (`hosts`, or
+    """Run the page's `askHosts` over the fake DOM and a fake service: for each scenario (`hosts`, or
     `fail: [status, message]`, then `steps` on the dialog) report what `send` got, the banner, the dialog and settling."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith("const el = "))
-    start = PAGE.index("async function askHosts(")
-    asking = PAGE[start : PAGE.index("// what the service is asked about", start)]
-    help_texts = PAGE[PAGE.index("const BUTTON_HELP = {") : PAGE.index("const ACTION_HELP = {")]
-    script = (
-        f"{HOSTS_DOM}\n{helpers}\n{help_texts}\nconst JSON_HEADERS = {{}};\nlet fake, banners = [];\n"
-        "const api = async () => { if (fake.fail) { const e = new Error(fake.fail[1]); e.status = fake.fail[0]; throw e; } return { hosts: fake.hosts || [] }; };\n"
-        "const banner = message => banners.push(message);\n"
-        f"{asking}\n"
-        'const scenarios = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
-        "(async () => { const out = [];\n"
-        "for (fake of scenarios) { banners = []; body.kids = []; const sent = []; let settled = false;\n"
-        "  const done = askHosts({ records: [] }, hosts => sent.push(hosts)).then(() => { settled = true; });\n"
-        "  await new Promise(r => setImmediate(r));\n"
-        "  const box = body.kids[0], seen = { shown: !!box };\n"
-        "  if (box) { const approve = byText(box, 'Approve and start'), ticks = walk(box).filter(n => n.attrs.type === 'checkbox');\n"
-        "    seen.rows = ticks.slice(1).length; seen.disabledAtStart = approve.disabled;\n"
-        "    for (const step of fake.steps) { if (step === 'all') { ticks[0].checked = true; ticks[0].fire('change'); }\n"
-        "      else if (typeof step === 'number') { ticks[step + 1].checked = true; ticks[step + 1].fire('change'); } else box.close(step); }\n"
-        "    seen.enabledAfterTicks = !approve.disabled; seen.allChecked = ticks[0].checked; seen.text = textOf(box); }\n"
-        "  await done;\n"
-        "  out.push({ ...seen, sent, banners, settled, removed: body.kids.length === 0 }); }\n"
-        "console.log(JSON.stringify(out)); })();\n"
+    return run_js(
+        """
+        let fake;
+        globalThis.fetch = async () => fake.fail
+            ? { ok: false, status: fake.fail[0], statusText: "", text: async () => JSON.stringify({ error: fake.fail[1] }) }
+            : { ok: true, status: 200, text: async () => JSON.stringify({ hosts: fake.hosts || [] }) };
+        const body = document.body, banner = document.getElementById("banner"), out = [];
+        for (fake of input) {
+            banner.kids = []; body.kids = [];
+            const sent = []; let settled = false;
+            const done = askHosts({ records: [] }, hosts => sent.push(hosts)).then(() => { settled = true; });
+            await new Promise(r => setImmediate(r));
+            const box = body.kids[0], seen = { shown: !!box };
+            if (box) {
+                const approve = byText(box, "Approve and start"), ticks = walk(box).filter(n => n.attrs.type === "checkbox");
+                seen.rows = ticks.slice(1).length; seen.disabledAtStart = approve.disabled;
+                for (const step of fake.steps) {
+                    if (step === "all") { ticks[0].checked = true; ticks[0].fire("change"); }
+                    else if (typeof step === "number") { ticks[step + 1].checked = true; ticks[step + 1].fire("change"); }
+                    else box.close(step);
+                }
+                seen.enabledAfterTicks = !approve.disabled; seen.allChecked = ticks[0].checked; seen.text = textOf(box);
+            }
+            await done;
+            out.push({ ...seen, sent, banners: banner.kids.map(line => textOf(line.kids[0])), settled, removed: body.kids.length === 0 });
+        }
+        print(out);
+        """,
+        {"actions.js": "askHosts"},
+        scenarios,
     )
-    done = subprocess.run([node, "-e", script], input=json.dumps(scenarios), capture_output=True, text=True, check=True)
-    return json.loads(done.stdout)
 
 
 def test_the_hosts_dialog_works_as_it_runs() -> None:
@@ -594,23 +622,16 @@ def test_every_button_that_asks_for_something_says_what_it_does() -> None:
     from mia_buffers.config import STAGE_ACTIONS as BUFFER_ACTIONS
     from mia_data.config import STAGE_ACTIONS as DATASET_ACTIONS
 
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    block = PAGE[PAGE.index("const ACTION_HELP = {") : PAGE.index("const actionHelp = ")]
-    names = "Object.fromEntries(Object.entries(ACTION_HELP).map(([kind, help]) => [kind, Object.keys(help)]))"
-    done = subprocess.run(
-        [node, "-e", f"{block}\nconsole.log(JSON.stringify({names}));"], capture_output=True, text=True, check=True
+    covered, keys = run_js(
+        "print([Object.fromEntries(Object.entries(ACTION_HELP).map(([kind, help]) => [kind, Object.keys(help)])),"
+        " Object.keys(BUTTON_HELP)]);",
+        {"actions.js": "ACTION_HELP, BUTTON_HELP"},
     )
-    covered = json.loads(done.stdout)
     own_control = {"buffer": {"go", "revoke", "dropped"}}
     for kind, table in (("dataset", DATASET_ACTIONS), ("buffer", BUFFER_ACTIONS), ("prep", PREP_STAGE_ACTIONS)):
         offered = set().union(*(actions for _, actions in table.values())) - own_control.get(kind, set())
         assert offered <= set(covered[kind]), (kind, offered - set(covered[kind]))
     assert "title: actionHelp(subject, action)" in PAGE
-    keys = re.findall(
-        r"^  (\w+): \"", PAGE[PAGE.index("const BUTTON_HELP = {") : PAGE.index("const ACTION_HELP = {")], re.M
-    )
     assert {"plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
     for key in keys:
         assert f"title: BUTTON_HELP.{key}" in PAGE, key
@@ -620,7 +641,7 @@ def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
     """A buffer's page reads like a dataset's: its id, a row of links (its spec, the spec's GitHub issue with its
     number, the round's workspace and its staged pyramids), then the labelled workflow. No pill beside the id, no
     row of bare root folders."""
-    body = PAGE[PAGE.index("async function viewBuffer(root, id, refresh) {") : PAGE.index("// ---- cache")]
+    body = FILES["buffers.js"][FILES["buffers.js"].index("async function viewBuffer(root, id, refresh) {") :]
     name, links, flow = body.index('el("h2", {}, id)'), body.index('class: "links"'), body.index('flowRow("buffer", ')
     assert name < links < flow
     assert "ghIcon(meta.buffers_repo, spec.issue, true)" in body and "SUBJECT_HASH.buffer(spec.key)" in body

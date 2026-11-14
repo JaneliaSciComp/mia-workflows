@@ -55,6 +55,7 @@ ruff = "*"
 mypy = "*"
 types-PyYAML = "*"
 orjson = "*"  # mypy writes its cache with it; without the real package an empty site-packages dir shadows it
+nodejs = ">=22.12,<25"  # an LTS line; tests/test_buffers_ui.py runs the page's modules under node
 
 [tool.pixi.feature.notebook.dependencies]
 pytorch = "*"

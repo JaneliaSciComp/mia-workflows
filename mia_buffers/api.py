@@ -1848,14 +1848,16 @@ class BufferService:
         return self._ui("index.html", query=query, body=body)
 
     def _ui(self, name: str, *, query: dict[str, str], body: bytes) -> Response:
-        """A file of the page by basename only (the segment is unquoted already, so check it here)."""
+        """A file of the page by basename only (the segment is unquoted already, so check it here). The browser
+        asks again on every load, so the page's modules are never a mix of two deployments."""
         content_type = UI_TYPES.get(PurePosixPath(name).suffix)
         if self.ui_dir is None or not UI_NAME_RE.match(name) or content_type is None:
             raise HttpError(404, "no such file")
         path = self.ui_dir / name
         if not path.is_file():
             raise HttpError(404, "no such file")
-        return 200, path.read_bytes(), {"Content-Type": content_type}
+        # ponytail: no validator, so each load sends every file again (about 250 kB); an ETag when that is felt
+        return 200, path.read_bytes(), {"Content-Type": content_type, "Cache-Control": "no-cache"}
 
     def _meta(self, *, query: dict[str, str], body: bytes) -> Response:
         if self.meta is not None:
