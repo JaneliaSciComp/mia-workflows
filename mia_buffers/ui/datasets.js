@@ -22,6 +22,7 @@ import {
   statePill,
   SUBJECT_HASH,
   thumb,
+  tipOn,
   VERDICT_KIND,
   when,
 } from "./dom.js";
@@ -388,15 +389,18 @@ export function datasetCards(d) {
     cards.push(
       card(
         "Crops",
-        `${num(ds.crops || ds.previews.length)} saved; the first ${num(ds.previews.length)} with their annotation overlay. Click one to open it.`,
+        `${num(ds.crops || ds.previews.length)} saved; the first ${num(ds.previews.length)} with their annotation overlay. Hover one for its full size, click to open it.`,
         el(
           "div",
           { class: "gallery" },
           ...ds.previews.map(id =>
-            el(
-              "a",
-              { href: cropPng(ds, id, "overlay"), target: "_blank", rel: "noopener", title: id },
-              el("img", { src: cropPng(ds, id, "overlay"), loading: "lazy", alt: `crop ${id} with its overlay` }),
+            tipOn(
+              el(
+                "a",
+                { href: cropPng(ds, id, "overlay"), target: "_blank", rel: "noopener" },
+                el("img", { src: cropPng(ds, id, "overlay"), loading: "lazy", alt: `crop ${id} with its overlay` }),
+              ),
+              [{ t: `${id} · click to open it` }, { full: cropPng(ds, id, "overlay") }],
             ),
           ),
         ),
