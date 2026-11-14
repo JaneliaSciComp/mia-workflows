@@ -184,7 +184,7 @@ async function specControls(subject) {
 // A view a person is typing into (an edited spec, ticked records) is not rebuilt under them: it says that
 // something changed, and waits for them. Any input in the view sets `root.dataset.dirty` and the start of a redraw
 // clears it, so a load that ends finds it set when someone typed while it ran. True when the view is to be kept.
-export function keepTyping(root, reload) {
+function keepTyping(root, reload) {
   if (!root.dataset.dirty) return false;
   if (!root.querySelector(".stale"))
     root.prepend(

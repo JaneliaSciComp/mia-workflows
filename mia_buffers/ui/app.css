@@ -29,7 +29,6 @@ button,select,input{font:inherit;color:inherit}
 .small{font-size:12.5px;color:var(--muted)}
 tr.superseded td{opacity:.55}
 .mono{font-family:var(--mono);font-size:12.5px}
-td.pills{white-space:nowrap}
 
 /* top bar: title, the five tabs, the catalog ref, the theme toggle */
 .topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid);
@@ -162,7 +161,6 @@ input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
 .card svg text{fill:var(--fg2);font-size:12px}
 .card svg .lbl{fill:var(--fg)}
 .card svg .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
-.card svg .grid{stroke:var(--grid);stroke-width:1}
 .card svg .base{stroke:var(--axis);stroke-width:1}
 .legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--fg2);margin:0 0 6px}
 .legend span i{display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:-2px;margin-right:5px}
@@ -200,7 +198,6 @@ a.gh{color:var(--fg2);display:inline-flex;align-items:center;gap:3px;vertical-al
 svg.ghm{vertical-align:-2px}
 a.gh:hover{color:var(--fg)}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-td.id{max-width:300px;overflow:hidden;text-overflow:ellipsis}
 td.wrap{white-space:normal;min-width:200px;max-width:520px;overflow-wrap:anywhere}
 tr.out td{color:var(--muted)}
 tr.click{cursor:pointer}
@@ -263,7 +260,6 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 .docs .ed{stroke:currentColor;stroke-width:1.1;fill:none;stroke-dasharray:5 4}
 .docs .em{stroke:var(--muted);stroke-width:.9;fill:none}
 .docs .ll{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 4}
-.docs .join{stroke:currentColor;stroke-width:3}
 .docs .sq{fill:none;stroke:currentColor;stroke-width:1.2}
 .docs .sqa{fill:none;stroke:var(--accent);stroke-width:1.8}
 .docs .fa{fill:var(--accent)}

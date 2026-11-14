@@ -21,7 +21,7 @@ export const levelsOf = coarsest => LEVELS.filter(l => l <= coarsest);
 export const levelsKey = c => `p${c.patch}-l${levelsOf(c.level).join("-")}`; // mia_buffers.jobspec.levels_key
 
 // A YAML scalar: plain when YAML reads it back as the same string, double-quoted (JSON is valid YAML) otherwise.
-export function yq(value) {
+function yq(value) {
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   const s = String(value ?? "");
   const risky =
