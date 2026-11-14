@@ -38,7 +38,7 @@ export function servableText(servable) {
   return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none";
 }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
-// a buffer's lifecycle event as the issue's stage label: the inverse of mia_buffers.activities.STAGE_EVENTS.
+// a buffer's lifecycle event as its spec's stage: the inverse of mia_buffers.activities.STAGE_EVENTS.
 // `approved` is the approve at the staged gate: consumers draw from then on, so it reads as ready.
 const STAGE_OF = {
   created: "planning",

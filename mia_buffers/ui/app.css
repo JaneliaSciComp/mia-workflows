@@ -1,5 +1,5 @@
 /* The page's styles: tokens for both themes, the shell, tables, pills, dialogs and the Docs view. */
-/* The buffer page: a top bar, then one of five views (datasets, buffers, cache, preparation, docs) chosen by the hash. */
+/* The buffer page: a top bar, then the one view the hash names. */
 :root{
   --bg:#f9f9f7; --surface:#fcfcfb; --fg:#0b0b0b; --fg2:#52514e; --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
   --accent:#2a78d6; --accent-soft:#cde2fb; --warn:#ec835a; --warn-soft:#fbeedd;
@@ -30,7 +30,7 @@ button,select,input{font:inherit;color:inherit}
 tr.superseded td{opacity:.55}
 .mono{font-family:var(--mono);font-size:12.5px}
 
-/* top bar: title, the five tabs, the catalog ref, the theme toggle */
+/* top bar: title, the tabs, the catalog ref, the theme toggle */
 .topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid);
   position:sticky;top:0;z-index:6;background:var(--bg);margin-top:-16px;padding-top:16px}  /* covers the body's top padding; above the filter box */
 .tabs{display:flex;gap:4px;flex-wrap:wrap}
@@ -220,7 +220,7 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 .tip .k{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:5px;border-radius:2px}
 @media (prefers-reduced-motion:no-preference){ .chip,.btn{transition:background .12s} }
 
-/* the Docs view: the two documents, in the artifact's reading-column style scoped under .docs */
+/* the Docs view: the two documents, in a reading-column style scoped under .docs */
 .docs{--panel:var(--surface);--line:var(--grid);max-width:980px;margin:0 auto}
 .docs .subtabs{margin-bottom:18px}
 .docs header{margin-bottom:24px}

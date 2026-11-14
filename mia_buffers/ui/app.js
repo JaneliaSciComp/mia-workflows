@@ -94,7 +94,7 @@ const VIEWS = {
   docs: viewDocs,
   job: viewJob, // #job/<address>: a job's record; the address is everything after the first slash
 };
-const REFRESH_MS = 30000; // the buffer views poll; the others reload when their tab is clicked
+const REFRESH_MS = 30000; // the buffer views poll
 let refreshTimer = 0;
 function route() {
   const [path, filters] = location.hash.slice(1).split("?"); // #datasets?state=in-progress: a list with its filters set

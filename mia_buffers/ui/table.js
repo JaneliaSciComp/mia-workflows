@@ -19,7 +19,7 @@ export const pageOf = (path, rowsKey, extra, quiet404) => async state => {
   return out && { rows: out[rowsKey] || [], total: out.total ?? (out[rowsKey] || []).length, out };
 };
 export const reloadTables = root => root.querySelectorAll(".paged").forEach(box => box.reload()); // a refresh that rebuilds nothing
-// cols: {key (the server's sort name; none: not sortable), label, num, wrap, title, cell}. `select`: {chosen (a Set), id, onchange, can}
+// cols: {key (the server's sort name; none: not sortable), label, num, wrap, title, cell}. `select`: {chosen (a Set), id, onchange}
 // adds a tick per row. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
 export function pagedTable(
   id,

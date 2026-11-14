@@ -28,7 +28,7 @@ import { BUTTON_HELP, prepareButton } from "./actions.js";
 const NOT_PREPARED = "not prepared"; // mia_buffers.plan.NOT_PREPARED
 const PLAN_DEBOUNCE_MS = 300;
 
-// ---- horizontal bars (the explorer's: single series, sequential hue)
+// ---- horizontal bars (single series, sequential hue)
 function barPath(x, y, w, h, r) {
   if (w <= r) return `M${x} ${y}h${w}v${h}h${-w}z`;
   return `M${x} ${y}h${w - r}a${r} ${r} 0 0 1 ${r} ${r}v${h - 2 * r}a${r} ${r} 0 0 1 ${-r} ${r}h${-(w - r)}z`;
@@ -351,7 +351,7 @@ export function specFromDatasets(ids) {
   location.hash = "#buffers/new";
   schedulePlan(0);
 }
-// Why a buffer issue for the current spec would be refused by the planner, or null when the plan is clean.
+// Why a buffer for the current spec would be refused by the planner, or null when the plan is clean.
 function bufferBlocker() {
   if (!S.ref) return "no catalog synced";
   if (S.planError) return `the plan failed: ${S.planError.message.split("\n")[0]}`;

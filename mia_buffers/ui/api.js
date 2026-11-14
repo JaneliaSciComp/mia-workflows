@@ -65,7 +65,7 @@ export async function load(path, quiet404) {
   }
 }
 
-// ---- shared state: the service's meta, the newest catalog, and the registry rows the views join
+// ---- shared state: the service's meta, the catalogs with the one in use, and the designer's plan
 export const S = { meta: {}, catalogs: [], ref: null, plan: null, planError: null };
 
 // ---- what an action route takes: JSON, and one key per click
