@@ -27,11 +27,9 @@ def render_stage(stage: str, detail: str = "", prefix: str = "data", sentence: s
     return f"**Stage:** `{prefix}:{safe_text(stage)}`" + (f"\n\n{said}" if said else "") + "\n"
 
 
-def render_result(stage: str, text: str = "", prefix: str = "data", rests_at: str = "", noun: str = "dataset") -> str:
-    """A stage pass's result entry: the stage it reports and what happened in it (`text`, already neutralized).
-    `rests_at` is the stage the subject rests at when this result ended its round."""
-    body = f"**Result:** `{prefix}:{safe_text(stage)}`" + (f"\n\n{text}" if text else "") + "\n"
-    return body + (f"\nThe {noun} rests at `{prefix}:{safe_text(rests_at)}`.\n" if rests_at else "")
+def render_result(stage: str, text: str = "", prefix: str = "data") -> str:
+    """A stage pass's result entry: the stage it reports and what happened in it (`text`, already neutralized)."""
+    return f"**Result:** `{prefix}:{safe_text(stage)}`" + (f"\n\n{text}" if text else "") + "\n"
 
 
 def render_jobs(links: dict[str, str]) -> str:
@@ -80,7 +78,8 @@ def stage_entries(
     if open_stage and not is_pass:
         ended = f"**{safe_text(stage)}**" + (f": {detail}" if detail else "")
         text = "\n\n".join(part for part in (result, ended, extra) if part)
-        body = "\n".join(part for part in (render_result(open_stage, text, prefix, stage, noun), shown, links) if part)
+        rests = f"The {noun} rests at `{prefix}:{safe_text(stage)}`.\n"  # last, under the binding and the jobs
+        body = "\n".join(part for part in (render_result(open_stage, text, prefix), shown, links, rests) if part)
         return [(body, result_marker, stage)]
     if open_stage:
         body = "\n".join(part for part in (render_result(open_stage, result, prefix), shown) if part)

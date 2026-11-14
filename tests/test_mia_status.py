@@ -55,7 +55,6 @@ def test_a_stage_says_what_it_is_doing_and_a_result_what_happened():
     assert render_stage("matching", sentence="An agent looks.") == "**Stage:** `data:matching`\n\nAn agent looks.\n"
     assert "An agent looks." not in render_stage("matching", "resuming the PR", sentence="An agent looks.")
     assert render_result("testing", "3 of 16 verified") == "**Result:** `data:testing`\n\n3 of 16 verified\n"
-    assert render_result("testing", rests_at="failed").endswith("\nThe dataset rests at `data:failed`.\n")
 
 
 def test_jobs_are_links_to_their_records_folded_when_many():
