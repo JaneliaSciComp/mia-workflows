@@ -506,6 +506,18 @@ async def test_adopt_pr_binding_pins_it_to_the_sha(tmp_path):
     assert r["hash"] == hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+async def test_adopt_pr_binding_takes_an_example_written_in_an_earlier_round(tmp_path):
+    """A reader's pull request outlives the round that asked for it. Its example names the catalog commit that
+    round was pinned to; the round that picks the reader up again adopts the example under its own pins."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    _pr_binding(t, {**NEW, "record_commit": "e" * 40})
+    r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
+    assert r["errors"] == []
+    stored = yaml.safe_load(Path(r["path"]).read_text())
+    assert (stored["record_commit"], stored["snippets_commit"]) == (REC_SHA, SNIP_SHA)
+
+
 @pytest.mark.parametrize(
     "b, files, why",
     [

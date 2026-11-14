@@ -131,7 +131,9 @@ merges the PR by hand: *Approve* on the dataset's page makes the worker post `/a
 `merging`), autodev merges, and if the merged snippet tree is the approved head's, the approved crops are
 saved; otherwise the merge commit gets its own crops, reviewed again. If the round stops (`failed` or `blocked`)
 while the PR is still open (a lost job, a failed status write), *Run again* resumes that PR: the current head is
-tested again under a new round, and no second snippets issue is opened. A PR closed or merged by then means a new
+tested again under a new round, and no second snippets issue is opened. The new round has its own pins: the PR's
+example binding is adopted whatever catalog commit it names (the round that asked for the reader wrote it), and the
+stored binding names the commits of the round that adopted it. A PR closed or merged by then means a new
 match. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
 `/approve` and `/revise` from the worker because its login is in autodev's `github.trusted_bots`), mia-snippets
 CI, the GitHub client.

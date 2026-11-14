@@ -64,16 +64,15 @@ def record_gaps(record: dict) -> list[str]:
 def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins: Pins) -> list[str]:
     """Errors in an agent-written binding (empty = ok). Rewrites s3:// URLs to https in place.
 
-    The binding must name the pinned record and commit, use only snippets from the catalog, and only URLs
-    on hosts the record itself names. `pins` is the trusted source of the record id: the record's own `id`
-    field is not trusted (see seed)."""
+    The binding must name the pinned record, use only snippets from the catalog, and only URLs on hosts the
+    record itself names. `pins` is the trusted source of the record id: the record's own `id` field is not
+    trusted (see seed). The commits a binding names are not checked: a reader's example may have been written in
+    an earlier round, and the round that adopts a binding writes its own pins into it."""
     if not isinstance(binding, dict):
         return ["binding is not a mapping"]
-    errors = [
-        f"{key} {binding.get(key)!r} is not {want!r}"
-        for key, want in (("record", pins.record), ("record_commit", pins.record_commit))
-        if binding.get(key) != want
-    ]
+    errors = (
+        [f"record {binding.get('record')!r} is not {pins.record!r}"] if binding.get("record") != pins.record else []
+    )
     raw, labels = binding.get("raw"), binding.get("labels") or []
     if not (isinstance(raw, list) and raw and isinstance(labels, list)):
         return errors + ["raw must be a non-empty list and labels a list"]

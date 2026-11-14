@@ -984,7 +984,8 @@ class Activities:
 
     async def _check_binding(self, text: str | None, round_id: str, pins: Pins, sha: str) -> tuple[dict, list[str]]:
         """Parse an agent-written binding and check it against the round's record and the snippets at `sha`.
-        Returns (binding, errors); the binding is empty when there are errors."""
+        Returns (binding, errors); the binding is empty when there are errors, and otherwise names the round's
+        own `record_commit`, whatever the agent (or an earlier round's example) wrote there."""
         if text is None:
             return {}, ["the binding is missing or unreadable"]
         try:
@@ -998,7 +999,7 @@ class Activities:
                 )
         except (yaml.YAMLError, ValueError, RecursionError) as error:  # a malformed URL raises in urlsplit
             errors = [f"{type(error).__name__}: {error}"]
-        return binding if not errors else {}, errors
+        return {**binding, "record_commit": pins.record_commit} if not errors else {}, errors
 
     @staticmethod
     def _store_binding(path: Path, binding: dict) -> tuple[str, str]:
