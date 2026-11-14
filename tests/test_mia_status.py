@@ -1,4 +1,12 @@
-from mia_data.status import render_binding, render_crops_table, render_links, render_stage
+from mia_data.status import (
+    render_binding,
+    render_crops_table,
+    render_jobs,
+    render_links,
+    render_result,
+    render_stage,
+    stage_entries,
+)
 
 
 def rows(n, cid="i1-e2-b1-{:03d}"):
@@ -41,3 +49,45 @@ def test_links_line_lists_only_given_urls():
     )
     assert render_links({"Workspace": None}) == ""
     assert "<!--" not in render_stage("needs-human", "<!-- mia-data:status -->")
+
+
+def test_a_stage_says_what_it_is_doing_and_a_result_what_happened():
+    assert render_stage("matching", sentence="An agent looks.") == "**Stage:** `data:matching`\n\nAn agent looks.\n"
+    assert "An agent looks." not in render_stage("matching", "resuming the PR", sentence="An agent looks.")
+    assert render_result("testing", "3 of 16 verified") == "**Result:** `data:testing`\n\n3 of 16 verified\n"
+    assert render_result("testing", rests_at="failed").endswith("\nThe dataset rests at `data:failed`.\n")
+
+
+def test_jobs_are_links_to_their_records_folded_when_many():
+    assert render_jobs({}) == ""
+    assert render_jobs({"match-1": "https://page/#job/issue-1/r/match-1"}) == (
+        "**Jobs:** [match-1](https://page/#job/issue-1/r/match-1)\n"
+    )
+    many = render_jobs({f"stage-{n}": f"https://page/#job/i/r/stage-{n}" for n in range(5)})
+    assert many.startswith("<details><summary>5 jobs</summary>\n\n**Jobs:** ") and many.endswith("\n</details>\n")
+
+
+def test_stage_entries_pair_a_result_with_the_stage_that_follows():
+    only = stage_entries("data", "i1-e2", "matching", is_pass=True, sentence="An agent looks.")
+    assert [(marker, sets) for _, marker, sets in only] == [("stage i1-e2 matching", "matching")]
+    result, start = stage_entries(
+        "data", "i1-e2", "testing", is_pass=True, start_n=2, open_stage="matching", result="Matched.", shown="JOBS"
+    )
+    assert result == ("**Result:** `data:matching`\n\nMatched.\n\nJOBS", "result i1-e2 matching 1", None)
+    assert start[1:] == ("stage i1-e2 testing 2", "testing")  # a later pass names its number; a first one does not
+    (rest,) = stage_entries(
+        "buffer",
+        "i1-e2",
+        "needs-human",
+        is_pass=False,
+        detail="no host",
+        open_stage="sourcing",
+        open_n=2,
+        noun="buffer",
+    )
+    assert rest[1:] == ("result i1-e2 sourcing 2", "needs-human") and "**needs-human**: no host" in rest[0]
+    assert (
+        rest[0].startswith("**Result:** `buffer:sourcing`") and "The buffer rests at `buffer:needs-human`." in rest[0]
+    )
+    (plain,) = stage_entries("data", "i1-e2", "blocked", is_pass=False, detail="refused at admission")
+    assert plain[0].startswith("**Stage:** `data:blocked`") and plain[1:] == ("stage i1-e2 blocked", "blocked")

@@ -28,6 +28,7 @@ from temporalio.exceptions import ActivityError, ApplicationError, CancelledErro
 with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
 
+    from .config import round_open
     from .crop_test import describe_failure, job_succeeded, judge
     from .models import (
         DEBUGGER,
@@ -419,6 +420,45 @@ class MiaDataDataset:
         the round. The write is a call to buffer-api. A history without that patch replays
         `stage-write-async`: a stage inside a round runs beside it and only a final stage (`wait`) is
         awaited."""
+        await self._write_stage(stage, detail, budget, extra, wait)
+        if self._results():
+            self._pass_begun(stage)
+
+    def _results(self) -> bool:
+        """Whether this run writes a result entry for each stage pass (`stage-results`; spec job-records §3.6): the
+        state carries the open pass, and the stage write carries its result out."""
+        return workflow.patched("stage-results")
+
+    def _pass_begun(self, stage: str) -> None:
+        """The stage was written, and with it the result of the pass that was open: a stage the round works or
+        waits at opens the next pass, a stage the dataset rests at leaves none open."""
+        state = self.state
+        if round_open(stage):
+            state.passes = {**state.passes, stage: state.passes.get(stage, 0) + 1}
+        state.pass_stage = stage if round_open(stage) else ""
+        state.pass_jobs, state.result, state.result_binding = [], "", False
+
+    def _found(self, text: str, binding: bool = False) -> None:
+        """What the open pass found, for its result entry; the next stage write, or `_flush`, writes it."""
+        if self._results():
+            self.state.result, self.state.result_binding = text, binding
+
+    async def _flush(self) -> None:
+        """Write the open pass's result now, where no stage write follows that would carry it. Never raises: a
+        result that could not be written is logged."""
+        state = self.state
+        if not state.pass_stage:
+            return
+        try:
+            await self._act("stage_result", state.issue, state)
+        except ActivityError as error:
+            workflow.logger.warning(
+                "issue #%d: the result of %s was not written: %s", state.issue, state.pass_stage, error_message(error)
+            )
+        state.pass_stage, state.pass_jobs, state.result, state.result_binding = "", [], "", False
+
+    async def _write_stage(self, stage: str, detail: str, budget: timedelta, extra: str, wait: bool) -> None:
+        """The `set_stage` call of `_stage`, awaited or beside the round as the run's patches say."""
         self.state.stage = stage
         args = [self.state.issue, stage, self.state, detail, extra]
         if not workflow.patched("stage-write-async"):
@@ -493,7 +533,14 @@ class MiaDataDataset:
         if stage == "failed" and debug and await self._debuggable():
             self.failure = detail
             minutes = (await self._limits()).debug_wait_min
-            stage, detail = "debugging", f"{detail}\n\n{DEBUG_NEXT.format(minutes=minutes)}"
+            if self._results() and self.state.pass_stage:  # the pass that failed says so in its own result
+                self._found(
+                    "\n\n".join(part for part in (self.state.result, f"**failed**: {detail}") if part),
+                    self.state.result_binding,
+                )
+                stage, detail = "debugging", DEBUG_NEXT.format(minutes=minutes)
+            else:
+                stage, detail = "debugging", f"{detail}\n\n{DEBUG_NEXT.format(minutes=minutes)}"
         elif stage == "failed" and self.state.debugs:
             detail = f"{detail}\n\n{DEBUGGED}"
         try:
@@ -560,7 +607,11 @@ class MiaDataDataset:
             needs = f"\n\n**What it needs:** {result.advice}" if result.advice else ""
             return await self._finish("blocked", f"{failure}\n\n{found}{needs}", debug=False)
         try:
-            await self._act("comment", state.issue, found, f"debug {state.round_id}")
+            if self._results():
+                self._found(f"{found}\n\nA new round follows, with the debugger's advice for its match agent.")
+                await self._flush()
+            else:
+                await self._act("comment", state.issue, found, f"debug {state.round_id}")
             await self._act(
                 "debug_go", state.issue, state.round_id, result.advice, seconds=120, budget=timedelta(minutes=30)
             )
@@ -610,6 +661,8 @@ class MiaDataDataset:
                 seconds=600,
                 result_type=str,
             )
+            if self._results() and workspace not in state.pass_jobs:
+                state.pass_jobs = [*state.pass_jobs, workspace]  # the pass's result links the job's record
             done = await workflow.execute_activity(
                 "await_job",
                 args=[
@@ -745,6 +798,16 @@ class MiaDataDataset:
             await self._release_raw(lock)
         return crop_workspace, verify_workspace, verify, crop_job, verify_job
 
+    async def _report(self, report: str, marker: str) -> str | None:
+        """Say what a test of the crops found: it is the result of the `testing` pass (written with the round's
+        binding by the stage write that follows, or by `_flush`); a run without `stage-results` posts it as an
+        entry of its own."""
+        state = self.state
+        if self._results():
+            self._found(report, binding=True)
+            return None
+        return await self._act("comment", state.issue, report, marker, "data", state.binding, state.binding_hash)
+
     async def _gallery(
         self, tag: str, crop_workspace: str, verify_workspace: str, verify: VerifyResult
     ) -> GalleryResult:
@@ -827,9 +890,13 @@ class MiaDataDataset:
             state.debugs = 0  # somebody asked for this round: it has its own debugging cycles
         if state.stage in left and state.snippet_issue and workflow.patched("resume-snippet-pr"):
             snippet_issue, snippet_pr = state.snippet_issue, state.pr
+        if self._results() and state.pass_stage:  # left open by the round before: a restart at review, a go
+            self._found(state.result or "Ended: a new round was started.")  # while the debugger was still to run
+            await self._flush()
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
         state.tests, state.attempts, state.pending = [], {}, []
+        state.passes, state.pass_stage, state.pass_jobs, state.result, state.result_binding = {}, "", [], "", False
         try:
             state.pins = await self._act("admit", state.issue, event.event_id, seconds=300, result_type=Pins)
         except ActivityError as error:
@@ -856,11 +923,17 @@ class MiaDataDataset:
             "h-no-eligibility"
         )  # a history without the patch carries an `ineligible` outcome
         if match.outcome == "needs_snippet":
+            fails = (match.draft or {}).get("what_fails")
+            self._found("No existing reader snippet fits this dataset" + (f": {fails}" if fails else "."))
             return await self._develop(match.draft or {}, snippet_issue)
         if match.outcome not in (("matched",) if no_size_verdict else ("matched", "ineligible")):
             stopped = "failed" if match.outcome == "failed" else "blocked"  # the agent says which of the two
             return await self._finish(stopped, f"match {stopped}: {match.reason}")
         state.binding, state.binding_hash = match.binding_path, match.binding_hash
+        reasons = "\n".join(f"- {reason}" for reason in match.reasons)
+        self._found(
+            "Matched: an existing reader snippet fits." + (f" The agent's reasons:\n{reasons}" if reasons else "")
+        )
         if not workflow.patched("crop-checks-binding") and await self._smoke(match, no_size_verdict):
             return  # a history without the patch ran a smoke job first
 
@@ -874,9 +947,7 @@ class MiaDataDataset:
             n_crops=(await self._limits()).per_round,
         )
         state.tests.append(test)
-        await self._act(
-            "comment", state.issue, report, f"test {state.round_id} {sha}", "data", state.binding, state.binding_hash
-        )
+        await self._report(report, f"test {state.round_id} {sha}")
         if not test.ok:
             return await self._finish("failed", "; ".join(["the crops failed; nothing is saved", *failed_jobs]))
         await self._stage("review")
@@ -955,6 +1026,7 @@ class MiaDataDataset:
             await self._publish_set()
         elif kind == "reject" and event:
             await self._assess("reject", event, subject)
+            self._found(f"Rejected by {event.actor}: autodev is asked for a snippet that takes the comments in.")
             feedback = await self._feedback(event)
             await self._develop({"what_fails": feedback}, state.snippet_issue, binding=state.binding)
 
@@ -1249,6 +1321,7 @@ class MiaDataDataset:
             return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
         test.approved_at = event.at
         await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
+        self._found(f"Approved by {event.actor}: the crops at `{test.sha}`.")
         await self._stage(
             "merging", f"the crops at `{test.sha}` are approved; autodev merges the snippet PR, then they are saved"
         )
@@ -1262,6 +1335,7 @@ class MiaDataDataset:
         await self._act(
             "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} {event.event_id}", "snippets"
         )
+        self._found(f"Rejected by {event.actor}: the comments went to the snippet PR as a revision request.")
         await self._stage(
             "developing",
             "your comments went to the snippet PR as a revision request; the next head's crops come back for review",
@@ -1301,7 +1375,12 @@ class MiaDataDataset:
         fixes it. Pre-§14 histories made `test_n` test crops and moved to `pr-ready`."""
         state, head = self.state, pr.head_sha
         loop = workflow.patched("review-loop")
-        if state.stage != "testing":
+        results = self._results()
+        if results and state.pass_stage != "testing":  # every head tested is a pass of its own
+            if state.pass_stage and not state.result:
+                self._found(f"The snippet PR has a new head, `{head}`.")
+            await self._stage("testing", f"making the sample crops at the snippet PR's head `{head}`")
+        elif not results and state.stage != "testing":
             await self._stage("testing")
         await self._act("set_crop_status", head, "pending", None)
         try:
@@ -1333,7 +1412,7 @@ class MiaDataDataset:
             report if test.ok or not loop else f"/revise the crops at `{head}` failed; make them pass:\n\n{report}"
         )
         pr_url = await self._act("comment", pr.pr, pr_report, marker, "snippets", state.binding, state.binding_hash)
-        issue_url = await self._act("comment", state.issue, report, marker, "data", state.binding, state.binding_hash)
+        issue_url = await self._report(report, marker)
         url = pr_url or issue_url  # the commit status links the PR comment
         current = await self._act("pr_state", pr.pr, result_type=PrUpdate)
         await self._act(
@@ -1341,6 +1420,8 @@ class MiaDataDataset:
         )  # the head's own, current or not
         if test.ok and current.head_sha == head and current.state == "open":
             await self._stage("review" if loop else "pr-ready", extra=f"**Snippet PR:** {current.url or f'#{pr.pr}'}\n")
+        elif results:  # no stage follows: this head's pass ends here, and the next head starts its own
+            await self._flush()
         if test.ok:
             await self._judge_crops(test)  # after the status and the stage: the required status never waits on it
         return current
@@ -1366,6 +1447,7 @@ class MiaDataDataset:
             approved = next(
                 (t for t in reversed(state.tests) if t.approved_at and t.ok and tree and t.tree_sha == tree), None
             )
+            self._found(f"The snippet PR merged as `{merge_sha}`.")
             if approved:
                 return await self._publish_set(approved, merge_sha)
             await self._stage(
@@ -1376,15 +1458,7 @@ class MiaDataDataset:
             )
             test.tree_sha = tree
             state.tests.append(test)
-            await self._act(
-                "comment",
-                state.issue,
-                report,
-                f"test {state.round_id} {merge_sha}",
-                "data",
-                state.binding,
-                state.binding_hash,
-            )
+            await self._report(report, f"test {state.round_id} {merge_sha}")
             if not test.ok:
                 return await self._finish(
                     "failed", "; ".join(["the merge commit's crops failed; nothing is saved", *failed_jobs])
@@ -1403,15 +1477,7 @@ class MiaDataDataset:
             )
             test.tree_sha = await self._act("tree_sha", merge_sha, binding["name"])
             state.tests.append(test)
-            await self._act(
-                "comment",
-                state.issue,
-                report,
-                f"test {state.round_id} {merge_sha}",
-                "data",
-                state.binding,
-                state.binding_hash,
-            )
+            await self._report(report, f"test {state.round_id} {merge_sha}")
             if not test.ok:
                 return await self._finish(
                     "failed",

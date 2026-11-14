@@ -32,6 +32,7 @@ from autodev.jobs import JobSpec
 from mia_core import autonomy
 from mia_core.assets import raw_asset
 from mia_core.config import manifest_path
+from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge.evidence import build as build_evidence
 from mia_core.judge.evidence import evidence_digest, read_claude_json
 from mia_core.judge.policy import POLICY_VERSION, authorized, new_assessment
@@ -47,7 +48,7 @@ from mia_core.untrusted import write_atomic as write_atomic
 from . import catalog
 from . import publish as crop_publish
 from .binding import check_binding, hosts, record_gaps, record_urls
-from .config import HUMAN_LABELS, STAGES, dataset_state
+from .config import HUMAN_LABELS, STAGE_SENTENCES, STAGES, dataset_state, round_open
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
     ADVICE_FILE,
@@ -90,7 +91,15 @@ from .models import (
 from .poll import run_poll
 from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
 from .seed import ID_RE
-from .status import render_binding, render_crops_table, render_judge_comment, render_links, render_stage
+from .status import (
+    render_binding,
+    render_crops_table,
+    render_jobs,
+    render_judge_comment,
+    render_links,
+    render_result,
+    stage_entries,
+)
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -257,6 +266,7 @@ class Activities:
             self.limits,
             self.poll,
             self.set_stage,
+            self.stage_result,
             self.comment,
             self.prepare_match,
             self.prepare_debug,
@@ -622,6 +632,8 @@ class Activities:
             cost,
             mode,
         )
+        if where := address(self.cfg.paths.work_root, path):  # the entry that reports a job links its record
+            comment += f"\n\n[The judge's conversation]({job_link(self.page_url, where)})\n"
         return JudgeResult(
             verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings
         )
@@ -662,11 +674,15 @@ class Activities:
     async def set_stage(
         self, issue: int, stage: str, state: DatasetState | None = None, detail: str = "", extra: str = ""
     ) -> None:
-        """Write the dataset's stage: its registry row, the subject's stage and, within a round, the stage's
-        timeline entry, once.
+        """Write the dataset's stage: its registry row, the subject's stage and, within a round, the timeline
+        entries of the stage passes involved (`stage_entries`), each once.
 
-        The entry has the stage line, `detail` (neutralized), the caller's `extra` (crops table, totals, PR
-        link) and links to the folders to look at. Entries are never edited: each stage and result is a new one."""
+        A stage a round works or waits at starts a pass: its entry has the stage line, what the stage is doing
+        (`detail`, or the stage's sentence), the caller's `extra` and links to the folders to look at. A pass
+        still open in `state` gets its result entry first: what it found (`state.result`), its binding and the
+        records of its jobs. A stage the dataset rests at is written by the open pass's result itself, which
+        says how the pass ended and where the dataset rests; with no pass open it has an entry of its own.
+        Entries are never edited: each start and each result is a new one."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         round_id = state.round_id if state else None
@@ -684,10 +700,50 @@ class Activities:
             links["Gallery"] = (
                 f"https://github.com/{gh.repo}/tree/{self.cfg.gallery.branch}/galleries/{pins.record}/{round_id}"
             )
-        marker = self.cfg.marker(f"stage {round_id} {stage}")
-        parts = [render_stage(stage, self._clean(detail)), self._clean(extra) if extra else "", render_links(links)]
-        body = "\n".join(part for part in parts if part) + f"\n{marker}"
-        await self._post(issue, body, marker, round_id=round_id, stage=stage)
+        assert state is not None
+        entries = stage_entries(
+            "data",
+            round_id,
+            stage,
+            is_pass=round_open(stage),
+            start_n=state.passes.get(stage, 0) + 1 if round_open(stage) else 1,
+            sentence=STAGE_SENTENCES.get(stage, ""),
+            detail=self._clean(detail),
+            extra=self._clean(extra) if extra else "",
+            links=render_links(links),
+            open_stage=state.pass_stage,
+            open_n=state.passes.get(state.pass_stage, 1),
+            result=self._clean(state.result),
+            shown=self._shown(state) if state.pass_stage else "",
+        )
+        for body, marker_text, sets in entries:
+            marker = self.cfg.marker(marker_text)
+            await self._post(issue, f"{body}\n{marker}", marker, round_id=round_id, stage=sets)
+
+    def _shown(self, state: DatasetState) -> str:
+        """What goes under the result of the pass open in `state`: the round's binding when the result is about
+        it, and a link to the record of each job the pass submitted (a job that left none is not listed)."""
+        links = {}
+        for workspace in state.pass_jobs:
+            where = address(self.cfg.paths.work_root, workspace)
+            if where and record_path(self.cfg.paths.work_root, where).is_file():
+                links[Path(workspace).name] = job_link(self.page_url, where)
+        binding = render_binding(state.binding, state.binding_hash) if state.result_binding else ""
+        return "\n".join(part for part in (binding, render_jobs(links)) if part)
+
+    @activity.defn(name="stage_result")
+    @mia_permanent_errors
+    async def stage_result(self, issue: int, state: DatasetState) -> None:
+        """Write the result entry of the pass open in `state`, once: for a pass that ended where no stage write
+        follows (a PR head whose crops failed waits for the next head)."""
+        if not (state.round_id and state.pass_stage):
+            return
+        body = render_result(state.pass_stage, self._clean(state.result))
+        shown = self._shown(state)
+        count = state.passes.get(state.pass_stage, 1)
+        marker = self.cfg.marker(f"result {state.round_id} {state.pass_stage} {count}")
+        text = "\n".join(part for part in (body, shown) if part)
+        await self._post(issue, f"{text}\n{marker}", marker, round_id=state.round_id)
 
     @activity.defn(name="comment")
     @mia_permanent_errors

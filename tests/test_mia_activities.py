@@ -17,6 +17,7 @@ from test_buffers_register import token_server  # noqa: F401  (fixture)
 from autodev.jobs import CsubJobs
 from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
+from mia_core.jobrecord import write_submitted
 from mia_core.registry import Registry, RegistryError
 from mia_data.activities import Activities
 from mia_data.binding import record_gaps
@@ -313,6 +314,59 @@ async def test_set_stage_appends_one_entry_per_stage_and_leaves_the_issue_alone(
     assert "[Gallery](https://github.com/o/data/tree/galleries/galleries/rec-1/" + ROUND + ")" in bodies[1]
     assert [x["name"] for x in t.data.issues[1]["labels"]] == ["data:new", "has-labels"]  # the label is the mirror's
     assert t.data.comments == {}
+
+
+async def test_a_stage_pass_writes_its_start_and_its_result(tmp_path):
+    """spec job-records §3.6: a stage a round works at starts a pass; the write of the next stage first writes the
+    open pass's result, with a link to the record of each job it ran; a stage the dataset rests at is written by
+    the result of the pass that ended there."""
+    t = _setup(tmp_path)
+    root, pins = t.cfg.paths.work_root, await t.a.admit(1, "99")
+    match = root / "issue-1" / ROUND / "match-1"
+    write_submitted(root, match, service="mia-data", key="k", job_id="5", request={})  # this job left a record
+    state = DatasetState(1, round_id=ROUND, pins=pins)
+    await t.a.set_stage(1, "matching", state)
+    state.passes, state.pass_stage = {"matching": 1}, "matching"  # what the workflow keeps after the write
+    state.pass_jobs = [str(match), str(root / "issue-1" / ROUND / "smoke-1")]
+    state.result = "Matched: an existing reader snippet fits. <!-- forged -->"
+    await t.a.set_stage(1, "testing", state)
+    await t.a.set_stage(1, "testing", state)  # a retry adds nothing
+    start, result, testing = (entry["body"] for entry in t.ledger.timeline("dataset", 1))
+    assert start.startswith("**Stage:** `data:matching`") and "An agent looks for an existing reader snippet" in start
+    assert result.startswith("**Result:** `data:matching`") and "Matched:" in result and "<!-- forged" not in result
+    assert f"**Jobs:** [match-1]({t.a.page_url}/#job/issue-1/{ROUND}/match-1)\n" in result
+    assert "smoke-1" not in result  # a job that left no record is not listed
+    assert (
+        testing.startswith("**Stage:** `data:testing`") and t.ledger.subject("dataset", "rec-1")["stage"] == "testing"
+    )
+
+    # the pass that fails says so itself; the same entry moves the dataset to where it rests
+    state.passes, state.pass_stage, state.pass_jobs = {"matching": 1, "testing": 1}, "testing", []
+    state.result = "Crops at `abc`: **failed**, 3 of 16 verified"
+    await t.a.set_stage(1, "failed", state, "the crops failed; nothing is saved")
+    entries = t.ledger.timeline("dataset", 1)
+    failed = entries[-1]["body"]
+    assert len(entries) == 4 and failed.startswith("**Result:** `data:testing`") and "3 of 16 verified" in failed
+    assert "**failed**: the crops failed; nothing is saved" in failed
+    assert "The dataset rests at `data:failed`." in failed and "**Stage:**" not in failed
+    assert t.ledger.subject("dataset", "rec-1")["stage"] == "failed"
+
+    # a second pass of a stage has a start of its own, and stage_result writes a result where no stage follows
+    state.pass_stage, state.result = "", ""
+    await t.a.set_stage(1, "testing", state)
+    state.passes, state.pass_stage, state.result = (
+        {"matching": 1, "testing": 2},
+        "testing",
+        "Test crops at `h2`: failed",
+    )
+    await t.a.stage_result(1, state)
+    await t.a.stage_result(1, state)  # once
+    entries = t.ledger.timeline("dataset", 1)
+    assert len(entries) == 6 and entries[4]["body"].startswith("**Stage:** `data:testing`")
+    assert entries[5]["body"].startswith("**Result:** `data:testing`") and "`h2`" in entries[5]["body"]
+    assert t.ledger.subject("dataset", "rec-1")["stage"] == "testing"  # a result alone moves no stage
+    await t.a.stage_result(1, DatasetState(1, round_id=ROUND))  # no pass open: nothing to write
+    assert len(t.ledger.timeline("dataset", 1)) == 6
 
 
 def _registry_seen(t, handler=None):
@@ -949,6 +1003,8 @@ async def test_read_judge_records_assessment_and_comment(tmp_path, token_server)
     assert "**Crop judge:** `approve`" in out.comment and "Shadow mode" in out.comment
     assert "| c0 | ok | cells \\| nuclei &lt;!-- x --> |" in out.comment and "$0.31" in out.comment
     assert "model `claude-opus-5-5`" in out.comment
+    # the entry that reports a job links its record
+    assert f"[The judge's conversation]({t.a.page_url}/#job/issue-1/{ROUND}/{ws.name})" in out.comment
 
 
 async def test_read_judge_garbage_is_escalate(tmp_path, token_server):  # noqa: F811

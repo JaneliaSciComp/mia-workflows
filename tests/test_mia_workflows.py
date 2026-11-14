@@ -35,6 +35,7 @@ from mia_data.models import (
     Reservation,
     Revocation,
     RoundLimits,
+    Test,
     VerifyResult,
 )
 from mia_data.workflows import MiaDataDataset
@@ -151,7 +152,13 @@ class Mocks:
             if stage in self.slow_stages:
                 rec("stage_waits", stage)
                 await self.stage_gate.wait()
+            if state and state.pass_stage:  # the write carries the open pass's result (spec job-records §3.6)
+                rec("result", state.pass_stage, state.result, stage, list(state.pass_jobs), state.result_binding)
             rec("set_stage", stage, detail, extra)
+
+        @activity.defn(name="stage_result")
+        async def stage_result(issue: int, state: DatasetState) -> None:
+            rec("result", state.pass_stage, state.result, None, list(state.pass_jobs), state.result_binding)
 
         @activity.defn(name="comment")
         async def comment(
@@ -359,6 +366,7 @@ class Mocks:
             admit,
             limits,
             set_stage,
+            stage_result,
             comment,
             refuse_label,
             prepare_match,
@@ -439,7 +447,7 @@ async def idle(h, m, stage):
 
 
 @contextlib.asynccontextmanager
-async def started(env, m, first=None, runner=None, signal="go"):
+async def started(env, m, first=None, runner=None, signal="go", state=None):
     tq = f"tq-{uuid.uuid4()}"
     kw = {"workflow_runner": runner} if runner else {}
     async with (
@@ -448,7 +456,7 @@ async def started(env, m, first=None, runner=None, signal="go"):
     ):
         h0 = await env.client.start_workflow(
             MiaDataDataset.run,
-            DatasetState(7),
+            state or DatasetState(7),
             id=f"wf-{uuid.uuid4()}",
             task_queue=tq,
             start_signal=signal,
@@ -499,7 +507,19 @@ async def test_match_crops_review_approve_publishes_that_set(env):
     assert [a[0] for a in m.of("publish_gallery")] == [SHA]
     assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
     seq = [n for n in m.names() if n in ("read_verify", "publish_gallery", "publish_crops", "comment")]
-    assert seq == ["read_verify", "publish_gallery", "comment", "read_verify", "publish_crops"]
+    assert seq == ["read_verify", "publish_gallery", "read_verify", "publish_crops"]  # no report as a comment
+    # each pass's result is carried by the stage write that ends it, with the jobs the pass ran
+    matched, tested, reviewed = m.of("result")
+    assert [(r[0], r[2]) for r in m.of("result")] == [
+        ("matching", "testing"),
+        ("testing", "review"),
+        ("review", "done"),
+    ]
+    assert matched[1].startswith("Matched") and "axes from conversion.json" in matched[1]
+    assert matched[3] == ["/w/i7-e11/match-1"] and not matched[4]
+    assert "16 of 16 verified" in tested[1] and tested[4]  # the crops report, shown with the binding
+    assert tested[3] == [f"/w/i7-e11/crop-{SHA}-1", f"/w/i7-e11/verify-{SHA}-1"]
+    assert reviewed[1] == "" and reviewed[3] == []  # `done` and its totals are the review's result
     assert m.of("read_verify")[1] == (
         f"/w/i7-e11/verify-{SHA}-1",
         f"/w/i7-e11/crop-{SHA}-1",
@@ -509,12 +529,23 @@ async def test_match_crops_review_approve_publishes_that_set(env):
     assert [a[2] for a in m.of("take_lock")] == owners and [a[2] for a in m.of("release_lock")] == owners
     crop_lock = ["raw", "rec-1", owners[0]]
     assert [a[2] for a in m.of("await")] == [None, crop_lock, crop_lock]  # match: none; crop and verify jobs
-    report = m.of("comment")[0][0]
+    report = tested[1]
     assert "table" in report and "axes from conversion.json" in report and "1234 bytes" in report
     done = m.of("set_stage")[-1]
     assert done[0] == "done" and "**Totals:** 16 crops saved" in done[2]  # the gallery table went up at review
-    assert m.of("comment")[0][3] == "/s/binding-1.yaml"  # the test report carries the matched binding
-    assert not m.of("refuse_label")
+    assert not m.of("comment") and not m.of("refuse_label")
+
+
+async def test_a_round_that_rolled_over_before_it_kept_passes_ends_as_it_began(env):
+    """A run that takes over a round at `review` from a state with no pass open (it rolled over before rounds
+    kept their passes) writes its stages as before: no result is due, so none is written."""
+    tested = "2026-01-01T00:00:00+00:00"
+    test = Test(SHA, f"i7-e11-{SHA[:12]}", True, tested, crop_workspace="/w/i7-e11/crop", verify_workspace="/w/v")
+    state = DatasetState(7, round_id="i7-e11", seed="1", stage="review", pins=PINS, binding="/s/b.yaml", tests=[test])
+    m = Mocks()
+    async with started(env, m, first=ev("approve", "12", shift(tested, 5)), signal="approve", state=state) as h:
+        await idle(h, m, "done")
+    assert m.stages == ["done"] and not m.of("result") and len(m.of("publish_crops")) == 1
 
 
 async def test_seed_is_recorded(env):
@@ -582,7 +613,9 @@ async def test_a_set_with_fewer_than_half_verified_never_reaches_review(env):
     async with started(env, m) as h:
         await idle(h, m, "failed")
     assert m.stages == ["matching", "testing", "failed"] and "publish_crops" not in m.names()
-    assert "5 of 16 verified (at least 8 needed)" in m.of("comment")[0][0]
+    stage, report, rests_at, jobs, _ = m.of("result")[-1]  # the failed pass says so itself, with its jobs
+    assert (stage, rests_at, len(jobs)) == ("testing", "failed", 2)
+    assert "5 of 16 verified (at least 8 needed)" in report and not m.of("comment")
 
 
 async def test_a_set_with_at_least_half_verified_is_reviewed_and_published(env):
@@ -818,15 +851,19 @@ async def test_a_failed_round_is_debugged_and_run_again(env):
         st = await h.query(MiaDataDataset.status)
         assert (await h.describe()).run_id != h.first_run_id  # the re-run is a round of its own, in a new run
     assert m.stages == ["matching", "testing", "debugging", "matching", "testing", "review"]
-    failed = m.of("set_stage")[2][1]
-    assert "the crops failed" in failed and "A debugging agent looks into this in 5 minutes" in failed
+    assert "A debugging agent looks into this in 5 minutes" in m.of("set_stage")[2][1]
+    stage, failed, then, jobs, _ = m.of("result")[1]  # testing's own result carries the failure and its jobs
+    assert (stage, then, len(jobs)) == ("testing", "debugging", 2)
+    assert "**failed**: the crops failed" in failed and "1 of" not in m.of("set_stage")[2][1]
     ((round_id, failure, binding),) = m.of("prepare_debug")
     assert (round_id, binding) == ("i7-e11", "/s/binding-1.yaml") and "the crops failed" in failure
     assert "debugging agent" not in failure  # the debugger reads why the round failed, not what happens next
     assert [a[1] for a in m.of("submit")][:4] == ["match", "crop", "verify", "debug"]
     assert [a[3] for a in m.of("reserve") if a[2] == "debug"] == [5.0]  # an agent run, reserved like the match
     assert m.of("debug_go") == [("i7-e11", "bind the first volume only")]
-    assert ("**Debugger:** the host sent 30 KB/s", "debug i7-e11", "data", None) in m.of("comment")
+    stage, found, then, jobs, _ = next(r for r in m.of("result") if r[0] == "debugging")
+    assert found.startswith("**Debugger:** the host sent 30 KB/s") and then is None  # written by stage_result
+    assert jobs == ["/w/i7-e11/debug-1"] and not m.of("comment")
     assert (st.round_id, st.debugs) == ("i7-e21", 1) and m.of("admit") == [("11",), ("21",)]
 
 
@@ -1159,6 +1196,12 @@ async def test_revision_limit(env):
         await wake(h, m, head(H3))
         await idle(h, m, "failed")
     assert "revision limit" in m.of("set_stage")[-1][1] and [a.sha for a in m.jobs() if a.n_crops] == [H1, H2]
+    # every head tested is a pass of its own: a start, and a result written where no stage write follows
+    assert m.stages == ["matching", "developing", "testing", "testing", "failed"]
+    first, second = (r for r in m.of("result") if r[2] is None)
+    assert (first[0], second[0]) == ("testing", "testing") and H1 in first[1] and H2 in second[1]
+    assert first[3] == [f"/w/i7-e11/crop-{H1}-1", f"/w/i7-e11/verify-{H1}-1"] and first[4]
+    assert [r[2] for r in m.of("result")][-1] is None  # no pass is open at the limit: `failed` stands alone
 
 
 async def test_merge_signal_before_test_finishes(env):
@@ -1351,6 +1394,7 @@ DEVELOP_HISTORY = HISTORY.with_name("develop_history.json")
 LOCK_HISTORY = HISTORY.with_name("dataset_history_c.json")
 CANCEL_HISTORY = HISTORY.with_name("dataset_history_cancel.json")
 AWAITED_HISTORY = HISTORY.with_name("dataset_history_b.json")
+RESULTS_HISTORY = HISTORY.with_name("dataset_history_r.json")
 
 
 def _scrub(obj):
@@ -1416,6 +1460,20 @@ async def test_replay_dataset_history_b(env):
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 
+async def test_replay_dataset_history_r(env):
+    """The match → done run under the `stage-results` patch (each stage pass writes a start and a result), as
+    test_replay_dataset_history. Re-record this one alone, so the older fixtures keep their paths:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_r"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks()
+        async with started(env, m) as h:
+            await approve_review(h, m)
+            await idle(h, m, "done")
+            RESULTS_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-stage-results", RESULTS_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
 async def cancelled_mid_match(h, m):
     """Cancel the round while its match job runs, then let the abandoned wait end."""
     await until(lambda: m.of("await"))
@@ -1434,6 +1492,8 @@ async def test_cancel_ends_the_round_kills_its_job_and_a_new_go_starts_over(env)
         assert m.of("kill_job") == [(job,)] and m.of("await")[0][0] == job
         assert [a[1] for a in m.of("settle")] == ["mia-7-i7-e11-match-1"]  # the reservation does not stay open
         assert m.of("set_stage")[-1][:2] == ("cancelled", "cancelled by alice") and "read_match" not in m.names()
+        # the cancelled pass writes its own result: the write that sets `cancelled` carries it, with the killed job
+        assert m.of("result") == [("matching", "", "cancelled", ["/w/i7-e11/match-1"], False)]
         await h.signal(MiaDataDataset.go, ev("go", "13"))
         await idle(h, m, "review")
     assert m.stages == ["matching", "cancelled", "matching", "testing", "review"]
@@ -1723,10 +1783,9 @@ async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env)
     async with started(env, m) as h:
         await idle(h, m, "review")
         names = m.names()
-        assert names.index("comment") < names.index("prepare_judge") < names.index("read_judge")
-        assert m.stages.index("review") < len(m.stages) and names.index(
-            "set_stage", names.index("comment")
-        ) < names.index("prepare_judge")  # the gate opens first
+        review = [at for at, name in enumerate(names) if name == "set_stage"][2]  # it carries the crops report
+        assert m.stages[2] == "review" and "verified" in m.of("result")[1][1]
+        assert review < names.index("prepare_judge") < names.index("read_judge")  # the gate opens first
         (prepared,) = m.of("prepare_judge")
         assert (
             prepared[0] == "crops" and prepared[3] == 16 and prepared[4] == SHA[:12]
