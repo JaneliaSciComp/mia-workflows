@@ -517,7 +517,7 @@ async def test_match_crops_review_approve_publishes_that_set(env):
     assert matched[3] == ["/w/i7-e11/match-1"] and not matched[4]
     assert "16 of 16 verified" in tested[1] and tested[4]  # the crops report, shown with the binding
     assert tested[3] == [f"/w/i7-e11/crop-{SHA}-1", f"/w/i7-e11/verify-{SHA}-1"]
-    assert reviewed[1] == "" and reviewed[3] == []  # `done` and its totals are the review's result
+    assert reviewed[1] == "Approved by alice." and reviewed[3] == []  # `done` and its totals end the review's result
     assert m.of("read_verify")[1] == (
         f"/w/i7-e11/verify-{SHA}-1",
         f"/w/i7-e11/crop-{SHA}-1",

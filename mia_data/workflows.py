@@ -1023,6 +1023,7 @@ class MiaDataDataset:
             if not written.authorized:
                 return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
             state.tests[-1].approved_at = event.at
+            self._found(f"Approved by {event.actor}.")
             await self._publish_set()
         elif kind == "reject" and event:
             await self._assess("reject", event, subject)
