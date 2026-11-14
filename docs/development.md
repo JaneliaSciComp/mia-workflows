@@ -802,8 +802,15 @@ table: a table shows the stage as a pill, and the buttons say whose turn it is.
 **A button with more to enter ends in an ellipsis.** *Reject…* opens a dialog for the feedback and sends nothing
 until some is typed; the dialog hangs off the body, so a redraw of the view behind it keeps what was typed.
 
-With an empty registry the views say so ("No catalog synced; run `mia-buffers catalog sync`."). A record's
-landing link is shown only for an `http(s)` URL.
+**A dataset's page carries every address of its catalog record.** The row under the name has the ones a person
+opens first: the dataset's own page (`landing_url`), its DOI, each paper (`publications`), the download
+(`data.download_url`), baseline code, the record in the catalog repository, and the catalog PR. The Links card
+lists the rest (sample files, evidence, inspected addresses), each address once. Only an `http(s)` address is a
+link: the row leaves any other out, and the card shows it as text. The catalog PR is a search for the pull
+requests opened from the record's branch (`claude/dataset/<id>`, the catalog agents' convention); a record that
+came into the catalog another way finds none.
+
+With an empty registry the views say so ("No catalog synced; run `mia-buffers catalog sync`.").
 
 **Health line.** `empty / (requests + empty)` over the last hour (`requests` counts `next` calls that served
 draws, one `ts` each; a successful `split` call is not counted), against the buffer's
