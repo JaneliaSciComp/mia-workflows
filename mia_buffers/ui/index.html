@@ -1199,8 +1199,8 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <script>
 (function(){
 "use strict";
-// Everything here is a GET (plus POST /plan, which writes nothing); the page holds no token. Actions that need an
-// identity are GitHub new-issue links. All hosts and repos come from GET /meta.
+// The page holds no token. It reads with GETs (and with POST /plan and POST /hosts/missing, which write nothing)
+// and asks for things through the action routes, which take none. All hosts and repos come from GET /meta.
 const DIMS = ["2D","2D+t","3D","3D+t"];
 const LIC = ["CC0-1.0","CC-BY-4.0","CC-BY-3.0","MIT","BSD-3-Clause","Apache-2.0","CC-BY-SA-4.0","CC-BY-NC-4.0","CC-BY-NC-SA-4.0","CC-BY-NC-ND-4.0","GPL-3.0-or-later"];
 const SRC = ["manual","proofread","automatic","mixed","unknown"];
@@ -2420,10 +2420,11 @@ async function specControls(subject) {  // what only a buffer spec has: edit and
   ] })));
   return box;
 }
-// A view a person is typing into (feedback for a reject, an edited spec, ticked records) is not rebuilt under
-// them when the stream says something changed: it says so, and waits for them.
-function keepTyping(root, refresh, reload) {
-  if (refresh !== "stream" || !root.dataset.dirty) return false;
+// A view a person is typing into (an edited spec, ticked records) is not rebuilt under them: it says that
+// something changed, and waits for them. Any input in the view sets `root.dataset.dirty` and the start of a redraw
+// clears it, so a load that ends finds it set when someone typed while it ran. True when the view is to be kept.
+function keepTyping(root, reload) {
+  if (!root.dataset.dirty) return false;
   if (!root.querySelector(".stale")) root.prepend(el("div", { class: "notice stale" }, "This changed while you were typing; what you typed is kept. ", el("button", { type: "button", class: "btn", title: BUTTON_HELP.showChange, onclick: reload }, "Show the change")));
   return true;
 }
@@ -2432,14 +2433,15 @@ function keepTyping(root, refresh, reload) {
 // time, so a record fixed in the catalog can be started after the next catalog sync.
 const gapsNotice = gaps => el("div", { class: "notice" }, el("b", {}, "Cannot be started. "), "Its catalog record lacks what a round needs: ", ...mdInline(gaps.join("; ")), ". Start is offered once a catalog sync brings a record that has it; nothing has to be done here.");
 async function viewSubject(kind, key, refresh) {
-  const root = $("subjectBody"), hash = location.hash;
-  if (keepTyping(root, refresh, () => viewSubject(kind, key, true))) return;
+  const root = $("subjectBody"), hash = location.hash, redraw = () => viewSubject(kind, key, true);
+  if (refresh === "stream" && keepTyping(root, redraw)) return;
   delete root.dataset.dirty;
   if (!refresh) root.replaceChildren(el("div", { class: "empty" }, "loading…"));
   shownSubject = { kind, key, number: shownSubject && shownSubject.kind === kind && shownSubject.key === key ? shownSubject.number : null };
   const turn = ++subjectTurn;
   const [subject, detail] = await Promise.all([load(`/subjects/${kind}/${encodeURIComponent(key)}`, true), kind === "dataset" ? load(`/catalog/datasets/${encodeURIComponent(key)}`, true) : null]);
   if (location.hash !== hash || turn !== subjectTurn) return;  // the reader moved on, or a later load started, while this loaded
+  if (keepTyping(root, redraw)) return;  // someone typed while this loaded
   const about = detail ? datasetCards(detail) : [];
   const [links = null, ...cards] = about;  // a dataset's links stand right under its name, its cards at the end
   const again = !!detail && detail.row.state !== "unprepared";  // Start, or Start again: the same word before and after the click
@@ -2455,6 +2457,7 @@ async function viewSubject(kind, key, refresh) {
   subject.again = again;
   const [timeline, run, extras] = await Promise.all([load(`/timeline/${kind}/${subject.number}`), api(`/run/${kind}/${subject.number}`).catch(() => null), kind === "buffer" ? specControls(subject) : null]);
   if (location.hash !== hash || turn !== subjectTurn) return;
+  if (keepTyping(root, redraw)) return;
   const entries = timeline?.entries || [];
   const flow = lifecycle(S.meta.lines?.[kind], subject.stage, [...entries].reverse().map(e => e.stage), subject.status === "working");
   const more = subjectLinks(subject, entries), row = links || (more.length ? el("div", { class: "links" }) : null);
@@ -2502,7 +2505,7 @@ let needsKind = "";  // the kind shown; kept while the list redraws itself, clea
 let needsCounts = {};  // how many wait under each kind, as last heard: a redrawn button starts with its number
 function viewNeeds(arg, refresh) {
   const root = $("needsBody");
-  if (keepTyping(root, refresh, () => viewNeeds("", true))) return;
+  if (refresh === "stream" && keepTyping(root, () => viewNeeds("", true))) return;
   delete root.dataset.dirty;
   if (!refresh) needsKind = NEEDS_KINDS.some(([kind]) => kind === arg) ? arg : "";
   const again = () => viewNeeds("", true);

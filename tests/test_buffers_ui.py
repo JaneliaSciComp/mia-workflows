@@ -386,6 +386,34 @@ def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     assert "turn !== subjectTurn" in PAGE
 
 
+def test_what_is_typed_while_a_subjects_page_loads_is_kept() -> None:
+    """A redraw the stream asked for leaves a view someone is typing into alone. So does any load that ends after
+    someone typed into the view: it is not painted over them, and one notice offers the change."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith("const el = "))
+    help_texts = PAGE[PAGE.index("const BUTTON_HELP = {") : PAGE.index("const ACTION_HELP = {")]
+    keeping = PAGE[PAGE.index("function keepTyping(") : PAGE.index("// A dataset whose catalog record lacks")]
+    script = (
+        f"{FAKE_DOM}\n{helpers}\n{help_texts}\n{keeping}\n"
+        "const root = new FakeNode('div'); root.dataset = {};\n"
+        "root.querySelector = () => root.kids.find(kid => kid.attrs.class.includes('stale')) || null;\n"
+        "root.prepend = (...kids) => root.kids.unshift(...kids);\n"
+        "const clean = keepTyping(root, () => {}), untouched = root.kids.length;\n"
+        "root.dataset.dirty = '1';\n"
+        "console.log(JSON.stringify([clean, untouched, keepTyping(root, () => {}), keepTyping(root, () => {}), root.kids.length]));\n"
+    )
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(done.stdout) == [False, 0, True, True, 1]
+    view = PAGE[PAGE.index("async function viewSubject(") : PAGE.index("async function viewFind(")]
+    # asked before a stream's redraw starts, and again after each of the two loads, before anything is painted
+    assert 'if (refresh === "stream" && keepTyping(root, redraw)) return;' in view
+    assert view.count("if (keepTyping(root, redraw)) return;") == 2
+    for load_ended in view.split("turn !== subjectTurn) return;")[1:]:
+        assert load_ended.index("keepTyping(root, redraw)") < load_ended.index("root.replaceChildren(")
+
+
 def test_the_page_asks_which_hosts_a_run_lacks_before_it_starts() -> None:
     """A start action first asks the service which hosts the run needs that the policy lacks."""
     assert ("POST", "/hosts/missing") in requested_paths() and resolve("POST", "/hosts/missing") == "read"
