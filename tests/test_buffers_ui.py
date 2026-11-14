@@ -362,6 +362,7 @@ def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
     judge = (
         "**Crop judge:** `approve`\n\n| item | severity | note |\n|---|---|---|\n"
         "| i7-e99-b0-000 | ok | sharp membranes |\n| binding | suspect | no crop of this name |\n"
+        "| i7-e99-b0-000 | bad | labels shifted |\n"
     )
     pictured, plain = run_js(
         "const [crops, judge] = input, show = nodes => nodes.map(html).join('');\n"
@@ -371,16 +372,17 @@ def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
     )
     local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
     assert pictured.startswith(
-        "<p><strong>Crop judge:</strong> <code>approve</code></p><details><summary>2 findings</summary>"
+        "<p><strong>Crop judge:</strong> <code>approve</code></p><details><summary>3 findings</summary>"
     )
-    assert "<th>raw</th><th>overlay</th><th>item</th><th>severity</th><th>note</th>" in pictured
-    for name in ("raw", "overlay"):
-        assert (
-            f'<img class="crop" src="{local}/{name}.png" loading="lazy" alt="{name} of crop i7-e99-b0-000">' in pictured
-        )
+    assert "<th>overlay</th><th>item</th><th>severity</th><th>note</th>" in pictured and "raw.png" not in pictured
+    # `ok` is plain; `suspect` and `bad` colour the word, and the picture's border with it
+    picture = f'src="{local}/overlay.png" loading="lazy" alt="overlay of crop i7-e99-b0-000">'
+    assert f'<img class="crop finding" {picture}' in pictured and "<td>ok</td>" in pictured
+    assert f'<img class="crop finding sev-bad" {picture}' in pictured
+    assert '<td><span class="sev-bad">bad</span></td>' in pictured
     # a finding about something that is no crop has no picture, and a timeline with no crops table adds no column
-    assert "<tr><td></td><td></td><td>binding</td><td>suspect</td>" in pictured
-    assert "<img" not in plain and "<details><summary>2 findings</summary>" in plain and "<th>raw</th>" not in plain
+    assert '<tr><td></td><td>binding</td><td><span class="sev-suspect">suspect</span></td>' in pictured
+    assert "<img" not in plain and "<details><summary>3 findings</summary>" in plain and "<th>overlay</th>" not in plain
     assert has("markdown(e.body, cropsOf(e.body, crops))") and has("log.append(...shown.reverse())")
     assert has('log.querySelectorAll("details").forEach((fold, n) => { fold.open = n === 0; });')
 

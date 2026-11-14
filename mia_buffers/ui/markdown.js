@@ -8,13 +8,13 @@ import { el, link } from "./dom.js";
 // origin. Any other image is a link: the page loads nothing from a host a timeline body names.
 const GALLERY_IMAGE =
   /^https:\/\/github\.com\/[^/]+\/[^/]+\/blob\/[^/]+\/galleries\/[^/]+\/(i\d+-e\d+)\/([0-9a-f]{40})\/([A-Za-z0-9_-][A-Za-z0-9._-]*)\/(raw|overlay)\.png\?raw=true$/;
-function cropImage(round, sha, crop, kind) {
-  // kind: raw or overlay
+function cropImage(round, sha, crop, kind, look = "crop") {
+  // kind: raw or overlay; look: the picture's classes
   const src = `/gallery/${round}/${sha}/${crop}/${kind}.png`;
   return el(
     "a",
     { href: src, target: "_blank", rel: "noopener", title: `${kind} of crop ${crop}: click to open it` },
-    el("img", { class: "crop", src, loading: "lazy", alt: `${kind} of crop ${crop}` }),
+    el("img", { class: look, src, loading: "lazy", alt: `${kind} of crop ${crop}` }),
   );
 }
 function mdImage(alt, url) {
@@ -23,8 +23,10 @@ function mdImage(alt, url) {
 }
 // A judge's findings table (`item | severity | note`) names the crops it judged by id and carries no picture. The
 // crops tables of a timeline say where each crop's pictures are: `cropsOf` adds a body's crops to a map of crop id
-// -> {round, sha}, and `markdown` given that map shows a finding's raw and overlay beside it. The timeline reads
-// its entries oldest first, so a finding gets the pictures of the newest crops table before it.
+// -> {round, sha}, and `markdown` given that map shows a finding's overlay beside it. The timeline reads its entries
+// oldest first, so a finding gets the picture of the newest crops table before it. A `suspect` or `bad` finding
+// has its severity in that severity's colour, and its picture a border of the same; `ok` is plain.
+const FLAGGED = ["suspect", "bad"];
 const GALLERY_CROP =
   /\/galleries\/[^/\s]+\/(i\d+-e\d+)\/([0-9a-f]{40})\/([A-Za-z0-9_-][A-Za-z0-9._-]*)\/raw\.png\?raw=true/g;
 export function cropsOf(text, crops) {
@@ -101,14 +103,19 @@ export function markdown(text, crops) {
     } else if (tableAt(i)) {
       const rows = [];
       for (i += 2; i < lines.length && lines[i].includes("|"); i++) rows.push(lines[i]);
-      // a judge's findings: folded like a crops table, each finding with the pictures of the crop it names
+      // a judge's findings: folded like a crops table, each finding with the overlay of the crop it names
       const judged = texts(line).join("|") === "item|severity|note",
-        at = row => crops?.[texts(row)[0]];
+        at = row => crops?.[texts(row)[0]],
+        flag = row => (judged && FLAGGED.includes(texts(row)[1]) ? `sev-${texts(row)[1]}` : "");
       const pictured = judged && rows.some(at);
-      const pictures = row =>
-        ["raw", "overlay"].map(kind => (at(row) ? [cropImage(at(row).round, at(row).sha, texts(row)[0], kind)] : []));
-      const head = [...(pictured ? [["raw"], ["overlay"]] : []), ...cells(line)];
-      const body = rows.map(row => [...(pictured ? pictures(row) : []), ...cells(row)]);
+      const picture = row =>
+        at(row)
+          ? [cropImage(at(row).round, at(row).sha, texts(row)[0], "overlay", `crop finding ${flag(row)}`.trim())]
+          : [];
+      const marked = row =>
+        cells(row).map((cell, n) => (n === 1 && flag(row) ? [el("span", { class: flag(row) }, ...cell)] : cell));
+      const head = [...(pictured ? [["overlay"]] : []), ...cells(line)];
+      const body = rows.map(row => [...(pictured ? [picture(row)] : []), ...marked(row)]);
       const table = el(
         "div",
         { class: "tablewrap" },
