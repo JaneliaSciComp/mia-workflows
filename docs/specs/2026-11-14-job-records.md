@@ -1,6 +1,7 @@
 # MIA: a record of every job and every agent conversation — Spec
 
-**Status:** v0.1 · 2026-11-14 · awaiting the user's approval.
+**Status:** v0.2 · 2026-11-14 · awaiting the user's approval. v0.2: no list of jobs on the page; a job's link
+sits next to what the job produced (the user's ruling on v0.1).
 
 ## 1. Intent
 
@@ -18,8 +19,8 @@ buried in a workspace. Each job should leave a small permanent record, and the p
   block, and every tool call. A tool's output is not kept; the call stands for it.
 - Records persist: one gzipped JSON file per job, in a directory no job can write, never deleted.
 - buffer-api serves a record as it is on disk (gzip passed through); the page renders it in the browser.
-- On the page: a subject lists its jobs, each with a link to its record, and a crop judge's verdict links to
-  the judge's conversation.
+- On the page a job's link sits next to what the job produced: `Stage: data:matching` links to the job that
+  did the matching, a crop judge's verdict to the judge's conversation. There is no separate list of jobs.
 
 **Non-goals**
 
@@ -133,10 +134,10 @@ the result read from the same workspace, no more; the judges have no tool that w
 
 Two read routes on buffer-api, no token, nothing written:
 
-- the jobs of a subject: for each round in the subject's timeline, the records under that round's workspace
-  directory, newest round first, each with its address, name (the workspace's basename), whether it is an
-  agent's, state, exit code and times. *(ponytail: opens each record of the subject to list it; an index when a
-  subject has thousands.)*
+- the jobs of a subject, which the page needs to place its links (§3.5): for each round in the subject's
+  timeline, the records under that round's workspace directory, each with its address, name (the workspace's
+  basename), whether it is an agent's, state, exit code and times. *(ponytail: opens each record of the subject
+  to list it; an index when a subject has thousands.)*
 - one record: the file's bytes with `Content-Type: application/json` and `Content-Encoding: gzip`. The path is
   checked segment by segment, must stay inside `_jobs`, and no symlink is followed.
 
@@ -145,16 +146,29 @@ is not among the things it removes.
 
 ### 3.5 The page
 
-- **A dataset's page and a buffer spec's page get a Jobs card:** the subject's rounds, newest first, and under
-  each the round's jobs: name, state, when, how long, peak memory, and a link to the record. A request's page
-  gets none: a request runs no job of its own, and the datasets it starts carry theirs. *(My call.)*
-- **A record's view** (`#job/<address>`): what ran and how it ended (state, exit code, queue, host, times,
-  usage, cost); for an agent the prompt (folded) and the conversation, turn by turn, a tool call as one line
-  that opens to its input, thinking folded; then the script, csub's answer, and the ends of stdout and stderr.
-- **The crop judge's link:** the judge's comment ends with a link to its record's view on the page.
-  `read_judge` renders that comment and knows both the workspace and the page's URL, so no workflow hears of
-  it, and the copy on GitHub carries the same link. *(My call: the link is in the comment's text, so judges'
-  comments posted before this have none.)*
+There is no card or tab that lists jobs. A link to a job's record sits where the page shows what that job did:
+
+- **An entry of the timeline shows the jobs that ran under it:** the jobs of the entry's round that were
+  submitted from that entry until the round's next one. `Stage: data:matching` so carries the match agent's job,
+  a testing or cropping entry its smoke, crop and verify jobs, a debugging entry the debugging agent's, a
+  buffer round's staging entry its stage jobs. Each is a short link beside the entry's folders (name, state,
+  how long), folded when an entry has many; the folder link to the workspace stays. The page works this out
+  from the entry's `round` and `at` and the records' `submitted_at`: no entry stores a job, no workflow or
+  activity hears of it, and it holds for every kind of subject and for rounds of any shape. *(My call. A stage's
+  entry is written and awaited before its job is submitted, so the order is the workflow's; ponytail: it
+  compares buffer-api's clock with the worker's, so two hosts a few seconds apart can put a job one entry
+  early. The upgrade is the record carrying the stage.)*
+- **What is rendered from a job's output links to that job.** The crop judge's comment ends with a link to the
+  judge's record. `read_judge` renders that comment and knows both the workspace and the page's URL, so no
+  workflow hears of it, and the copy on GitHub carries the same link. *(My call: the link is in the comment's
+  text, so judges' comments posted before this have none.)*
+- **A record's view** (`#job/<address>`), where every such link leads: what ran and how it ended (state, exit
+  code, queue, host, times, usage, cost); for an agent the prompt (folded) and the conversation, turn by turn,
+  a tool call as one line that opens to its input, thinking folded; then the script, csub's answer, and the
+  ends of stdout and stderr.
+
+A request's entries get no job link: a request runs no job of its own, and the datasets it starts carry
+theirs.
 
 Everything from a record is inserted as text, never parsed as HTML or as markdown. The new module follows the
 page's rules: no build step, imports only modules below it, read routes only.
