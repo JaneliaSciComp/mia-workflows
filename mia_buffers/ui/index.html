@@ -104,7 +104,7 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .md{font-size:13.5px;overflow-wrap:anywhere}
 .md>*{margin:0 0 6px}
 .md>:last-child{margin-bottom:0}
-.md p{max-width:none}  /* an entry's paragraph is as wide as its tables and code, not the page's 72ch measure */
+.md p,.md li{max-width:90ch}  /* an entry's prose keeps a readable measure; its tables and code take the card's width */
 .md pre{white-space:pre-wrap;font-family:var(--mono);font-size:12.5px;padding:8px 10px;border:1px solid var(--grid);border-radius:6px;background:var(--surface);max-height:320px;overflow:auto}
 .md :not(pre)>code{background:var(--grid);padding:0 3px;border-radius:3px}
 .md ul,.md ol{padding-left:20px}
