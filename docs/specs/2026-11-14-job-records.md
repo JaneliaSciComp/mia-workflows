@@ -1,10 +1,9 @@
 # MIA: a record of every job and every agent conversation — Spec
 
-**Status:** v0.2 · 2026-11-14 · awaiting the user's approval. v0.2: no list of jobs on the page; a job's link
-sits next to what the job produced (the user's ruling on v0.1). v0.3: the timeline reads stage by stage, each
-stage with what happened in it (§3.6; the user's ruling on v0.2). v0.4: one stage entry per pass (the user's
-ruling on v0.3). v0.5: a job is tied to its stage by a row the worker writes at submit, not by comparing
-times; the route that listed a subject's jobs is gone.
+**Status:** v0.6 · 2026-11-14 · awaiting the user's approval. Rulings of the user on the drafts before it: no
+list of jobs on the page, a job's link sits next to what the job produced; a stage says what happened in it;
+one entry per pass of a stage; and (v0.6) a stage writes two entries, its start and its result, the result
+carrying its jobs.
 
 ## 1. Intent
 
@@ -22,11 +21,10 @@ buried in a workspace. Each job should leave a small permanent record, and the p
   block, and every tool call. A tool's output is not kept; the call stands for it.
 - Records persist: one gzipped JSON file per job, in a directory no job can write, never deleted.
 - buffer-api serves a record as it is on disk (gzip passed through); the page renders it in the browser.
-- On the page a job's link sits next to what the job produced: `Stage: data:matching` links to the job that
-  did the matching, a crop judge's verdict to the judge's conversation. There is no separate list of jobs.
-
-- A stage on a subject's page says what happened in it: `data:testing` holds its crops report, `data:matching`
-  what the agent matched and why.
+- A stage of a round writes two entries to the subject's timeline: one when it starts, saying what it is
+  doing, and one when it ends, saying what happened. The result entry links the jobs the stage ran. There is
+  no separate list of jobs, and nothing on the page works out which job or which report belongs to which
+  stage: the entry says it.
 
 **Non-goals**
 
@@ -42,9 +40,8 @@ buried in a workspace. Each job should leave a small permanent record, and the p
   credential: every string that comes from a job is scrubbed of anything that looks like one (§3.3).
 - A round that fails, or waits, because a record could not be written or read. Recording is best effort and
   logged.
-- A workflow change for the records, their links or the blocks: none of them alters a command a workflow
-  issues or a result dataclass in `models.py`. The one workflow change here is the stage entry per pass
-  (§3.6), behind a patch.
+- A stage that started and never says how it ended: failed, cancelled and refused passes write a result too.
+- A change to a result dataclass in `models.py`, or a workflow command changed outside a patch (§3.6).
 - Tool output in a record or on the page.
 
 ## 2. Approaches
@@ -148,86 +145,70 @@ is not among the things it removes.
 
 ### 3.5 The page
 
-There is no card or tab that lists jobs. A link to a job's record sits where the page shows what that job did:
-
-- **A stage of the timeline (§3.6) shows the jobs it ran,** as short links (the job's name) beside the stage
-  entry's folders, folded when there are many; the folder link to the workspace stays. `Stage: data:matching`
-  so carries the match agent's job, a testing entry its crop and verify jobs, a debugging entry the debugging
-  agent's, a buffer round's staging entry its stage jobs.
-
-  The tie is written, not worked out. When a worker of mia-data or mia-buffers submits a job it tells the
-  registry (a worker route, the bearer token): the subject, the record's address, the job's name. buffer-api
-  stores that in a `jobs` table of the ledger together with the subject's open stage entry, the last one
-  written, in one transaction. A stage's entry is written and awaited before its jobs are submitted, and one
-  ledger orders both writes, so the tie is exact and no clock is compared. The subject's timeline is returned
-  with its jobs, each naming its stage entry. The write is best effort like the record itself, once per
-  address; a job of a `test-pr` round has no subject and is not listed, and autodev lists nothing.
-- **What is rendered from a job's output links to that job.** The crop judge's comment ends with a link to the
-  judge's record. `read_judge` renders that comment and knows both the workspace and the page's URL, so no
-  workflow hears of it, and the copy on GitHub carries the same link. *(My call: the link is in the comment's
-  text, so judges' comments posted before this have none.)*
-- **A record's view** (`#job/<address>`), where every such link leads: what ran and how it ended (state, exit
-  code, queue, host, times, usage, cost); for an agent the prompt (folded) and the conversation, turn by turn,
-  a tool call as one line that opens to its input, thinking folded; then the script, csub's answer, and the
-  ends of stdout and stderr.
-
-A request's entries get no job link: a request runs no job of its own, and the datasets it starts carry
-theirs.
+- **A record's view** (`#job/<address>`): what ran and how it ended (state, exit code, queue, host, times,
+  usage, cost); for an agent the prompt (folded) and the conversation, turn by turn, a tool call as one line
+  that opens to its input, thinking folded; then the script, csub's answer, and the ends of stdout and stderr.
+- **Links to it are in the timeline's text** (§3.6), which the page already renders: a `**Jobs:**` line of
+  links, written the way `**Folders:**` is, each to `<service.url>/#job/<address>`. The same line works in the
+  copy on GitHub. The page has no card, tab or route that lists jobs, and groups nothing.
 
 Everything from a record is inserted as text, never parsed as HTML or as markdown. The new module follows the
 page's rules: no build step, imports only modules below it, read routes only.
 
-### 3.6 The timeline, stage by stage
+### 3.6 A stage writes its start and its result
 
-A stage's entry is written when the stage begins, so that the registry's stage is never behind the round, and
-an entry is never edited. What the stage found is therefore a later entry of its own, and today nothing ties
-the two together: `Stage: data:testing` is a bare line, and the report of its crops (`Crops at <sha>: passed,
-12 of 12 verified …`, with the crops table) reads as if it belonged to no stage. A successful match writes
-nothing at all.
+A round is a series of stage passes. Each pass writes two entries, both naming the round and the stage:
 
-- **The page shows a subject's timeline in stage blocks.** A stage entry opens a block; every entry written
-  after it and before the next stage entry is shown inside that block, under the stage's line. The crops report
-  is so the body of `data:testing`, the judge's verdict of `data:review`, a debugging agent's diagnosis of
-  `data:debugging`; the block also carries the stage's job links (§3.5). Entries before a subject's first stage
-  entry (an action a person took, a refusal) stand alone, as they do now. This is the page's reading of the
-  order the entries were written in: the ledger, its `timeline` rows and the copy on GitHub stay a flat log.
-- **Matching says what it found.** `read_match`, which reads the agent's outcome, writes one entry (once, by
-  marker): for `matched`, the snippet the binding uses and the agent's reasons; for `needs_snippet`, what fails
-  with the existing ones. A match that stopped `blocked` or `failed` already has its reason in the stage the
-  round ends at. The entry is written by the activity, like every other entry, so no workflow hears of it; a
-  `test-pr` round has no subject and gets none.
-- **Testing** needs no new text: its report opens with the sentence that says what happened, and now sits in
-  its block.
+- **Start**, when the pass begins: the stage line (`Stage: data:matching`), one sentence saying what the stage
+  does (a sentence per stage, kept beside the stage table), and the folders. Writing it is what sets the
+  subject's stage, as now.
+- **Result**, when the pass ends: `Result: data:matching` and one sentence saying what happened, then whatever
+  the stage has to show (the crops table and the binding for a test, a debugging agent's diagnosis, a snippet
+  PR's link), then `**Jobs:**`, a link to the record of every job the pass submitted, folded when there are
+  many. A result does not set a stage.
 
-- **One stage entry per pass.** Today a round writes a stage's entry once (its marker is `stage <round>
-  <stage>`), so a stage the round comes back to writes nothing, and what the second pass finds would show
-  under whatever stage came before it. A pass is each time the round begins a stage's work:
-  - the round enters the stage from another one (`testing`, `review`, then `testing` again for a revised
-    snippet PR; the same in a buffer round and a request);
-  - the round tests another PR head while it is still at `testing` (the head before it failed). The workflow
-    writes no stage there today (`if state.stage != "testing"`); it now does.
+What the result says, for a dataset: matching, which snippet the binding uses and the agent's reasons, or what
+fails with the existing ones; testing, the sentence its report opens with today (`Crops at <sha>: passed, 12
+of 12 verified …`) with the table; review, who decided what; developing and merging, what became of the
+snippet PR; debugging, the diagnosis and whether a new round follows. A buffer round and a request follow the
+same rule with their own stages. A pass that fails, is cancelled or is refused writes its result too, with
+the reason and the jobs it got to: the round's final stage (`failed`, `blocked`, `cancelled`) then says where
+the round rests, and no longer has to carry the story of the stage that broke.
 
-  A call that only repeats the stage the round is at, and a retried activity, still write nothing. The
-  workflow counts the passes of each stage within the round (a field of its state, with a default, reset with
-  the round) and the activity that writes the stage puts the pass into the marker from the second pass on, so
-  a first pass keeps today's marker and a round in flight across the deploy repeats nothing. The entry of a
-  later pass reads like any stage entry; the copy on GitHub gets it as one more comment.
+**Which stages.** The stage tables already say it (`STAGE_ACTIONS`): a stage where a round is `working` or
+`waiting` is a pass and writes both entries. A stage a subject rests at (`done`, `failed`, `blocked`,
+`cancelled`, …) is where a round ended, not work: it writes one entry, as now.
 
-  The second kind of pass is a new command, so it sits behind `workflow.patched("stage-per-pass")` with the
-  replay fixture re-recorded; the first kind issues the commands it issues today. *(My calls: what counts as a
-  pass, and the counter living in the workflow's state. The builder goes through every `_stage` call of the
-  three workflows and says which kind it is.)*
+**What this replaces.** The comments a round writes today that are really a stage's result (the crops report,
+the debugging diagnosis, the PR notices) become the body of that stage's result entry; they are not written a
+second time. The judge's verdict stays an entry of its own, written while the subject waits at `review`, and
+ends with the link to the judge's record: it is the report of that one job. The rule for every link is the
+same: the entry that reports what a job did links the job.
 
-*(My calls: grouping on the page rather than a stored tie, and no new sentence for stages other than
-matching.)*
+**One pair per pass.** A pass is each time the round begins a stage's work: it enters the stage from another
+one (`testing`, `review`, `testing` again for a revised snippet PR), or it tests another PR head while still at
+`testing`. The workflow counts the passes of each stage within the round (a defaulted field of its state,
+reset with the round); the pass is in both markers from the second pass on, so a first start keeps today's
+marker. A retried activity writes nothing twice.
+
+**How it is written.** The workflow knows when a pass ends and which jobs it submitted (their workspaces, from
+which a record's address follows), so the workflow asks for the result: one activity call per pass, which
+renders the entry and posts it through `_post` like every other. Each of those calls is a new command. They
+all sit behind one patch per workflow (`stage-results`), the replay fixtures are re-recorded, and a round in
+flight across the deploy finishes the way it started, without results. *(My calls: the patch, the counter in
+the workflow's state, jobs as a line of links in the entry's text and not a stored list. The builder goes
+through every stage of the three workflows and every path out of it.)*
+
+**What it costs to know.** A job's link appears when its stage ends, not while the job runs; its record is
+only complete then. The copy on GitHub gets two comments per pass.
 
 ## 4. What changes and what does not
 
-Unchanged: result dataclasses in `models.py`, `mia.yaml` (no new key), the harness, the registry's existing
-tables (the ledger gains `jobs`, created if missing), and every command a workflow issues except the one
-behind `stage-per-pass`. Changed: the workflows' state gains
-the pass counts (a defaulted field, so a state carried across `continue_as_new` still loads), the stage
-activities' markers from the second pass on, and one replay fixture.
+Unchanged: result dataclasses in `models.py`, `mia.yaml` (no new key), the harness, the registry's tables and
+routes other than the one that serves a record, and the page's timeline code. Changed: the three workflows
+write a result per pass and count passes (behind `stage-results`; state gains a defaulted field, so a state
+carried across `continue_as_new` still loads), the stage activities render a start sentence and pass markers,
+and the replay fixtures.
 
 Deploying is a merge into the live checkout with a restart of the workers and buffer-api, built in a worktree
 until then: workers load workflow code from the checkout for each run, and the page's files are served from it.
@@ -237,11 +218,10 @@ spec was built by the new code.
 ## 5. Left to the builder
 
 Module layout (the reduction belongs in `mia_core`), exact field names beyond §3.1, the size caps, the route
-patterns, the
-blocks' and the view's layout, and the tests. Expected at least: the reduction over a fixture stream (no tool
-output, long inputs cut, junk lines survived, a planted credential redacted), no env value in a record, both
-halves written by `CsubJobs` with the fake client, a write that fails leaving submit and wait unharmed, the
-record route refusing a path outside `_jobs`, a submitted job listed under the stage entry that was open, the
-page's grouping of entries into stage blocks, a second pass
-writing a second stage entry while a retry and a repeated stage write none, the replay tests, and the existing
-check that the page calls read and action routes only.
+pattern, the wording of each stage's two sentences, the view's layout, how the workflow gathers a pass's jobs,
+and the tests. Expected at least: the reduction over a fixture stream (no tool output, long inputs cut, junk
+lines survived, a planted credential redacted), no env value in a record, both halves written by `CsubJobs`
+with the fake client, a write that fails leaving submit and wait unharmed, the record route refusing a path
+outside `_jobs`, a round whose every pass has a start and a result (one that passes, one that fails in a
+stage, one that is cancelled, one with a second pass of a stage), a retry writing neither twice, the replay
+tests old and new, and the existing check that the page calls read and action routes only.
