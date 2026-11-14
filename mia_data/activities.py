@@ -1523,6 +1523,6 @@ class Activities:
     @activity.defn(name="poll")
     @mia_permanent_errors
     async def poll(self) -> list[str]:
-        """One scheduled pass over GitHub: labels become signals, changed snippet PRs wake their workflows
-        (see poll.py). Returns a log of what was done."""
+        """One scheduled pass over the snippets repo: changed snippet PRs wake their workflows (see poll.py).
+        Returns a log of what was done."""
         return await run_poll(self)

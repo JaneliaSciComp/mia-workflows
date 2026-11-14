@@ -66,7 +66,7 @@ def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins:
 
     The binding must name the pinned record and commit, use only snippets from the catalog, and only URLs
     on hosts the record itself names. `pins` is the trusted source of the record id: the record's own `id`
-    field is not trusted (see seed)."""
+    field is not trusted."""
     if not isinstance(binding, dict):
         return ["binding is not a mapping"]
     errors = [

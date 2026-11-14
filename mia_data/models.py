@@ -13,12 +13,12 @@ DEBUGGER = "debugger"  # the actor of the go that runs a round again after it wa
 
 @dataclass
 class LabelEvent:
-    """A human adding `data:go`, `data:approve` or `data:reject` to a dataset issue, delivered as a signal."""
+    """An action somebody asked of a subject through buffer-api, delivered to its workflow as a signal."""
 
     kind: str  # go | approve | reject; mia-buffers adds plan
-    event_id: str
+    event_id: str  # the action's id in the registry
     actor: str
-    at: str  # ISO-8601 from GitHub
+    at: str  # ISO-8601, as buffer-api stored the action
 
 
 @dataclass
@@ -240,7 +240,7 @@ class GalleryResult:
 class JudgeResult:
     """What the judge said about a subject, after policy read it (spec autonomous-gates §4): `verdict` is the
     judge's own, `effective` what the assessment records (a reject without a `bad` finding is an approve, low
-    confidence is an escalate). `comment` is rendered for the issue; `assessment` is "" without a registry."""
+    confidence is an escalate). `comment` is rendered for the timeline; `assessment` is "" when its write to the registry failed."""
 
     verdict: str
     effective: str

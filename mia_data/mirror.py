@@ -45,7 +45,7 @@ def dataset_page(cfg: Config) -> Callable[[dict], str]:
 
 
 def dataset_issue(cfg: Config, gh_catalog: GitHub) -> Describe:
-    """How a dataset's issue reads: the record's facts as `mia-data seed` wrote them, under the record marker and
+    """How a dataset's issue reads: the record's facts (`seed.render_issue`), under the record marker and
     the line that sends people to the dataset's page."""
 
     async def describe(subject: dict) -> tuple[str, str, list[str]]:

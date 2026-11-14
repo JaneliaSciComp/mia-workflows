@@ -1,7 +1,7 @@
 """The poller: one scheduled pass over the snippets repo's pull requests.
 
 autodev's surface is GitHub (spec webapp-actions §9), so what happens to a snippet PR a dataset round is waiting
-on is found by looking: this is the one GitHub poll left in the two pipelines, and it carries no human command.
+on is found by looking: this is the one GitHub poll of the two pipelines, and it carries no human command.
 Two jobs, each done per PR so one bad PR never skips the rest (the next poll retries it):
 
 - wake the dataset workflow whose snippet PR changed (head, state, merge, needs-human);

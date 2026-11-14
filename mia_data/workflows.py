@@ -54,7 +54,7 @@ with workflow.unsafe.imports_passed_through():
     )
 
 GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:revoke"
-CANCEL = "data:cancel"  # an action only: there was never such a label
+CANCEL = "data:cancel"
 NO_ROUND = "there is no round in progress to cancel"
 ROUND_ENDED = "the round ended before the cancel reached it"
 CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the round's activity in flight to answer
@@ -161,7 +161,7 @@ class MiaDataDataset:
 
     @workflow.signal
     def revoke(self, event: LabelEvent) -> None:
-        """`data:revoke`: withdraw what this issue published (spec autonomous-gates §6); taken at any stage."""
+        """Withdraw this dataset's saved crops (spec autonomous-gates §6); taken at any stage."""
         self.revoke_events.append(event)
 
     @workflow.signal
@@ -472,8 +472,8 @@ class MiaDataDataset:
             start_to_close_timeout=timedelta(seconds=60),
             schedule_to_close_timeout=budget,
             retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
-            # stage-write-wait: a cancelled write already inside its GitHub call finishes before the next write
-            # starts, so two writes never swap labels at once (two issues once kept `matching` and a stop stage)
+            # stage-write-wait: a cancelled write already inside its registry call finishes before the next write
+            # starts, so an older stage never lands after a newer one
             cancellation_type=(
                 workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
                 if workflow.patched("stage-write-wait")
@@ -487,9 +487,9 @@ class MiaDataDataset:
         workflow.continue_as_new(self.state)
 
     async def _drop_stage_write(self) -> None:
-        """Cancel the stage write still pending, so a late retry cannot swap the label back, and wait for an
-        attempt already inside its GitHub call to finish; a write that failed meanwhile is logged (the registry
-        row and the next write carry the stage)."""
+        """Cancel the stage write still pending, so a late retry cannot write the older stage back, and wait for
+        an attempt already inside its registry call to finish; a write that failed meanwhile is logged (the next
+        write carries the stage)."""
         await self._settle_stage_write(cancel=True)
 
     async def _settle_stage_write(self, cancel: bool) -> None:
@@ -1124,7 +1124,7 @@ class MiaDataDataset:
         )
 
     async def _feedback(self, event: LabelEvent) -> str:
-        """The reviewer's comments on the issue since the set's report and up to this reject (spec §14)."""
+        """The notes of the rejects since the set's report and up to this one (spec §14)."""
         state = self.state
         return await self._act(
             "read_feedback", state.issue, state.tests[-1].finished_at, event.at, seconds=300, result_type=str
@@ -1221,7 +1221,7 @@ class MiaDataDataset:
             ("reject", event) for event in self.reject_events
         ]
         self.approve_events, self.reject_events = [], []
-        for kind, event in sorted(queued, key=lambda pair: pair[1].at):  # GitHub's ISO-8601 UTC strings sort
+        for kind, event in sorted(queued, key=lambda pair: pair[1].at):  # buffer-api's ISO-8601 UTC strings sort
             if self._seen(event):
                 continue
             label = APPROVE if kind == "approve" else REJECT
@@ -1230,9 +1230,7 @@ class MiaDataDataset:
             elif (at := _parse_time(event.at)) and at > tested_at:
                 found = (kind, event)
             else:
-                await self._refuse(
-                    label, f"it is older than the round's test crops; add it again to {kind} them", event
-                )
+                await self._refuse(label, f"it is older than the round's test crops; ask again to {kind} them", event)
         return found
 
     async def _review(self) -> tuple[str, LabelEvent | None]:

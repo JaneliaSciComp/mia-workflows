@@ -1,7 +1,7 @@
-"""mia-data configuration: mia_data.yaml, with a few environment-variable overrides.
+"""mia-data configuration: the service's block of mia.yaml, with a few environment-variable overrides.
 
-mia-data works with three GitHub repositories: the data repo (one issue per dataset, where humans label
-and the galleries branch lives), the snippets repo (mia-snippets, the loader code) and the catalog repo
+mia-data works with three GitHub repositories: the data repo (one issue per dataset, the mirror's copy of its
+timeline, and the galleries branch), the snippets repo (mia-snippets, the loader code) and the catalog repo
 (mia-agentic-search, the dataset records and download state). Secrets come only from the environment,
 ./.env and key files, never from the YAML.
 """
@@ -108,7 +108,7 @@ def dataset_state(stage: str, saved: bool) -> str:
     return "prepared" if stage == "done" and saved else "needs-human"
 
 
-EXTRA_LABELS = {  # plain labels; modality:<family> labels are generated per family at seed time
+EXTRA_LABELS = {  # the plain labels `init-labels` creates beside the stage labels
     "has-labels": ("c5def5", "Dataset ships labels or annotations"),
 }
 

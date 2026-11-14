@@ -114,7 +114,7 @@ def dataset_folder(record: dict, record_id: str) -> str:
 
     A record with no single organism is filed under `unknown`; one whose modalities settle on no family but
     include `other` is filed under the family `other`. Raises ValueError when the record names no modality the
-    tables know. `record_id` is the trusted id (the record's own `id` field is not, see seed)."""
+    tables know. `record_id` is the trusted id (the record's own `id` field is not)."""
     imaging = record.get("imaging") or {}
     modalities, organisms = imaging.get("modality") or [], imaging.get("organism") or []
     # The family of the first modality if it is unambiguous, else the family all modalities share.

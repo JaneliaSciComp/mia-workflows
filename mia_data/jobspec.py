@@ -1,4 +1,4 @@
-"""Building the csub job specs for the four job kinds (match, smoke, crop, verify), plus the two things
+"""Building the csub job specs for the job kinds (match, debug, smoke, crop, verify, judge), plus the two things
 every job needs: a read-only snapshot of mia-snippets at a commit, and the harness pin.
 
 The record and bindings live under `paths.state_dir`, which is never mounted into a job: the caller copies
