@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
 from mia_core.hosts import PolicyError, generate_policy
+from mia_core.jobrecord import RECORDS_DIR
 from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
@@ -68,6 +69,8 @@ MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
 # no row = unprepared; `ineligible` ended with spec §12; `revoked` since autonomous-gates §6
 DATASET_STATES = ("in-progress", "prepared", "needs-human", "revoked")
 CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
+# a job's gzipped record is kilobytes, an agent's with a long conversation a few megabytes; a larger file is not sent
+JOB_RECORD_LIMIT = 16 << 20
 CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
 log = logging.getLogger(__name__)
 UI_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")  # a file of the page by basename; no dotfile, no "/"
@@ -498,6 +501,7 @@ ROUTES = [
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
     ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
     ("GET", re.compile(r"^/gallery/i(\d+)-e(\d+)/([0-9a-f]{40})/([^/]+)/(raw|overlay)\.png$"), "gallery_png", "read"),
+    ("GET", re.compile(r"^/jobs/(.+)$"), "job_record", "read"),
     ("POST", re.compile(r"^/plan$"), "plan", "read"),  # a POST only to carry the spec text; it writes nothing
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
     ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
@@ -1667,6 +1671,24 @@ class BufferService:
             if data is not None:
                 return 200, data, {"Content-Type": "image/png", "Cache-Control": "public, max-age=3600"}
         raise HttpError(404, "no such crop")
+
+    def _job_record(self, where: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A job's record (`mia_core.jobrecord`) as its file is on disk, gzip passed through: `where` is the record's
+        address, the job's workspace relative to work_root. Every segment of it is a plain name (none empty, none
+        starting with a dot, so no `.` or `..`), and the file is a regular file inside the records directory:
+        a symlink is not followed to one, nor out of the directory. Nothing here writes or deletes a record."""
+        if self.work_root is None:
+            raise HttpError(503, "the service has no work_root")
+        if not all(UI_NAME_RE.fullmatch(segment) for segment in where.split("/")):
+            raise HttpError(404, "no record for this job")
+        data = read_untrusted(self.work_root / RECORDS_DIR, f"{where}.json.gz", JOB_RECORD_LIMIT + 1, binary=True)
+        if data is None:
+            raise HttpError(404, "no record for this job")
+        if len(data) > JOB_RECORD_LIMIT:
+            # ponytail: a record over the cap is refused, since a gzip cut short is no JSON; stream the file in
+            # chunks when records outgrow the cap
+            raise HttpError(500, f"the record of this job is over {JOB_RECORD_LIMIT >> 20} MB")
+        return 200, data, {"Content-Type": "application/json", "Content-Encoding": "gzip", "Cache-Control": "no-cache"}
 
     def _list_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         return 200, {"datasets": self.ledger.datasets(query.get("state"))}, {}

@@ -877,3 +877,103 @@ def test_a_datasets_page_lists_every_address_of_its_catalog_record_in_its_links_
     ]  # fmt: skip
     assert 'href="javascript:' not in json.dumps(links)
     assert bare == [0, False]  # a record with no address and no place in the catalog: an empty row, and no card
+
+
+PLANTED = "<script>alert(1)</script>"
+JOB_ADDRESS = "issue-12/i12-e345/match-1"
+JOB_RECORD = {
+    "schema": 1,
+    "job_id": "777",
+    "workspace": JOB_ADDRESS,
+    "submitted_at": "2026-11-14T10:00:00+00:00",
+    "finished_at": "2026-11-14T10:05:00+00:00",
+    "request": {"name": "match", "command": "claude -p … > claude.jsonl", "cpus": 2, "env": ["ANTHROPIC_API_KEY"]},
+    "submit": {"queue": "local", "estimated_max_cost_usd": 0.1, "job_group": None},
+    "outcome": {"state": "EXIT", "exit_code": 1, "exec_host": "node-1", "queue": "local"},
+    "usage": {"max_mem": "2 Gbytes", "run_time": "61 second(s)"},
+    "logs": {"stdout": "out-tail", "stderr": ""},
+    "agent": {
+        "prompt": "Match this dataset.",
+        "model": "claude-opus",
+        "cost_usd": 0.25,
+        "num_turns": 3,
+        "duration_ms": 1200,
+        "turns": [
+            {"role": "thinking", "text": "look at the record first"},
+            {"role": "tool", "name": "Read", "input": {"file_path": "record.yaml"}, "error": False},
+            {"role": "tool", "name": "Write", "input": {"content": PLANTED + "x" * 200}, "error": True},
+            {"role": "assistant", "text": f"done\n{PLANTED}", "sub": True},
+            "not a turn",
+            {"role": "unheard-of"},
+        ],
+    },
+}
+# a record's page as a test reads it: its HTML text, the tags it is built of, its text, and each fold
+JOB_SHOWN = (
+    "const shownOf = root => ({ html: html(root), tags: [...new Set(walk(root).map(node => node.tag))],"
+    " text: textOf(root), folds: walk(root).filter(node => node.tag === 'details').map(fold =>"
+    " ({ open: 'open' in fold.attrs, cls: fold.attrs.class, summary: textOf(fold.children[0]),"
+    " body: textOf(fold.children[1]) })) });\n"
+)
+
+
+def test_a_jobs_record_is_shown_as_text_never_as_markup() -> None:
+    """What a job printed stays text: a tag in a turn or in a tool's input makes no element. An agent's prompt, its
+    thinking and each tool call are closed folds; a failed call says so and a sub-agent's turn is indented."""
+    full, bare = run_js(
+        JOB_SHOWN
+        + "print(input.map(record => shownOf(el('div', {}, ...jobView(record, 'issue-12/i12-e345/match-1')))));",
+        {"dom.js": "el", "job.js": "jobView"},
+        [JOB_RECORD, {"schema": 1, "request": {"command": "sleep 1"}, "submit": {"queue": "local"}}],
+    )
+    assert "script" not in full["tags"] and "<script" not in full["html"] and full["text"].count(PLANTED) == 3
+    assert f'<div class="turn said subagent">done\n{PLANTED.replace("<", "&lt;")}</div>' in full["html"]
+    assert full["html"].startswith(f'<div><h2>match</h2><div class="small mono">{JOB_ADDRESS}</div><dl class="kv">')
+    assert '<dt>state</dt><dd><span class="pill warn">EXIT</span></dd><dt>exit code</dt><dd>1</dd>' in full["html"]
+    for shown in ("<dd>local</dd>", "<dd>node-1</dd>", "<dd>777</dd>", "<dd>2026-11-14T10:00:00+00:00 (", "<dd>3</dd>"):
+        assert shown in full["html"], shown
+    for shown in ("<dt>peak memory</dt><dd>2 Gbytes</dd>", "<dt>run time</dt><dd>61 second(s)</dd>", "<dd>$0.25</dd>"):
+        assert shown in full["html"], shown
+    assert "average memory" not in full["text"] and "still running" not in full["text"]  # only what the record has
+    prompt, thinking, read, write = full["folds"]
+    assert not any(fold["open"] for fold in full["folds"])
+    assert (prompt["summary"], prompt["body"]) == ("Prompt", "Match this dataset.")
+    assert (thinking["summary"], thinking["body"]) == ("Thinking", "look at the record first")
+    assert (read["summary"], read["body"]) == ('Read {"file_path":"record.yaml"}', '{\n  "file_path": "record.yaml"\n}')
+    whole = json.dumps({"content": PLANTED + "x" * 200}, separators=(",", ":"))
+    assert write["summary"] == f"Write {whole[:120]}… failed" and write["body"].count("x") == 200
+    assert "unheard-of" not in full["text"] and "not a turn" not in full["text"]
+    assert "<h2>Script</h2><pre>claude -p … > claude.jsonl</pre>" in full["html"]
+    assert '<dt>cpus</dt><dd>2</dd><dt>env</dt><dd>["ANTHROPIC_API_KEY"]</dd>' in full["html"]
+    assert "<dt>estimated_max_cost_usd</dt><dd>0.1</dd>" in full["html"] and "job_group" not in full["text"]
+    assert '<div class="sub">stdout</div><pre>out-tail</pre>' in full["html"] and "stderr" not in full["text"]
+    # a record with its first half alone: the job's name is its workspace's, and nothing is said about an agent
+    assert bare["html"].startswith("<div><h2>match-1</h2>")
+    assert "This job is still running, or its end was not recorded." in bare["text"]
+    assert "Conversation" not in bare["text"] and "Output" not in bare["text"] and bare["folds"] == []
+    assert '"./markdown.js"' not in FILES["job.js"]  # nothing of a record is read as markdown
+
+
+def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() -> None:
+    """`#job/<address>` is the whole remainder after `#job/`, slashes and all, and the page reads `/jobs/<address>`
+    (a read route); a 404 is a job that left no record."""
+    assert has("job: viewJob") and has('let arg = rest.join("/")') and has('data-view="job"') and has('id="jobBody"')
+    assert ("GET", "/jobs/x") in requested_paths() and resolve("GET", f"/jobs/{JOB_ADDRESS}") == "read"
+    found, missing = run_js(
+        "globalThis.location = { hash: '#job/issue-12/i12-e345/match-1' };\n"
+        "const asked = [], out = [];\n"
+        "for (const answer of input) {\n"
+        "  globalThis.fetch = async path => { asked.push(path); return { ...answer, text: async () => answer.body }; };\n"
+        "  await viewJob('issue-12/i12-e345/match-1');\n"
+        "  out.push({ asked: asked.pop(), text: textOf(document.getElementById('jobBody')) });\n"
+        "}\n"
+        "print(out);",
+        {"job.js": "viewJob"},
+        [
+            {"ok": True, "status": 200, "body": json.dumps({"request": {"name": "match"}})},
+            {"ok": False, "status": 404, "statusText": "Not Found", "body": '{"error": "no record for this job"}'},
+        ],
+    )
+    assert found["asked"] == missing["asked"] == f"/jobs/{JOB_ADDRESS}"
+    assert found["text"].startswith("match" + JOB_ADDRESS + "This job is still running")
+    assert missing["text"] == "match-1No record for this job."

@@ -752,6 +752,7 @@ above it in this table, never in a circle:
 | `table.js` | a table paged by the server |
 | `markdown.js` | a timeline entry's markdown as DOM nodes |
 | `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
+| `job.js` | a job's record, every value of it inserted as text |
 | `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views |
 | `app.js` | the Docs view, health, the stream, hash routing and boot |
 
@@ -785,6 +786,14 @@ Each tab is one kind of thing, and each thing has one page:
   with the current one filled. The stages are `lines` of `/meta`, which is each stage table in its own order
   without the stages a round can end in from any step (`failed`, `blocked`, `needs-human`, `cancelled`); those
   hang under the step the round stopped at.
+- **A job's record** (`#job/<address>`) reads `/jobs/<address>`. The address is the job's workspace relative to
+  `paths.work_root`, slashes included, and buffer-api answers with the file `<work_root>/_jobs/<address>.json.gz`
+  as it is on disk (`Content-Encoding: gzip`; the browser inflates it). Every segment of the address is a plain
+  name, no symlink is followed, and a file over 16 MB is refused. The view shows how the job ended and what it
+  used, an agent's prompt and conversation (the prompt, the thinking and each tool call folded), the script, what
+  the cluster was asked and what csub answered, and the ends of stdout and stderr. A record holds what a job
+  printed, so all of it is text: none is read as HTML or as markdown. A job without a record is a 404, and the
+  view says so; no tab lists jobs.
 - **Cache** reads `/assets/raw|staged`, `/locks`, `/keeper` and the quotas from `/meta`.
 - **Decisions** reads `/decisions` (newest first, by gate, with the judge/human agreement); a human approve that a
   later reject overrules is marked by the server.
