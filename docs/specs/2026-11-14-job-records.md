@@ -3,7 +3,8 @@
 **Status:** v0.2 · 2026-11-14 · awaiting the user's approval. v0.2: no list of jobs on the page; a job's link
 sits next to what the job produced (the user's ruling on v0.1). v0.3: the timeline reads stage by stage, each
 stage with what happened in it (§3.6; the user's ruling on v0.2). v0.4: one stage entry per pass (the user's
-ruling on v0.3).
+ruling on v0.3). v0.5: a job is tied to its stage by a row the worker writes at submit, not by comparing
+times; the route that listed a subject's jobs is gone.
 
 ## 1. Intent
 
@@ -138,14 +139,9 @@ the result read from the same workspace, no more; the judges have no tool that w
 
 ### 3.4 Serving it
 
-Two read routes on buffer-api, no token, nothing written:
-
-- the jobs of a subject, which the page needs to place its links (§3.5): for each round in the subject's
-  timeline, the records under that round's workspace directory, each with its address, name (the workspace's
-  basename), whether it is an agent's, state, exit code and times. *(ponytail: opens each record of the subject
-  to list it; an index when a subject has thousands.)*
-- one record: the file's bytes with `Content-Type: application/json` and `Content-Encoding: gzip`. The path is
-  checked segment by segment, must stay inside `_jobs`, and no symlink is followed.
+One read route on buffer-api, no token, nothing written: a record, as the file's bytes with `Content-Type:
+application/json` and `Content-Encoding: gzip`. The path is checked segment by segment, must stay inside
+`_jobs`, and no symlink is followed.
 
 buffer-api never writes or deletes a record. Nothing deletes one: the keeper's rule is unchanged, and `_jobs`
 is not among the things it removes.
@@ -154,16 +150,18 @@ is not among the things it removes.
 
 There is no card or tab that lists jobs. A link to a job's record sits where the page shows what that job did:
 
-- **A stage of the timeline (§3.6) shows the jobs that ran under it:** the jobs of the stage entry's round that
-  were submitted from that entry until the round's next stage entry. `Stage: data:matching` so carries the match
-  agent's job, a testing or cropping entry its smoke, crop and verify jobs, a debugging entry the debugging
-  agent's, a buffer round's staging entry its stage jobs. Each is a short link beside the entry's folders (name,
-  state, how long), folded when an entry has many; the folder link to the workspace stays. The page works this
-  out from the entry's `round` and `at` and the records' `submitted_at`: no entry stores a job, no workflow or
-  activity hears of it, and it holds for every kind of subject and for rounds of any shape. *(My call. A stage's
-  entry is written and awaited before its job is submitted, so the order is the workflow's; ponytail: it
-  compares buffer-api's clock with the worker's, so two hosts a few seconds apart can put a job one entry early.
-  The upgrade is the record carrying the stage.)*
+- **A stage of the timeline (§3.6) shows the jobs it ran,** as short links (the job's name) beside the stage
+  entry's folders, folded when there are many; the folder link to the workspace stays. `Stage: data:matching`
+  so carries the match agent's job, a testing entry its crop and verify jobs, a debugging entry the debugging
+  agent's, a buffer round's staging entry its stage jobs.
+
+  The tie is written, not worked out. When a worker of mia-data or mia-buffers submits a job it tells the
+  registry (a worker route, the bearer token): the subject, the record's address, the job's name. buffer-api
+  stores that in a `jobs` table of the ledger together with the subject's open stage entry, the last one
+  written, in one transaction. A stage's entry is written and awaited before its jobs are submitted, and one
+  ledger orders both writes, so the tie is exact and no clock is compared. The subject's timeline is returned
+  with its jobs, each naming its stage entry. The write is best effort like the record itself, once per
+  address; a job of a `test-pr` round has no subject and is not listed, and autodev lists nothing.
 - **What is rendered from a job's output links to that job.** The crop judge's comment ends with a link to the
   judge's record. `read_judge` renders that comment and knows both the workspace and the page's URL, so no
   workflow hears of it, and the copy on GitHub carries the same link. *(My call: the link is in the comment's
@@ -225,8 +223,9 @@ matching.)*
 
 ## 4. What changes and what does not
 
-Unchanged: result dataclasses in `models.py`, `mia.yaml` (no new key), the harness, the registry's tables, and
-every command a workflow issues except the one behind `stage-per-pass`. Changed: the workflows' state gains
+Unchanged: result dataclasses in `models.py`, `mia.yaml` (no new key), the harness, the registry's existing
+tables (the ledger gains `jobs`, created if missing), and every command a workflow issues except the one
+behind `stage-per-pass`. Changed: the workflows' state gains
 the pass counts (a defaulted field, so a state carried across `continue_as_new` still loads), the stage
 activities' markers from the second pass on, and one replay fixture.
 
@@ -238,10 +237,11 @@ spec was built by the new code.
 ## 5. Left to the builder
 
 Module layout (the reduction belongs in `mia_core`), exact field names beyond §3.1, the size caps, the route
-patterns, how a subject's rounds map to workspace directories (`_gallery_png` does it for dataset rounds), the
+patterns, the
 blocks' and the view's layout, and the tests. Expected at least: the reduction over a fixture stream (no tool
 output, long inputs cut, junk lines survived, a planted credential redacted), no env value in a record, both
 halves written by `CsubJobs` with the fake client, a write that fails leaving submit and wait unharmed, the
-record route refusing a path outside `_jobs`, the page's grouping of entries into stage blocks, a second pass
+record route refusing a path outside `_jobs`, a submitted job listed under the stage entry that was open, the
+page's grouping of entries into stage blocks, a second pass
 writing a second stage entry while a retry and a repeated stage write none, the replay tests, and the existing
 check that the page calls read and action routes only.
