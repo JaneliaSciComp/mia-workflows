@@ -4,7 +4,13 @@ from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, w
 def test_moved_helpers_behave_as_before(tmp_path):
     assert neutralize("a <!-- x --> ghp_abcdef", token=None) == "a &lt;!-- x --> [redacted]"
     assert loads("[1]") == [1] and loads("nope") is None and loads(None) is None
-    assert text(None) == "" and text("x" * 10, 3) == "xxx" and texts("a") == ["a"] and texts(None) == []
+    assert (
+        text(None) == ""
+        and text("x" * 10, 3) == "xx…"
+        and text("xxx", 3) == "xxx"
+        and texts("a") == ["a"]
+        and texts(None) == []
+    )
     write_atomic(tmp_path / "d" / "f", "hi")
     assert (tmp_path / "d" / "f").read_text() == "hi" and not list((tmp_path / "d").glob(".*tmp"))
     (tmp_path / "job").mkdir()
