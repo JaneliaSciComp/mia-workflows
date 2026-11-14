@@ -828,7 +828,7 @@ class Activities:
     @activity.defn(name="prep_nudge")
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
-        """Hand one requested record to mia-data unless the registry already settled it (prepared or
+        """Hand one requested record to mia-data unless the registry already settled it (prepared, shelved or
         needs-human); otherwise nudge_dataset, its result named for the request's entry. A request that says
         `again` hands those over too: the dataset gets a new round, and its row says `in-progress` at once, so
         the request follows that round instead of settling on what the last one left."""
@@ -838,8 +838,8 @@ class Activities:
         except RegistryError as error:  # best effort: the dataset issue tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        settled = (state := _followed_state(row)) in ("prepared", "needs-human")
-        if settled and (not again or (row or {}).get("state") == "shelved"):  # a shelved dataset is never asked
+        settled = (state := _followed_state(row)) in ("prepared", "shelved", "needs-human")
+        if settled and (not again or state == "shelved"):  # a shelved dataset is never asked
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
         found, created = await self._nudge(round_id, record, again=again)
@@ -1828,11 +1828,11 @@ class Activities:
 def _followed_state(row: dict | None) -> str:
     """A dataset's state as a preparation request follows it: `in-progress` while its round is open, which
     includes one waiting at review (the round goes on once a person gives the verdict); else the row's state,
-    `unprepared` without one. A shelved dataset is followed as `needs-human`: it settles, and only a person
-    brings it back."""
+    `unprepared` without one. A shelved dataset reads `shelved` whatever its stage: it settles, a person set it
+    aside, and the request does not wait for it."""
     row = row or {}
     if row.get("state") == "shelved":
-        return "needs-human"
+        return "shelved"
     return "in-progress" if round_open(row.get("data_stage")) else row.get("state", "unprepared")
 
 

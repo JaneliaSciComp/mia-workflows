@@ -109,8 +109,11 @@ Temporal. The stage and the dataset's stored row are not touched. What reads the
 - `Ledger.dataset` and `Ledger.datasets` give a shelved dataset `state: shelved` and the hold's reason (a row is
   made up for one that never ran), so `POST /plan`, the `plan` activity and the Datasets list need no rule of
   their own; `shelved` is not a state a worker can write.
-- A preparation request sends a shelved dataset no `go` and follows it as `needs-human` (`prep_nudge`,
-  `_followed_state`); the Designer's *to prepare* list leaves it out.
+- A preparation request sends a shelved dataset no `go` and follows it as `shelved` (`prep_nudge`,
+  `_followed_state`): the request is `done` when each of its datasets is prepared or shelved. A request resting
+  at `needs-human` gets a `recheck` from buffer-api when a dataset it names is shelved or written `prepared`
+  (`_recheck_requests`), reads its datasets again and moves itself to `done` if that now holds. The Designer's
+  *to prepare* list leaves a shelved dataset out.
 
 **Every stage write is awaited.** `set_stage` writes the subject's stage, its timeline entry and the dataset's
 registry row, and the workflow waits for it: the registry's stage is what buffer-api checks an action against and

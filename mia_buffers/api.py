@@ -97,7 +97,7 @@ NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
 # `shelved`, it takes `unshelve` alone, and a shelved dataset reads `shelved` to every plan and request. A subject
 # with one of these status words (no round in progress, none at review) also takes `shelve`.
 SHELVABLE = ("not started", "stuck", "done")
-HOLD_ACTIONS = ("shelve", "unshelve")  # carried out by this service: no workflow hears of them
+HOLD_ACTIONS = ("shelve", "unshelve")  # carried out by this service: the subject's workflow hears of neither
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
 DROP_QUIET_S = 60  # `dropped` is refused while a file under incoming/ changed this recently
@@ -787,7 +787,25 @@ class BufferService:
             raise HttpError(422, "a dataset is a JSON object")
         if "state" in fields and fields["state"] not in DATASET_STATES:
             raise HttpError(422, f"state must be one of {list(DATASET_STATES)}, got {fields['state']!r}")
-        return 200, self.ledger.put_dataset(record, fields), {}
+        row = self.ledger.put_dataset(record, fields)
+        if fields.get("state") == "prepared":
+            self._recheck_requests(record)
+        return 200, row, {}
+
+    def _recheck_requests(self, record: str) -> None:
+        """A dataset was shelved or became prepared: tell each request resting at `needs-human` that names it to
+        look at its datasets again (`MiaPrep.recheck`); the request moves itself to `done` when each is prepared
+        or shelved. One that selects by rule names no record here, so it is told too. Best effort: the write that
+        led here stands, and the next dataset to settle tells the request again."""
+        if self.dispatcher is None:
+            return
+        for request in self.ledger.find_subjects(kind="prep"):  # ponytail: reads every request, as `_catalog_dataset`
+            if request["stage"] != "needs-human" or record not in (_prep_records(request) or [record]):
+                continue
+            try:
+                self.dispatcher.signal_running("prep", request["number"], "recheck")
+            except DispatchError as error:
+                log.warning("request %s not told that %s settled: %s", request["key"], record, error)
 
     def _get_dataset(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
         row = self.ledger.dataset(record)
@@ -1466,6 +1484,8 @@ class BufferService:
             held = action["payload"].get("note") if parsed.action == "shelve" else None
             action = self.ledger.settle_hold(action["id"], held, _action_entry(action)) or action
             self._changed(kind, number)
+            if (kind, parsed.action) == ("dataset", "shelve"):
+                self._recheck_requests(subject["key"])
         return 202, action, {}
 
     def _get_action(self, action_id: str, *, query: dict[str, str], body: bytes) -> Response:

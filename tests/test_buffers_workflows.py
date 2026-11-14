@@ -2126,6 +2126,41 @@ async def test_prep_needs_human_on_timeout(env):
     assert m.of("result") == [("requested", "1 of 3 requested datasets are prepared.", "needs-human")]
 
 
+async def test_prep_is_done_when_each_dataset_is_prepared_or_shelved(env):
+    """A shelved dataset settles like a prepared one: a person set it aside, so the request does not wait for it."""
+    m = PrepMocks(outcomes={"c": PrepOutcome("c", "shelved")}, statuses={"a": "prepared", "b": "shelved"})
+    async with prep_started(env, m) as h:
+        await polled(env, m, 1)
+        await prep_settled(h, m, "done")
+    assert m.stages == ["requested", "done"] and m.of("set_prep_stage")[-1][1] == "prepared: `a`; shelved: `b`, `c`"
+    assert m.of("result") == [("requested", "1 of 3 requested datasets are prepared, 2 shelved.", "done")]
+
+
+async def test_prep_at_needs_human_moves_to_done_when_told_its_datasets_settled(env):
+    """A request whose round ended `needs-human` is told (`recheck`) when one of its datasets is shelved or becomes
+    prepared: it stays while any is neither, and is done once each is."""
+    m = PrepMocks(
+        outcomes={"a": PrepOutcome("a", "prepared"), "b": PrepOutcome("b", "prepared")},
+        statuses={"a": "prepared", "b": "prepared", "c": ["needs-human", "needs-human", "shelved"]},
+    )
+    async with prep_started(env, m) as h:
+        await polled(env, m, 1)
+        await prep_settled(h, m, "needs-human")
+        await h.signal(workflows.MiaPrep.recheck)  # c still needs a human
+        await until(lambda: len(m.of("prep_status")) == 2, m=m)
+        assert m.stages == ["requested", "needs-human"]
+        await h.signal(workflows.MiaPrep.recheck)  # c was shelved
+        await prep_settled(h, m, "done")
+        state = await h.query(workflows.MiaPrep.status)
+        await h.signal(workflows.MiaPrep.recheck)  # done already: nothing is read
+        await h.signal(workflows.MiaPrep.go, ev("go", "21"))  # a redelivery, sent to see the recheck was handled
+        await asyncio.sleep(0.3)
+    assert m.of("prep_status") == [(["c"],), (["a", "b", "c"],), (["a", "b", "c"],)]
+    detail = "2 of 3 requested datasets are prepared, 1 shelved. prepared: `a`, `b`; shelved: `c`"
+    assert m.of("set_prep_stage")[-1] == ("done", detail)
+    assert state.stage == "done" and state.settled == {"a": "prepared", "b": "prepared", "c": "shelved"}
+
+
 async def test_prep_registry_outage_ends_needs_human(env):
     m = PrepMocks(status_error="RegistryError: buffer-api unreachable")
     async with prep_started(env, m) as h:

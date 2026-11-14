@@ -86,7 +86,7 @@ stream, and never sent to Temporal. The mirror copies the entry to the issue; no
 | buffer plans (`POST /plan`, the `plan` activity) | read `prepared` through the above: a shelved dataset is `not prepared` |
 | `to_prepare` (`explore.py`) | leaves out rows whose state is `shelved` |
 | a worker's `go` | `prep_nudge` sends none for a shelved dataset, also for a request that says `again`; one sent all the same is refused (409) like anybody's |
-| `_followed_state` | a request follows a shelved dataset as `needs-human`: it settles, and the request says so |
+| `_followed_state` | a request follows a shelved dataset as `shelved`: it settles, and a request whose datasets are each prepared or shelved is `done`; one resting at `needs-human` is told to look again (`recheck`) when a dataset it names is shelved or prepared |
 
 `shelved` is not in `DATASET_STATES`: no worker can write it.
 

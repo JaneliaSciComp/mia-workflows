@@ -101,7 +101,10 @@ REFUSED_ARTIFACT = "staged artifact {artifact} is refused: {why}"
 REVOKE_LABEL = "buffer:revoke"
 NO_REVOKE_LINES = "name the records to revoke: tick them on the spec's page"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then run it again"
-PREP_SETTLED = ("prepared", "needs-human")  # registry states a preparation request stops following (spec §12)
+# registry states a preparation request stops following (spec §12); a request is done when each record is one of
+# PREP_DONE: prepared, or set aside by a person
+PREP_SETTLED = ("prepared", "shelved", "needs-human")
+PREP_DONE = ("prepared", "shelved")
 # nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
 PREP_HUMAN = ("done-unpublished", "unknown")
 NEW_ROUND = "Ended: a new round was started."  # the result of a pass a new round found still open
@@ -157,6 +160,21 @@ def _results() -> bool:
     """Whether this run writes a result entry for each stage pass (`stage-results`; spec job-records §3.6): the
     state carries the open pass, and the stage write carries its result out."""
     return workflow.patched("stage-results")
+
+
+def _prep_count(records: list[str], settled: dict[str, str]) -> str:
+    """How many of a request's records are prepared, and how many shelved if any, as a sentence."""
+    prepared, shelved = (sum(settled.get(record) == state for record in records) for state in PREP_DONE)
+    set_aside = f", {shelved} shelved" if shelved else ""
+    return f"{prepared} of {len(records)} requested datasets are prepared{set_aside}."
+
+
+def _prep_done(records: list[str], settled: dict[str, str]) -> str:
+    """The detail of a request's `done`: its prepared records, then its shelved ones if any."""
+    named = {
+        state: ", ".join(f"`{record}`" for record in records if settled.get(record) == state) for state in PREP_DONE
+    }
+    return f"prepared: {named['prepared'] or 'none'}" + (f"; shelved: {named['shelved']}" if named["shelved"] else "")
 
 
 def _pass_begun(state: BufferState | PrepState, stage: str, opened: bool, carried: int = 0) -> None:
@@ -1803,7 +1821,9 @@ class MiaBuffer:
 @workflow.defn(name="MiaPrep")
 class MiaPrep:
     """One preparation request issue: each `prep:go` hands the records it names to mia-data and follows them in
-    the registry to `prep:done` (each prepared) or `prep:needs-human`. One round at a time."""
+    the registry to `prep:done` (each prepared or shelved) or `prep:needs-human`. One round at a time. A request
+    resting at `needs-human` is told (`recheck`) when one of its datasets settles, and moves to `done` once each
+    has."""
 
     @workflow.init
     def __init__(self, state: PrepState) -> None:
@@ -1814,10 +1834,17 @@ class MiaPrep:
         self.unwinding = False  # the round's task has been told to stop
         self.in_flight = 0  # the round's activities in flight
         self.round_task: asyncio.Future[None] | None = None
+        self.look_again = False  # a `recheck` not yet acted on
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
         self.go_events.append(event)
+
+    @workflow.signal
+    def recheck(self) -> None:
+        """A dataset this request names was shelved or became prepared (buffer-api sends this to a request at
+        `needs-human`): look at its datasets again."""
+        self.look_again = True
 
     @workflow.signal
     def cancel(self, event: LabelEvent) -> None:
@@ -1834,12 +1861,18 @@ class MiaPrep:
         rounds = 0
         while True:
             await workflow.wait_condition(
-                lambda: bool(self.go_events or self.cancel_events) or (_rollover_due() and not self.cancel_events)
+                lambda: (
+                    bool(self.go_events or self.cancel_events or self.look_again)
+                    or (_rollover_due() and not self.cancel_events)
+                )
             )
-            if not (self.go_events or self.cancel_events):
+            if not (self.go_events or self.cancel_events or self.look_again):
                 workflow.continue_as_new(self.state)  # idle, nothing queued
             await self._refuse_cancels()  # idle: no round to cancel
+            look_again, self.look_again = self.look_again, False
             if not self.go_events:
+                if look_again:
+                    await self._recheck()
                 continue
             event = self.go_events.pop(0)
             if self._seen(event):  # redelivery
@@ -1966,6 +1999,23 @@ class MiaPrep:
                 )
         await self._stage("cancelled", f"cancelled by {events[-1].actor}")
 
+    async def _recheck(self) -> None:
+        """The request rests at `needs-human` and one of its datasets settled since: when each is now prepared or
+        shelved, the request is done. Anything else leaves it where it is."""
+        state = self.state
+        if state.stage != "needs-human" or state.pins is None:
+            return
+        records = state.pins.records
+        try:
+            found = await self._act("prep_status", records, result_type=dict[str, str])
+        except ActivityError as error:  # best effort: the next dataset to settle asks again
+            if isinstance(error.cause, CancelledError):
+                raise
+            return workflow.logger.warning("issue #%d: recheck failed: %s", state.issue, error_message(error))
+        if all(found.get(record) in PREP_DONE for record in records):
+            state.settled = {record: found[record] for record in records}
+            await self._stage("done", f"{_prep_count(records, found)} {_prep_done(records, found)}")
+
     async def _refuse_cancels(self, reason: str = NO_ROUND) -> None:
         """A cancel with no round in progress: refused."""
         events, self.cancel_events = self.cancel_events, []
@@ -2037,11 +2087,10 @@ class MiaPrep:
             await self._refuse_queued()  # ponytail: a busy go waits for the next poll (MAX_POLL_MINUTES at most)
             last = await self._act("prep_status", unsettled, result_type=dict[str, str])
             state.settled |= {record: value for record, value in last.items() if value in (*PREP_SETTLED, *legacy)}
-        prepared = [record for record in pins.records if state.settled.get(record) == "prepared"]
-        stuck = [record for record in pins.records if state.settled.get(record) not in ("prepared", *legacy)]
-        self._found(f"{len(prepared)} of {len(pins.records)} requested datasets are prepared.")
+        stuck = [record for record in pins.records if state.settled.get(record) not in (*PREP_DONE, *legacy)]
+        self._found(_prep_count(pins.records, state.settled))
         if not stuck:
-            return await self._stage("done", "prepared: " + (", ".join(f"`{r}`" for r in prepared) or "none"))
+            return await self._stage("done", _prep_done(pins.records, state.settled))
         humans = [f"`{record}`" for record in stuck if state.settled.get(record) == "needs-human"]
         waiting = [f"`{record}` ({last.get(record, 'unprepared')})" for record in stuck if record not in state.settled]
         why = "the outcomes table or its dataset's page says why"

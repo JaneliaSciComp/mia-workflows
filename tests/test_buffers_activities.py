@@ -1835,13 +1835,13 @@ async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_to
 
 
 async def test_a_request_leaves_a_shelved_dataset_alone_and_settles_it(acts, gateway):
-    """A shelved dataset is followed as `needs-human` and gets no go, also from a request that says `again`."""
+    """A shelved dataset is followed as `shelved` and gets no go, also from a request that says `again`."""
     prep_issue(acts, records=[U937], again=True)
     await acts.prep_admit(8, "21")
     acts.registry.adopt_subject("dataset", 5, U937, stage="done")
     acts.registry.send_action(f"/datasets/{U937}/actions", "shelve", note="the labels are wrong")
-    assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "needs-human", None)
-    assert await acts.prep_status([U937]) == {U937: "needs-human"}
+    assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "shelved", None)
+    assert await acts.prep_status([U937]) == {U937: "shelved"}
     assert not gateway.sent
     assert U937 not in {row["id"] for row in acts.registry.datasets("prepared")}  # what a buffer's plan reads
 

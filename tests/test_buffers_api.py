@@ -1344,11 +1344,11 @@ class Gateway(Kicks):
             raise DispatchError(self.fail)
         self.sent.append((kind, number, signal, event))
 
-    def signal_running(self, kind, number, signal, event):
+    def signal_running(self, kind, number, signal, *args):
         if self.fail:
             raise DispatchError(self.fail)
         if self.running:
-            self.sent.append((kind, number, signal, event))
+            self.sent.append((kind, number, signal, *args))
         return self.running
 
     def health(self):
@@ -1514,6 +1514,32 @@ def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(
         "**Action:** `shelve` by `page`",
         "**Action:** `unshelve` by `page`",
     ]
+
+
+def test_a_request_at_needs_human_is_told_when_a_dataset_it_names_settles(tmp_path):
+    """Shelving a dataset, or a worker writing it `prepared`, sends `recheck` to each request resting at
+    `needs-human` that names it (one that selects by rule too); the request's workflow decides whether it is done."""
+    s, gateway = _acting(tmp_path)
+    spec = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/catalog", "ref": REF_A}}
+    texts = [
+        yaml.safe_dump({**spec, "records": ["rec-a", "rec-b"]}),  # 10: names both
+        yaml.safe_dump({**spec, "records": ["rec-b"]}),  # 11: names the other one
+        yaml.safe_dump({**spec, "select": {"modality": ["em"]}}),  # 12: by rule, so its records are not known here
+        yaml.safe_dump({**spec, "records": ["rec-a"]}),  # 13: names it, and is not at needs-human
+    ]
+    for number, text in enumerate(texts, start=10):
+        stage = "requested" if number == 13 else "needs-human"
+        worker(s, "PUT", f"/subjects/prep/{number}", {"key": f"prep-{number}", "stage": stage, "data": {"spec": text}})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "blocked"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "needs a data engineer"})[0] == 202
+    assert gateway.sent == [("prep", 10, "recheck"), ("prep", 12, "recheck")]
+    assert worker(s, "PUT", "/datasets/rec-b", {"state": "in-progress"})[0] == 200  # not settled: nobody is told
+    assert worker(s, "PUT", "/datasets/rec-b", {"state": "prepared"})[0] == 200
+    assert gateway.sent[2:] == [("prep", 10, "recheck"), ("prep", 11, "recheck"), ("prep", 12, "recheck")]
+    gateway.fail = "Temporal is away"  # best effort: the dataset's write stands
+    assert worker(s, "PUT", "/datasets/rec-b", {"state": "prepared"})[0] == 200
+    assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202  # an unshelve tells nobody
+    assert len(gateway.sent) == 5
 
 
 def test_shelving_covers_specs_requests_and_a_dataset_that_never_ran(tmp_path):
