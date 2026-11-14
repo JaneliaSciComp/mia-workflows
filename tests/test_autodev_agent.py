@@ -176,7 +176,9 @@ async def test_past_the_cap_the_newest_policy_hosts_are_kept(tmp_path):
 
 
 async def test_submit_reuses_job_found_by_name(tmp_path):
-    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd=str(tmp_path / "round"), state="RUN")])
+    fake = FakeCsub(
+        existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd=str(tmp_path / "round"), state="RUN")]
+    )
     j = _jobs(tmp_path, fake)
     ref = await j.submit(7, K, 1, Workspace(str(tmp_path / "round"), "abc", "b"))
     assert ref.job_id == "555" and fake.submitted == []

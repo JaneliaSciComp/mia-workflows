@@ -203,6 +203,35 @@ prepared again. From the buffer side, `revoke` on a ready or idle spec carries t
 page's *Revoke the ticked*; records not in the buffer are ignored), rejects and quarantines those records'
 artifacts and takes the keeper's `revoked` path at once.
 
+**A stage pass writes its start and its result.** A round is a series of stage passes: every stage whose word in
+its stage table is `working` or `waiting` (`mia_data.config.round_open`, `mia_buffers.config.stage_pass`). A
+pass's start entry is the stage line and one sentence (the round's own detail, else the stage's from
+`STAGE_SENTENCES`); its result entry, `**Result:** …`, says what happened and links the record of every job the
+pass submitted. The workflow keeps the open pass in its state (`pass_stage`, `passes`, `pass_jobs`, `result`):
+`_found` sets what it found, a job's workspace is added when its submit returns, and the stage activity, which
+gets the state with every write, writes the open pass's result before the next stage's start
+(`mia_data.status.stage_entries`). A stage the subject rests at is written by the open pass's result itself:
+`**failed**: <why>` under `Result: data:testing`, ending "The dataset rests at `data:failed`", so a pass that
+fails or is cancelled reports itself and no stage ends silently; with no pass open the resting stage has an entry
+of its own. Where a pass ends and no stage write follows (a PR head whose crops failed, a round started over a
+pass still open), `_flush` writes the result through `stage_result`. A buffer round's passes are `planning`,
+`plan-review`, `sourcing` (its result counts the pool's datasets by status and links the fetch and stage jobs),
+`staged` and `idle`; a request's one pass is `requested`. Entries an activity writes by itself (the plan, the
+staged board, a request's outcomes table, per-dataset notices, a judge's verdict) stay entries of their own. All
+of it is behind `workflow.patched("stage-results")`; a run that takes the patch mid-round has no pass open and
+writes plain stage entries until its next pass starts.
+
+**Every job leaves a record.** `CsubJobs`, given the service's `work_root`, writes
+`<work_root>/_jobs/<workspace relative to work_root>.json.gz` (`mia_core/jobrecord.py`): at submit the request
+(`env` as names only) and csub's answer; when the wait sees the job end, the outcome, what LSF says it used
+(`bjobs`, left out when LSF has forgotten the job), the last 64 kB of stdout and stderr, and for an agent job
+(`JobSpec.transcript_file`) its prompt and its conversation: text, thinking and tool calls, no tool output,
+credentials scrubbed. The agent commands print `--output-format stream-json --verbose` to `claude.jsonl`, and
+`keep_result` copies the stream's last line, the result object, to the file the result is read from. Writing a
+record is best effort; a job whose workspace is not under `work_root` leaves none; `CsubJobs` refuses a job that
+would get `_jobs` writable; nothing deletes a record. buffer-api serves the file as it is (`GET /jobs/<address>`,
+gzip passed through) and the page renders it at `#job/<address>`.
+
 ## Style
 
 - Descriptive names everywhere except loop variables; no single-letter instance attributes.
