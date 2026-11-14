@@ -775,7 +775,7 @@ class Activities:
         except RegistryError as error:  # best effort: the dataset issue tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        settled = (state := (row or {}).get("state")) in ("prepared", "needs-human")
+        settled = (state := _followed_state(row)) in ("prepared", "needs-human")
         if settled and not again:
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
@@ -793,8 +793,9 @@ class Activities:
     @activity.defn(name="prep_status")
     @mia_permanent_errors
     async def prep_status(self, records: list[str]) -> dict[str, str]:
-        """Each record's registry state, `unprepared` when it has no row. A registry outage raises."""
-        states = {row["id"]: row.get("state", "unprepared") for row in await asyncio.to_thread(self.registry.datasets)}
+        """Each record's state as a request follows it (`_followed_state`), `unprepared` when it has no row. A
+        registry outage raises."""
+        states = {row["id"]: _followed_state(row) for row in await asyncio.to_thread(self.registry.datasets)}
         return {record: states.get(record, "unprepared") for record in records}
 
     @activity.defn(name="set_prep_stage")
@@ -1735,6 +1736,14 @@ class Activities:
         await asyncio.to_thread(registry.put_asset, kind, key, {"state": "evicted", "evicted_at": now, "bytes": 0})
         log.info("keeper: evicted %s %s (%s bytes, last used %s)", kind, key, data.get("bytes"), data.get("last_used"))
         return True
+
+
+def _followed_state(row: dict | None) -> str:
+    """A dataset's state as a preparation request follows it: `in-progress` while its round is open, which
+    includes one waiting at review (the round goes on once a person gives the verdict); else the row's state,
+    `unprepared` without one."""
+    row = row or {}
+    return "in-progress" if round_open(row.get("data_stage")) else row.get("state", "unprepared")
 
 
 def _issue_of(round_id: str) -> int:

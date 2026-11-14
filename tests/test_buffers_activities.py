@@ -1766,6 +1766,8 @@ async def test_prep_status_reads_the_registry(acts):
         BCSS: "prepared",
         "never-seen": "unprepared",
     }
+    acts.registry.put_dataset(U937, state="needs-human", data_stage="review")  # waits for a verdict: still followed
+    assert await acts.prep_status([U937]) == {U937: "in-progress"}
     acts.registry = Registry("http://127.0.0.1:9", "t")  # nothing listens: the outage raises
     with pytest.raises(RegistryError):
         await acts.prep_status([U937])
