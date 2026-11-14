@@ -139,6 +139,9 @@ def test_the_plan_summary_counts_over_every_row() -> None:
     # nor is one whose catalog record cannot be run
     gapped = plan_view(PLAN, {**DATASETS, "c": {"gaps": ["it names no data URL"]}}, "p256-l1-2", ALL)["summary"]
     assert gapped["to_prepare"] == []
+    # nor one a person has shelved
+    shelved = {**PLAN, "rows": [{**row, "prepared": "shelved"} if row["id"] == "c" else row for row in PLAN["rows"]]}
+    assert plan_view(shelved, DATASETS, "p256-l1-2", ALL)["summary"]["to_prepare"] == []
 
 
 def test_the_plan_rows_are_joined_sorted_and_cut() -> None:

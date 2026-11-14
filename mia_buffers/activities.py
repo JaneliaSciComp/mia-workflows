@@ -779,7 +779,7 @@ class Activities:
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
         settled = (state := _followed_state(row)) in ("prepared", "needs-human")
-        if settled and not again:
+        if settled and (not again or (row or {}).get("state") == "shelved"):  # a shelved dataset is never asked
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
         found, created = await self._nudge(round_id, record, again=again)
@@ -1744,8 +1744,11 @@ class Activities:
 def _followed_state(row: dict | None) -> str:
     """A dataset's state as a preparation request follows it: `in-progress` while its round is open, which
     includes one waiting at review (the round goes on once a person gives the verdict); else the row's state,
-    `unprepared` without one."""
+    `unprepared` without one. A shelved dataset is followed as `needs-human`: it settles, and only a person
+    brings it back."""
     row = row or {}
+    if row.get("state") == "shelved":
+        return "needs-human"
     return "in-progress" if round_open(row.get("data_stage")) else row.get("state", "unprepared")
 
 

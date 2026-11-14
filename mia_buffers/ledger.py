@@ -97,6 +97,8 @@ CREATE TABLE IF NOT EXISTS timeline (kind TEXT, number INTEGER, seq INTEGER, at 
 CREATE TABLE IF NOT EXISTS actions (id INTEGER PRIMARY KEY, kind TEXT, number INTEGER, action TEXT, actor TEXT,
     at TEXT, key TEXT UNIQUE, payload TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS actions_subject ON actions (kind, number);
+CREATE TABLE IF NOT EXISTS shelved (kind TEXT, number INTEGER, by TEXT, at TEXT, reason TEXT NOT NULL,
+    PRIMARY KEY (kind, number));
 """
 
 ACTION_COLUMNS = ("id", "kind", "number", "action", "actor", "at", "key", "payload", "state", "detail")
@@ -464,21 +466,40 @@ class Ledger:
         with self._transaction() as db:
             return self._merge_dataset(db, record, fields, time.time())
 
+    @staticmethod
+    def _shelved_datasets(db: sqlite3.Connection) -> dict[str, dict]:
+        """Record id -> the hold of each shelved dataset."""
+        rows = db.execute(
+            "SELECT s.key, h.by, h.at, h.reason FROM shelved h JOIN subjects s ON s.kind = h.kind AND "
+            "s.number = h.number WHERE h.kind = 'dataset'"
+        )
+        return {key: {"by": by, "at": at, "reason": reason} for key, by, at, reason in rows}
+
+    @staticmethod
+    def _dataset_read(record: str, stored: tuple | None, hold: dict | None) -> dict | None:
+        """A dataset's row as it reads: the stored (data, updated_at), and over it `shelved` with the hold's
+        reason for a shelved dataset (one without a row gets one made up). None: no row and no hold."""
+        row = {**json.loads(stored[0]), "id": record, "updated_at": stored[1]} if stored else None
+        if hold is None:
+            return row
+        made_up = {"id": record, "updated_at": datetime.fromisoformat(hold["at"]).timestamp()}
+        return {**(row or made_up), "state": "shelved", "reason": hold["reason"]}
+
     def dataset(self, record: str) -> dict | None:
+        """The record's row as it reads (`_dataset_read`): the stored row is what a shelved dataset reads again
+        once it is unshelved."""
         with self._lock:
-            row = self._db.execute("SELECT data, updated_at FROM datasets WHERE id = ?", (record,)).fetchone()
-        return {**json.loads(row[0]), "id": record, "updated_at": row[1]} if row else None
+            stored = self._db.execute("SELECT data, updated_at FROM datasets WHERE id = ?", (record,)).fetchone()
+            hold = self._shelved_datasets(self._db).get(record)
+        return self._dataset_read(record, stored, hold)
 
     def datasets(self, state: str | None = None) -> list[dict]:
-        query = "SELECT id, data, updated_at FROM datasets"
+        """Every dataset's row as it reads (`_dataset_read`), or those that read `state`."""
         with self._lock:
-            if state is None:
-                rows = self._db.execute(query + " ORDER BY id").fetchall()
-            else:
-                rows = self._db.execute(
-                    query + " WHERE json_extract(data, '$.state') = ? ORDER BY id", (state,)
-                ).fetchall()
-        return [{**json.loads(data), "id": record, "updated_at": updated} for record, data, updated in rows]
+            stored = {record: rest for record, *rest in self._db.execute("SELECT id, data, updated_at FROM datasets")}
+            held = self._shelved_datasets(self._db)
+        rows = [self._dataset_read(record, stored.get(record), held.get(record)) for record in sorted({*stored, *held})]
+        return [row for row in rows if row is not None and (state is None or row.get("state") == state)]
 
     def sync_datasets(self, prepared: dict[str, dict], *, older_than: float | None = None) -> dict:
         """Mark each given record prepared and drop prepared rows no longer given. A record whose last round did
@@ -702,18 +723,46 @@ class Ledger:
         there is no such action."""
         with self._transaction() as db:
             found = self._actions(db, "WHERE id = ?", (action_id,))
+            return self._settle(db, found[0], state, detail, entry) if found else None
+
+    def _settle(
+        self, db: sqlite3.Connection, action: dict, state: str, detail: str, entry: tuple[str, str] | None
+    ) -> dict:
+        """settle_action's writes, inside the caller's transaction."""
+        db.execute("UPDATE actions SET state = ?, detail = ? WHERE id = ?", (state, detail, action["id"]))
+        if entry is not None:
+            key = (action["kind"], action["number"])
+            seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM timeline WHERE kind = ? AND number = ?", key)
+            db.execute(
+                "INSERT OR IGNORE INTO timeline (kind, number, seq, at, round, stage, body, marker) "
+                "VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
+                (*key, seq.fetchone()[0], datetime.now(UTC).isoformat(), *entry),
+            )
+        return self._actions(db, "WHERE id = ?", (action["id"],))[0]
+
+    def shelved(self) -> dict[tuple[str, int], dict]:
+        """(kind, number) -> {by, at, reason} of every shelved subject."""
+        with self._lock:
+            rows = self._db.execute("SELECT kind, number, by, at, reason FROM shelved").fetchall()
+        return {(kind, number): {"by": by, "at": at, "reason": reason} for kind, number, by, at, reason in rows}
+
+    def settle_hold(self, action_id: int, reason: str | None, entry: tuple[str, str]) -> dict | None:
+        """Carry out a `shelve` (`reason`) or an `unshelve` (None) in one transaction: the subject's hold is
+        written or deleted, the action is `sent` and its entry is on the timeline. None without such an action."""
+        with self._transaction() as db:
+            found = self._actions(db, "WHERE id = ?", (action_id,))
             if not found:
                 return None
-            db.execute("UPDATE actions SET state = ?, detail = ? WHERE id = ?", (state, detail, action_id))
-            if entry is not None:
-                key = (found[0]["kind"], found[0]["number"])
-                seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM timeline WHERE kind = ? AND number = ?", key)
+            action = found[0]
+            key = (action["kind"], action["number"])
+            if reason is None:
+                db.execute("DELETE FROM shelved WHERE kind = ? AND number = ?", key)
+            else:
                 db.execute(
-                    "INSERT OR IGNORE INTO timeline (kind, number, seq, at, round, stage, body, marker) "
-                    "VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
-                    (*key, seq.fetchone()[0], datetime.now(UTC).isoformat(), *entry),
+                    "INSERT OR REPLACE INTO shelved VALUES (?, ?, ?, ?, ?)",
+                    (*key, action["actor"], action["at"], reason),
                 )
-            return self._actions(db, "WHERE id = ?", (action_id,))[0]
+            return self._settle(db, action, "sent", "", entry)
 
     def action(self, action_id: int) -> dict | None:
         with self._lock:

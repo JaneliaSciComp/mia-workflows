@@ -357,7 +357,7 @@ def plan_view(
         "to_prepare": sorted(
             row["id"]
             for row in fitting
-            if row.get("prepared") != "prepared"
+            if row.get("prepared") not in ("prepared", "shelved")  # shelved: set aside by a person
             and not round_open(row.get("stage"))  # in a round or at review: a request would start nothing
             and not (datasets.get(row["id"]) or {}).get("gaps")  # the record cannot be run: nor would it there
             and (not page.text or matches(page.text, _plan_haystack(row)))
