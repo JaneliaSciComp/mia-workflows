@@ -173,15 +173,9 @@ class Registry:
     def sync_assets(self) -> dict:
         return self.request("POST", "/sync/assets", timeout=SYNC_TIMEOUT_S)
 
-    def locks(self) -> list[dict]:
-        return self.request("GET", "/locks")["locks"]
-
     def put_records(self, ref: str, records: list[tuple[str, dict]]) -> dict:
         body = {"records": [{"path": path, "record": record} for path, record in records]}
         return self.request("PUT", f"/records/{quote(ref, safe='')}", json=body)
-
-    def plan(self, spec_text: str) -> dict:
-        return self.request("POST", "/plan", json={"spec": spec_text})
 
     def sync_datasets(self) -> dict:
         return self.request("POST", "/sync/datasets", timeout=SYNC_TIMEOUT_S)
@@ -247,13 +241,6 @@ class Registry:
         )
         params = {name: value for name, value in given if value is not None}
         return self.request("GET", "/assessments", params=params or None)["assessments"]
-
-    def decisions(self, gate: str | None = None, *, offset: int | None = None, limit: int | None = None) -> dict:
-        """{assessments, total, agreement}: one page of the Decisions view's data, newest first (spec
-        autonomous-gates §10)."""
-        given = (("gate", gate), ("offset", offset), ("limit", limit))
-        params = {name: value for name, value in given if value is not None}
-        return self.request("GET", "/decisions", params=params or None)
 
     def assessment(self, assessment_id: str) -> dict | None:
         return self._lookup(f"/assessments/{quote(assessment_id, safe='')}")

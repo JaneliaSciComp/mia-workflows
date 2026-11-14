@@ -30,7 +30,6 @@ from mia_core.judge.evidence import evidence_digest, fenced_text, read_claude_js
 from mia_core.judge.policy import POLICY_VERSION, new_assessment
 from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
 from mia_core.registry import Registry, best_effort
-from mia_core.untrusted import SECRET_RE as SECRET_RE
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 

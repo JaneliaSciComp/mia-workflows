@@ -97,32 +97,7 @@ async def test_create_issue(gh):
 
 
 @respx.mock
-async def test_find_issue_by_marker(gh):
-    route = respx.get(f"{API}{R}/issues").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                {"number": 1, "body": "nope"},
-                {"number": 2, "body": "x <!--m1--> y"},
-                {"number": 3, "body": "<!--m1-->"},
-                {"number": 4, "body": "<!--m1-->", "pull_request": {}},
-            ],
-        )
-    )
-    assert (await gh.find_issue_by_marker("<!--m1-->"))["number"] == 2
-    assert route.calls[0].request.url.params["state"] == "all"
-    assert await gh.find_issue_by_marker("zzz") is None
-    await gh.find_issue_by_marker("<!--m1-->", ["a", "b"])
-    assert route.calls[-1].request.url.params["labels"] == "a,b"
-
-
-@respx.mock
-async def test_find_and_edit_comment(gh):
-    respx.get(f"{API}{R}/issues/4/comments").mock(
-        return_value=httpx.Response(200, json=[{"id": 1, "body": "a"}, {"id": 2, "body": "has MK"}])
-    )
-    assert (await gh.find_comment(4, "MK"))["id"] == 2
-    assert await gh.find_comment(4, "nope") is None
+async def test_edit_comment(gh):
     route = respx.patch(f"{API}{R}/issues/comments/2").mock(return_value=httpx.Response(200, json={"id": 2}))
     assert (await gh.edit_comment(2, "new"))["id"] == 2
     assert json.loads(route.calls[0].request.content) == {"body": "new"}
