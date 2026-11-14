@@ -1013,6 +1013,13 @@ async def test_admit_for_an_action_reads_the_record_and_the_root_from_the_regist
         await t.a.admit(other, str(go["id"]))
 
 
+def test_every_activity_is_registered_on_a_worker(tmp_path):
+    """An activity the workflow calls but no worker registers is retried for hours, with the round stuck."""
+    acts = _setup(tmp_path).a
+    defined = {name for name, member in vars(type(acts)).items() if hasattr(member, "__temporal_activity_definition")}
+    assert defined and defined == {method.__name__ for method in [*acts.all(), acts.await_job]}
+
+
 async def test_read_feedback_is_the_note_of_the_reject_action_in_the_window(tmp_path, monkeypatch):
     from mia_buffers import ledger as ledger_module
 

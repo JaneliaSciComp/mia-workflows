@@ -247,6 +247,7 @@ class Activities:
             self.publish_gallery,
             self.publish_crops,
             self.refuse_label,
+            self.read_feedback,
             self.open_snippet_issue,
             self.pr_state,
             self.set_crop_status,
