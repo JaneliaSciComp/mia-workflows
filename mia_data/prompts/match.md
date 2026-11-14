@@ -2,7 +2,7 @@ You are matching dataset `${record}` (catalog record at commit ${record_commit})
 read it. A snippet is a small reader for one file format; a binding is the data that says which snippet reads
 which file, with which params. You write the binding, test it with the harness, and report the outcome. You
 write no code.
-
+${advised}
 # What is here
 
 All in the current directory:

@@ -1285,6 +1285,7 @@ const PILL_HELP = {
   "testing": "Making the sample crops a reviewer will look at.",
   "review": "Sample crops are ready; the dataset's page waits for a reviewer to approve or reject them.",
   "merging": "The crops were approved; the reader's pull request is being merged.",
+  "debugging": "The round failed. A debugging agent looks into it and, if a new round can pass, runs one; nothing is needed from you.",
   "done": "The dataset is prepared: its crops and binding are saved.",
   // odds and ends
   "stale": "This consumer has not been seen for longer than expected.",
@@ -1723,7 +1724,7 @@ function viewDesigner() {
 // ---- datasets: every dataset of the catalog with what the registry knows about it, one page at a time
 const DS_FILTER = { state: "", modality: "", dims: "", licence: "" };
 const CHOSEN = new Set(), SETTLED = new Set();  // the ticked datasets, and those of them that are prepared or in a round
-const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging"]);  // the stages of a round under way or at review
+const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging", "debugging"]);  // the stages of a round under way or at review
 const PREPARABLE = row => row.state !== "prepared" && !ROUND_OPEN.has(row.stage);
 function viewDatasetList(arg, params) {
   const root = $("datasetsBody");
@@ -2123,7 +2124,8 @@ const BUTTON_HELP = {
 };
 const ACTION_HELP = {
   dataset: {
-    go: s => s.stage === "review" ? "Start over: the crops under review are dropped unsaved and a new round prepares the dataset again, with a judge's verdict on its crops. If a reader's pull request made these crops, its current head is tested again."
+    go: s => s.stage === "debugging" ? "Run a new round now, without waiting for the debugging agent. Use it when you already know what was wrong and have fixed it."
+      : s.stage === "review" ? "Start over: the crops under review are dropped unsaved and a new round prepares the dataset again, with a judge's verdict on its crops. If a reader's pull request made these crops, its current head is tested again."
       : s.stage !== "new" ? "Start a new round of the preparation workflow from the beginning. After a stop it picks up the reader's open pull request, if there is one." + (s.stage === "done" ? " Until its new crops are approved the dataset is not prepared, and a new buffer plan leaves it out." : "")
       : s.again ? "Run the preparation workflow again: a new round makes more sample crops, which are saved once you approve them. Until then the dataset is not prepared, and a new buffer plan leaves it out."
       : "Start the preparation workflow: an agent matches the dataset to a reader, then sample crops are made for you to review.",
@@ -2152,6 +2154,7 @@ const ACTION_WORDS = { approve: "Approve", reject: "Reject…", keep: "Keep", go
 // the word on an action's button; the Buffers list names what a spec waits for by the same words
 const actionWord = (subject, action) => action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review" ? "Run"  // the plan's gate: this starts the jobs
   : action === "go" && subject.kind === "buffer" ? "Plan" : action === "dropped" ? "Files are in place"  // a spec's own controls
+  : action === "go" && subject.kind === "dataset" && subject.stage === "debugging" ? "Run again now"  // or wait: the debugger runs it again itself
   : action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"  // beside Approve and Reject: neither verdict, the set is dropped
   : action === "go" && subject.stage === "new" ? (subject.kind === "dataset" ? (subject.again ? "Start again" : "Start") : "Run") : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {

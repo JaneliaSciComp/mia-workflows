@@ -41,7 +41,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   call.
 - **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
   `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there.
-  buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`.
+  buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`
+  (a dataset at `debugging` also the `go` of its next round).
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries

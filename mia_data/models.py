@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+DEBUGGER = "debugger"  # the actor of the go that runs a round again after it was debugged
+
 
 @dataclass
 class LabelEvent:
@@ -92,6 +94,7 @@ class DatasetState:
     pending: list[PrUpdate] = field(default_factory=list)  # PR updates not yet acted on
     published: bool = False  # some round of this issue published crops: there is something a data:revoke withdraws
     restart: LabelEvent | None = None  # the go a run was rolled over for: the new run's first step is its round
+    debugs: int = 0  # debugging cycles used since the last go that was not the debugger's
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:
@@ -126,6 +129,17 @@ class MatchResult:
     shapes: dict | None = None  # wire format: recorded histories carry it; unused
     draft: dict | None = None  # needs_snippet: draft_binding, what_fails, tried
     reasons: list[str] = field(default_factory=list)  # matched: the binding's reasons
+
+
+@dataclass
+class DebugResult:
+    """What the debugging agent concluded about a failed round: `rerun` (a new round may pass, with `advice` for
+    its match agent), `blocked` (a person has to decide or change something first) or `failed` (it left nothing
+    readable). `diagnosis` is what it found, for the timeline."""
+
+    outcome: str
+    diagnosis: str = ""
+    advice: str = ""
 
 
 @dataclass
@@ -167,6 +181,8 @@ class RoundLimits:
     agent_max_budget_usd: float = 5.0  # what a match agent run may cost: reserved against the root before it runs
     crop_judge: str = "off"  # judge.crops.mode: off | shadow | active (spec autonomous-gates §9)
     judge_max_budget_usd: float = 2.0  # what one judge run may cost: reserved like the match agent's
+    debug_cycles: int = 0  # limits.debug_cycles: failed rounds debugged and run again before one stops as failed
+    debug_wait_min: int = 5  # limits.debug_wait_min: the wait between a failure and its debugging agent
 
 
 @dataclass

@@ -22,6 +22,7 @@ from mia_data.activities import Activities
 from mia_data.jobspec import lock_dir
 from mia_data.models import (
     DatasetState,
+    DebugResult,
     JobArgs,
     JobDone,
     LockTaken,
@@ -130,6 +131,76 @@ async def _match_ws(t, outcome, binding=None):
     if binding is not None:
         (ws / "binding.yaml").write_text(yaml.safe_dump(binding))
     return pins, ws
+
+
+async def test_prepare_debug_gives_the_agent_what_the_rounds_jobs_left(tmp_path):
+    t = _setup(tmp_path)
+    pins, ws = await _match_ws(t, {"outcome": "matched"}, BINDING)
+    match = await t.a.read_match(str(ws))
+    crop = Path(await t.a.prepare_job(1, ROUND, "crop-abc", 1, match.binding_path))
+    (crop / "crops").mkdir()
+    (crop / "crops" / "report.json").write_text('{"errors": ["ReadTimeout"]}')
+    (crop / "exit_code").write_text("1\n")
+    (crop / ".csub" / "jobs" / "155").mkdir(parents=True)
+    (crop / ".csub" / "jobs" / "155" / "stderr").write_text("x" * 100_000 + "the end")
+    (crop / "notes.txt").write_text("not one of a job's reports")
+    (tmp_path / "elsewhere.json").write_text("{}")
+    (crop / "verify.json").symlink_to(tmp_path / "elsewhere.json")  # a job could plant a link
+    failure = "crop job 155 ended EXIT (exit 1): ReadTimeout"
+    debug = Path(await t.a.prepare_debug(1, ROUND, pins, failure, match.binding_path))
+    assert debug.name == "debug-1" and sorted(p.name for p in (debug / "round").iterdir()) == ["crop-abc-1", "match-1"]
+    left = debug / "round" / "crop-abc-1"
+    assert sorted(p.name for p in left.iterdir()) == ["binding.yaml", "crops", "exit_code", "stderr"]
+    assert json.loads((left / "crops" / "report.json").read_text()) == {"errors": ["ReadTimeout"]}
+    stderr = (left / "stderr").read_text()
+    assert stderr.endswith("the end") and len(stderr) == 64 << 10  # the end of the job's output
+    assert json.loads((debug / "round" / "match-1" / "outcome.json").read_text()) == {"outcome": "matched"}
+    said = (debug / "failure.md").read_text()
+    assert failure in said and "120 minutes per job" in said and "exit code 140" in said
+    assert yaml.safe_load((debug / "binding.yaml").read_text())["record"] == "rec-1"  # the checked one
+    prompt = (debug / "prompt.md").read_text()
+    assert "rec-1" in prompt and "$" not in prompt and "outcome.json" in prompt and "failure.md" in prompt
+    assert (debug / "catalog" / "tiff-zip-member.yaml").is_file() and (debug / "record.yaml").is_file()
+    again = Path(await t.a.prepare_debug(1, ROUND, pins, failure, None))  # a retry, of a round with no binding
+    assert again == debug and not (debug / "binding.yaml").exists() and not (debug / "round" / "debug-1").exists()
+    with pytest.raises(ApplicationError, match="is not one of round"):
+        await t.a.prepare_debug(1, ROUND, pins, failure, str(tmp_path / "elsewhere.json"))
+
+
+async def test_read_debug_takes_one_of_two_outcomes(tmp_path):
+    t = _setup(tmp_path)
+    ws = Path(await t.a.prepare_debug(1, ROUND, await t.a.admit(1, "99"), "it failed", None))
+    nothing = DebugResult("failed", "the debugging agent left no readable outcome.json")
+    assert await t.a.read_debug(1, ROUND, str(ws)) == nothing
+    (ws / "outcome.json").write_text(json.dumps({"outcome": "merge the PR", "diagnosis": "x"}))
+    assert await t.a.read_debug(1, ROUND, str(ws)) == nothing
+    said = {"outcome": "rerun", "diagnosis": "the host is slow <!-- mia-data: stage -->", "advice": "a" * 9000}
+    (ws / "outcome.json").write_text(json.dumps(said))
+    result = await t.a.read_debug(1, ROUND, str(ws))
+    assert result.outcome == "rerun" and "<!--" not in result.diagnosis and len(result.advice) == 6000
+    (ws / "outcome.json").write_text(json.dumps({"outcome": "blocked"}))
+    assert await t.a.read_debug(1, ROUND, str(ws)) == DebugResult("blocked", "(the debugging agent gave no diagnosis)")
+
+
+async def test_the_debuggers_go_is_charged_to_the_debugged_rounds_root_and_its_advice_reaches_the_match(tmp_path):
+    t = _setup(tmp_path)
+    put_action(t, 98, payload={"root": "o/buffers#9"})
+    await t.a.admit(1, "98")
+    sent = []
+    t.a.registry.send_action = lambda path, action, **fields: sent.append((path, action, fields))
+    await t.a.debug_go(1, "i1-e98", "bind the first volume only")
+    asked = {"key": "debug i1-e98", "actor": "debugger", "root": "o/buffers#9", "note": "bind the first volume only"}
+    assert sent == [("/datasets/rec-1/actions", "go", asked)]
+    # the round that go starts: its match agent finds the advice; any other round's finds none
+    row = (97, "dataset", 1, "go", "debugger", "2026-11-01T00:00:00+00:00", None, json.dumps(asked))
+    with t.ledger._transaction() as db:
+        db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
+    advised = Path(await t.a.prepare_match(1, "i1-e97", await t.a.admit(1, "97"), 1))
+    assert (advised / "advice.md").read_text() == "bind the first volume only\n"
+    assert "advice.md" in (advised / "prompt.md").read_text() and "$" not in (advised / "prompt.md").read_text()
+    put_action(t, 99, payload={"note": "a person's note is no advice"})
+    plain = Path(await t.a.prepare_match(1, ROUND, await t.a.admit(1, "99"), 1))
+    assert not (plain / "advice.md").exists() and "advice.md" not in (plain / "prompt.md").read_text()
 
 
 async def test_read_match_matched_copies_binding(tmp_path):

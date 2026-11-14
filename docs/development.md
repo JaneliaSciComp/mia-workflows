@@ -94,7 +94,7 @@ posting it to GitHub.
 **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
 `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there. buffer-api
 refuses any other action and the page offers only these; a round in progress accepts only `cancel` (and, for a
-buffer, what feeds it: `dropped`, and the force stop). A new stage or action goes into the table first.
+buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round). A new stage or action goes into the table first.
 
 **Every stage write is awaited.** `set_stage` writes the subject's stage, its timeline entry and the dataset's
 registry row, and the workflow waits for it: the registry's stage is what buffer-api checks an action against and

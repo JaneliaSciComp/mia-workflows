@@ -36,6 +36,7 @@ STAGES = {
     "testing": ("fbca04", "mia-data: making the crops to review"),
     "review": ("1d76db", "mia-data: waiting for review"),
     "merging": ("1d76db", "mia-data: crops approved; autodev is merging the snippet PR"),
+    "debugging": ("fbca04", "mia-data: a round failed; a debugging agent looks at it and runs it again"),
     "done": ("5319e7", "mia-data: crops saved"),
     "failed": ("d93f0b", "mia-data: a step failed; running it again may pass"),
     "blocked": ("b60205", "mia-data: stopped until a person decides or changes something"),
@@ -59,7 +60,8 @@ HUMAN_LABELS = {  # the actions a person takes
 }
 STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done")
 # stage -> (status word, the actions it accepts); "working" means a round is in progress, and a round in progress
-# accepts only `cancel` (spec webapp-actions §5.1). buffer-api refuses any other action, the page offers only
+# accepts only `cancel` (spec webapp-actions §5.1). `debugging` is between two rounds, so it also takes the `go`
+# that runs the next one: the debugger's own, or a person's who does not want to wait for it. buffer-api refuses any other action, the page offers only
 # these. The workflow stays the code that carries a round out.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
@@ -68,6 +70,7 @@ STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "testing": ("working", frozenset({"cancel"})),
     "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),  # go: start over, the set is dropped
     "merging": ("working", frozenset({"cancel"})),
+    "debugging": ("working", frozenset({"go", "cancel"})),
     "done": ("done", frozenset({"go", "revoke"})),
     "failed": ("stuck", frozenset({"go", "revoke"})),
     "blocked": ("stuck", frozenset({"go", "revoke"})),
@@ -167,6 +170,8 @@ class LimitsCfg(BaseModel):
     agent_max_budget_usd: float = 5
     max_stage_attempts: int = 1
     max_pr_revisions: int = 5
+    debug_cycles: int = 1  # how often a failed round is debugged and run again before it stops as `failed`; 0 = never
+    debug_wait_min: int = 5  # how long a failed round waits before its debugging agent starts
     fetch_bytes: float = 50e9
     fetch_walltime_min: int = 480
     fetch_attempts: int = 4

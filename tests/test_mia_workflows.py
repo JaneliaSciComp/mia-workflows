@@ -22,6 +22,7 @@ from mia_data.activities import Activities
 from mia_data.models import (
     AssessmentWritten,
     DatasetState,
+    DebugResult,
     GalleryResult,
     JobArgs,
     JobDone,
@@ -50,8 +51,8 @@ async def env():
     await e.shutdown()
 
 
-def ev(kind, eid, at="2026-01-01T00:00:00Z"):
-    return LabelEvent(kind, eid, "alice", at)
+def ev(kind, eid, at="2026-01-01T00:00:00Z", actor="alice"):
+    return LabelEvent(kind, eid, actor, at)
 
 
 def turn(answers, key, default):
@@ -94,7 +95,11 @@ class Mocks:
         submit_gate=None,
         kill_error=None,
         admit_error=None,
+        debug_cycles=0,
+        debug_result=None,
     ):
+        self.debug_cycles = debug_cycles  # limits.debug_cycles the limits activity reports
+        self.debug_result = debug_result or DebugResult("rerun", "the host sent 30 KB/s", "bind the first volume only")
         self.admit_error = admit_error  # a message: admit refuses the record with it, non-retryable
         self.submit_gate = submit_gate  # an asyncio.Event: every submit waits for it, as a slow bsub would
         self.kill_error = kill_error  # a message: kill_job fails with it
@@ -129,7 +134,15 @@ class Mocks:
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
             rec("limits")
-            return RoundLimits(4, 16, 120, self.revisions, crop_judge=self.crop_judge, judge_max_budget_usd=3.5)
+            return RoundLimits(
+                4,
+                16,
+                120,
+                self.revisions,
+                crop_judge=self.crop_judge,
+                judge_max_budget_usd=3.5,
+                debug_cycles=self.debug_cycles,
+            )
 
         @activity.defn(name="set_stage")
         async def set_stage(
@@ -160,6 +173,22 @@ class Mocks:
         async def prepare_match(issue: int, round_id: str, pins: Pins, attempt: int = 1) -> str:
             rec("prepare_match", round_id)
             return f"/w/{round_id}/match-{attempt}"
+
+        @activity.defn(name="prepare_debug")
+        async def prepare_debug(
+            issue: int, round_id: str, pins: Pins, failure: str, binding: str | None, attempt: int = 1
+        ) -> str:
+            rec("prepare_debug", round_id, failure, binding)
+            return f"/w/{round_id}/debug-{attempt}"
+
+        @activity.defn(name="read_debug")
+        async def read_debug(issue: int, round_id: str, ws: str) -> DebugResult:
+            rec("read_debug", ws)
+            return self.debug_result
+
+        @activity.defn(name="debug_go")
+        async def debug_go(issue: int, round_id: str, advice: str) -> None:
+            rec("debug_go", round_id, advice)  # buffer-api's part, the go as a signal, is the test's to send
 
         @activity.defn(name="prepare_job")
         async def prepare_job(issue: int, round_id: str, kind: str, attempt: int, binding: str | None) -> str:
@@ -334,6 +363,9 @@ class Mocks:
             refuse_label,
             prepare_match,
             prepare_job,
+            prepare_debug,
+            read_debug,
+            debug_go,
             submit,
             read_match,
             take_lock,
@@ -366,7 +398,7 @@ class Mocks:
             if self.await_failures:
                 self.await_failures -= 1
                 raise ApplicationError("worker died mid-await")
-            state, code = self.states.get(ws.rsplit("/", 1)[1].rsplit("-", 1)[0], ("DONE", 0))  # by kind
+            state, code = turn(self.states, ws.rsplit("/", 1)[1].rsplit("-", 1)[0], ("DONE", 0))  # by kind
             return JobDone(job_id, state, code)
 
         return [await_job]
@@ -752,6 +784,133 @@ async def test_the_crop_job_waits_for_the_raw_lock_and_releases_it_after_a_faile
     assert m.of("release_lock") == [("raw", "rec-1", owner)]
     assert names.index(("read_verify", None)) < names.index(("release_lock", None))
     assert m.stages == ["matching", "testing", "failed"] and "the crops failed" in m.of("set_stage")[-1][1]
+
+
+# --- a failed round is debugged and run again -----------------------------------------------
+
+CROP_FAILS = {f"crop-{SHA}": ("EXIT", 1)}
+
+
+async def debugging(h, m):
+    """Wait until the dataset is at `debugging` and its wait for the debugging agent has begun (a timer)."""
+    await until(lambda: m.stages[-1:] == ["debugging"])
+    for _ in range(500):
+        if (await h.fetch_history()).events[-1].event_type == EventType.EVENT_TYPE_TIMER_STARTED:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("the wait before the debugging agent never began")
+
+
+async def debugged(env, h, m):
+    """From `debugging` through the wait and the debugging agent, up to its go being asked for."""
+    await debugging(h, m)
+    assert "prepare_debug" not in m.names()  # the wait comes first
+    await env.sleep(timedelta(minutes=6))
+    await until(lambda: m.of("debug_go"))
+
+
+async def test_a_failed_round_is_debugged_and_run_again(env):
+    m = Mocks(debug_cycles=1, states={f"crop-{SHA}": [("EXIT", 1), ("DONE", 0)]})
+    async with started(env, m, signal="restart") as h:
+        await debugged(env, h, m)
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor="debugger"))  # what buffer-api makes of its go
+        await idle(h, m, "review")
+        st = await h.query(MiaDataDataset.status)
+        assert (await h.describe()).run_id != h.first_run_id  # the re-run is a round of its own, in a new run
+    assert m.stages == ["matching", "testing", "debugging", "matching", "testing", "review"]
+    failed = m.of("set_stage")[2][1]
+    assert "the crops failed" in failed and "A debugging agent looks into this in 5 minutes" in failed
+    ((round_id, failure, binding),) = m.of("prepare_debug")
+    assert (round_id, binding) == ("i7-e11", "/s/binding-1.yaml") and "the crops failed" in failure
+    assert "debugging agent" not in failure  # the debugger reads why the round failed, not what happens next
+    assert [a[1] for a in m.of("submit")][:4] == ["match", "crop", "verify", "debug"]
+    assert [a[3] for a in m.of("reserve") if a[2] == "debug"] == [5.0]  # an agent run, reserved like the match
+    assert m.of("debug_go") == [("i7-e11", "bind the first volume only")]
+    assert ("**Debugger:** the host sent 30 KB/s", "debug i7-e11", "data", None) in m.of("comment")
+    assert (st.round_id, st.debugs) == ("i7-e21", 1) and m.of("admit") == [("11",), ("21",)]
+
+
+async def test_a_re_run_that_fails_stops_and_a_persons_go_gets_its_own_cycle(env):
+    m = Mocks(debug_cycles=1, states=CROP_FAILS)
+    async with started(env, m, signal="restart") as h:
+        await debugged(env, h, m)
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor="debugger"))
+        await idle(h, m, "failed")
+        assert m.stages == ["matching", "testing", "debugging", "matching", "testing", "failed"]
+        assert m.of("set_stage")[-1][1].endswith("nothing more is tried automatically.")
+        assert len(m.of("prepare_debug")) == 1
+        await h.signal(MiaDataDataset.restart, ev("go", "31"))  # a person: Run again
+        await until(lambda: m.stages.count("debugging") == 2)  # their round has a cycle of its own
+
+
+@pytest.mark.parametrize(
+    "mocks, stage, said",
+    [
+        (  # no round can pass until a person changes something
+            {"debug_result": DebugResult("blocked", "a 65 MB plane is read per volume", "raise job_walltime_min")},
+            "blocked",
+            ["the crops failed", "**Debugger:** a 65 MB plane", "**What it needs:** raise job_walltime_min"],
+        ),
+        (  # the debugging agent's own job failed
+            {"states": {**CROP_FAILS, "debug": ("EXIT", 1)}, "debug_result": DebugResult("failed", "no outcome")},
+            "failed",
+            ["the crops failed", "The debugging agent did not finish: debug job job-mia-7-i7-e11-debug-1 ended EXIT"],
+        ),
+        (  # its job ran, and left nothing readable
+            {"debug_result": DebugResult("failed", "the debugging agent left no readable outcome.json")},
+            "failed",
+            ["The debugging agent did not finish: the debugging agent left no readable outcome.json"],
+        ),
+        (  # the operator's pause refuses its job, as it would refuse a new round's
+            {"reservations": {"debug": Reservation(False, "max_usd reached")}},
+            "blocked",
+            ["the crops failed", "The debugging agent did not run: root budget: max_usd reached"],
+        ),
+    ],
+)
+async def test_a_debugger_that_finds_no_way_on_stops_the_round_with_both_reasons(env, mocks, stage, said):
+    m = Mocks(debug_cycles=1, **{"states": CROP_FAILS, **mocks})
+    async with started(env, m) as h:
+        await debugging(h, m)
+        await env.sleep(timedelta(minutes=6))
+        await idle(h, m, stage)
+    assert m.stages == ["matching", "testing", "debugging", stage] and not m.of("debug_go")
+    assert all(text in m.of("set_stage")[-1][1] for text in said), m.of("set_stage")[-1][1]
+
+
+async def test_run_again_at_debugging_starts_a_persons_round_without_the_debugger(env):
+    m = Mocks(debug_cycles=1, states={f"crop-{SHA}": [("EXIT", 1), ("DONE", 0)]})
+    async with started(env, m, signal="restart") as h:
+        await debugging(h, m)
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))
+        await idle(h, m, "review")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "testing", "debugging", "matching", "testing", "review"]
+    assert "prepare_debug" not in m.names() and not m.of("refuse_label") and (st.round_id, st.debugs) == ("i7-e12", 0)
+
+
+async def test_a_cancel_at_debugging_ends_it(env):
+    m = Mocks(debug_cycles=1, states=CROP_FAILS)
+    async with started(env, m) as h:
+        await debugging(h, m)
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+    assert m.stages == ["matching", "testing", "debugging", "cancelled"] and "prepare_debug" not in m.names()
+
+
+@pytest.mark.parametrize(
+    "mocks, stages",
+    [
+        ({"outcome": "blocked"}, ["matching", "blocked"]),  # a person has to act: no round can pass
+        ({"admit_error": "rec-1: no such record"}, ["blocked"]),
+        ({"debug_cycles": 0, "states": CROP_FAILS}, ["matching", "testing", "failed"]),  # switched off
+    ],
+)
+async def test_only_a_failed_round_with_a_cycle_left_is_debugged(env, mocks, stages):
+    m = Mocks(**{"debug_cycles": 1, **mocks})
+    async with started(env, m) as h:
+        await idle(h, m, stages[-1])
+    assert m.stages == stages
 
 
 # --- the development path (§7.3) ------------------------------------------------------------

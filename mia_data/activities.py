@@ -50,11 +50,14 @@ from .binding import check_binding, hosts, record_urls
 from .config import HUMAN_LABELS, STAGES, dataset_state
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
+    ADVICE_FILE,
     SHA_RE,
     HostsNotAllowed,
     PinMoved,
     check_hosts_allowed,
     crop_job,
+    debug_job,
+    debug_prompt,
     harness_pin,
     harness_snapshot,
     judge_job,
@@ -66,8 +69,10 @@ from .jobspec import (
     verify_job,
 )
 from .models import (
+    DEBUGGER,
     AssessmentWritten,
     DatasetState,
+    DebugResult,
     GalleryResult,
     JobArgs,
     JobDone,
@@ -99,6 +104,19 @@ log = logging.getLogger(__name__)
 
 TEST_PR_RE = re.compile(r"i0-e(\d+)-[0-9a-f]{7}")  # `mia-data test-pr`'s round id: PR <n> at a head, no data issue
 ROUND_RE = re.compile(rf"i\d+-e\d+|{TEST_PR_RE.pattern}")
+# what a job leaves in its workspace that says how it went: copied for the debugging agent, each cut at this size
+ROUND_FILES = (
+    "binding.yaml",
+    "outcome.json",
+    "smoke.json",
+    "crops/report.json",
+    "verify.json",
+    "claude.json",
+    "claude.err",
+    "exit_code",
+)
+EVIDENCE_BYTES = 1 << 20
+LOG_BYTES = 64 << 10  # the end of a job's stdout and stderr
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
@@ -241,6 +259,9 @@ class Activities:
             self.set_stage,
             self.comment,
             self.prepare_match,
+            self.prepare_debug,
+            self.read_debug,
+            self.debug_go,
             self.prepare_job,
             self.probe_hosts,
             self.submit,
@@ -456,6 +477,8 @@ class Activities:
             cfg.limits.agent_max_budget_usd,
             cfg.judge.crops.mode,
             cfg.judge.max_budget_usd,
+            cfg.limits.debug_cycles,
+            cfg.limits.debug_wait_min,
         )
 
     # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
@@ -703,9 +726,20 @@ class Activities:
     @activity.defn(name="prepare_match")
     @mia_permanent_errors
     async def prepare_match(self, issue: int, round_id: str, pins: Pins, attempt: int = 1) -> str:
-        """Make the match agent's workspace: prompt.md, record.yaml, downloads.json, the downloader's
-        conversion.json / manifest.json, catalog/<name>.yaml (visible snippets only) and SPEC.md. Returns its path."""
-        workspace, round_dir = self._make_workspace(issue, round_id, "match", attempt), self._round_dir(round_id)
+        """Make the match agent's workspace: prompt.md, what `_agent_inputs` writes and, in a round the debugger
+        asked for, its advice as advice.md. Returns its path."""
+        workspace = self._make_workspace(issue, round_id, "match", attempt)
+        await self._agent_inputs(workspace, round_id, pins)
+        advice = await self._advice(issue, round_id)
+        if advice:
+            (workspace / ADVICE_FILE).write_text(advice + "\n")
+        (workspace / "prompt.md").write_text(match_prompt(pins, advised=bool(advice)))
+        return str(workspace)
+
+    async def _agent_inputs(self, workspace: Path, round_id: str, pins: Pins) -> None:
+        """What an agent reads about the round's dataset, written into its workspace: record.yaml, downloads.json,
+        the downloader's conversion.json / manifest.json, catalog/<name>.yaml (visible snippets only) and SPEC.md."""
+        round_dir = self._round_dir(round_id)
         snapshot_dir = await self._snapshot(pins.snippets_commit)
         shutil.rmtree(workspace / "catalog", ignore_errors=True)
         (workspace / "catalog").mkdir()
@@ -718,8 +752,90 @@ class Activities:
             if isinstance(dataset_dir, str) and (data := read_untrusted(Path(dataset_dir), name, 16 << 20)) is not None:
                 (workspace / name).write_text(data)
         (workspace / "SPEC.md").write_text(read_untrusted(snapshot_dir, "SPEC.md", 1 << 20) or "")
-        (workspace / "prompt.md").write_text(match_prompt(pins))
+
+    async def _advice(self, issue: int, round_id: str) -> str:
+        """The debugger's advice for this round: the note of the go that started it, when that go is the
+        debugger's. "" for any other round."""
+        if TEST_PR_RE.fullmatch(round_id):
+            return ""
+        action = await self._action(issue, round_id.split("-e", 1)[1])
+        if action is None or action["actor"] != DEBUGGER:
+            return ""
+        return self._clean(_text(action["payload"].get("note"), 16000))
+
+    # --- debugging a failed round ------------------------------------------------------------
+
+    @activity.defn(name="prepare_debug")
+    @mia_permanent_errors
+    async def prepare_debug(
+        self, issue: int, round_id: str, pins: Pins, failure: str, binding: str | None, attempt: int = 1
+    ) -> str:
+        """Make the debugging agent's workspace: what the match agent reads, `failure.md` (what stopped the round
+        and the limits its jobs ran under), the round's checked binding when it got that far, and `round/<job>/`
+        with what each job of the round left (ROUND_FILES and the end of its stdout and stderr), read as untrusted,
+        cut to size and cleaned of anything that looks like a credential. Returns its path."""
+        workspace = self._make_workspace(issue, round_id, "debug", attempt)
+        await self._agent_inputs(workspace, round_id, pins)
+        (workspace / "binding.yaml").unlink(missing_ok=True)
+        if binding:
+            if not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
+                raise ValueError(f"binding {binding} is not one of round {round_id}'s")
+            shutil.copyfile(binding, workspace / "binding.yaml")
+        shutil.rmtree(workspace / "round", ignore_errors=True)
+        for job_dir in sorted(self._round_workspace(issue, round_id).iterdir()):
+            if job_dir == workspace or job_dir.is_symlink() or not job_dir.is_dir():
+                continue
+            left = {rel: read_untrusted(job_dir, rel, EVIDENCE_BYTES) for rel in ROUND_FILES}
+            jobs = job_dir / ".csub" / "jobs"
+            runs = sorted(entry.name for entry in jobs.iterdir() if entry.name.isdecimal()) if jobs.is_dir() else []
+            for log in ("stdout", "stderr") if runs else ():
+                left[log] = read_untrusted(job_dir, f".csub/jobs/{runs[-1]}/{log}", LOG_BYTES, tail=True)
+            for rel, data in left.items():
+                if data:
+                    (workspace / "round" / job_dir.name / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (workspace / "round" / job_dir.name / rel).write_text(self._clean(data))  # no credential
+        limits = self.cfg.limits
+        (workspace / "failure.md").write_text(
+            f"# What stopped the round\n\n{self._clean(_text(failure, 8000))}\n\n"
+            "# The limits its jobs ran under\n\n"
+            f"- Time: {limits.job_walltime_min} minutes per job. A job the cluster kills at this limit ends with exit "
+            "code 140 and writes no report.\n"
+            f"- Data: {int(limits.job_bytes)} bytes fetched per job.\n"
+            "- Your own job runs under the same two limits.\n"
+        )
+        (workspace / "prompt.md").write_text(debug_prompt(pins))
         return str(workspace)
+
+    @activity.defn(name="read_debug")
+    @mia_permanent_errors
+    async def read_debug(self, issue: int, round_id: str, workspace: str) -> DebugResult:
+        """Read the debugging agent's outcome.json into a DebugResult; anything else it left is `failed`."""
+        outcome = _job_json(self._job_workspace(issue, round_id, workspace), "outcome.json")
+        if not isinstance(outcome, dict) or outcome.get("outcome") not in ("rerun", "blocked"):
+            return DebugResult("failed", "the debugging agent left no readable outcome.json")
+        return DebugResult(
+            outcome["outcome"],
+            self._clean(_text(outcome.get("diagnosis"), 6000)) or "(the debugging agent gave no diagnosis)",
+            self._clean(_text(outcome.get("advice"), 6000)),
+        )
+
+    @activity.defn(name="debug_go")
+    @mia_permanent_errors
+    async def debug_go(self, issue: int, round_id: str, advice: str) -> None:
+        """Ask for the dataset's next round as the debugger: a `go` through buffer-api like any other, charged to the
+        root the debugged round was, carrying the advice as its note. One go per debugged round, however often this
+        is retried."""
+        pins = self._pins(round_id)
+        go = functools.partial(
+            self.registry.send_action,
+            f"/datasets/{pins.record}/actions",
+            "go",
+            key=f"debug {round_id}",
+            actor=DEBUGGER,
+            **({"root": pins.root} if pins.root else {}),
+            **({"note": advice} if advice else {}),
+        )
+        await asyncio.to_thread(go)
 
     @activity.defn(name="prepare_job")
     @mia_permanent_errors
@@ -747,6 +863,8 @@ class Activities:
             return match_job(cfg, args)
         if kind == "judge":
             return judge_job(cfg, args)
+        if kind == "debug":
+            return debug_job(cfg, args)
         existing = self._dataset_dir(args.round_id, args.pins) / "manifest.json" if args.existing else None
         existing = existing if existing and existing.is_file() else None
         if kind in ("smoke", "crop"):

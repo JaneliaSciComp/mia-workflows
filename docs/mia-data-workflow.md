@@ -83,7 +83,8 @@ its first `go`, records the action and starts the dataset's `MiaDataDataset` wor
 signal. A preparation request (*Prepare these datasets*) sends the same `go` for each of its datasets, with the
 worker token, and is charged for their jobs. Preparation judges nothing about who may use a dataset: licence and
 size are a buffer spec's filters, so a GPL dataset or one of 60-pixel images is prepared like any other. A round
-in progress accepts only *Cancel the round*. Components: the page, buffer-api, Temporal.
+in progress accepts only *Cancel the round*; `debugging`, between a failed round and its re-run, also takes
+*Run again now*. Components: the page, buffer-api, Temporal.
 
 The round pins the record at the catalog's commit: the commit in the catalog's downloads state when the record
 has an entry there, else the head of `main`.
@@ -180,11 +181,34 @@ asset row (files, bytes, `ready` or `partial`, `last_used`) to buffer-api. A tru
 host (a redirect to one that is not allowed) ends the round `blocked`, naming the host. A PR head's crop job mounts
 the cache read-only, writes a private one and takes no lock.
 
+## When a round fails
+
+A round that fails does not stop at once. While it has a debugging cycle left (`limits.debug_cycles`, default 1,
+counted since the last go that was not the debugger's), its stage is `debugging`, which is a round in progress:
+nothing is asked of a person. After `limits.debug_wait_min` (default 5) the worker submits the **debug job**, a
+Claude agent with the match agent's tools, mounts and budget. Its workspace holds what the match agent reads,
+`failure.md` (what stopped the round and the limits its jobs ran under), the round's checked binding when it got
+that far, and `round/<job>/` with what each job left: its reports, an agent's `claude.json`, its exit code and the
+end of its stdout and stderr, each read as untrusted and cut to size. The agent finds the cause, may test it with
+small `harness smoke` and `harness list` probes, and writes one of two outcomes:
+
+- `rerun`: a new round can pass. The worker posts the diagnosis and sends the dataset a `go` as `debugger` through
+  buffer-api (the debugged round's root, the advice as its note). That go starts a round like any other; its match
+  agent finds the advice as `advice.md` and is told to read it first, as a colleague's notes to check, not
+  instructions. The advice can steer the match to another snippet or other params, or to `needs_snippet`.
+- `blocked`: no round can pass until a person changes something outside a round (a host, a limit, a harness
+  defect, data that is gone). The stage is `blocked`, with the failure, the diagnosis and what it needs.
+
+A debugger that does not run or leaves no readable outcome ends the round `failed`, with both reasons. A re-run
+that fails stops as `failed` too, saying it was the re-run: the cycles are used up. *Run again now* at `debugging`
+ends the cycle and starts a person's round at once, which has its own cycles. A round a person cancelled is never
+debugged. A request that is cancelled cancels the debugger's round like its own.
+
 ## How the timeline reads
 
 Every stage change is a new entry, never an edit: the stage, what it produced, and the folders to look at. The
 dataset is in exactly one stage at a time, written only by the workflow: `matching`, `developing`, `testing`,
-`review`, `merging`, `done`, `failed`, `blocked` or `cancelled`. The buttons on its page are the actions its stage
+`review`, `merging`, `debugging`, `done`, `failed`, `blocked` or `cancelled`. The buttons on its page are the actions its stage
 accepts. A round that cannot go on stops with an entry saying why, in one of two stages: `failed` when a job or a
 check failed and running it again may pass, `blocked` when a person has to decide or change something first (the
 match agent says so, a host is not approved, admission refuses the record, the policy refuses an approve, a

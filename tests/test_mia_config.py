@@ -114,15 +114,17 @@ def test_every_dataset_stage_has_a_rule():
         assert status in STATUS_WORDS and actions <= {*HUMAN_LABELS, "cancel"}
     # a verdict, or a restart that drops the set under review
     assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "go", "cancel"}))
-    # a round in progress is cancelled before anything else is asked of its dataset
-    assert all(actions == {"cancel"} for status, actions in STAGE_ACTIONS.values() if status == "working")
+    # a round in progress is cancelled before anything else is asked of its dataset; between a failed round and
+    # its re-run a go is taken too: the debugger's own, or a person's who does not wait for it
+    working = {stage: actions for stage, (status, actions) in STAGE_ACTIONS.items() if status == "working"}
+    assert working.pop("debugging") == {"go", "cancel"} and all(actions == {"cancel"} for actions in working.values())
     assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"go", "revoke"}))
 
 
 def test_a_datasets_state_is_what_a_person_reads_and_the_stage_decides_it():
     from mia_data.config import STAGES, dataset_state, round_open
 
-    for stage in ("matching", "developing", "testing", "merging"):
+    for stage in ("matching", "developing", "testing", "merging", "debugging"):  # nothing is asked of a person
         assert dataset_state(stage, saved=True) == dataset_state(stage, saved=False) == "in-progress"
     for stage in (
         "review",
@@ -140,5 +142,6 @@ def test_a_datasets_state_is_what_a_person_reads_and_the_stage_decides_it():
         "testing",
         "review",
         "merging",
+        "debugging",
     ]
     assert not round_open(None) and not round_open("no such stage")

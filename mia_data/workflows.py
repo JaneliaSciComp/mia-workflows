@@ -30,8 +30,10 @@ with workflow.unsafe.imports_passed_through():
 
     from .crop_test import describe_failure, job_succeeded, judge
     from .models import (
+        DEBUGGER,
         AssessmentWritten,
         DatasetState,
+        DebugResult,
         GalleryResult,
         JobArgs,
         JobDone,
@@ -59,6 +61,12 @@ NOTHING_TO_REVOKE = "nothing to revoke: this dataset has no saved crops"
 REVOKED = "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; running it again repairs it"
 BUSY = "busy, ignored: a round is already running. Cancel it first, or ask again once it has ended."
 NOT_REVIEW = "an approve or a reject counts only while the dataset is at `review`, for the set under review."
+DEBUG_NEXT = (
+    "A debugging agent looks into this in {minutes} minutes and, if a new round can pass, runs one. Nothing is "
+    "needed from you; *Run again* skips the wait and the debugger."
+)
+DEBUGGED = "This round was the re-run after debugging; nothing more is tried automatically."
+GO_PATIENCE = timedelta(minutes=30)  # how long the debugger's own go may take to arrive as a signal
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
 NOT_AUTHORIZED = "approve recorded as {id}, but saving the crops is not authorized: {why}"
@@ -128,6 +136,7 @@ class MiaDataDataset:
         self.unkilled: list[str] = []  # jobs a cancel could not kill, each with the reason
         self.limits: RoundLimits | None = None  # read from config at the start of a round
         self.stage_write: Any = None  # the handle of a stage write still running beside the round (see _stage)
+        self.failure: str | None = None  # why the round just failed, while its debugging cycle is still to run
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
@@ -286,6 +295,9 @@ class MiaDataDataset:
             cancel.cancel()
             self.round_task, self.cancelling, self.unwinding = None, False, False
         await self._settle_stage_write(cancel=False)  # quiet point: the last stage write lands before a rollover
+        if (failure := self.failure) is not None:  # the step failed with a debugging cycle left: that runs now
+            self.failure = None
+            await self._guard(self._debug(failure))
 
     async def _cancel_round(self, round_task: asyncio.Future[None]) -> None:
         """End the round a `cancel` was sent for, leaving nothing of it behind.
@@ -323,6 +335,7 @@ class MiaDataDataset:
             return await self._finish(
                 "failed",
                 f"cancelled by {events[-1].actor}, but a job could not be killed and may still be running: {jobs}",
+                debug=False,  # a person ended this round
             )
         await self._finish("cancelled", f"cancelled by {events[-1].actor}")
 
@@ -472,13 +485,90 @@ class MiaDataDataset:
                 "issue #%d: could not refuse %s %s: %s", self.state.issue, label, event.event_id, error_message(error)
             )
 
-    async def _finish(self, stage: str, detail: str = "", extra: str = "") -> None:
-        """End the round in a dataset stage, then refuse whatever queued up while it ran. Never raises."""
+    async def _finish(self, stage: str, detail: str = "", extra: str = "", debug: bool = True) -> None:
+        """End the round in a dataset stage, then refuse whatever queued up while it ran. Never raises.
+
+        A round that failed goes to `debugging` instead while a debugging cycle is left (`debug`: unless the
+        caller rules that out): `_guard` then runs `_debug`, which ends in a new round or in a stop stage."""
+        if stage == "failed" and debug and await self._debuggable():
+            self.failure = detail
+            minutes = (await self._limits()).debug_wait_min
+            stage, detail = "debugging", f"{detail}\n\n{DEBUG_NEXT.format(minutes=minutes)}"
+        elif stage == "failed" and self.state.debugs:
+            detail = f"{detail}\n\n{DEBUGGED}"
         try:
             await self._stage(stage, detail, budget=timedelta(hours=24), extra=extra, wait=True)
         except ActivityError as error:
             workflow.logger.error("issue #%d: could not set %s: %s", self.state.issue, stage, error_message(error))
         await self._refuse_queued()
+
+    async def _debuggable(self) -> bool:
+        """Whether the round that just failed gets a debugging cycle: it was admitted (a debugger's job needs its
+        pins) and `limits.debug_cycles` are not used up since the last go that was not the debugger's."""
+        state = self.state
+        if not (state.pins and state.round_id) or not workflow.patched("auto-debug"):
+            return False
+        try:
+            return state.debugs < (await self._limits()).debug_cycles
+        except ActivityError:
+            return False
+
+    async def _go_within(self, patience: timedelta) -> bool:
+        """Wait up to `patience` for a go; whether one is queued."""
+        with contextlib.suppress(TimeoutError):
+            await workflow.wait_condition(lambda: bool(self.go_events), timeout=patience)
+        return bool(self.go_events)
+
+    async def _debug(self, failure: str) -> None:
+        """One debugging cycle of a round that failed with `failure`, at stage `debugging`: wait
+        `limits.debug_wait_min`, run the debugging agent over what the round's jobs left, and act on its outcome.
+        `rerun`: its go starts a new round, whose match agent reads its advice. `blocked`, or a debugger that did
+        not finish: the round stops there, with the failure and what the debugger said. A go that arrives
+        meanwhile (a person's *Run again*) ends the cycle at once: that round is what runs next."""
+        state = self.state
+        assert state.round_id and state.pins  # _debuggable
+        state.debugs += 1
+        if await self._go_within(timedelta(minutes=(await self._limits()).debug_wait_min)):
+            return
+        try:
+            workspace = await self._act(
+                "prepare_debug",
+                state.issue,
+                state.round_id,
+                state.pins,
+                failure,
+                state.binding,
+                seconds=600,
+                result_type=str,
+            )
+            job = await self._job("debug", workspace)
+            result = await self._act(
+                "read_debug", state.issue, state.round_id, workspace, seconds=300, result_type=DebugResult
+            )
+        except (ActivityError, RoundFailed) as error:
+            if self.go_events:
+                return
+            why = f"{failure}\n\nThe debugging agent did not run: {error_message(error)}"
+            return await self._finish(stop_stage(error), why, debug=False)
+        if self.go_events:
+            return
+        if result.outcome == "failed":
+            why = result.diagnosis if job_succeeded(job) else describe_failure("debug", job)
+            return await self._finish("failed", f"{failure}\n\nThe debugging agent did not finish: {why}", debug=False)
+        found = f"**Debugger:** {result.diagnosis}"
+        if result.outcome == "blocked":
+            needs = f"\n\n**What it needs:** {result.advice}" if result.advice else ""
+            return await self._finish("blocked", f"{failure}\n\n{found}{needs}", debug=False)
+        try:
+            await self._act("comment", state.issue, found, f"debug {state.round_id}")
+            await self._act(
+                "debug_go", state.issue, state.round_id, result.advice, seconds=120, budget=timedelta(minutes=30)
+            )
+        except ActivityError as error:
+            why = f"{failure}\n\nThe debugger's new round could not be asked for: {error_message(error)}"
+            return await self._finish("failed", why, debug=False)
+        if not await self._go_within(GO_PATIENCE):
+            await self._finish("failed", f"{failure}\n\nThe debugger's new round did not start.", debug=False)
 
     async def _prepare(self, kind: str) -> str:
         """Make the workspace for a smoke/crop/verify job. Returns its path."""
@@ -506,7 +596,8 @@ class MiaDataDataset:
         limits = await self._limits()
         budgeted = workflow.patched("l-budget")
         if budgeted:  # the operator's switches first: the pause, then the root budget (spec autonomous-gates §8)
-            usd = {"match": limits.agent_max_budget_usd, "judge": limits.judge_max_budget_usd}.get(kind, 0.0)
+            agent = limits.agent_max_budget_usd
+            usd = {"match": agent, "debug": agent, "judge": limits.judge_max_budget_usd}.get(kind, 0.0)
             await self._reserve(key, kind, usd)
         walltime = timedelta(minutes=limits.walltime_min)
         job_id = None
@@ -731,7 +822,9 @@ class MiaDataDataset:
         snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
         # (a cancelled develop round left its snippet issue and PR open too: autodev is not asked twice)
         # (a restart at review leaves them open as well)
-        left = (*STOPPED, "cancelled", "review") if restarted else (*STOPPED, "cancelled")
+        left = (*STOPPED, "cancelled", "debugging", *(("review",) if restarted else ()))
+        if event.actor != DEBUGGER:
+            state.debugs = 0  # somebody asked for this round: it has its own debugging cycles
         if state.stage in left and state.snippet_issue and workflow.patched("resume-snippet-pr"):
             snippet_issue, snippet_pr = state.snippet_issue, state.pr
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
