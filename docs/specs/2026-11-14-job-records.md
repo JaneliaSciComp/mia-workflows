@@ -2,7 +2,8 @@
 
 **Status:** v0.2 · 2026-11-14 · awaiting the user's approval. v0.2: no list of jobs on the page; a job's link
 sits next to what the job produced (the user's ruling on v0.1). v0.3: the timeline reads stage by stage, each
-stage with what happened in it (§3.6; the user's ruling on v0.2).
+stage with what happened in it (§3.6; the user's ruling on v0.2). v0.4: one stage entry per pass (the user's
+ruling on v0.3).
 
 ## 1. Intent
 
@@ -40,8 +41,9 @@ buried in a workspace. Each job should leave a small permanent record, and the p
   credential: every string that comes from a job is scrubbed of anything that looks like one (§3.3).
 - A round that fails, or waits, because a record could not be written or read. Recording is best effort and
   logged.
-- A workflow change. Nothing here alters a command a workflow issues, a result dataclass in `models.py`, or a
-  replay fixture.
+- A workflow change for the records, their links or the blocks: none of them alters a command a workflow
+  issues or a result dataclass in `models.py`. The one workflow change here is the stage entry per pass
+  (§3.6), behind a patch.
 - Tool output in a record or on the page.
 
 ## 2. Approaches
@@ -199,22 +201,47 @@ nothing at all.
 - **Testing** needs no new text: its report opens with the sentence that says what happened, and now sits in
   its block.
 
-*(My calls: grouping on the page rather than a stored tie, and no new sentence for stages other than matching.
-ponytail: a stage entered a second time in one round writes no second entry, as today, so what its second pass
-writes shows under the stage before it; the upgrade is a stage entry per pass.)*
+- **One stage entry per pass.** Today a round writes a stage's entry once (its marker is `stage <round>
+  <stage>`), so a stage the round comes back to writes nothing, and what the second pass finds would show
+  under whatever stage came before it. A pass is each time the round begins a stage's work:
+  - the round enters the stage from another one (`testing`, `review`, then `testing` again for a revised
+    snippet PR; the same in a buffer round and a request);
+  - the round tests another PR head while it is still at `testing` (the head before it failed). The workflow
+    writes no stage there today (`if state.stage != "testing"`); it now does.
 
-## 4. What does not change
+  A call that only repeats the stage the round is at, and a retried activity, still write nothing. The
+  workflow counts the passes of each stage within the round (a field of its state, with a default, reset with
+  the round) and the activity that writes the stage puts the pass into the marker from the second pass on, so
+  a first pass keeps today's marker and a round in flight across the deploy repeats nothing. The entry of a
+  later pass reads like any stage entry; the copy on GitHub gets it as one more comment.
 
-Workflows, activity signatures, `models.py`, replay fixtures, `mia.yaml` (no new key), the harness, the
-registry's tables. Deploying is a restart of the workers and buffer-api; jobs submitted before it have no
-record, and jobs running across it get the second half only if their spec was built by the new code.
+  The second kind of pass is a new command, so it sits behind `workflow.patched("stage-per-pass")` with the
+  replay fixture re-recorded; the first kind issues the commands it issues today. *(My calls: what counts as a
+  pass, and the counter living in the workflow's state. The builder goes through every `_stage` call of the
+  three workflows and says which kind it is.)*
+
+*(My calls: grouping on the page rather than a stored tie, and no new sentence for stages other than
+matching.)*
+
+## 4. What changes and what does not
+
+Unchanged: result dataclasses in `models.py`, `mia.yaml` (no new key), the harness, the registry's tables, and
+every command a workflow issues except the one behind `stage-per-pass`. Changed: the workflows' state gains
+the pass counts (a defaulted field, so a state carried across `continue_as_new` still loads), the stage
+activities' markers from the second pass on, and one replay fixture.
+
+Deploying is a merge into the live checkout with a restart of the workers and buffer-api, built in a worktree
+until then: workers load workflow code from the checkout for each run, and the page's files are served from it.
+Jobs submitted before the restart have no record, and jobs running across it get the second half only if their
+spec was built by the new code.
 
 ## 5. Left to the builder
 
 Module layout (the reduction belongs in `mia_core`), exact field names beyond §3.1, the size caps, the route
 patterns, how a subject's rounds map to workspace directories (`_gallery_png` does it for dataset rounds), the
-card's and the view's layout, and the tests. Expected at least: the reduction over a fixture stream (no tool
+blocks' and the view's layout, and the tests. Expected at least: the reduction over a fixture stream (no tool
 output, long inputs cut, junk lines survived, a planted credential redacted), no env value in a record, both
-halves written by `CsubJobs` with
-the fake client, a write that fails leaving submit and wait unharmed, the record route refusing a path outside
-`_jobs`, and the existing check that the page calls read and action routes only.
+halves written by `CsubJobs` with the fake client, a write that fails leaving submit and wait unharmed, the
+record route refusing a path outside `_jobs`, the page's grouping of entries into stage blocks, a second pass
+writing a second stage entry while a retry and a repeated stage write none, the replay tests, and the existing
+check that the page calls read and action routes only.
