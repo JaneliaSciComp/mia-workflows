@@ -79,7 +79,7 @@ GATE_WAITING = WAITING + ("waiting-lock",)  # no job of its own: the staged gate
 SETTLED = ("servable", "failed", "dropped")
 ABANDONED = "abandoned: a new buffer:go started another round"
 CANCELLED = "abandoned: the round was cancelled"
-CANCEL, PREP_CANCEL = "buffer:cancel", "prep:cancel"  # actions only: there never were such labels
+CANCEL, PREP_CANCEL = "buffer:cancel", "prep:cancel"
 NO_ROUND = "there is no round in progress to cancel"
 ROUND_ENDED = "the round ended before the cancel reached it"
 CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the activities in flight to answer
@@ -542,7 +542,7 @@ class MiaBuffer:
         await self._refuse_lifecycle()
 
     def _lifecycle(self) -> bool:
-        """Lifecycle signals are queued and this run acts on them (an old run ignores them, as it always did)."""
+        """Lifecycle signals are queued and this run acts on them (a run from before `d-lifecycle` ignores them)."""
         return self.lifecycle_on and bool(self.lifecycle)
 
     async def _refuse_lifecycle(self, reason: str = NO_BUFFER, count: int = 0) -> None:
@@ -1339,7 +1339,7 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
-            workflow.deprecate_patch("e-prep")  # a `prep:go` issue prepares it; the buffer never waits on mia-data
+            workflow.deprecate_patch("e-prep")  # a preparation request prepares it; the buffer never waits on mia-data
             return await self._fail(dataset, NOT_PREPARED)
         dataset.artifact = binding.artifact
         if binding.refused and workflow.patched("l-assess"):
@@ -1388,7 +1388,7 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
-            workflow.deprecate_patch("e-prep")  # a `prep:go` issue prepares it; the buffer never waits on mia-data
+            workflow.deprecate_patch("e-prep")  # a preparation request prepares it; the buffer never waits on mia-data
             return await self._fail(dataset, NOT_PREPARED)
         dataset.artifact = binding.artifact
         if binding.refused and workflow.patched("l-assess"):  # revoked: never reused, never served again
@@ -1557,7 +1557,7 @@ class MiaBuffer:
             workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
     async def _quota(self, dataset: DatasetStatus, owner: str) -> bool:
-        """Wait until the raw cache has room for the record (`blocked` meanwhile, said once on the issue), with the
+        """Wait until the raw cache has room for the record (`blocked` meanwhile, said once on the timeline), with the
         record's lock released while blocked (spec §5.2) and taken again after. False: the dataset was dropped
         (the round's day limit had fired, so the block dropped it) or abandoned while blocked."""
         state = self.state
@@ -1927,7 +1927,7 @@ class MiaPrep:
         return False
 
     async def _stage(self, stage: str, detail: str = "") -> None:
-        """Swap the `prep:<stage>` label; the round's last one is best effort (the state says it either way)."""
+        """Write the request's stage; the round's last one is best effort (the state says it either way)."""
         self.state.stage = stage
         try:
             await self._act("set_prep_stage", self.state.issue, stage, self.state, detail)
@@ -2056,11 +2056,11 @@ class MiaPrep:
             "prep_admit", state.issue, event.event_id, seconds=600, result_type=PrepPins
         )
         await self._stage("requested")
-        for record in pins.records:  # one at a time: each may open an issue in the datasets repo
+        for record in pins.records:  # one at a time: each may send a dataset its go
             try:
                 outcome = await self._act("prep_nudge", state.round_id, record, result_type=PrepOutcome)
-            except ActivityError as error:  # this record alone: an unclear catalog record, a refused issue
-                if isinstance(error.cause, CancelledError):  # the request was cancelled: stop opening issues
+            except ActivityError as error:  # this record alone: an unclear catalog record, a refused go
+                if isinstance(error.cause, CancelledError):  # the request was cancelled: stop sending gos
                     raise
                 outcome = PrepOutcome(record, "unknown", note=error_message(error))
             state.outcomes.append(outcome)

@@ -1,6 +1,6 @@
 """The plan: fit, channel and dimensionality policy, weights and a split preview over the data pool, rendered as
-JSON (plan.json) and markdown (the plan comment). Pure functions over Spec and Facts; the CLI and later the
-`planning` activity call `build_plan`.
+JSON (plan.json) and markdown (the plan comment). Pure functions over Spec and Facts; the CLI, the
+`plan` activity and buffer-api's `POST /plan` call `build_plan`.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from .spec import Spec
 from .specmap import ArrayFacts, Facts, facts
 
 MANUAL_DROP_NOTE = "download_method other: needs a manual drop (spec v0.4 §3)"
-UNREADABLE = "_unreadable"  # set by cli.load_records on a file that is not a YAML mapping
+UNREADABLE = "_unreadable"  # set by load_records on a file that is not a YAML mapping
 NOT_PREPARED = "not prepared"  # the rule of a fitting row whose dataset is not prepared (server-side plans only)
 
 

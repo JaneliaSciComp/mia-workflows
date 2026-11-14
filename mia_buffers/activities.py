@@ -674,8 +674,8 @@ class Activities:
     @activity.defn(name="comment")
     @mia_permanent_errors
     async def comment(self, issue: int, body: str, marker: str) -> str | None:
-        """Add an entry to the buffer spec's timeline, once per marker. Returns None (it returned the comment's
-        URL when it posted to GitHub; the signature is recorded in histories)."""
+        """Add an entry to the buffer spec's timeline, once per marker. Returns None; the return type is
+        recorded in histories."""
         full_marker = self.cfg.marker(marker)
         await self._post("buffer", issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
         return None
@@ -811,7 +811,7 @@ class Activities:
         again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
-        except RegistryError as error:  # best effort: the dataset issue tells the rest
+        except RegistryError as error:  # best effort: the dataset's subject tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
         settled = (state := _followed_state(row)) in ("prepared", "shelved", "needs-human")
@@ -1185,7 +1185,7 @@ class Activities:
                 log.info("%s: %s was published already; reusing it, removing %s", record, final, building.name)
                 shutil.rmtree(building)
                 return published
-            # a failed build left in place before builds had their own directory: aside, for the `.building-*` sweep
+            # what is in place is no finished artifact (no stage.json saying ok): aside, for the `.building-*` sweep
             os.rename(final, final.with_name(f".building-stale-{final.name}-{time.time_ns()}"))
             os.rename(building, final)
         return report
@@ -1400,7 +1400,7 @@ class Activities:
     @mia_permanent_errors
     async def create_buffer(self, round_id: str, buffer_id: str) -> None:
         """`PUT buffers/<id>` from the round's plan and spec, pinned to the round's harness and plan.json; no event
-        (set_stage("sourcing") writes `approved`)."""
+        (the round's stage writes are its events: STAGE_EVENTS)."""
         cfg, spec, pins = self.cfg, self._spec(round_id), self._pins(round_id)
         plan_text = (self._round_dir(round_id) / "plan.json").read_text()
         body = buffer_config(
@@ -1527,7 +1527,7 @@ class Activities:
         sync datasets and assets; signal the workflows of ready and idle buffers (degraded, idle, retire); the catalog
         when `keeper.catalog_sync_hours` have passed; rows building under an
         ended job reset; `.building-*` directories and empty raw directories older than `quota.hold_hours` removed; free assets evicted per
-        kind until under quota, and a comment on the newest buffer issue when a kind stays over. With `dry_run`
+        kind until under quota, and the report says by how much a kind stays over. With `dry_run`
         the resets, removals and evictions are only reported. The catalog sync runs last, so a slow one never
         holds up an eviction; a background task heartbeats through any single long step."""
         report, registry, quota, now = KeeperReport(), self.registry, self.cfg.quota, time.time()
