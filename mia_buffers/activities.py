@@ -34,6 +34,7 @@ from mia_core import autonomy
 from mia_core.assets import cache_missing, raw_asset, read_files_json
 from mia_core.config import manifest_path
 from mia_core.fs import dir_bytes
+from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge import policy
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
@@ -47,11 +48,20 @@ from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_s
 from mia_data.models import DEBUGGER, JobDone, LockTaken, Reservation
 from mia_data.publish import prepared_row
 from mia_data.seed import ID_RE
-from mia_data.status import render_links, render_stage
+from mia_data.status import render_jobs, render_links, render_result, stage_entries
 
 from .api import BufferConfig
 from .assume import VOXEL_NM
-from .config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES
+from .config import (
+    HUMAN_LABELS,
+    PREP_HUMAN_LABELS,
+    PREP_STAGE_ACTIONS,
+    PREP_STAGE_SENTENCES,
+    PREP_STAGES,
+    STAGE_SENTENCES,
+    STAGES,
+    stage_pass,
+)
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
@@ -204,6 +214,7 @@ class Activities:
             self.plan,
             self.limits,
             self.set_stage,
+            self.stage_result,
             self.comment,
             self.comment_plan,
             self.refuse_label,
@@ -234,6 +245,7 @@ class Activities:
             self.prep_nudge,
             self.prep_status,
             self.set_prep_stage,
+            self.prep_stage_result,
             self.comment_prep,
             self.keep,
             self.paused,
@@ -608,7 +620,14 @@ class Activities:
     async def set_stage(
         self, issue: int, stage: str, state: BufferState | None = None, detail: str = "", extra: str = ""
     ) -> None:
-        """Write the buffer spec's stage and, within a round, the stage's timeline entry once."""
+        """Write the buffer spec's stage and, within a round, the timeline entries of the stage passes involved
+        (`stage_entries`), each once.
+
+        A stage a round works or waits at starts a pass: its entry has the stage line, what the stage is doing
+        (`detail`, or the stage's sentence), the caller's `extra` and links to the folders to look at. A pass still
+        open in `state` gets its result entry first: what it found (`state.result`) and the records of its jobs. A
+        stage the buffer spec rests at is written by the open pass's result itself, which says how the pass ended
+        and where the spec rests; with no pass open it has an entry of its own."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         if not (state and state.round_id):
@@ -626,14 +645,55 @@ class Activities:
         links = {"Workspace": paths.link(self._round_workspace(issue, state.round_id))}
         if state.levels and state.patch:
             links["Staged"] = paths.link(paths.staged_root / levels_key(state.patch, state.levels))
-        marker = self.cfg.marker(f"stage {state.round_id} {stage}")
-        parts = [
-            render_stage(stage, self._clean(detail), prefix="buffer"),
-            self._clean(extra) if extra else "",
-            render_links(links),
-        ]
-        body = "\n".join(part for part in parts if part) + f"\n{marker}"
-        await self._post("buffer", issue, body, marker, round_id=state.round_id, stage=stage)
+        is_pass = stage_pass(stage)
+        entries = stage_entries(
+            "buffer",
+            state.round_id,
+            stage,
+            is_pass=is_pass,
+            start_n=state.passes.get(stage, 0) + 1 if is_pass else 1,
+            sentence=STAGE_SENTENCES.get(stage, ""),
+            detail=self._clean(detail),
+            extra=self._clean(extra) if extra else "",
+            links=render_links(links),
+            open_stage=state.pass_stage,
+            open_n=state.passes.get(state.pass_stage, 1),
+            result=self._clean(state.result),
+            shown=self._shown(state) if state.pass_stage else "",
+            noun="buffer spec",
+        )
+        for body, marker_text, sets in entries:
+            marker = self.cfg.marker(marker_text)
+            await self._post("buffer", issue, f"{body}\n{marker}", marker, round_id=state.round_id, stage=sets)
+
+    def _shown(self, state: BufferState | PrepState) -> str:
+        """What goes under the result of the pass open in `state`: a link to the record of each job the pass
+        submitted (a job that left none is not listed)."""
+        links = {}
+        for workspace in state.pass_jobs:
+            where = address(self.cfg.paths.work_root, workspace)
+            if where and record_path(self.cfg.paths.work_root, where).is_file():
+                links[Path(workspace).name] = job_link(self.cfg.service.url, where)
+        return render_jobs(links)
+
+    async def _result(self, kind: str, issue: int, state: BufferState | PrepState) -> None:
+        """Write the result entry of the pass open in `state`, once, and no stage: for a buffer spec (`buffer`) or
+        a request (`prep`)."""
+        if not (state.round_id and state.pass_stage):
+            return
+        body = render_result(state.pass_stage, self._clean(state.result), prefix=kind)
+        count = state.passes.get(state.pass_stage, 1)
+        tag = "prep " if kind == "prep" else ""
+        marker = self.cfg.marker(f"{tag}result {state.round_id} {state.pass_stage} {count}")
+        text = "\n".join(part for part in (body, self._shown(state)) if part)
+        await self._post(kind, issue, f"{text}\n{marker}", marker, round_id=state.round_id)
+
+    @activity.defn(name="stage_result")
+    @mia_permanent_errors
+    async def stage_result(self, issue: int, state: BufferState) -> None:
+        """Write the result entry of the pass open in `state`, once: for a pass that ended where no stage write
+        follows (a new round started while the one before waited at a gate)."""
+        await self._result("buffer", issue, state)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
@@ -804,15 +864,39 @@ class Activities:
     @activity.defn(name="set_prep_stage")
     @mia_permanent_errors
     async def set_prep_stage(self, issue: int, stage: str, state: PrepState | None = None, detail: str = "") -> None:
-        """Write the request's stage and, within its round, the stage's timeline entry once."""
+        """Write the request's stage and, within its round, the timeline entries of the stage passes involved, each
+        once, as `set_stage` does for a buffer spec: the start of a pass, the result of the pass still open in
+        `state`, or that result alone when it ends the round at the stage the request rests at."""
         if stage not in PREP_STAGES:
             raise ValueError(f"unknown preparation stage {stage!r}")
         if not (state and state.round_id):
             await self._post("prep", issue, "", "", stage=stage)
             return
-        marker = self.cfg.marker(f"prep stage {state.round_id} {stage}")
-        body = render_stage(stage, self._clean(detail), prefix="prep") + f"\n{marker}"
-        await self._post("prep", issue, body, marker, round_id=state.round_id, stage=stage)
+        is_pass = stage_pass(stage, PREP_STAGE_ACTIONS)
+        entries = stage_entries(
+            "prep",
+            state.round_id,
+            stage,
+            is_pass=is_pass,
+            start_n=state.passes.get(stage, 0) + 1 if is_pass else 1,
+            sentence=PREP_STAGE_SENTENCES.get(stage, ""),
+            detail=self._clean(detail),
+            open_stage=state.pass_stage,
+            open_n=state.passes.get(state.pass_stage, 1),
+            result=self._clean(state.result),
+            shown=self._shown(state) if state.pass_stage else "",
+            tag="prep ",
+            noun="request",
+        )
+        for body, marker_text, sets in entries:
+            marker = self.cfg.marker(marker_text)
+            await self._post("prep", issue, f"{body}\n{marker}", marker, round_id=state.round_id, stage=sets)
+
+    @activity.defn(name="prep_stage_result")
+    @mia_permanent_errors
+    async def prep_stage_result(self, issue: int, state: PrepState) -> None:
+        """Write the result entry of the request's pass open in `state`, once: for a pass no stage write follows."""
+        await self._result("prep", issue, state)
 
     @activity.defn(name="comment_prep")
     @mia_permanent_errors

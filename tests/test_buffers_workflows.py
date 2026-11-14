@@ -26,6 +26,7 @@ from mia_buffers.models import (
     BufferState,
     DatasetIssue,
     DatasetPlan,
+    DatasetStatus,
     DegradedSignal,
     DropResult,
     FetchJobArgs,
@@ -164,7 +165,13 @@ class Mocks:
         async def set_stage(
             issue: int, stage: str, state: BufferState | None = None, detail: str = "", extra: str = ""
         ) -> None:
+            if state and state.pass_stage:  # the write carries the open pass's result (spec job-records §3.6)
+                rec("result", state.pass_stage, state.result, stage, list(state.pass_jobs))
             rec("set_stage", stage, detail, extra)
+
+        @activity.defn(name="stage_result")
+        async def stage_result(issue: int, state: BufferState) -> None:
+            rec("result", state.pass_stage, state.result, None, list(state.pass_jobs))
 
         @activity.defn(name="comment")
         async def comment(issue: int, body: str, marker: str) -> str | None:
@@ -266,6 +273,7 @@ class Mocks:
             plan,
             limits,
             set_stage,
+            stage_result,
             comment,
             comment_plan,
             nudge_dataset,
@@ -461,9 +469,9 @@ IDLE_EVENTS = (
 
 
 @contextlib.asynccontextmanager
-async def started(env, m, first=None, runner=None, signal="plan"):
+async def started(env, m, first=None, runner=None, signal="plan", state=None):
     """Start a round; `signal="plan"` keeps the plan-review gate the older tests go through (spec §15: a `go` round
-    skips it and stops at the staged gate only)."""
+    skips it and stops at the staged gate only). `state`: the state a run takes over, as after a rollover."""
     tq = f"tq-{uuid.uuid4()}"
     kw = {"workflow_runner": runner} if runner else {}
     async with (
@@ -472,7 +480,7 @@ async def started(env, m, first=None, runner=None, signal="plan"):
     ):
         h0 = await env.client.start_workflow(
             MiaBuffer.run,
-            BufferState(7),
+            state or BufferState(7),
             id=f"wf-{uuid.uuid4()}",
             task_queue=tq,
             start_signal=signal,
@@ -877,6 +885,7 @@ async def test_go_at_staged_starts_a_new_round_and_retires_the_staged_buffer(env
         state = await h.query(MiaBuffer.status)
     assert m.of("retire_buffer") == [("i7-e11",)] and state.round_id == "i7-e15" and state.buffer_id == "i7-e15"
     assert ("failed round's buffer `i7-e11` retired: refs released", "retired i7-e11") in m.of("comment")
+    assert ("staged", workflows.NEW_ROUND, None, []) in m.of("result")  # the gate the go left says how it ended
 
 
 async def test_stale_approve_at_staged_is_refused(env):
@@ -912,6 +921,82 @@ async def test_timeout_at_the_gate_drops_waiting_and_keeps_the_gate(env):
     assert "`bcss` | dropped" in staged_comments(m)[-1][0]
 
 
+# --- a stage pass writes its start and its result (spec job-records §3.6) ---------------------------
+
+
+async def test_each_pass_result_is_carried_by_the_stage_write_that_ends_it(env):
+    m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+    assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"]
+    planned, reviewed, sourced, staged = m.of("result")
+    assert [(r[0], r[2]) for r in m.of("result")] == [
+        ("planning", "plan-review"),
+        ("plan-review", "sourcing"),
+        ("sourcing", "staged"),
+        ("staged", "ready"),  # `ready` is where the spec rests: the gate's result is the entry that says so
+    ]
+    assert planned[1].startswith("Planned: 1 dataset(s) in the pool") and planned[3] == []
+    assert reviewed[1] == "Approved by alice: sourcing starts." and reviewed[3] == []
+    assert sourced[1] == "Datasets of the pool: 1 servable."
+    assert sourced[3] == ["/w/i7-e11/fetch-u937-1", "/w/i7-e11/stage-u937"]  # the fetch job, then the stage job
+    assert staged[1] == "Approved by human:alice: the buffer serves what is staged." and staged[3] == []
+    assert m.of("set_stage")[3][1] == workflows.STAGED_NEXT and "BufferDataset(" in m.of("set_stage")[4][2]
+
+
+async def test_a_round_that_fails_while_sourcing_says_so_in_that_pass_result(env):
+    m = Mocks(plan=ONLY_U937, stage={"u937": StageResult(False, 0, ["unreadable"])})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+    assert m.stages == ["planning", "sourcing", "needs-human"]
+    stage, found, rests_at, jobs = m.of("result")[-1]  # the write that sets `needs-human` carries the failed pass
+    assert (stage, rests_at, jobs) == ("sourcing", "needs-human", ["/w/i7-e11/stage-u937"])
+    assert found == "Datasets of the pool: 1 failed." and m.of("set_stage")[-1][1].startswith("nothing to serve")
+
+
+async def test_a_go_at_the_plan_gate_writes_the_open_pass_result_before_the_new_round(env):
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m) as h:
+        await idle(h, m, "plan-review")
+        await h.signal(MiaBuffer.go, ev("go", "15"))
+        await idle(h, m, "staged")
+        state = await h.query(MiaBuffer.status)
+    assert m.stages == ["planning", "plan-review", "planning", "sourcing", "staged"] and state.round_id == "i7-e15"
+    assert [(r[0], r[2]) for r in m.of("result")] == [
+        ("planning", "plan-review"),
+        ("plan-review", None),  # no stage write follows the gate the go left: its result is written by itself
+        ("planning", "sourcing"),
+        ("sourcing", "staged"),
+    ]
+    assert m.of("result")[1][1] == workflows.NEW_ROUND
+    flushed = m.calls.index(("result", ("plan-review", workflows.NEW_ROUND, None, [])))
+    assert flushed < m.calls.index(("admit", ("15",)))  # under the round it belongs to, before the next is admitted
+    assert state.passes == {"planning": 1, "sourcing": 1, "staged": 1} and state.pass_stage == "staged"
+    assert m.of("result")[-1][3] == ["/w/i7-e15/stage-u937"]
+
+
+async def test_a_run_that_takes_over_a_round_with_no_pass_open_writes_its_stage_as_before(env):
+    """A run that rolled over at `plan-review` before rounds kept their passes: no result is due, so the next
+    stage write carries none; the passes are kept from that write on."""
+    planned = "2026-01-01T00:00:00+00:00"
+    state = BufferState(
+        7,
+        round_id="i7-e11",
+        stage="plan-review",
+        pins=PINS,
+        planned_at=planned,
+        datasets=[DatasetStatus("u937", "confocal", False, weight=1.0)],
+        levels=[1],
+        patch=64,
+    )
+    m = Mocks(plan=ONLY_U937)
+    async with started(env, m, first=ev("approve", "12", shift(planned, 5)), signal="approve", state=state) as h:
+        await idle(h, m, "staged")
+    assert m.stages == ["sourcing", "staged"] and not m.of("admit")
+    assert m.of("result") == [("sourcing", "Datasets of the pool: 1 servable.", "staged", ["/w/i7-e11/stage-u937"])]
+
+
 # --- replay -------------------------------------------------------------------------------------
 
 HISTORY = Path(__file__).parent / "fixtures" / "buffers" / "buffer_history.json"
@@ -919,6 +1004,8 @@ CACHE_HISTORY = HISTORY.with_name("buffer_history_c.json")
 LIFECYCLE_HISTORY = HISTORY.with_name("buffer_history_d.json")
 REBUILD_HISTORY = HISTORY.with_name("buffer_history_d_rebuild.json")
 GATE_HISTORY = HISTORY.with_name("buffer_history_k.json")
+RESULTS_HISTORY = HISTORY.with_name("buffer_history_r.json")
+PREP_RESULTS_HISTORY = HISTORY.with_name("prep_history_r.json")
 
 
 def _scrub(obj):
@@ -970,6 +1057,25 @@ async def test_replay_buffer_history_k(env):
             await ready(h, m)
             GATE_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-staged-gate", GATE_HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+async def test_replay_buffer_history_r(env):
+    """A run under the `stage-results` patch (each stage pass writes a start and a result): a `go` round fetches and
+    stages u937 and is approved to `ready`, the buffer goes idle, and a new go writes the idle pass's result before
+    its own round stages again. Re-record this one alone, so the older fixtures keep their paths:
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_r"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])})
+        async with started(env, m, signal="go") as h:
+            await ready(h, m)
+            await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])  # as the keeper sends it
+            await idle(h, m, "idle")
+            await h.signal(MiaBuffer.go, ev("go", "15"))
+            await until(lambda: m.stages.count("staged") == 2, m=m)
+            await idle(h, m, "staged")
+            RESULTS_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("buffers-stage-results", RESULTS_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
 
 
@@ -1468,7 +1574,11 @@ async def test_idle_keep_and_retire(env):
     assert m.of("retire_buffer") == [("i7-e11",)] and state.retired and state.stage == "retired"
     idle_detail = m.of("set_stage")[5][1]  # planning, plan-review, sourcing, staged, ready, idle
     assert idle_detail.startswith("No consumer for 72 hours: idle.") and "14 days of idleness" in idle_detail
-    assert ("kept", "keep i7-e11 31") in m.of("comment")
+    # idle is a pass: the keep is its result, carried by the write that returns the buffer to `ready`
+    assert m.of("result")[-1] == ("idle", "Kept by alice.", "ready", []) and "kept" not in [
+        c[0] for c in m.of("comment")
+    ]
+    # a buffer at `ready` rests: no pass is open, so `retired` is an entry of its own
     assert m.of("set_stage")[-1][1] == "Retired: refs released; draws archived to /state/archive/i7-e11.draws.jsonl.gz"
     assert not m.of("refuse_label")
 
@@ -1863,7 +1973,13 @@ class PrepMocks:
 
         @activity.defn(name="set_prep_stage")
         async def set_prep_stage(issue: int, stage: str, state: PrepState | None = None, detail: str = "") -> None:
+            if state and state.pass_stage:  # the write carries the open pass's result (spec job-records §3.6)
+                rec("result", state.pass_stage, state.result, stage)
             rec("set_prep_stage", stage, detail)
+
+        @activity.defn(name="prep_stage_result")
+        async def prep_stage_result(issue: int, state: PrepState) -> None:
+            rec("result", state.pass_stage, state.result, None)
 
         @activity.defn(name="prep_nudge")
         async def prep_nudge(round_id: str, record: str) -> PrepOutcome:
@@ -1904,6 +2020,7 @@ class PrepMocks:
             prep_admit,
             limits,
             set_prep_stage,
+            prep_stage_result,
             prep_nudge,
             comment_prep,
             prep_status,
@@ -1988,6 +2105,9 @@ async def test_prep_round_opens_nudges_and_closes_done(env):
     assert "`a`" in m.of("set_prep_stage")[-1][1] and "`b`" in m.of("set_prep_stage")[-1][1]
     assert m.of("refuse_label") == [("prep:go", workflows.BUSY, "22")]
     assert state.settled == {"a": "prepared", "b": "prepared", "c": "prepared"} and state.stage == "done"
+    # `requested` is the request's one pass: the write that sets `done` carries its result
+    assert m.of("result") == [("requested", "3 of 3 requested datasets are prepared.", "done")]
+    assert (state.passes, state.pass_stage) == ({"requested": 1}, "")
 
 
 async def test_prep_needs_human_on_timeout(env):
@@ -2002,6 +2122,8 @@ async def test_prep_needs_human_on_timeout(env):
     detail = m.of("set_prep_stage")[-1][1]
     assert m.stages == ["requested", "needs-human"] and "`b`" in detail and "`c`" in detail and "`a`" not in detail
     assert "in-progress" in detail and state.settled == {"a": "prepared", "c": "needs-human"}
+    # the write that sets `needs-human` carries the pass that ended there, with what it came to
+    assert m.of("result") == [("requested", "1 of 3 requested datasets are prepared.", "needs-human")]
 
 
 async def test_prep_registry_outage_ends_needs_human(env):
@@ -2084,6 +2206,21 @@ async def test_replay_prep_history(env):
             await prep_settled(h, m, "done")
             PREP_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("prep-recorded", PREP_HISTORY.read_text())
+    await Replayer(workflows=[workflows.MiaPrep]).replay_workflow(history)
+
+
+async def test_replay_prep_history_r(env):
+    """The prep:go → requested → polls → done run under the `stage-results` patch, as test_replay_prep_history.
+    Re-record this one alone, so the older fixtures keep their paths:
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_prep_history_r"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = prep_round()
+        async with prep_started(env, m) as h:
+            await polled(env, m, 2)
+            await prep_settled(h, m, "done")
+            history = (await h.fetch_history()).to_json_dict()
+            PREP_RESULTS_HISTORY.write_text(json.dumps(_scrub(history), indent=1) + "\n")
+    history = WorkflowHistory.from_json("prep-stage-results", PREP_RESULTS_HISTORY.read_text())
     await Replayer(workflows=[workflows.MiaPrep]).replay_workflow(history)
 
 
@@ -2335,6 +2472,8 @@ async def test_cancel_while_sourcing_kills_the_jobs_releases_what_the_round_held
             "bcss": ("failed", "abandoned: the round was cancelled"),
         }
         assert m.of("set_stage")[-1][:2] == ("cancelled", "cancelled by alice") and not m.of("register_dataset")
+        # the cancelled pass writes its own result: the write that sets `cancelled` carries it, with the killed job
+        assert m.of("result")[-1] == ("sourcing", "", "cancelled", ["/w/i7-e11/stage-u937"])
         await h.signal(MiaBuffer.go, ev("go", "13"))  # from `cancelled` a go starts over
         await until(lambda: m.stages[-1:] == ["sourcing"] and m.of("create_buffer")[-1:] == [("i7-e13",)], m=m)
     assert m.stages == ["planning", "sourcing", "cancelled", "planning", "sourcing"]
@@ -2430,6 +2569,7 @@ async def test_cancelling_a_request_cancels_the_dataset_rounds_it_started_and_a_
         await prep_cancelled(h, m)
         assert m.of("prep_cancel") == [(8, ["a", "b"])]  # the activity cancels only what this request started
         assert m.of("set_prep_stage")[-1] == ("cancelled", "cancelled by alice")
+        assert m.of("result") == [("requested", "", "cancelled")]  # the cancelled pass writes its own result
         await h.signal(workflows.MiaPrep.cancel, ev("cancel", "23"))  # nothing in progress now: refused
         await until(lambda: m.of("refuse_label"), m=m)
         assert m.of("refuse_label")[0][0] == "prep:cancel"

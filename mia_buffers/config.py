@@ -75,6 +75,27 @@ PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "needs-human": ("stuck", frozenset({"go"})),
     "cancelled": ("done", frozenset({"go"})),
 }
+# What a round is doing at each stage it works or waits at: the sentence of the stage's start entry when the round
+# has nothing more specific to say.
+STAGE_SENTENCES = {
+    "planning": "The spec is resolved against the catalog into a plan: the pool of datasets and their weights.",
+    "plan-review": "The plan is in the timeline; the round waits here for an approve, and no job has run yet.",
+    "sourcing": "The pool's datasets are fetched, staged and registered with the buffer, several at a time.",
+    "staged": "No job is left to run and the board is in the timeline; the round waits for an approve.",
+    "idle": "No consumer has drawn for a while; a keep returns the buffer to ready, otherwise the keeper retires it.",
+}
+PREP_STAGE_SENTENCES = {
+    "requested": "The request's datasets are handed to mia-data; the request follows them until each has settled.",
+}
+
+
+def stage_pass(stage: str | None, table: dict[str, tuple[str, frozenset[str]]] = STAGE_ACTIONS) -> bool:
+    """Whether `stage` is one a round works or waits at, by `table` (a buffer spec's stages; a request's with
+    `PREP_STAGE_ACTIONS`). Such a stage is a pass: it writes a start entry and a result entry. Any other stage is
+    where the subject rests, written by the result of the pass that ended there (spec job-records §3.6)."""
+    return table.get(stage or "", ("",))[0] in ("working", "waiting")
+
+
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
     "MIA_BUFFERS_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy"),

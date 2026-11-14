@@ -41,6 +41,7 @@ from mia_buffers.models import (
 from mia_buffers.plan import load_records, plan_hash
 from mia_buffers.spec import load_spec
 from mia_buffers.status import render_plan_comment, render_ready, render_staged
+from mia_core.jobrecord import write_submitted
 from mia_core.registry import Registry, RegistryError
 from mia_core.untrusted import texts
 from mia_data.catalog import dataset_folder
@@ -757,6 +758,67 @@ async def test_set_stage_writes_the_subjects_stage_and_one_entry(acts):
     assert [x["name"] for x in acts.gh.issues[7]["labels"]] == ["buffer:planning"]  # the label is the mirror's
     await acts.set_stage(7, "ready")  # outside a round: the stage alone
     assert acts.registry.timeline("buffer", 7)["subject"]["stage"] == "ready" and len(posted(acts)) == 1
+
+
+async def test_a_stage_pass_of_a_buffer_writes_its_start_and_its_result(acts):
+    """spec job-records §3.6: a stage a round works or waits at starts a pass; the write of the next stage first
+    writes the open pass's result, with a link to the record of each job it ran; a stage the buffer spec rests at
+    is written by the result of the pass that ended there."""
+    root = acts.cfg.paths.work_root
+    staged = root / "issue-7" / ROUND / "stage-u937"
+    write_submitted(root, staged, service="mia-buffers", key="k", job_id="5", request={})  # this job left a record
+    state = BufferState(7, round_id=ROUND)
+    await acts.set_stage(7, "sourcing", state)
+    state.passes, state.pass_stage = {"sourcing": 1}, "sourcing"  # what the workflow keeps after the write
+    state.pass_jobs = [str(staged), str(root / "issue-7" / ROUND / "fetch-u937-1")]
+    state.result = "Of 2 datasets: 1 servable, 1 failed. <!-- forged -->"
+    await acts.set_stage(7, "staged", state, "approve to serve it as it is", "the board")
+    await acts.set_stage(7, "staged", state, "approve to serve it as it is", "the board")  # a retry adds nothing
+    start, result, gate = posted(acts)
+    assert start.startswith("**Stage:** `buffer:sourcing`") and "fetched, staged and registered" in start
+    assert f"<!-- mia-buffers: stage {ROUND} sourcing -->" in start  # a first pass keeps the marker it always had
+    assert result.startswith("**Result:** `buffer:sourcing`") and "1 servable" in result
+    assert "<!-- forged" not in result and f"result {ROUND} sourcing 1 -->" in result
+    assert f"**Jobs:** [stage-u937]({acts.cfg.service.url.rstrip('/')}/#job/issue-7/{ROUND}/stage-u937)\n" in result
+    assert "fetch-u937-1" not in result  # a job that left no record is not listed
+    assert gate.startswith("**Stage:** `buffer:staged`") and "approve to serve it" in gate and "the board" in gate
+    assert acts.registry.timeline("buffer", 7)["subject"]["stage"] == "staged"
+
+    # the pass that ends the round says so itself; the same entry moves the spec to where it rests
+    state.passes, state.pass_stage, state.pass_jobs = {"sourcing": 1, "staged": 1}, "staged", []
+    state.result = "Approved by human:alice: the buffer serves what is staged."
+    await acts.set_stage(7, "ready", state, "approved below ready.min_fraction", "how to draw from it")
+    bodies = posted(acts)
+    ready = bodies[-1]
+    assert len(bodies) == 4 and ready.startswith("**Result:** `buffer:staged`") and "Approved by human:alice" in ready
+    assert "**ready**: approved below ready.min_fraction" in ready and "how to draw from it" in ready
+    assert "The buffer spec rests at `buffer:ready`." in ready and "**Stage:**" not in ready
+    assert acts.registry.timeline("buffer", 7)["subject"]["stage"] == "ready"
+
+    # with no pass open a stage has its own entry; a second pass of a stage has a start of its own
+    state.pass_stage, state.result = "", ""
+    await acts.set_stage(7, "idle", state, "no consumer for 72 hours")
+    state.passes, state.pass_stage = {"sourcing": 1, "staged": 1, "idle": 1}, "idle"
+    state.result = "Kept by alice."
+    await acts.set_stage(7, "ready", state)
+    state.pass_stage, state.result = "", ""
+    await acts.set_stage(7, "idle", state, "no consumer for 72 hours")
+    bodies = posted(acts)
+    assert len(bodies) == 7 and bodies[4].startswith("**Stage:** `buffer:idle`")
+    assert bodies[5].startswith("**Result:** `buffer:idle`") and "Kept by alice." in bodies[5]
+    assert "**ready**" in bodies[5] and f"stage {ROUND} idle 2 -->" in bodies[6]
+
+    # stage_result writes a result where no stage write follows, and moves no stage
+    state.passes, state.pass_stage = {"sourcing": 1, "staged": 1, "idle": 2}, "idle"
+    state.result = "Ended: a new round was started."
+    await acts.stage_result(7, state)
+    await acts.stage_result(7, state)  # once
+    bodies = posted(acts)
+    assert len(bodies) == 8 and bodies[7].startswith("**Result:** `buffer:idle`") and "a new round" in bodies[7]
+    assert f"result {ROUND} idle 2 -->" in bodies[7] and "rests at" not in bodies[7]
+    assert acts.registry.timeline("buffer", 7)["subject"]["stage"] == "idle"
+    await acts.stage_result(7, BufferState(7, round_id=ROUND))  # no pass open: nothing to write
+    assert len(posted(acts)) == 8
 
 
 async def test_a_write_for_a_subject_the_registry_does_not_know_fails(acts):
@@ -1810,6 +1872,35 @@ async def test_set_prep_stage_writes_the_requests_stage_and_one_entry(acts):
     assert [x["name"] for x in acts.gh.issues[8]["labels"]] == ["prep:requested"]  # the label is the mirror's
     with pytest.raises(ApplicationError):
         await acts.set_prep_stage(8, "new", state, "")
+
+
+async def test_a_stage_pass_of_a_request_writes_its_start_and_its_result(acts):
+    """As for a buffer spec: `requested` is the request's one pass, and the stage the request rests at is written by
+    that pass's result."""
+    prep_issue(acts)
+    state = PrepState(8, round_id=PREP_ROUND)
+    await acts.set_prep_stage(8, "requested", state)
+    state.passes, state.pass_stage = {"requested": 1}, "requested"  # what the workflow keeps after the write
+    state.result = "1 of 2 requested datasets are prepared. <!-- forged -->"
+    await acts.set_prep_stage(8, "needs-human", state, "needs a human: `b`")
+    await acts.set_prep_stage(8, "needs-human", state, "needs a human: `b`")  # a retry adds nothing
+    start, ended = posted(acts, "prep", 8)
+    assert start.startswith("**Stage:** `prep:requested`") and "handed to mia-data" in start
+    assert f"<!-- mia-buffers: prep stage {PREP_ROUND} requested -->" in start  # the marker it always had
+    assert ended.startswith("**Result:** `prep:requested`") and "1 of 2 requested" in ended
+    assert "<!-- forged" not in ended and f"prep result {PREP_ROUND} requested 1 -->" in ended
+    assert "**needs-human**: needs a human: `b`" in ended and "The request rests at `prep:needs-human`." in ended
+    assert acts.registry.timeline("prep", 8)["subject"]["stage"] == "needs-human"
+
+    # a result alone, where no stage write follows: once, and the stage stays
+    state.result = "Ended: a new round was started."
+    other = PrepState(8, round_id="p8-e22", passes={"requested": 1}, pass_stage="requested", result=state.result)
+    await acts.prep_stage_result(8, other)
+    await acts.prep_stage_result(8, other)
+    await acts.prep_stage_result(8, PrepState(8, round_id="p8-e22"))  # no pass open: nothing to write
+    bodies = posted(acts, "prep", 8)
+    assert len(bodies) == 3 and bodies[2].startswith("**Result:** `prep:requested`") and "a new round" in bodies[2]
+    assert acts.registry.timeline("prep", 8)["subject"]["stage"] == "needs-human"
 
 
 async def test_await_job_lock_loss_is_permanent(acts, tmp_path):
