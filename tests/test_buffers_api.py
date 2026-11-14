@@ -1384,6 +1384,21 @@ def test_a_go_for_a_dataset_with_a_known_issue_keeps_that_issues_number(tmp_path
     assert (subject["number"], subject["issue"]) == (234, 234) and gateway.sent[0][1] == 234
 
 
+def test_a_dataset_whose_row_holds_an_open_rounds_stage_gets_its_subject_at_that_stage(tmp_path):
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/datasets/rec-b", {"state": "in-progress", "data_stage": "developing", "issue": 234})
+    status, out, _ = act(s, "/datasets/rec-b/actions", {"action": "go"})
+    assert status == 409 and "`developing`" in out["error"] and "cancel" in out["error"] and gateway.sent == []
+    subject = call(s, "GET", "/subjects/dataset/rec-b")[1]
+    assert (subject["number"], subject["stage"], subject["actions"]) == (234, "developing", ["cancel"])
+    assert act(s, "/datasets/rec-b/actions", {"action": "cancel"})[0] == 202  # the round can be cancelled
+    # a subject already made at `new`, which no workflow has written, is corrected by the next click
+    worker(s, "PUT", "/datasets/rec-a", {"state": "in-progress", "data_stage": "testing", "issue": 7})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "new"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "go"})[0] == 409
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["stage"] == "testing"
+
+
 def test_an_action_for_something_that_is_not_there_is_refused(tmp_path):
     s, gateway = _acting(tmp_path)
     assert act(s, "/datasets/nope/actions", {"action": "go"})[0] == 404  # not a record of the synced catalog
