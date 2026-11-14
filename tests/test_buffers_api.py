@@ -842,9 +842,14 @@ def test_root_serves_the_page_and_ui_files(tmp_path):
     assert call(s, "GET", "/") == (
         200,
         b"<!doctype html><title>t</title>",
-        {"Content-Type": "text/html; charset=utf-8"},
+        {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache"},
     )
-    assert call(s, "GET", "/ui/app.js") == (200, b"let a = 1;", {"Content-Type": "text/javascript"})
+    # a module is asked for again on every load: the page never runs files of two deployments together
+    assert call(s, "GET", "/ui/app.js") == (
+        200,
+        b"let a = 1;",
+        {"Content-Type": "text/javascript", "Cache-Control": "no-cache"},
+    )
     assert call(s, "GET", "/ui/notes.txt")[0] == 404  # not one of the served suffixes
     assert call(s, "GET", "/ui/missing.css")[0] == 404
     assert call(svc(tmp_path), "GET", "/")[0] == 404  # no ui_dir: no page

@@ -37,13 +37,14 @@ Run all of these before pushing. CI runs the last three in this order on every p
 
 | command | what it does |
 |---|---|
-| `pixi run fmt` | formats with ruff and applies its safe autofixes |
-| `pixi run lint` | `ruff check` plus a formatting check; fails on drift |
+| `pixi run fmt` | formats with ruff and applies its safe autofixes; Biome does the same for the page's modules |
+| `pixi run lint` | `ruff check` plus a formatting check, and Biome's lint and formatting check of the page's modules; fails on drift |
 | `pixi run typecheck` | mypy over `autodev/`, `mia_core/`, `mia_data/`, `mia_ops/` and `mia_buffers/` with `check_untyped_defs` |
 | `pixi run test` | pytest over `tests/`, including the Temporal replay tests |
 
-Configuration for all four is in `pyproject.toml`. Keep them clean rather than suppressing: a `type: ignore` or
-`noqa` comment needs a reason next to it.
+Configuration for all four is in `pyproject.toml`, and Biome's in `biome.jsonc`. Keep them clean rather than
+suppressing: a `type: ignore` or `noqa` comment needs a reason next to it, and so does a rule turned off in
+`biome.jsonc`.
 
 ## Layout
 
@@ -724,6 +725,27 @@ read routes (and `POST /plan`, which carries the spec text and writes nothing), 
 routes. `tests/test_buffers_ui.py` fails if the page requests a route that does not exist or is a worker route,
 uses an `Authorization` header, or calls a host other than github.com and Google Fonts.
 
+The page is plain files under `mia_buffers/ui/`, with no build step: `index.html` (the shell), `app.css`, the two
+documents of the Docs view, and ES modules that the browser loads as they are. A module imports only modules
+above it in this table, never in a circle:
+
+| module | |
+|---|---|
+| `spec.js` | the YAML the page writes (a buffer spec, a preparation request); no DOM |
+| `dom.js` | nodes built from text (never parsed HTML), numbers and times, links and addresses, pills, the tooltip, cards, a lifecycle's line |
+| `api.js` | the page's one `fetch`, the banner its errors go to, and what the service said at boot |
+| `table.js` | a table paged by the server |
+| `markdown.js` | a timeline entry's markdown as DOM nodes |
+| `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
+| `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views |
+| `app.js` | the Docs view, health, the stream, hash routing and boot |
+
+Every file is sent with `Cache-Control: no-cache`, so a browser never runs the modules of two deployments
+together. `tests/test_buffers_ui.py` imports the modules under node (a test dependency in `pyproject.toml`) over a
+small fake DOM, and reads all the files as one text for the rules about the page as a whole; a rule about the
+code is compared without whitespace (`has()`, `count()`), so it holds however Biome lays the code out.
+`ui/package.json` only tells node that the files are modules; the service does not serve it.
+
 Each tab is one kind of thing, and each thing has one page:
 
 - **Needs you** reads `/needs`: everything that waits on a person, with the buttons that answer it.
@@ -749,8 +771,8 @@ Each tab is one kind of thing, and each thing has one page:
 - **Cache** reads `/assets/raw|staged`, `/locks`, `/keeper` and the quotas from `/meta`.
 - **Decisions** reads `/decisions` (newest first, by gate, with the judge/human agreement); a human approve that a
   later reject overrules is marked by the server.
-- **Docs** is static: the user guide (`#docs`) and the architecture overview (`#docs/architecture`). Both live in
-  `index.html` under `data-view="docs"`.
+- **Docs** is static: the user guide (`#docs`) and the architecture overview (`#docs/architecture`). Each is a file
+  of the page (`ui/guide.html`, `ui/architecture.html`), read when it is first shown.
 
 The page opens `GET /stream` and refetches what an event names.
 
@@ -772,16 +794,24 @@ sort. Then `issue` (a GitHub mark linking the issue; empty without one), then `a
 alone in a table, the mark and `#<issue>` on the subject's own page, with a tooltip saying that the issue is a
 copy of the timeline. No link to GitHub is spelled out in words.
 
-**A subject's page says where it stands with its lifecycle.** Under the name comes one row with every link (a
-dataset's own, its GitHub issue, its workflow in Temporal, its round's crops), then the line of stages; the step a
+**A subject's page says where it stands with its lifecycle.** Under the name comes one row with the links to what the
+workflows made (its GitHub issue, its workflow in Temporal, its round's crops), then the line of stages; the step a
 round is working at is marked (`subject.status === "working"`). There is no status word on the page or in a
 table: a table shows the stage as a pill, and the buttons say whose turn it is.
 
 **A button with more to enter ends in an ellipsis.** *Reject…* opens a dialog for the feedback and sends nothing
 until some is typed; the dialog hangs off the body, so a redraw of the view behind it keeps what was typed.
 
-With an empty registry the views say so ("No catalog synced; run `mia-buffers catalog sync`."). A record's
-landing link is shown only for an `http(s)` URL.
+**A dataset's page lists every address of its catalog record in its Links card.** The row under the name has only
+what the workflows made: the GitHub issue, the workflow in Temporal, the round's crops and the saved crops. The
+Links card has the dataset's own page (`landing_url`), its DOI, each paper (`publications`), the download
+(`data.download_url`), baseline code, the record in the catalog repository and the catalog PR, then the sample
+files, evidence and inspected addresses, each address once. Only an `http(s)` address is a link; any other is
+shown as text. The catalog PR is a search for the pull requests opened from the record's branch
+(`claude/dataset/<id>`, the catalog agents' convention); a record that came into the catalog another way finds
+none.
+
+With an empty registry the views say so ("No catalog synced; run `mia-buffers catalog sync`.").
 
 **Health line.** `empty / (requests + empty)` over the last hour (`requests` counts `next` calls that served
 draws, one `ts` each; a successful `split` call is not counted), against the buffer's

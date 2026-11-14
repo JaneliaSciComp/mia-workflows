@@ -19,8 +19,8 @@ a round pins its HEAD, so the harness deploys first. Dated specs and plans are u
 ## Before you push
 
 ```
-pixi run fmt        # format + safe autofixes
-pixi run lint       # ruff check + format check
+pixi run fmt        # format + safe autofixes (ruff; Biome for the page's modules)
+pixi run lint       # ruff check + format check, Biome's lint + format check
 pixi run typecheck  # mypy
 pixi run test       # pytest, incl. Temporal replay tests; needs no GitHub, LSF or Temporal server
 ```
@@ -68,6 +68,10 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   against the stage table. Every other route the page needs is a read route (`tests/test_buffers_ui.py` enforces
   it). An action can ask a workflow to do something; it cannot write what a workflow found, which stays behind the
   worker token.
+- **The page has no build step.** `mia_buffers/ui/` is `index.html`, `app.css` and ES modules the browser loads as
+  they are. A module imports only modules below it, never in a circle (the table in `docs/development.md`, The
+  page); the tests import the modules under node, so a module must not touch the DOM when it is imported beyond
+  what `dom.js` does. What a job or a record wrote is inserted as text, never parsed as HTML.
 - **Only a person's click approves a host.** Brokers read `<csub.policy_dir>/broker.toml`, generated from the operator's
   `csub.base_policy` plus `approved-hosts.jsonl`, which buffer-api alone appends to, on a start action, with hosts
   that run's jobs need (records' URL hosts, bindings' too if the record names them, redirect targets, package hosts;

@@ -16,24 +16,31 @@ environments:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ast-serialize-0.13.0-py311hf77984d_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/biome-2.6.7-hf19af3b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/bzip2-1.0.8-hda65f42_10.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/c-ares-1.34.9-hebe6cf0_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cffi-2.1.1-py312h703531f_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cryptography-50.0.2-py311hc91d8b8_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/icu-78.3-py310h44b86e0_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ld_impl_linux-64-2.46.1-default_hbd61a6d_102.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libev-4.33-h280c20c_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libexpat-2.8.5-hd2095e1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libffi-3.7.0-h81df57d_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/liblzma-5.8.3-hb03c661_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libnghttp2-1.71.0-hc5e5977_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libnsl-2.0.1-hb9d3cd8_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libpython-3.12.14-h0c77377_3_cpython.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/libsqlite-3.53.4-h0737f62_102.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libsqlite-3.54.1-h13e7031_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libuuid-2.42.4-hcfc3c73_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libuv-1.52.1-h280c20c_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libxcrypt-4.4.38-h280c20c_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mypy-2.4.0-py312h1b36aeb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ncurses-6.6-hdb14827_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/nodejs-24.22.3-h5bd7f29_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/openssl-3.6.5-h781a0a9_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orjson-3.12.0-py312he35bb96_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/psutil-7.2.2-py312h1b36aeb_3.conda
@@ -391,7 +398,7 @@ packages:
   - __glibc >=2.17
   license: MIT
   purls:
-  - pkg:pypi/ast-serialize?source=compressed-mapping
+  - pkg:pypi/ast-serialize?source=hash-mapping
   run_exports: {}
   size: 1154654
   timestamp: 1791848677322
@@ -545,6 +552,20 @@ packages:
     - aws-checksums >=1.0.1,<1.0.2.0a0
   size: 105108
   timestamp: 1790805328182
+- conda: https://conda.anaconda.org/conda-forge/linux-64/biome-2.6.7-hf19af3b_0.conda
+  sha256: 47241a839c567014ce109a7c437862e5b38943167a7d9773ce57891b41f12d79
+  md5: 52e7c2b69a76c659c9ecbc2c460dc37f
+  depends:
+  - libgcc >=15
+  - __glibc >=2.17,<3.0.a0
+  constrains:
+  - __glibc >=2.17
+  license: MIT
+  license_family: MIT
+  purls: []
+  run_exports: {}
+  size: 29675495
+  timestamp: 1794480641107
 - conda: https://conda.anaconda.org/conda-forge/linux-64/blosc-1.21.0-h9c3ff4c_0.tar.bz2
   sha256: 209fadef3c846f7dd913ad83f197af4c5b7a14837d242dba61d0ca067e51b374
   md5: 5e815e5126c6f7e34ab4496fa1b48dca
@@ -1450,6 +1471,26 @@ packages:
     - libnghttp2 >=1.70.0,<2.0a0
   size: 832943
   timestamp: 1793191292795
+- conda: https://conda.anaconda.org/conda-forge/linux-64/libnghttp2-1.71.0-hc5e5977_0.conda
+  sha256: a4386712ad6d5bc18943b198407c39e2f8ae2fa9c6418bb37bba96f1d382f109
+  md5: 726df214814a8b06135a6a674bc54589
+  depends:
+  - libev >=4.33,<5.0a0
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=15
+  - libstdcxx >=15
+  - libev >=4.33,<4.34.0a0
+  - c-ares >=1.34.9,<2.0a0
+  - libzlib >=1.3.2,<2.0a0
+  - openssl >=3.5.9,<4.0a0
+  license: MIT
+  license_family: MIT
+  purls: []
+  run_exports:
+    weak:
+    - libnghttp2 >=1.71.0,<2.0a0
+  size: 822778
+  timestamp: 1793628201366
 - conda: https://conda.anaconda.org/conda-forge/linux-64/libnsl-2.0.1-hb9d3cd8_1.conda
   sha256: 927fe72b054277cde6cb82597d0fcf6baf127dcbce2e0a9d8925a68f1265eef5
   md5: d864d34357c3b65a4b731f78c0801dc4
@@ -1551,20 +1592,6 @@ packages:
     - libsodium >=1.0.22,<1.0.23.0a0
   size: 270970
   timestamp: 1789425325397
-- conda: https://conda.anaconda.org/conda-forge/linux-64/libsqlite-3.53.4-h0737f62_102.conda
-  sha256: 0f6e60634de2b55da15772fe65485965fd9b61afcce0d749c1446f625babba30
-  md5: 59ec6dc9fa87a6687c00969d4dcfcd97
-  depends:
-  - __glibc >=2.17,<3.0.a0
-  - libgcc >=15
-  - libzlib >=1.3.2,<2.0a0
-  license: blessing
-  purls: []
-  run_exports:
-    weak:
-    - libsqlite >=3.53.4,<4.0a0
-  size: 969522
-  timestamp: 1791167270446
 - conda: https://conda.anaconda.org/conda-forge/linux-64/libsqlite-3.54.1-h13e7031_0.conda
   sha256: 07b3c98282022f05781122d073f84e944bfb4299946e8457ece3ce6c384ff78e
   md5: 8f15f0ec9b69344df5c3bb5cce1751a1
@@ -1965,6 +1992,29 @@ packages:
     - ncurses >=6.6,<7.0a0
   size: 911196
   timestamp: 1786355078102
+- conda: https://conda.anaconda.org/conda-forge/linux-64/nodejs-24.22.3-h5bd7f29_0.conda
+  sha256: a12dbbe765033e36a650ea95567c8ba30bec845f33591c5eb65e4cac7a6033e8
+  md5: 33b90a235da875eba72f7bc869dc447f
+  depends:
+  - libgcc >=15
+  - libstdcxx >=15
+  - __glibc >=2.28,<3.0.a0
+  - libnghttp2 >=1.71.0,<2.0a0
+  - openssl >=3.5.9,<4.0a0
+  - libuv >=1.52.1,<2.0a0
+  - libsqlite >=3.54.1,<4.0a0
+  - c-ares >=1.34.9,<2.0a0
+  - icu >=78.3,<79.0a0
+  - zstd >=1.5.7,<1.6.0a0
+  - libzlib >=1.3.2,<2.0a0
+  license: MIT
+  license_family: MIT
+  purls: []
+  run_exports:
+    weak:
+    - nodejs >=24.22.3,<25.0a0
+  size: 18951931
+  timestamp: 1794471909301
 - conda: https://conda.anaconda.org/conda-forge/linux-64/numcodecs-0.17.1-py312h0ec8046_0.conda
   sha256: 2ffc65cfd9798989c1f7666f27c62e73be4f412e13a26dc5873e86dfd3cb4d6b
   md5: 09862be8788bcec8e37ccfe75e1b4245
@@ -2363,8 +2413,7 @@ packages:
   - __glibc >=2.17
   license: MIT
   license_family: MIT
-  purls:
-  - pkg:pypi/ruff?source=compressed-mapping
+  purls: []
   run_exports: {}
   size: 8926625
   timestamp: 1791586553873

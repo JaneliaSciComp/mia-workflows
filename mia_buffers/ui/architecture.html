@@ -1,0 +1,667 @@
+<!-- The architecture overview: how the services, workflows and storage fit together. The Docs view shows it. -->
+<header>
+  <div class="eyebrow">architecture · mia-data, mia-buffers and buffer-api</div>
+  <h1>MIA Training Buffers</h1>
+  <p>The system is two pipelines that share one registry. <b>mia-data</b> turns a catalog record into a prepared dataset, which means an approved binding and verified crops on shared storage. <b>mia-buffers</b> turns a buffer spec into served crops. It plans over prepared datasets only, fetches the raw files once into a shared cache, stages each volume as an immutable OME-Zarr pyramid, and registers each pyramid with <b>buffer-api</b>, the one service that picks every crop. Training jobs pull crop descriptors from the service and read the pyramids themselves.</p>
+  <p>buffer-api also serves <b>this page</b>, which is how a person starts, approves or cancels anything. A button is a request to buffer-api; the service checks it against the stage of the thing it is about and passes it to that thing's workflow. Every step a workflow takes is written to the registry as a stage and a timeline entry, and the page follows them as they happen.</p>
+</header>
+
+<h2>1. System layout</h2>
+<p>One host runs everything that holds a credential: Temporal, the two workers and buffer-api. Jobs run on the cluster and see only files. In the figure, lines run in the gutters between columns, and each later figure drills into one part of this one.</p>
+<figure>
+<svg viewBox="0 0 960 540" role="img" aria-label="Components of the system: GitHub repositories on the left, one host with the two workers and buffer-api in the middle, cluster jobs and shared storage below, the page and the training job on the right. The workers write a copy of each timeline to GitHub; the page reads from buffer-api and sends it actions.">
+<defs><marker id="f1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<!-- GitHub column -->
+<rect class="b" x="20" y="62" width="175" height="55" rx="4"/>
+<text class="t" x="28" y="82">mia-workflow-data</text>
+<text class="s" x="28" y="98">one issue per dataset: a copy</text>
+<rect class="b" x="20" y="140" width="175" height="55" rx="4"/>
+<text class="t" x="28" y="160">mia-buffers issues</text>
+<text class="s" x="28" y="176">specs · requests: copies</text>
+<rect class="b" x="20" y="225" width="175" height="55" rx="4"/>
+<text class="t" x="28" y="245">mia-snippets</text>
+<text class="s" x="28" y="261">readers · tensorisers · harness</text>
+<rect class="b" x="20" y="305" width="175" height="55" rx="4"/>
+<text class="t" x="28" y="325">mia-agentic-search</text>
+<text class="s" x="28" y="341">catalog records, pinned by commit</text>
+<!-- the host -->
+<rect class="band" x="250" y="40" width="410" height="215" rx="6"/>
+<text class="hd" x="262" y="56">one host · mia.yaml · local disk for locks and SQLite</text>
+<rect class="b" x="280" y="66" width="175" height="55" rx="4"/>
+<text class="t" x="288" y="86">mia-data worker</text>
+<text class="s" x="288" y="102">match · crops · save</text>
+<rect class="b" x="280" y="140" width="175" height="55" rx="4"/>
+<text class="t" x="288" y="160">mia-buffers worker</text>
+<text class="s" x="288" y="176">plan · fetch · stage · keeper</text>
+<rect class="bs" x="480" y="66" width="170" height="129" rx="4"/>
+<text class="t" x="488" y="86">buffer-api</text>
+<text class="s" x="488" y="104">the registry: an index of</text>
+<text class="s" x="488" y="118">what is on disk</text>
+<text class="s" x="488" y="140">workers write with a token</text>
+<text class="s" x="488" y="154">the page reads, sends actions</text>
+<text class="s" x="488" y="168">starts and signals workflows</text>
+<text class="s" x="488" y="186">also serves the page</text>
+<text class="s" x="262" y="243">Temporal runs the workflows on the same host</text>
+<!-- jobs -->
+<rect class="b" x="280" y="300" width="110" height="50" rx="4"/>
+<text class="t" x="288" y="320">mia-data jobs</text>
+<text class="s" x="288" y="337">match · crop</text>
+<rect class="b" x="410" y="300" width="110" height="50" rx="4"/>
+<text class="t" x="418" y="320">fetch job</text>
+<text class="s" x="418" y="337">files → raw cache</text>
+<rect class="b" x="540" y="300" width="110" height="50" rx="4"/>
+<text class="t" x="548" y="320">stage job</text>
+<text class="s" x="548" y="337">cache → pyramid</text>
+<!-- storage band -->
+<rect class="band" x="250" y="385" width="410" height="140" rx="6"/>
+<text class="hd" x="262" y="401">shared storage · the truth the registry indexes</text>
+<rect class="b" x="280" y="412" width="110" height="50" rx="4"/>
+<text class="lm" x="288" y="431">crops/</text>
+<text class="s" x="288" y="448">binding · manifest</text>
+<rect class="un" x="410" y="412" width="110" height="50" rx="4"/>
+<text class="lm" x="418" y="431">raw/</text>
+<text class="s" x="418" y="448">untrusted bytes</text>
+<rect class="b" x="540" y="412" width="110" height="50" rx="4"/>
+<text class="lm" x="548" y="431">staged/</text>
+<text class="s" x="548" y="448">pyramids by id</text>
+<text class="s" x="262" y="486">plus state/ per service: rounds, plans, backups, the draws archive</text>
+<text class="s" x="262" y="502">tinted: bytes no reviewed code has read yet</text>
+<!-- right column -->
+<rect class="b" x="735" y="62" width="205" height="55" rx="4"/>
+<text class="t" x="743" y="82">the page</text>
+<text class="s" x="743" y="98">served by buffer-api · no login</text>
+<rect class="bs" x="735" y="140" width="205" height="55" rx="4"/>
+<text class="t" x="743" y="160">training job</text>
+<text class="s" x="743" y="176">descriptors in, reads the pyramid</text>
+<!-- GitHub ↔ workers -->
+<line class="e" x1="195" y1="90" x2="280" y2="90" marker-start="url(#f1)"/>
+<text class="l" x="237" y="83" text-anchor="middle">mirror</text>
+<line class="e" x1="195" y1="167" x2="280" y2="167" marker-start="url(#f1)"/>
+<text class="l" x="237" y="160" text-anchor="middle">mirror</text>
+<path class="e" d="M195 252 H225 V330"/>
+<path class="e" d="M195 332 H225"/>
+<path class="e" d="M225 290 H262 V200 H280" marker-end="url(#f1)"/>
+<text class="l" x="232" y="285">pinned</text>
+<text class="l" x="232" y="299">snapshots</text>
+<!-- workers → buffer-api -->
+<line class="e" x1="455" y1="93" x2="480" y2="93" marker-end="url(#f1)"/>
+<line class="e" x1="455" y1="167" x2="480" y2="167" marker-end="url(#f1)"/>
+<text class="l" x="467" y="208" text-anchor="middle">token</text>
+<!-- workers → jobs (csub), in the left gutter and below the band -->
+<path class="e" d="M280 110 H262 V325 H280" marker-end="url(#f1)"/>
+<text class="l" x="258" y="365" text-anchor="end">csub</text>
+<path class="e" d="M400 195 V270 H465 V300" marker-end="url(#f1)"/>
+<path class="e" d="M430 195 V260 H595 V300" marker-end="url(#f1)"/>
+<text class="l" x="520" y="254" text-anchor="middle">csub</text>
+<!-- jobs → storage -->
+<line class="e" x1="335" y1="350" x2="335" y2="412" marker-end="url(#f1)"/>
+<line class="e" x1="465" y1="350" x2="465" y2="412" marker-end="url(#f1)"/>
+<line class="e" x1="595" y1="350" x2="595" y2="412" marker-end="url(#f1)"/>
+<text class="l" x="400" y="385" text-anchor="middle">read · write</text>
+<!-- right column ↔ buffer-api, training job → staged -->
+<line class="e" x1="735" y1="90" x2="650" y2="90" marker-end="url(#f1)"/>
+<text class="l" x="692" y="83" text-anchor="middle">GET · actions</text>
+<line class="e" x1="735" y1="167" x2="650" y2="167" marker-start="url(#f1)" marker-end="url(#f1)"/>
+<text class="l" x="692" y="160" text-anchor="middle">next · status</text>
+<path class="ea" d="M837 195 V437 H650" marker-end="url(#f1)"/>
+<text class="l" x="745" y="430" text-anchor="middle">reads pyramids</text>
+</svg>
+<figcaption><b>Figure 1.</b> The workers are the only components that talk to GitHub and submit jobs. From GitHub they take pinned snapshots of the snippets and the catalog; to GitHub they write a copy of each timeline (the mirror), and nothing on those issues is read back. Jobs see files and nothing else: they hold no token, see no lock directory and call no service. buffer-api holds the registry, serves the page and passes a person's actions to the workflows through Temporal; it holds no GitHub credential and deletes nothing. The training job and the page both read from it, but only the training job touches the pyramids.</figcaption>
+</figure>
+
+<h2>2. Two workflows around shared resources</h2>
+<p>In the figure, data preparation runs along the top and buffering along the bottom. Everything they share sits in the middle: the registry, the raw cache, the staged artifacts, the saved crops and the lock directory. Solid arrows are the workflow, read left to right. Dashed arrows say which resource a step reads or writes, and the columns line up so that each dashed arrow stays in its own lane.</p>
+<figure>
+<svg viewBox="0 0 960 630" role="img" aria-label="Three bands: data preparation steps on top, shared resources in the middle (locks, raw cache, staged artifacts, saved crops, registry), buffering steps below; solid arrows join each pipeline's steps left to right, dashed arrows show which step reads or writes which resource, and a preparation request on the left reaches up from buffering to the dataset's round.">
+<defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<!-- bands -->
+<rect class="band" x="20" y="30" width="920" height="140" rx="6"/>
+<text class="hd" x="32" y="46">data preparation · mia-data worker, its agent and jobs</text>
+<rect class="band" x="20" y="250" width="920" height="120" rx="6"/>
+<text class="hd" x="32" y="266">shared resources</text>
+<rect class="band" x="20" y="450" width="920" height="150" rx="6"/>
+<text class="hd" x="32" y="466">buffering · mia-buffers worker, its jobs and the keeper</text>
+<!-- top boxes -->
+<rect class="b" x="40" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="48" y="78">a dataset's round</text>
+<text class="s" x="48" y="96">Start on its page,</text>
+<text class="s" x="48" y="110">or a preparation request</text>
+<text class="s" x="48" y="124">ends at done</text>
+<rect class="b" x="225" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="233" y="78">match</text>
+<text class="s" x="233" y="96">an agent writes the binding;</text>
+<text class="s" x="233" y="110">a job opens every array</text>
+<text class="s" x="233" y="124">and reads one patch</text>
+<rect class="b" x="410" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="418" y="78">crops · review</text>
+<text class="s" x="418" y="96">one set, verified, shown; Approve</text>
+<text class="s" x="418" y="110">saves it, Reject loops (fig. 3b);</text>
+<text class="s" x="418" y="124">downloads land in the raw cache</text>
+<path class="ea" d="M545 58 V44 H425 V58" marker-end="url(#f2)"/>
+<text class="l" x="552" y="40">Reject: fix, then new crops</text>
+<rect class="bs" x="595" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="603" y="78">save</text>
+<text class="s" x="603" y="96">the reviewed crops, binding.yaml</text>
+<text class="s" x="603" y="110">and a manifest naming the</text>
+<text class="s" x="603" y="124">binding: this is "prepared"</text>
+<rect class="b" x="780" y="58" width="150" height="90" rx="4"/>
+<text class="t" x="788" y="78">report the stage</text>
+<text class="s" x="788" y="96">every stage is written to</text>
+<text class="s" x="788" y="110">the registry: the timeline</text>
+<text class="s" x="788" y="124">and the dataset's row</text>
+<!-- the data preparation workflow, left to right -->
+<line class="e" x1="190" y1="103" x2="225" y2="103" marker-end="url(#f2)"/>
+<line class="e" x1="375" y1="103" x2="410" y2="103" marker-end="url(#f2)"/>
+<line class="e" x1="560" y1="103" x2="595" y2="103" marker-end="url(#f2)"/>
+<line class="e" x1="745" y1="103" x2="780" y2="103" marker-end="url(#f2)"/>
+<text class="l" x="762" y="48" text-anchor="middle">at each step</text>
+<!-- middle boxes -->
+<rect class="b" x="40" y="278" width="150" height="70" rx="4"/>
+<text class="lm" x="48" y="297">locks/raw/&lt;record&gt;</text>
+<text class="s" x="48" y="314">host-local disk</text>
+<text class="s" x="48" y="328">one cache writer at a time</text>
+<rect class="un" x="225" y="278" width="150" height="70" rx="4"/>
+<text class="lm" x="233" y="297">raw/&lt;record&gt;/</text>
+<text class="s" x="233" y="314">original files, files.json</text>
+<text class="s" x="233" y="328">shared by both pipelines</text>
+<rect class="b" x="410" y="278" width="150" height="70" rx="4"/>
+<text class="lm" x="418" y="297">staged/…/&lt;artifact&gt;/</text>
+<text class="s" x="418" y="314">immutable pyramids</text>
+<text class="s" x="418" y="328">id = hash of every input</text>
+<rect class="b" x="595" y="278" width="150" height="70" rx="4"/>
+<text class="lm" x="603" y="297">crops/&lt;folder&gt;/</text>
+<text class="s" x="603" y="314">binding · manifest · crops</text>
+<text class="s" x="603" y="328">mia-data's output lives here</text>
+<rect class="bs" x="780" y="278" width="150" height="70" rx="4"/>
+<text class="t" x="788" y="297">registry (buffer-api)</text>
+<text class="s" x="788" y="314">subjects · timelines</text>
+<text class="s" x="788" y="328">datasets · assets · draws</text>
+<!-- bottom boxes -->
+<rect class="b" x="40" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="48" y="498">spec · plan</text>
+<text class="s" x="48" y="516">Plan plans over the</text>
+<text class="s" x="48" y="530">prepared rows (fig. 3), a</text>
+<text class="s" x="48" y="544">person runs it; a request</text>
+<text class="s" x="48" y="558">asks mia-data for datasets</text>
+<rect class="b" x="225" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="233" y="498">fetch</text>
+<text class="s" x="233" y="516">harness fetch fills the</text>
+<text class="s" x="233" y="530">raw cache under the lock,</text>
+<text class="s" x="233" y="544">resuming until complete</text>
+<rect class="b" x="410" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="418" y="498">stage</text>
+<text class="s" x="418" y="516">cache read-only, no network;</text>
+<text class="s" x="418" y="530">the worker saves the</text>
+<text class="s" x="418" y="544">pyramid by rename</text>
+<rect class="bs" x="595" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="603" y="498">register</text>
+<text class="s" x="603" y="516">volumes with refs to the</text>
+<text class="s" x="603" y="530">raw and the artifact; ready</text>
+<text class="s" x="603" y="544">once each group meets</text>
+<text class="s" x="603" y="558">the spec's floor</text>
+<rect class="b" x="780" y="478" width="150" height="100" rx="4"/>
+<text class="t" x="788" y="498">keeper</text>
+<text class="s" x="788" y="516">syncs rows with the files,</text>
+<text class="s" x="788" y="530">evicts free assets under</text>
+<text class="s" x="788" y="544">quota, watches ready buffers</text>
+<!-- the buffering workflow, left to right (the keeper is a schedule beside it) -->
+<line class="e" x1="190" y1="528" x2="225" y2="528" marker-end="url(#f2)"/>
+<line class="e" x1="375" y1="528" x2="410" y2="528" marker-end="url(#f2)"/>
+<line class="e" x1="560" y1="528" x2="595" y2="528" marker-end="url(#f2)"/>
+<text class="l" x="762" y="590" text-anchor="middle">every keeper.minutes (30)</text>
+<!-- top → middle arrows -->
+<line class="ed" x1="300" y1="148" x2="300" y2="278" marker-start="url(#f2)" marker-end="url(#f2)"/>
+<text class="l" x="306" y="206">reads · writes</text>
+<text class="l" x="306" y="220">under the lock</text>
+<line class="ed" x1="240" y1="148" x2="140" y2="278" marker-end="url(#f2)"/>
+<text class="l" x="150" y="190" text-anchor="end">takes</text>
+<line class="ed" x1="430" y1="148" x2="360" y2="278" marker-start="url(#f2)" marker-end="url(#f2)"/>
+<text class="l" x="420" y="226" text-anchor="start">reads the original files; a file not</text>
+<text class="l" x="420" y="240" text-anchor="start">cached yet is downloaded into place</text>
+<line class="ed" x1="670" y1="148" x2="670" y2="278" marker-end="url(#f2)"/>
+<text class="l" x="676" y="214">writes</text>
+<line class="ed" x1="855" y1="148" x2="855" y2="278" marker-end="url(#f2)"/>
+<text class="l" x="861" y="206">PUT datasets</text>
+<text class="l" x="861" y="220">until prepared</text>
+<!-- bottom → middle arrows -->
+<line class="ed" x1="300" y1="478" x2="300" y2="348" marker-end="url(#f2)"/>
+<text class="l" x="306" y="418">writes, locked</text>
+<line class="ed" x1="240" y1="478" x2="140" y2="348" marker-end="url(#f2)"/>
+<text class="l" x="150" y="440" text-anchor="end">takes</text>
+<line class="ed" x1="370" y1="348" x2="430" y2="478" marker-end="url(#f2)"/>
+<text class="l" x="408" y="396" text-anchor="start">reads</text>
+<line class="ed" x1="485" y1="478" x2="485" y2="348" marker-end="url(#f2)"/>
+<text class="l" x="491" y="440">saves by rename</text>
+<line class="ed" x1="670" y1="478" x2="670" y2="348" marker-end="url(#f2)"/>
+<text class="l" x="676" y="418">binding hash</text>
+<line class="ed" x1="730" y1="478" x2="820" y2="348" marker-start="url(#f2)" marker-end="url(#f2)"/>
+<text class="l" x="752" y="463" text-anchor="start">volumes · refs</text>
+<line class="ed" x1="870" y1="478" x2="870" y2="348" marker-start="url(#f2)" marker-end="url(#f2)"/>
+<text class="l" x="876" y="418">asset rows</text>
+<text class="l" x="876" y="432">syncs</text>
+<!-- prep request: bottom-left up to the dataset issue -->
+<path class="ea" d="M60 478 V460 H30 V103 H40" marker-end="url(#f2)"/>
+<text class="l" transform="rotate(-90 12 300)" x="12" y="300" text-anchor="middle">a preparation request sends each dataset a go</text>
+</svg>
+<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is saved together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
+</figure>
+
+<h2>3. How a dataset becomes prepared</h2>
+<p>A dataset is <b>prepared</b> when its latest round ended <code>done</code> with a binding and a manifest saved. Its state is the word for a person: <code>in-progress</code> while a round works by itself, <code>needs-human</code> whenever a person has to act (crops to review, a stopped or cancelled round), <code>prepared</code> after that. Running a prepared dataset again takes it out of <code>prepared</code> until the new round's crops are approved. A buffer plans over prepared datasets only, and asking for more datasets to be prepared is its own, explicit request. Preparation judges nothing about who may use a dataset. Licence, modality, organism, annotations and fit at a given patch size and set of levels are all filters of a buffer spec, and the planner evaluates them per spec. A dataset of 60-pixel images is therefore prepared like any other and simply fails the fit rule of a 256-pixel buffer. The only place preparation stops is a <code>needs-human</code> stage. A dataset whose catalog record lacks what a round needs (a data URL with a host) cannot be started at all: its page says what is missing and offers no <i>Start</i>, and it can be started once a catalog sync brings a record that has it.</p>
+<figure>
+<svg viewBox="0 0 960 300" role="img" aria-label="Three lanes: a dataset's round in mia-data runs from Start to done and saves a binding; the registry row moves from unprepared through in-progress to prepared, or to needs-human when a person has to act; the buffer plans over prepared rows, and a preparation request bridges unprepared datasets to mia-data.">
+<defs><marker id="f2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<text class="hd" x="20" y="36">mia-data · a dataset's round</text>
+<rect class="b" x="20" y="48" width="110" height="40" rx="8"/><text class="t" x="75" y="73" text-anchor="middle">Start</text>
+<rect class="b" x="160" y="48" width="130" height="40" rx="8"/><text class="t" x="225" y="73" text-anchor="middle">match</text>
+<rect class="b" x="320" y="48" width="150" height="40" rx="8"/><text class="t" x="395" y="73" text-anchor="middle">crops · review</text>
+<path class="ea" d="M450 48 V34 H340 V48" marker-end="url(#f2)"/><text class="l" x="395" y="30" text-anchor="middle">Reject → fix → new crops (fig. 3b)</text>
+<rect class="bs" x="500" y="48" width="150" height="40" rx="8"/><text class="t" x="575" y="73" text-anchor="middle">save · done</text>
+<line class="e" x1="130" y1="68" x2="160" y2="68" marker-end="url(#f2)"/>
+<line class="e" x1="290" y1="68" x2="320" y2="68" marker-end="url(#f2)"/>
+<line class="e" x1="470" y1="68" x2="500" y2="68" marker-end="url(#f2)"/><text class="l" x="485" y="100" text-anchor="middle">Approve</text>
+<text class="s" x="660" y="64">binding.yaml + manifest.json</text>
+<text class="s" x="660" y="78">land in crops/&lt;folder&gt;/</text>
+<!-- registry lane -->
+<text class="hd" x="20" y="136">registry · datasets row</text>
+<rect class="note" x="20" y="148" width="110" height="40" rx="8"/><text class="t" x="75" y="173" text-anchor="middle">unprepared</text>
+<rect class="b" x="160" y="148" width="310" height="40" rx="8"/><text class="t" x="315" y="167" text-anchor="middle">in-progress</text><text class="s" x="315" y="181" text-anchor="middle">a round working by itself</text>
+<rect class="bs" x="500" y="148" width="150" height="40" rx="8"/><text class="t" x="575" y="173" text-anchor="middle">prepared</text>
+<rect class="un" x="690" y="148" width="130" height="40" rx="8"/><text class="t" x="755" y="167" text-anchor="middle">needs-human</text><text class="s" x="755" y="181" text-anchor="middle">a person has to act</text>
+<line class="e" x1="130" y1="168" x2="160" y2="168" marker-end="url(#f2)"/>
+<line class="e" x1="470" y1="168" x2="500" y2="168" marker-end="url(#f2)"/>
+<line class="ed" x1="75" y1="88" x2="75" y2="148" marker-end="url(#f2)"/>
+<line class="ed" x1="575" y1="88" x2="575" y2="148" marker-end="url(#f2)"/>
+<line class="ed" x1="470" y1="88" x2="700" y2="148" marker-end="url(#f2)"/>
+<text class="s" x="840" y="168">a sync rebuilds the</text>
+<text class="s" x="840" y="182">rows from the files</text>
+<!-- buffers lane -->
+<text class="hd" x="20" y="236">mia-buffers</text>
+<rect class="b" x="20" y="248" width="200" height="40" rx="8"/><text class="t" x="120" y="267" text-anchor="middle">preparation request</text><text class="s" x="120" y="281" text-anchor="middle">ticked datasets, or a plan's</text>
+<rect class="bs" x="500" y="248" width="150" height="40" rx="8"/><text class="t" x="575" y="267" text-anchor="middle">buffer plan</text><text class="s" x="575" y="281" text-anchor="middle">prepared rows only</text>
+<path class="e" d="M120 248 V210 H75 V188" marker-end="url(#f2)"/>
+<text class="l" x="200" y="222">a go for each dataset</text>
+<line class="e" x1="575" y1="188" x2="575" y2="248" marker-end="url(#f2)"/>
+<text class="l" x="582" y="222">in the pool</text>
+<path class="ed" d="M320 188 V268 H500"/>
+<text class="l" x="410" y="262" text-anchor="middle">"not prepared": out of the pool,</text>
+<text class="l" x="410" y="276" text-anchor="middle">listed under its own heading</text>
+</svg>
+<figcaption><b>Figure 3.</b> The registry row is derived state. mia-data writes it as its stages change, and <code>datasets sync</code> rebuilds it from the saved files. A buffer never asks mia-data for a dataset. A preparation request does that instead: it sends each of its datasets a <code>go</code> through buffer-api, charged to the request, and follows the rows until each dataset is <code>prepared</code> or <code>needs-human</code>, which includes one whose crops wait for a review; then the request ends, <code>done</code> when all are prepared. Hand-placed bindings do not count as prepared. There is no <code>ineligible</code> state, because a size or licence verdict taken here would bind every buffer that ever asks. Each buffer's plan takes that verdict instead.</figcaption>
+</figure>
+
+<h3 style="font-size:16px;font-weight:600;margin:28px 0 6px">3b. The review loop</h3>
+<p>Every set of crops waits at <code>review</code>, including a set made from a snippet PR. <i>Approve</i> on the dataset's page saves the set the reviewer looked at. When that set came from a PR head, the worker first has autodev merge that head, and the same files are saved under the merge commit. <i>Reject</i> sends the feedback typed with it to the agent. When the round is following a PR, the feedback goes as <code>/revise</code> on that PR. Otherwise it goes as a new mia-snippets issue asking for a snippet that supersedes the one at fault, because a merged snippet is never edited. The next set of crops comes back to review, and the loop continues until the reviewer approves.</p>
+<p>Every verdict is written to the registry as an assessment before anything acts on it. A judge, a second model that reads the same gallery, can look at each set first: in shadow mode its verdict is recorded beside the person's and decides nothing, and the <a href="#decisions">Decisions</a> tab shows how often the two agree. <i>Revoke</i> at any later time withdraws a saved set: its artifacts are quarantined, the buffers that drew from it unregister the dataset, and <i>Run again</i> on the dataset's page repairs it.</p>
+<figure>
+<svg viewBox="0 0 960 270" role="img" aria-label="Two lanes. Top, the dataset's stages: Start, match, crops and verify, review, merging, done. Bottom, mia-snippets: the snippets issue, the PR head, and the feedback step. Loops: a PR head's crops go up to review; a reject or a failed set goes down to the PR as /revise and a new head comes back; an approve goes to merging and the merged head's crops are saved.">
+<defs><marker id="f3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<text class="hd" x="20" y="18">mia-data · the dataset's stages</text>
+<rect class="b" x="20" y="44" width="100" height="40" rx="8"/><text class="t" x="70" y="69" text-anchor="middle">Start</text>
+<rect class="b" x="150" y="44" width="130" height="40" rx="8"/><text class="t" x="215" y="69" text-anchor="middle">match</text>
+<rect class="b" x="310" y="44" width="150" height="40" rx="8"/><text class="t" x="385" y="63" text-anchor="middle">crops · verify</text><text class="s" x="385" y="77" text-anchor="middle">the set, its gallery</text>
+<rect class="bs" x="490" y="44" width="130" height="40" rx="8"/><text class="t" x="555" y="69" text-anchor="middle">review</text>
+<rect class="b" x="650" y="44" width="120" height="40" rx="8"/><text class="t" x="710" y="69" text-anchor="middle">merging</text>
+<rect class="bs" x="800" y="44" width="140" height="40" rx="8"/><text class="t" x="870" y="63" text-anchor="middle">done</text><text class="s" x="870" y="77" text-anchor="middle">crops saved</text>
+<line class="e" x1="120" y1="64" x2="150" y2="64" marker-end="url(#f3b)"/>
+<line class="e" x1="280" y1="64" x2="310" y2="64" marker-end="url(#f3b)"/><text class="l" x="295" y="100" text-anchor="middle">matched</text>
+<line class="e" x1="460" y1="64" x2="490" y2="64" marker-end="url(#f3b)"/><text class="l" x="475" y="100" text-anchor="middle">≥ half verified</text>
+<line class="ea" x1="620" y1="64" x2="650" y2="64" marker-end="url(#f3b)"/><text class="l" x="635" y="100" text-anchor="middle">Approve, PR head:</text><text class="lm" x="635" y="113" text-anchor="middle">/approve &lt;head&gt;</text>
+<line class="ea" x1="770" y1="64" x2="800" y2="64" marker-end="url(#f3b)"/><text class="l" x="785" y="100" text-anchor="middle">autodev merges</text>
+<path class="ea" d="M555 44 V28 H870 V44" marker-end="url(#f3b)"/><text class="l" x="712" y="24" text-anchor="middle">Approve, matched binding: save</text>
+<!-- mia-snippets lane -->
+<text class="hd" x="20" y="170">mia-snippets · autodev</text>
+<rect class="b" x="150" y="190" width="130" height="44" rx="8"/><text class="t" x="215" y="209" text-anchor="middle">snippets issue</text><text class="s" x="215" y="224" text-anchor="middle">autodev takes it</text>
+<rect class="un" x="310" y="190" width="150" height="44" rx="8"/><text class="t" x="385" y="209" text-anchor="middle">PR head</text><text class="s" x="385" y="224" text-anchor="middle">autodev's agent wrote it</text>
+<rect class="b" x="490" y="190" width="160" height="44" rx="8"/><text class="t" x="570" y="209" text-anchor="middle">feedback to autodev</text><text class="s" x="570" y="224" text-anchor="middle">/revise the PR, or a new issue</text>
+<rect class="un" x="800" y="190" width="140" height="44" rx="8"/><text class="t" x="870" y="209" text-anchor="middle">failed · blocked</text><text class="s" x="870" y="224" text-anchor="middle">Run again resumes</text>
+<line class="e" x1="215" y1="84" x2="215" y2="190" marker-end="url(#f3b)"/><text class="l" x="221" y="164">no snippet fits</text>
+<line class="e" x1="280" y1="212" x2="310" y2="212" marker-end="url(#f3b)"/>
+<line class="ea" x1="490" y1="212" x2="460" y2="212" marker-end="url(#f3b)"/><text class="l" x="475" y="264" text-anchor="middle">a new head</text>
+<line class="e" x1="370" y1="190" x2="370" y2="84" marker-end="url(#f3b)"/><text class="l" x="364" y="130" text-anchor="end">each head: the set,</text><text class="l" x="364" y="143" text-anchor="end">private cache</text>
+<line class="ea" x1="430" y1="84" x2="430" y2="190" marker-end="url(#f3b)"/><text class="l" x="436" y="130">crops failed:</text><text class="lm" x="436" y="143">/revise + report</text>
+<line class="ea" x1="570" y1="84" x2="570" y2="190" marker-end="url(#f3b)"/><text class="l" x="576" y="130">Reject: the feedback</text><text class="l" x="576" y="143">typed with it</text>
+<text class="l" x="570" y="248" text-anchor="middle">no PR yet: an issue to supersede the snippet</text>
+<line class="ed" x1="650" y1="212" x2="800" y2="212" marker-end="url(#f3b)"/><text class="l" x="725" y="206" text-anchor="middle">revision limit,</text><text class="l" x="725" y="228" text-anchor="middle">PR closed</text>
+</svg>
+<figcaption><b>Figure 3b.</b> There are two loops, and both end in the reviewer's approve. The inner loop belongs to autodev and has no person in it: a head whose crops fail verification receives the report as <code>/revise</code>, and the next head is tested again. The outer loop belongs to the reviewer: they reject with feedback, the agent revises, new crops are made, and the set comes back to review. Rejecting a matched binding starts a PR where there was none, through an issue asking autodev to supersede the binding's snippet, and from there it is the same loop. autodev merges only on the worker's <code>/approve</code> of the exact head whose crops the reviewer approved, and the saved crops are those files under the merge commit. One rare case is not drawn: a merge whose snippet tree differs from the approved head's, because someone pushed more commits, makes its own set and goes back through review. The loop stops at autodev's revision limit, after five heads in one round, or when the PR is closed. mia-snippets is the one repository whose issues and pull requests drive anything: autodev works there.</figcaption>
+</figure>
+
+<h2>4. From a click to a stage</h2>
+<p>A dataset, a buffer spec and a preparation request are each a <b>subject</b> in the registry: a key, a stage, a revision that rises with every stage, and a timeline. One table per kind (<code>STAGE_ACTIONS</code> in <code>mia_data/config.py</code> and <code>mia_buffers/config.py</code>) says which actions each stage accepts and whether a round is in progress there. buffer-api refuses anything the table does not list, and the page offers only what it lists. The workflow is the only writer of stages, and every stage write is awaited, so the registry's stage is the workflow's.</p>
+<figure>
+<svg viewBox="0 0 940 400" role="img" aria-label="Sequence between the page, buffer-api, a workflow on a worker and the GitHub issue: the page posts an action; buffer-api checks it against the stage table, records it and starts or signals the workflow; the workflow writes its stage and a timeline entry back with the worker token; the page hears of the change on the stream and fetches the subject again; the mirror copies the entry to the GitHub issue, which nothing reads.">
+<defs><marker id="f9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<rect class="b" x="35" y="14" width="150" height="34" rx="4"/><text class="t" x="110" y="36" text-anchor="middle">the page</text>
+<rect class="bs" x="295" y="14" width="150" height="34" rx="4"/><text class="t" x="370" y="36" text-anchor="middle">buffer-api</text>
+<rect class="b" x="545" y="14" width="150" height="34" rx="4"/><text class="t" x="620" y="36" text-anchor="middle">workflow · worker</text>
+<rect class="b" x="775" y="14" width="150" height="34" rx="4"/><text class="t" x="850" y="36" text-anchor="middle">GitHub issue</text>
+<line class="ll" x1="110" y1="48" x2="110" y2="392"/>
+<line class="ll" x1="370" y1="48" x2="370" y2="392"/>
+<line class="ll" x1="620" y1="48" x2="620" y2="392"/>
+<line class="ll" x1="850" y1="48" x2="850" y2="392"/>
+<line class="e" x1="110" y1="80" x2="370" y2="80" marker-end="url(#f9)"/>
+<text class="l" x="240" y="73" text-anchor="middle">POST …/actions · {action, key, revision}</text>
+<rect class="note" x="380" y="90" width="230" height="32" rx="3"/>
+<text class="s" x="388" y="103">does this stage accept the action?</text>
+<text class="s" x="388" y="116">the action is recorded, pending</text>
+<line class="e" x1="370" y1="146" x2="620" y2="146" marker-end="url(#f9)"/>
+<text class="l" x="495" y="139" text-anchor="middle">start or signal through Temporal · sent</text>
+<line class="e" x1="370" y1="172" x2="110" y2="172" marker-end="url(#f9)"/>
+<text class="l" x="240" y="165" text-anchor="middle">200 · the subject says what was asked</text>
+<rect class="note" x="120" y="182" width="240" height="32" rx="3"/>
+<text class="s" x="128" y="195">409: what the stage accepts instead</text>
+<text class="s" x="128" y="208">503: not delivered; the page offers Retry</text>
+<line class="ea" x1="620" y1="244" x2="370" y2="244" marker-end="url(#f9)"/>
+<text class="l" x="495" y="237" text-anchor="middle">POST /timeline/… · {stage, body} · token</text>
+<rect class="note" x="380" y="254" width="230" height="32" rx="3"/>
+<text class="s" x="388" y="267">the stage is the subject's, revision + 1;</text>
+<text class="s" x="388" y="280">an entry is appended once per marker</text>
+<line class="e" x1="370" y1="310" x2="110" y2="310" marker-end="url(#f9)"/>
+<text class="l" x="240" y="303" text-anchor="middle">/stream · the page fetches it again</text>
+<line class="e" x1="620" y1="344" x2="850" y2="344" marker-end="url(#f9)"/>
+<text class="l" x="735" y="337" text-anchor="middle">MiaMirror: a comment per entry</text>
+<rect class="note" x="630" y="354" width="210" height="32" rx="3"/>
+<text class="s" x="638" y="367">retried until GitHub answers;</text>
+<text class="s" x="638" y="380">nothing is read back</text>
+</svg>
+<figcaption><b>Figure 4.</b> One click, end to end. The action routes take no token: they accept JSON from this page's own origin only, and they can ask a workflow to do something but cannot write what a workflow found, which stays behind the worker token. <i>Approve</i> and <i>Reject</i> carry the revision the page was showing and are refused if the subject has moved on. A <code>key</code> sent again is the same action, which the workflow drops if it already handled it, so <i>Retry</i> runs nothing twice; nothing retries in the background. Between the click and the workflow's first write the subject carries <code>asked</code>, and the page holds that subject's buttons (for at most a minute, so a worker that is away cannot hold them). The <code>MiaMirror</code> workflow posts each timeline entry once as a comment on the subject's GitHub issue and sets the stage as the issue's label.</figcaption>
+</figure>
+<div class="tw"><table>
+<tr><th>subject</th><th>its page</th><th>action route</th><th>actions</th></tr>
+<tr><td>dataset</td><td><code>#datasets/&lt;record&gt;</code></td><td><code>POST /datasets/&lt;record&gt;/actions</code></td><td><code>go</code> (<i>Start</i>, <i>Run again</i>, <i>Restart</i> at review), <code>approve</code>, <code>reject</code> with a note, <code>revoke</code>, <code>cancel</code></td></tr>
+<tr><td>buffer spec</td><td><code>#specs/&lt;name&gt;</code></td><td><code>POST /specs</code> · <code>POST /specs/&lt;name&gt;/actions</code></td><td><code>go</code> with <code>plan_first</code> (<i>Plan</i>), <code>approve</code> (<i>Run</i> at the plan, <i>Approve</i> at the board), <code>keep</code>, <code>retire</code>, <code>revoke</code>, <code>dropped</code> (<i>Files are in place</i>), <code>cancel</code>, <code>stop</code></td></tr>
+<tr><td>preparation request</td><td><code>#requests/&lt;key&gt;</code></td><td><code>POST /prep</code> · <code>POST /prep/&lt;number&gt;/actions</code></td><td><code>go</code>, <code>cancel</code>, <code>stop</code></td></tr>
+</table></div>
+<p><b>Cancel and force stop.</b> <code>cancel</code> ends a round in progress: the round starts no new activity, every cluster job it waits on is killed by id, locks are released and the stage becomes <code>cancelled</code>. A job that cannot be killed ends the round in <code>needs-human</code> naming it. <code>stop</code> terminates a workflow that does not answer a cancel and retires the spec's buffers; it does not kill a job already running. <b>The pause.</b> <code>mia pause</code> sets <code>autonomy.pause</code> in <code>mia.yaml</code>; every workflow stops at its next job with a <code>needs-human</code> entry that starts "paused by the operator", until <code>mia resume</code>.</p>
+
+<h2>5. Lifecycle of a buffer spec</h2>
+<p>A buffer spec is in one stage at a time. A person moves it with <i>Plan</i>, <i>Run</i>, <i>Approve</i>, <i>Keep</i>, <i>Retire</i> and <i>Cancel the round</i>; the worker and the keeper make every other transition. A round stops twice for a person: at its plan, before any job runs, and at <code>staged</code>, before anything is served.</p>
+<figure>
+<svg viewBox="0 0 1040 330" role="img" aria-label="State machine of a buffer spec: new, planning, plan-review, sourcing, staged, ready, idle, retired, with needs-human as the recovery state and cancelled for a round a person cancelled; Run at plan-review starts sourcing; Approve at staged serves the buffer, partial or not; the keeper signals degraded, idle and retire, and retires a staged buffer nobody approves.">
+<defs><marker id="f3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<rect class="b" x="20" y="60" width="90" height="50" rx="10"/>
+<text class="t" x="65" y="82" text-anchor="middle">new</text><text class="s" x="65" y="98" text-anchor="middle">spec saved</text>
+<rect class="b" x="150" y="60" width="110" height="50" rx="10"/>
+<text class="t" x="205" y="82" text-anchor="middle">planning</text><text class="s" x="205" y="98" text-anchor="middle">registry records</text>
+<rect class="b" x="300" y="60" width="130" height="50" rx="10"/>
+<text class="t" x="365" y="82" text-anchor="middle">plan-review</text><text class="s" x="365" y="98" text-anchor="middle">waits for Run</text>
+<rect class="b" x="470" y="60" width="110" height="50" rx="10"/>
+<text class="t" x="525" y="82" text-anchor="middle">sourcing</text><text class="s" x="525" y="98" text-anchor="middle">per dataset, parallel</text>
+<rect class="b" x="630" y="60" width="130" height="50" rx="10"/>
+<text class="t" x="695" y="82" text-anchor="middle">staged</text><text class="s" x="695" y="98" text-anchor="middle">the board · waits</text>
+<rect class="bs" x="810" y="60" width="110" height="50" rx="10"/>
+<text class="t" x="865" y="82" text-anchor="middle">ready</text><text class="s" x="865" y="98" text-anchor="middle">serving · watched</text>
+<rect class="b" x="810" y="220" width="110" height="50" rx="10"/>
+<text class="t" x="865" y="242" text-anchor="middle">idle</text><text class="s" x="865" y="258" text-anchor="middle">no consumer</text>
+<rect class="b" x="560" y="220" width="150" height="50" rx="10"/>
+<text class="t" x="635" y="242" text-anchor="middle">retired</text><text class="s" x="635" y="258" text-anchor="middle">refs released · draws archived</text>
+<rect class="un" x="135" y="200" width="140" height="50" rx="10"/>
+<text class="t" x="205" y="222" text-anchor="middle">needs-human</text><text class="s" x="205" y="238" text-anchor="middle">the timeline says why</text>
+<line class="e" x1="110" y1="85" x2="150" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="130" y="77" text-anchor="middle">Plan</text>
+<line class="e" x1="260" y1="85" x2="300" y2="85" marker-end="url(#f3)"/>
+<line class="e" x1="430" y1="85" x2="470" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="450" y="77" text-anchor="middle">Run</text>
+<line class="e" x1="580" y1="85" x2="630" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="605" y="77" text-anchor="middle">no job left</text>
+<line class="e" x1="760" y1="85" x2="810" y2="85" marker-end="url(#f3)"/>
+<text class="l" x="785" y="77" text-anchor="middle">Approve</text>
+<text class="l" x="785" y="124" text-anchor="middle">partial accepted;</text>
+<text class="l" x="785" y="138" text-anchor="middle">no job in between</text>
+<path class="ed" d="M700 60 C 740 20, 800 20, 850 60" marker-end="url(#f3)"/>
+<text class="l" x="780" y="30" text-anchor="middle">plan.auto_approve, every group ≥ min_fraction</text>
+<path class="e" d="M680 110 V160 H225 V110" marker-end="url(#f3)"/>
+<text class="l" x="450" y="154" text-anchor="middle">Plan again with an edited spec, from either gate (the staged buffer is retired)</text>
+<line class="e" x1="225" y1="110" x2="225" y2="200" marker-end="url(#f3)"/>
+<text class="l" x="231" y="185">invalid spec</text>
+<line class="e" x1="175" y1="200" x2="175" y2="110" marker-end="url(#f3)"/>
+<text class="l" x="169" y="185" text-anchor="end">Plan</text>
+<line class="e" x1="500" y1="110" x2="275" y2="205" marker-end="url(#f3)"/>
+<text class="l" x="405" y="192" text-anchor="middle">nothing servable after</text>
+<text class="l" x="405" y="206" text-anchor="middle">the day limit</text>
+<line class="e" x1="710" y1="110" x2="660" y2="220" marker-end="url(#f3)"/>
+<text class="l" x="700" y="198" text-anchor="start">keeper: not approved</text>
+<text class="l" x="700" y="212" text-anchor="start">in retire_after_days</text>
+<line class="e" x1="830" y1="110" x2="830" y2="220" marker-end="url(#f3)"/>
+<text class="l" x="824" y="166" text-anchor="end">keeper: idle</text>
+<text class="l" x="824" y="180" text-anchor="end">after idle.hours</text>
+<line class="e" x1="900" y1="220" x2="900" y2="110" marker-end="url(#f3)"/>
+<text class="l" x="906" y="170">Keep</text>
+<line class="e" x1="810" y1="245" x2="710" y2="245" marker-end="url(#f3)"/>
+<text class="l" x="760" y="237" text-anchor="middle">retire_after_days</text>
+<text class="l" x="760" y="260" text-anchor="middle">or Retire</text>
+<path class="e" d="M635 270 V302 H140 V100 H150" marker-end="url(#f3)"/>
+<text class="l" x="400" y="295" text-anchor="middle">Plan starts a new round (a serving buffer stays registered until the keeper retires it)</text>
+<path class="ea" d="M905 60 C 940 30, 960 80, 920 90" marker-end="url(#f3)"/>
+<text class="l" x="930" y="128">degraded: a lost</text>
+<text class="l" x="930" y="142">pyramid is rebuilt</text>
+<rect class="b" x="330" y="228" width="140" height="44" rx="10"/>
+<text class="t" x="400" y="247" text-anchor="middle">cancelled</text><text class="s" x="400" y="262" text-anchor="middle">Cancel, before ready</text>
+</svg>
+<figcaption><b>Figure 5.</b> The round stages before it asks to serve. The staged entry is the board: it lists each failed dataset with its error and each weighting group against <code>ready.min_fraction</code>. The approve accepts the board as it is, and the fraction accepted per group becomes that group's floor. buffer-api refuses consumers until the buffer is approved. The keeper, a scheduled pass every <code>keeper.minutes</code> (30 unless set), watches ready buffers and retires a staged buffer that nobody approves. <i>Cancel the round</i> ends a round at any stage before <code>ready</code> and leaves the spec at <code>cancelled</code>. Every way out of a dead end is <i>Plan</i>. A <code>go</code> sent to the action route without <code>plan_first</code> does not wait at the plan; the page always sends it.</figcaption>
+</figure>
+
+<h2>6. Sourcing one dataset</h2>
+<p>Once a round is running, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the two phases shown in figure 6, a fetch and a stage. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
+<figure>
+<svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, fetch what is missing into the raw cache, stage offline into a build directory, save by rename, register the volumes, release the lock.">
+<defs><marker id="f4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<rect class="b" x="20" y="40" width="150" height="56" rx="4"/>
+<text class="ts" x="28" y="62">binding + pins →</text><text class="ts" x="28" y="79">artifact id</text>
+<text class="s" x="20" y="116">sha256(binding, levels, voxel</text>
+<text class="s" x="20" y="130">size, harness, env, plan)</text>
+<rect class="bs" x="20" y="250" width="150" height="50" rx="4"/>
+<text class="t" x="28" y="270">artifact on disk?</text><text class="s" x="28" y="288">reuse: no job at all</text>
+<line class="e" x1="95" y1="96" x2="95" y2="250" marker-end="url(#f4)"/>
+<text class="l" x="101" y="200">registry says ready</text>
+<line class="e" x1="170" y1="68" x2="220" y2="68" marker-end="url(#f4)"/>
+<rect class="b" x="220" y="40" width="130" height="56" rx="4"/>
+<text class="t" x="228" y="62">take the lock</text><text class="s" x="228" y="79">locks/raw/&lt;record&gt;</text>
+<text class="s" x="228" y="92">wait while held</text>
+<line class="e" x1="350" y1="68" x2="400" y2="68" marker-end="url(#f4)"/>
+<rect class="b" x="400" y="40" width="150" height="56" rx="4"/>
+<text class="t" x="408" y="62">raw cache complete?</text><text class="s" x="408" y="79">files.json vs the binding</text>
+<text class="s" x="408" y="92">quota checked first</text>
+<rect class="un" x="400" y="140" width="150" height="56" rx="4"/>
+<text class="t" x="408" y="162">fetch job</text><text class="s" x="408" y="179">harness fetch · cache rw</text>
+<text class="s" x="408" y="192">resumes until complete</text>
+<line class="e" x1="475" y1="96" x2="475" y2="140" marker-end="url(#f4)"/>
+<text class="l" x="481" y="122">no</text>
+<line class="e" x1="550" y1="68" x2="610" y2="68" marker-end="url(#f4)"/>
+<text class="l" x="580" y="60" text-anchor="middle">yes</text>
+<path class="e" d="M550 168 H580 V68" />
+<rect class="b" x="610" y="40" width="150" height="56" rx="4"/>
+<text class="t" x="618" y="62">stage job</text><text class="s" x="618" y="79">cache read-only, no network</text>
+<text class="s" x="618" y="92">writes .building-&lt;id&gt;-…</text>
+<line class="e" x1="685" y1="96" x2="685" y2="140" marker-end="url(#f4)"/>
+<rect class="b" x="610" y="140" width="150" height="56" rx="4"/>
+<text class="t" x="618" y="162">worker saves</text><text class="s" x="618" y="179">verify stage.json, add the</text>
+<text class="s" x="618" y="192">artifact block, rename to &lt;id&gt;</text>
+<line class="e" x1="685" y1="196" x2="685" y2="250" marker-end="url(#f4)"/>
+<rect class="bs" x="610" y="250" width="150" height="56" rx="4"/>
+<text class="t" x="618" y="272">register volumes</text><text class="s" x="618" y="289">split from the plan row</text>
+<text class="s" x="618" y="302">refs to the artifact and the raw</text>
+<line class="e" x1="170" y1="275" x2="610" y2="275" marker-end="url(#f4)"/>
+<text class="l" x="390" y="268" text-anchor="middle">yes: read the saved stage.json and register</text>
+<rect class="note" x="790" y="40" width="150" height="266" rx="4"/>
+<text class="hd" x="800" y="60">while locked</text>
+<text class="s" x="800" y="82">the lock is heartbeated</text>
+<text class="s" x="800" y="96">from every job poll;</text>
+<text class="s" x="800" y="110">a dead worker's lock</text>
+<text class="s" x="800" y="124">goes stale in 15 min</text>
+<text class="s" x="800" y="150">blocked on raw quota:</text>
+<text class="s" x="800" y="164">release, wait for the</text>
+<text class="s" x="800" y="178">keeper, take again</text>
+<text class="s" x="800" y="204">a second buffer on the</text>
+<text class="s" x="800" y="218">same record waits here,</text>
+<text class="s" x="800" y="232">then finds the artifact</text>
+<text class="s" x="800" y="246">and reuses it</text>
+<text class="s" x="800" y="272">released when servable,</text>
+<text class="s" x="800" y="286">failed or dropped</text>
+<line class="e" x1="760" y1="278" x2="790" y2="278" marker-end="url(#f4)"/>
+<text class="l" x="775" y="271" text-anchor="middle">release</text>
+</svg>
+<figcaption><b>Figure 6.</b> Fetch and stage are two phases per dataset, so one slow download never holds up the others. The stage job runs with the cache read-only: <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker saves it. The one exception to "no network" is a URL that the fetch could not get as a whole file, and for that URL alone the stage job stays online. A saved pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
+</figure>
+
+<h2>7. The cache and its keeper</h2>
+<p>The cache is two shared roots, the raw root and the staged root, and both are reference-counted through the registry. Nothing in the service deletes. Only the keeper, which runs inside the buffers worker, removes a directory.</p>
+<figure>
+<svg viewBox="0 0 960 280" role="img" aria-label="The keeper's pass: sync the registry with the files, reset rows whose job died, sweep abandoned build directories, then evict free assets under the quota; an asset is free when it has no references, is ready, has not been used for the hold period, and its record is neither in a mia-data round nor locked.">
+<defs><marker id="f5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<text class="hd" x="20" y="34">every keeper.minutes (30)</text>
+<rect class="b" x="20" y="46" width="150" height="50" rx="4"/><text class="t" x="28" y="66">sync</text><text class="s" x="28" y="83">datasets · assets (sizes, missing)</text>
+<rect class="b" x="200" y="46" width="150" height="50" rx="4"/><text class="t" x="208" y="66">stale builds</text><text class="s" x="208" y="83">job gone → partial / missing</text>
+<rect class="b" x="380" y="46" width="150" height="50" rx="4"/><text class="t" x="388" y="66">sweep .building-*</text><text class="s" x="388" y="83">older than hold_hours</text>
+<rect class="bs" x="560" y="46" width="150" height="50" rx="4"/><text class="t" x="568" y="66">evict per root</text><text class="s" x="568" y="83">until under quota − headroom</text>
+<rect class="b" x="740" y="46" width="200" height="50" rx="4"/><text class="t" x="748" y="66">watch ready buffers</text><text class="s" x="748" y="83">missing → degraded · idle · retire</text>
+<line class="e" x1="170" y1="71" x2="200" y2="71" marker-end="url(#f5)"/>
+<line class="e" x1="350" y1="71" x2="380" y2="71" marker-end="url(#f5)"/>
+<line class="e" x1="530" y1="71" x2="560" y2="71" marker-end="url(#f5)"/>
+<line class="e" x1="710" y1="71" x2="740" y2="71" marker-end="url(#f5)"/>
+<text class="s" x="20" y="120">then the catalog's main head once a day; the pass and what it evicted are posted to the registry for the Cache tab</text>
+<rect class="note" x="20" y="140" width="920" height="120" rx="6"/>
+<text class="hd" x="32" y="160">an asset is free, hence evictable, when all of these hold</text>
+<text class="t" x="32" y="186">refs = ∅</text><text class="s" x="32" y="202">no registered volume uses it</text>
+<text class="t" x="200" y="186">state = ready</text><text class="s" x="200" y="202">not fetching, staging, waiting</text>
+<text class="t" x="400" y="186">unused for hold_hours</text><text class="s" x="400" y="202">last_used: jobs touch raw, draws touch staged</text>
+<text class="t" x="650" y="186">record not busy</text><text class="s" x="650" y="202">no mia-data round in progress on it</text>
+<text class="t" x="650" y="226">lock not held</text><text class="s" x="650" y="242">the keeper takes it before deleting</text>
+<text class="s" x="32" y="226">quota 0 = unlimited (the default); a blocked fetch records its demand so the keeper frees enough room for it;</text>
+<text class="s" x="32" y="242">when nothing is evictable and a root is still over, the Cache tab says so</text>
+</svg>
+<figcaption><b>Figure 7.</b> Sizes come from the keeper's scan and are reused until a directory's mtime changes. A raw asset shared by several buffers keeps one reference per buffer. A retire drops that buffer's references, so its pyramids become evictable and its raw files stay until the space is needed. A quarantined artifact, one whose dataset was revoked, is kept for <code>autonomy.quarantine_days</code> whatever the quota says. <code>mia-buffers assets sync --dry-run</code> runs the same pass by hand and only reports.</figcaption>
+</figure>
+
+<h2>8. Serving</h2>
+<p>Train consumers get a stream of crops, and val and test consumers get a frozen list. Both kinds read the pixels from shared storage themselves.</p>
+<figure>
+<svg viewBox="0 0 940 440" role="img" aria-label="Sequence of calls between the worker, the buffer service, a train consumer and a val consumer: volumes registered, train descriptors streamed by weight, val descriptors served from a frozen list, a late dataset renormalising train weights only.">
+<defs><marker id="f6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<rect class="b" x="35" y="14" width="150" height="34" rx="4"/><text class="t" x="110" y="36" text-anchor="middle">mia-buffers worker</text>
+<rect class="b" x="295" y="14" width="150" height="34" rx="4"/><text class="t" x="370" y="36" text-anchor="middle">buffer-api</text>
+<rect class="bs" x="545" y="14" width="150" height="34" rx="4"/><text class="t" x="620" y="36" text-anchor="middle">train consumer</text>
+<rect class="b" x="775" y="14" width="150" height="34" rx="4"/><text class="t" x="850" y="36" text-anchor="middle">val consumer</text>
+<line class="ll" x1="110" y1="48" x2="110" y2="432"/>
+<line class="ll" x1="370" y1="48" x2="370" y2="432"/>
+<line class="ll" x1="620" y1="48" x2="620" y2="432"/>
+<line class="ll" x1="850" y1="48" x2="850" y2="432"/>
+<line class="e" x1="110" y1="80" x2="370" y2="80" marker-end="url(#f6)"/>
+<text class="l" x="240" y="73" text-anchor="middle">PUT buffers/&lt;id&gt; · levels, patch, recipe, plan hash</text>
+<line class="e" x1="110" y1="106" x2="370" y2="106" marker-end="url(#f6)"/>
+<text class="l" x="240" y="99" text-anchor="middle">PUT volumes/&lt;vol&gt; · artifact, splits, weight; refs in one transaction</text>
+<line class="e" x1="620" y1="140" x2="370" y2="140" marker-end="url(#f6)"/>
+<text class="l" x="495" y="133" text-anchor="middle">POST consumers {split: train, rank}</text>
+<line class="e" x1="370" y1="162" x2="620" y2="162" marker-end="url(#f6)"/>
+<text class="l" x="495" y="155" text-anchor="middle">consumer_id · the config names the recipe; a different harness commit is refused</text>
+<line class="e" x1="620" y1="194" x2="370" y2="194" marker-end="url(#f6)"/>
+<text class="l" x="495" y="187" text-anchor="middle">GET next?n=128</text>
+<rect class="note" x="380" y="204" width="230" height="32" rx="3"/>
+<text class="s" x="388" y="217">volume by weight (missing ones skipped),</text>
+<text class="s" x="388" y="230">then one of its planned samples, recorded first</text>
+<line class="ea" x1="370" y1="254" x2="620" y2="254" marker-end="url(#f6)"/>
+<text class="l" x="495" y="247" text-anchor="middle">128 descriptors · seq, volume, plane, centre_nm</text>
+<rect class="note" x="630" y="264" width="210" height="32" rx="3"/>
+<text class="s" x="638" y="277">reads the pyramid, runs the tensoriser</text>
+<text class="s" x="638" y="290">img, bbox, label → prefetch queue</text>
+<line class="ed" x1="620" y1="312" x2="370" y2="312" marker-end="url(#f6)"/>
+<text class="l" x="495" y="305" text-anchor="middle">each call is a heartbeat; last_seen drives idle</text>
+<line class="e" x1="850" y1="342" x2="370" y2="342" marker-end="url(#f6)"/>
+<text class="l" x="610" y="335" text-anchor="middle">GET split/val?from=0&amp;n=64</text>
+<line class="e" x1="370" y1="366" x2="850" y2="366" marker-end="url(#f6)"/>
+<text class="l" x="610" y="359" text-anchor="middle">frozen list, items 0–63 · generated once from the seed, identical every epoch</text>
+<line class="e" x1="110" y1="398" x2="370" y2="398" marker-end="url(#f6)"/>
+<text class="l" x="240" y="391" text-anchor="middle">PUT volumes/&lt;late dataset&gt;</text>
+<rect class="note" x="380" y="406" width="230" height="28" rx="3"/>
+<text class="s" x="388" y="418">train weights renormalise on the next draw;</text>
+<text class="s" x="388" y="430">the val list does not change for this run</text>
+</svg>
+<figcaption><b>Figure 8.</b> The service is the only sampler, so every consumer of a buffer sees one distribution. <code>next</code> records a draw before it returns it, which makes the ledger a complete record of a run. A retire archives the draws to shared storage, and the service answers 410 from then on. The daily usage rows and the empty-response rate are what the health line on a buffer's page shows.</figcaption>
+</figure>
+
+<h2>9. What a crop is</h2>
+<p>The service hands out descriptors, not pixels. Whoever tensorises a crop derives one pixel box per level from the descriptor and reads it from the pyramid. The example in figure 9 uses the U937 confocal record, with 45 nm pixels, 256-pixel patches and levels 1, 2 and 4.</p>
+<figure>
+<svg viewBox="0 0 940 345" role="img" aria-label="One crop descriptor becomes three 256-pixel patches at pyramid levels 1, 2 and 4 around the same world point, stacked into the img tensor with a physical bounding box per level.">
+<rect class="b" x="30" y="30" width="280" height="280" rx="3"/>
+<text class="s" x="38" y="47">staged plane · 2048 × 2048 px · 45 nm/px</text>
+<rect class="ed" x="100" y="100" width="140" height="140"/>
+<text class="s" x="236" y="112" text-anchor="end">valid centres</text>
+<rect class="sq" x="60" y="130" width="140" height="140"/>
+<rect class="sq" x="95" y="165" width="70" height="70"/>
+<rect class="sqa" x="112.5" y="182.5" width="35" height="35"/>
+<circle class="fa" cx="130" cy="200" r="2.6"/>
+<text class="s" x="64" y="143">level 4 · 1024 px</text>
+<line class="em" x1="200" y1="130" x2="500" y2="75"/>
+<line class="em" x1="165" y1="165" x2="500" y2="165"/>
+<line class="em" x1="147.5" y1="182.5" x2="500" y2="255"/>
+<text class="s" x="535" y="30" text-anchor="middle">256 × 256 px at each level</text>
+<rect class="sq" x="500" y="40" width="70" height="70"/>
+<rect class="sqa" x="517.5" y="57.5" width="35" height="35"/>
+<rect class="sq" x="500" y="130" width="70" height="70"/>
+<rect class="sqa" x="517.5" y="147.5" width="35" height="35"/>
+<rect class="sqa" x="500" y="220" width="70" height="70" fill="var(--accent-soft)"/>
+<text class="ts" x="585" y="60">level 4</text><text class="s" x="585" y="76">180 nm/px · 46 µm field</text><text class="s" x="585" y="91">bbox = [y0, x0], [y1, x1] in nm</text>
+<text class="ts" x="585" y="150">level 2</text><text class="s" x="585" y="166">90 nm/px · 23 µm field</text><text class="s" x="585" y="181">same centre, half the field</text>
+<text class="ts" x="585" y="240">level 1</text><text class="s" x="585" y="256">45 nm/px · 11.5 µm field</text><text class="s" x="585" y="271">native resolution</text>
+<path class="em" d="M735 42 H742 V288 H735 M742 165 H749"/>
+<text class="t" x="758" y="130">img   (L=3, C=3, 256, 256)</text>
+<text class="t" x="758" y="152">bbox  (L=3, 2, 2)  nm</text>
+<text class="t" x="758" y="174">label (L=3, 256, 256)</text>
+<text class="s" x="758" y="190">only when a label layer exists</text>
+<text class="s" x="758" y="216">one world point per sample;</text>
+<text class="s" x="758" y="231">bbox values feed the rotary</text>
+<text class="s" x="758" y="246">embedding, so the unit is fixed</text>
+<text class="lm" x="30" y="332">descriptor = (buffer, seq, volume, plane, centre_nm, levels=[1, 2, 4], normalize)</text>
+</svg>
+<figcaption><b>Figure 9.</b> A sample's centre lies inside the region where the coarsest box still fits, so the three patches are always co-centred and never clamped. Each coarser patch covers twice the field of the one below it. The coarsest footprint is 1024 level-0 pixels, which is why a 224-pixel dataset fails this spec's fit rule at plan time. A spec with a 32-pixel patch admits the same dataset, and preparation itself refuses no dataset for its size.</figcaption>
+</figure>
+
+<h2>10. Where things live</h2>
+<p>One configuration file serves every service on the host. Anything that needs a working lock lives on host-local disk, and everything a job or a consumer reads lives on shared storage.</p>
+<pre>mia.yaml                                 <span class="c">one file: shared sections, then services.&lt;name&gt; overlays</span>
+
+&lt;local_root&gt;/                            <span class="c">host-local disk (file locks and SQLite do not work on NFS)</span>
+  locks/raw/&lt;record&gt;                     <span class="c">one writer per raw cache · owner, heartbeat, TTL 15 min</span>
+  locks/snapshot/&lt;sha&gt;                   <span class="c">one extraction per pinned commit</span>
+  service/buffers.sqlite                 <span class="c">the registry: subjects, timelines, actions, datasets, assets, buffers, draws</span>
+  temporal/temporal.db                   <span class="c">the dev Temporal server</span>
+
+&lt;storage_root&gt;/&lt;dataset folder&gt;/        <span class="c">mia-data's output · what "prepared" means</span>
+  binding.yaml · manifest.json           <span class="c">the manifest names the binding it was verified with</span>
+  &lt;crop id&gt;/                             <span class="c">verified crops</span>
+
+&lt;raw_root&gt;/&lt;record&gt;/                     <span class="c">original files · shared by both pipelines · untrusted bytes</span>
+  files.json                             <span class="c">url → cache key, validators, source: download | drop</span>
+  incoming/                              <span class="c">where a person places files no job may fetch</span>
+
+&lt;staged_root&gt;/&lt;levels key&gt;/&lt;record&gt;/&lt;artifact id&gt;/
+  stage.json                             <span class="c">the job's report: the recipe, the planned samples, the checks</span>
+  v&lt;i&gt;.zarr/raw/s&lt;k&gt; · labels/&lt;key&gt;      <span class="c">one sparse OME-Zarr 0.6 pyramid per volume · provenance in its attributes</span>
+  ../.building-&lt;artifact&gt;-&lt;job&gt;/         <span class="c">a build in progress; swept by the keeper if abandoned</span>
+
+&lt;state_root&gt;/&lt;service&gt;/                 <span class="c">per worker: rounds/&lt;id&gt;/{spec, pins, plan, bindings}</span>
+  backups/ · archive/ · keeper/          <span class="c">registry copies every keeper.minutes · retired buffers' draws · the catalog sync mark</span></pre>
+
+<h2>11. The page</h2>
+<p>buffer-api serves the page at <code>/</code>. The page holds no token: it reads the open routes, its buttons call the action routes, and it follows <code>/stream</code> to redraw what changed. Each tab is one kind of thing, and each thing has one page of its own. The search box in the header finds a dataset, a spec or a request by its name, its issue number or its issue URL.</p>
+<div class="tw"><table>
+<tr><th>tab</th><th>shows</th><th>reads</th></tr>
+<tr><td>Needs you</td><td>everything that waits on a person or is stuck, with the buttons that answer it, and the actions of the last day that were not delivered</td><td><code>/needs</code></td></tr>
+<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw download, staged artifacts and buffers; a tick per dataset and <i>Prepare</i>. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
+<tr><td>Preparation</td><td>the preparation requests; a request's page lists its datasets with where each stands</td><td><code>/subjects/prep</code> · <code>/catalog/datasets</code></td></tr>
+<tr><td>Buffers</td><td>the specs and the buffers. <i>New buffer</i> designs a spec against a live plan. A spec's page has its buttons, its timeline and its buffers; a buffer's page has its board, volumes, consumers, daily usage and health line</td><td><code>/subjects/buffer</code> · <code>/buffers</code> · <code>POST /plan</code> · <code>/usage</code></td></tr>
+<tr><td>Cache</td><td>raw by dataset, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets/raw</code> · <code>/assets/staged</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
+<tr><td>Decisions</td><td>every verdict at a gate, newest first, with how often the judge and the person agree</td><td><code>/decisions</code></td></tr>
+<tr><td>Docs</td><td>the user guide (the loop from spec to training, as the person training a model sees it) and this architecture overview</td><td>nothing: static</td></tr>
+</table></div>
+
+<h2>What is not built</h2>
+<ul>
+  <li><b>Identity:</b> the action routes take no login, so the registry records an action but not who pressed the button. A proxy or token layer in front of buffer-api would name the actor.</li>
+  <li><b>An active judge:</b> a judge runs in shadow only; its verdict is recorded and decides nothing.</li>
+  <li><b>Remote mode:</b> crop workers beside the service that tensorise and return tensors over HTTP. Local mode, where the training job reads the pyramid, is the only mode.</li>
+  <li><b>Several worker hosts:</b> the lock directory assumes one host. The upgrade is a lease table in the registry with the same four calls.</li>
+</ul>
+<p>Source: the specs under <code>docs/specs/</code> (training buffers, prep and buffering, sparse OME-Zarr 0.6 staging, autonomous gates, webapp actions). <code>docs/development.md</code> is the developer's guide.</p>
