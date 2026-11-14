@@ -213,6 +213,21 @@ const gapsNotice = gaps =>
     ...mdInline(gaps.join("; ")),
     ". Start is offered once a catalog sync brings a record that has it; nothing has to be done here.",
   );
+// A shelved subject (spec shelved-subjects): who set it aside, when and why. Its only button is Unshelve.
+const shelvedNotice = hold =>
+  el(
+    "div",
+    { class: "notice" },
+    el("b", {}, "Shelved"),
+    ` by ${hold.by}, `,
+    when(hold.at),
+    `: ${hold.reason} `,
+    el(
+      "span",
+      { class: "small" },
+      "Nothing is asked of it, and no request or buffer plan takes it, until it is unshelved.",
+    ),
+  );
 export async function viewSubject(kind, key, refresh) {
   const root = $("subjectBody"),
     hash = location.hash,
@@ -307,6 +322,7 @@ export async function viewSubject(kind, key, refresh) {
     actionBar(subject, redraw, kind === "buffer" ? ["go", "revoke"] : []),
     undelivered(subject, timeline?.actions || [], redraw),
   );
+  if (subject.shelved) parts.push(shelvedNotice(subject.shelved));
   if (gaps.length) parts.push(gapsNotice(gaps));
   if (extras) parts.push(extras);
   parts.push(...cards);
@@ -412,18 +428,24 @@ const NEEDS_KINDS = [
 ]; // the "what" a person can narrow the list to
 let needsKind = ""; // the kind shown; kept while the list redraws itself, cleared by opening the tab
 let needsCounts = {}; // how many wait under each kind, as last heard: a redrawn button starts with its number
+let needsShelved = false; // whether the list is the shelved subjects (`#needs/shelved`) and not what waits
+let shelvedCount = null; // how many subjects are shelved, as last heard
 export function viewNeeds(arg, refresh) {
   const root = $("needsBody");
   if (refresh === "stream" && keepTyping(root, () => viewNeeds("", true))) return;
   delete root.dataset.dirty;
-  if (!refresh) needsKind = NEEDS_KINDS.some(([kind]) => kind === arg) ? arg : "";
+  if (!refresh) {
+    needsKind = NEEDS_KINDS.some(([kind]) => kind === arg) ? arg : "";
+    needsShelved = arg === "shelved";
+  }
   const again = () => viewNeeds("", true);
   const failed = el("div");
-  const show = kind => {
+  const show = (kind, shelved) => {
     // the address keeps the choice across a reload; it is set without a new route
     needsKind = kind;
+    needsShelved = shelved;
     if (TABLE_STATE.has("needs")) TABLE_STATE.get("needs").offset = 0;
-    history.replaceState(null, "", "#needs" + (kind ? "/" + kind : ""));
+    history.replaceState(null, "", "#needs" + (shelved ? "/shelved" : kind ? "/" + kind : ""));
     again();
   };
   const kinds = el(
@@ -438,14 +460,32 @@ export function viewNeeds(arg, refresh) {
           "aria-pressed": String(kind === needsKind),
           "data-kind": kind,
           "data-word": word,
-          onclick: () => show(kind),
+          onclick: () => show(kind, needsShelved),
         },
         word,
       ),
     ),
   );
+  // beside the kinds: the subjects a person set aside, which the list leaves out until this is pressed
+  const shelf = el(
+    "button",
+    {
+      type: "button",
+      class: "btn",
+      "aria-pressed": String(needsShelved),
+      title: "Show what was shelved, with its reason, and not what waits on you.",
+      onclick: () => show(needsKind, !needsShelved),
+    },
+    "Shelved",
+  );
+  const countShelved = n => {
+    shelf.textContent = n == null ? "Shelved" : `Shelved ${num(n)}`;
+  };
+  countShelved(shelvedCount);
+  kinds.append(shelf);
   const count = counts =>
     kinds.querySelectorAll("button").forEach(b => {
+      if (b === shelf) return; // it is no kind: it counts for itself
       // each button says how many wait under it
       const all = Object.values(counts),
         n = b.dataset.kind ? counts[b.dataset.kind] : all.length ? all.reduce((a, c) => a + c, 0) : null;
@@ -462,12 +502,20 @@ export function viewNeeds(arg, refresh) {
     kinds,
     failed,
     pagedTable("needs", {
-      source: pageOf("/needs", "needs", () => (needsKind ? { kind: needsKind } : {})),
+      source: pageOf("/needs", "needs", () => ({
+        ...(needsKind ? { kind: needsKind } : {}),
+        ...(needsShelved ? { shelved: 1 } : {}),
+      })),
       sort: "updated",
       dir: "desc",
-      empty: needsKind ? "Nothing of this kind waits on you." : "Nothing waits on you.",
+      empty: needsShelved
+        ? "Nothing is shelved."
+        : needsKind
+          ? "Nothing of this kind waits on you."
+          : "Nothing waits on you.",
       onPage: page => {
         count((needsCounts = page.out.kinds || {}));
+        countShelved((shelvedCount = page.out.shelved ?? null));
         failed.replaceChildren(
           ...(page.out.failed || [])
             .filter(a => a.subject)
@@ -494,6 +542,7 @@ export function viewNeeds(arg, refresh) {
               "div",
               {},
               actionBar(x, again, x.kind === "buffer" ? ["go", "revoke"] : []),
+              x.shelved ? el("div", { class: "small" }, x.shelved.reason) : "",
               ...(x.drops || []).map(record =>
                 el(
                   "div",

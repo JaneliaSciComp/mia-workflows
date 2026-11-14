@@ -269,7 +269,11 @@ def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
         and not has("<select", view)
         and not has('"select"', view)
     )
-    assert has('pageOf("/needs", "needs", () => (needsKind ? { kind: needsKind } : {}))', view)
+    assert has(
+        'pageOf("/needs", "needs", () => ({ ...(needsKind ? { kind: needsKind } : {}),'
+        " ...(needsShelved ? { shelved: 1 } : {}) }))",
+        view,
+    )
     assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]')
     assert has('.toggles .btn[aria-pressed="true"]')
 
@@ -601,6 +605,54 @@ def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
     assert has('reject: "Reject…"') and has("showModal()")
     assert not has("bar.append(note)")
     assert has("Send rejection") and has("sendButton.disabled = !note.value.trim()")
+
+
+def test_shelving_is_offered_for_every_kind_and_asks_for_its_reason() -> None:
+    """Shelve is a button of the action bar like any other the service offers; it opens a dialog for the reason,
+    which cannot be sent empty. A shelved subject says who, when and why, and Needs you has a toggle for them."""
+    covered, order = run_js(
+        "print([Object.entries(ACTION_HELP).map(([kind, help]) => [kind, !!help.shelve && !!help.unshelve]),"
+        " ACTION_ORDER]);",
+        {"actions.js": "ACTION_HELP, ACTION_ORDER"},
+    )
+    assert covered == [["dataset", True], ["buffer", True], ["prep", True]]
+    assert {"shelve", "unshelve"} <= set(order)
+    assert has('shelve: "Shelve…"') and has("if (dialog) return askNote(subject, dialog, note => send({ note }))")
+    assert has("if (subject.shelved) parts.push(shelvedNotice(subject.shelved))")
+    assert has('"aria-pressed": String(needsShelved)') and has('"shelved": "Set aside by a person')
+
+
+def test_shelve_sends_its_reason_once_one_is_typed() -> None:
+    calls, words, blocked = run_js(
+        """
+        const calls = [];
+        globalThis.fetch = async (url, init) => {
+            calls.push([url, JSON.parse(init.body)]);
+            return { ok: true, status: 202, text: async () => "{}" };
+        };
+        const subject = { kind: "dataset", key: "rec-a", number: 7, stage: "failed", status: "stuck", revision: 3,
+                          actions: ["go", "revoke", "shelve"], asked: null };
+        const bar = actionBar(subject, () => {});
+        bar.querySelectorAll = () => walk(bar).filter(node => node.tag === "button");  // the fake DOM has none
+        const words = walk(bar).filter(node => node.tag === "button").map(textOf);
+        const typed = text => {
+            byText(bar, "Shelve…").fire("click");
+            const box = document.body.kids.at(-1), note = walk(box).find(node => node.tag === "textarea");
+            note.value = text; note.fire("input");
+            const blocked = byText(box, "Shelve").disabled;
+            box.close("send");
+            return blocked;
+        };
+        const blocked = [typed("  "), typed(" it needs a reader of its own ")];
+        await new Promise(r => setImmediate(r));
+        print([calls.map(([url, body]) => [url, body.action, body.note, "revision" in body]), words, blocked]);
+        """,
+        {"actions.js": "actionBar"},
+    )
+    assert words == ["Run again", "Revoke", "Shelve…"] and blocked == [True, False]
+    assert calls == [
+        ["/datasets/rec-a/actions", "shelve", "it needs a reader of its own", False]
+    ]  # the empty one: none
 
 
 def test_a_datasets_page_leads_with_its_links_then_its_preparation_workflow() -> None:
