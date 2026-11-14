@@ -399,6 +399,19 @@ def test_markdown_never_becomes_html_or_a_script_link() -> None:
     )
 
 
+def test_a_job_link_in_a_timeline_opens_in_this_page() -> None:
+    """A result entry links its jobs' records as `<service url>/#job/<address>`: on the page that address is this
+    page's own, so the link opens here; a link to anywhere else opens a new tab."""
+    here, away = run_js(
+        "globalThis.location = { origin: 'https://page.example', hash: '' };\n"
+        "print(input.map(text => html(markdown(text)[0])));",
+        {"markdown.js": "markdown"},
+        ["**Jobs:** [match-1](https://page.example/#job/issue-1/i1-e2/match-1)", "[x](https://other.example/#job/y)"],
+    )
+    assert '<a href="https://page.example/#job/issue-1/i1-e2/match-1">match-1</a>' in here
+    assert 'target="_blank"' not in here and 'target="_blank"' in away
+
+
 def lifecycle(*calls: list) -> list[str]:
     """What the page's `lifecycle()` builds for each (line, stage, history), as HTML text."""
     return run_js("print(input.map(call => html(lifecycle(...call))));", {"dom.js": "lifecycle"}, calls)

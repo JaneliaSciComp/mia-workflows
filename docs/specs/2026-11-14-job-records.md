@@ -1,6 +1,7 @@
 # MIA: a record of every job and every agent conversation — Spec
 
-**Status:** v0.6 · 2026-11-14 · awaiting the user's approval. Rulings of the user on the drafts before it: no
+**Status:** v0.7 · 2026-11-14 · approved by the user 2026-11-14 (as v0.6) and built; v0.7 says what the build
+settled (§3.1 the guard on `_jobs`, §3.6 how a result is written). Rulings of the user on the drafts: no
 list of jobs on the page, a job's link sits next to what the job produced; a stage says what happened in it;
 one entry per pass of a stage; and (v0.6) a stage writes two entries, its start and its result, the result
 carrying its jobs.
@@ -62,8 +63,8 @@ buried in a workspace. Each job should leave a small permanent record, and the p
 One file per job: `<work_root>/_jobs/<the job's workspace, relative to work_root>.json.gz`. A workspace is
 unique per job, and everything that handles a job knows its workspace, so a record's address needs no id
 passed around. Each service writes under its own `paths.work_root`; mia-data and mia-buffers share one, which
-buffer-api already reads. No job mounts `work_root` itself or `_jobs` (a test asserts it for every job spec
-builder).
+buffer-api already reads. No job gets `_jobs` writable: `CsubJobs` refuses a job whose workspace or read-write
+mount is `_jobs`, lies in it or contains it.
 
 ```
 { "schema": 1,
@@ -72,7 +73,7 @@ builder).
   "request":  { name, command, cpus, mem_mb, walltime_min, allow_hosts, agent, mounts, env: [names] },
   "submit":   { …csub's SubmitResult: queue, slots, job_group, estimated_max_cost_usd, billing_group, … },
   "outcome":  { state, exit_code, exec_host, queue },
-  "usage":    { max_mem, avg_mem, mem_limit, cpu_used, run_time, slots },
+  "usage":    { max_mem, avg_mem, memlimit, cpu_used, run_time, slots },
   "logs":     { stdout, stderr },
   "agent":    { prompt, model, cost_usd, turns: [ … ] } }
 ```
@@ -184,7 +185,8 @@ the subject to `done`.
 `waiting` is a pass and writes both entries. A stage a subject rests at (`done`, `failed`, `blocked`,
 `cancelled`, …) is where a round ended, not work, and gets no entry of its own: the result that ended the
 round carries it. The one exception is a round that ends before any stage started (a `go` refused at
-admission): nothing has a result to write, so the resting stage is written with its reason, as now.
+admission) or after its last pass already wrote its result (a snippet PR closed while the round waited for
+its next head): nothing has a result to write, so the resting stage is written with its reason, as now.
 
 **What this replaces.** The comments a round writes today that are really a stage's result (the crops report,
 the debugging diagnosis, the PR notices) become the body of that stage's result entry; they are not written a
@@ -198,13 +200,19 @@ one (`testing`, `review`, `testing` again for a revised snippet PR), or it tests
 reset with the round); the pass is in both markers from the second pass on, so a first start keeps today's
 marker. A retried activity writes nothing twice.
 
-**How it is written.** The workflow knows when a pass ends and which jobs it submitted (their workspaces, from
-which a record's address follows), so the workflow asks for the result: one activity call per pass, which
-renders the entry and posts it through `_post` like every other. Each of those calls is a new command. They
-all sit behind one patch per workflow (`stage-results`), the replay fixtures are re-recorded, and a round in
-flight across the deploy finishes the way it started, without results. *(My calls: the patch, the counter in
-the workflow's state, jobs as a line of links in the entry's text and not a stored list. The builder goes
-through every stage of the three workflows and every path out of it.)*
+**How it is written.** The workflow keeps the open pass in its durable state: its stage, the pass counts,
+the workspaces of the jobs it submitted (from which a record's address follows) and what it found. The stage
+activity gets that state with every stage write, as it always did, and writes the open pass's result before
+the next stage's start, or as the one entry that moves the subject to the stage it rests at
+(`mia_data.status.stage_entries`). So a transition issues the command it issued before, a pass cannot end
+without its result, and the reports that were comments are no longer commands at all. A pass that ends where no
+stage write follows (a PR head whose crops failed and that waits for the next head, the debugger's rerun, a
+round started over a pass still open) is written by a small activity of its own. Everything sits behind one
+patch per workflow (`stage-results`), each with a replay fixture of its own, recorded alone; a run that began
+without the patch keeps writing as it did, and one that takes the patch mid-round (it rolled over before the
+deploy) has no pass open in its state and writes plain stage entries until its next pass starts. *(My calls:
+the patch, the pass in the workflow's state, jobs as a line of links in the entry's text and not a stored
+list.)*
 
 **What it costs to know.** A job's link appears when its stage ends, not while the job runs; its record is
 only complete then. The copy on GitHub gets two comments per pass.
