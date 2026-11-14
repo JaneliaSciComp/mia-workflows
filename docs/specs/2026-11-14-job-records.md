@@ -171,13 +171,20 @@ What the result says, for a dataset: matching, which snippet the binding uses an
 fails with the existing ones; testing, the sentence its report opens with today (`Crops at <sha>: passed, 12
 of 12 verified …`) with the table; review, who decided what; developing and merging, what became of the
 snippet PR; debugging, the diagnosis and whether a new round follows. A buffer round and a request follow the
-same rule with their own stages. A pass that fails, is cancelled or is refused writes its result too, with
-the reason and the jobs it got to: the round's final stage (`failed`, `blocked`, `cancelled`) then says where
-the round rests, and no longer has to carry the story of the stage that broke.
+same rule with their own stages.
+
+**A stage that fails says so itself.** A pass that fails, is blocked or is cancelled writes its own result:
+`Result: data:testing` **failed**, the reason, and the links to the jobs it got to. There is no separate,
+generic failure entry. That same write moves the subject to the stage it rests at (`failed`, `blocked`,
+`cancelled`), and the entry's last line names it, so the registry's stage and the entry change together, in
+one write, as a stage entry does today. A round that ends well is the same: the result of its last stage moves
+the subject to `done`.
 
 **Which stages.** The stage tables already say it (`STAGE_ACTIONS`): a stage where a round is `working` or
 `waiting` is a pass and writes both entries. A stage a subject rests at (`done`, `failed`, `blocked`,
-`cancelled`, …) is where a round ended, not work: it writes one entry, as now.
+`cancelled`, …) is where a round ended, not work, and gets no entry of its own: the result that ended the
+round carries it. The one exception is a round that ends before any stage started (a `go` refused at
+admission): nothing has a result to write, so the resting stage is written with its reason, as now.
 
 **What this replaces.** The comments a round writes today that are really a stage's result (the crops report,
 the debugging diagnosis, the PR notices) become the body of that stage's result entry; they are not written a
