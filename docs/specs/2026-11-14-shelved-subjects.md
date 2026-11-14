@@ -1,6 +1,8 @@
 # MIA: shelving a subject — Spec
 
-**Status:** v0.1 · 2026-11-14 · approach picked by the user 2026-11-14; this text awaits approval.
+**Status:** v0.2 · 2026-11-14 · approved by the user 2026-11-14 (as v0.1) and built. v0.2 says what the build
+settled: a subject with an action waiting for its workflow's answer takes no `shelve` (§3.2), and a request is
+kept from a shelved dataset in `prep_nudge`, with buffer-api's refusal behind it (§3.3).
 
 ## 1. Intent
 
@@ -64,7 +66,8 @@ The rule, in one function that `_subject_view` and `_accepts` both call (it also
 that removes `go`):
 
 - a subject that is not shelved and whose status is `not started`, `stuck` or `done` also accepts `shelve`;
-  one with a round in progress or at review does not (cancel first);
+  one with a round in progress or at review does not (cancel first), nor one whose last action is still waiting
+  for its workflow's answer (`asked`): the round that action starts would run on a shelved subject;
 - a shelved subject has the status `shelved` and accepts `unshelve` and nothing else, whoever asks.
 
 `shelved` joins `STATUS_WORDS`. It is in neither `NEEDS_A_PERSON` nor a stage table.
@@ -82,7 +85,7 @@ stream, and never sent to Temporal. The mirror copies the entry to the issue; no
 | `Ledger.dataset`, `Ledger.datasets` | a shelved dataset reads `state: "shelved"` with the hold's reason (a row is made up for one that has none); the stored row is not touched, so unshelving restores it and `sync_datasets` and mia-data's writes need no change |
 | buffer plans (`POST /plan`, the `plan` activity) | read `prepared` through the above: a shelved dataset is `not prepared` |
 | `to_prepare` (`explore.py`) | leaves out rows whose state is `shelved` |
-| a worker's `go` (`_nudge`) | sends none for a shelved subject and returns the reason as the `DatasetIssue` note |
+| a worker's `go` | `prep_nudge` sends none for a shelved dataset, also for a request that says `again`; one sent all the same is refused (409) like anybody's |
 | `_followed_state` | a request follows a shelved dataset as `needs-human`: it settles, and the request says so |
 
 `shelved` is not in `DATASET_STATES`: no worker can write it.
