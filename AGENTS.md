@@ -45,6 +45,11 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   (a dataset at `debugging` also the `go` of its next round).
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
+- **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
+  `shelve` (with a reason); a shelved one reads the status `shelved` and takes `unshelve` alone (`_rules` in
+  `mia_buffers/api.py`). No workflow hears of either. The hold is a row of the ledger's `shelved` table; a shelved
+  dataset reads `state: shelved` from `Ledger.dataset(s)` while its stored row stays, so no plan and no request
+  takes it. Anything new that selects or starts datasets reads their state through those two.
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
   (`Activities._post`); the `MiaMirror` workflow copies them to GitHub.
 - **Nothing reads a data or buffers issue.** No label, comment, body, close or reopen is input: nothing polls

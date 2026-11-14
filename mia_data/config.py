@@ -58,7 +58,8 @@ HUMAN_LABELS = {  # the actions a person takes
         "Revoke this dataset's saved crops: buffers that drew from it are degraded, nothing is deleted",
     ),
 }
-STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done")
+# `shelved` is no stage's word: buffer-api gives it to a subject a person has shelved, whatever its stage
+STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done", "shelved")
 # stage -> (status word, the actions it accepts); "working" means a round is in progress, and a round in progress
 # accepts only `cancel` (spec webapp-actions §5.1). `debugging` is between two rounds, so it also takes the `go`
 # that runs the next one: the debugger's own, or a person's who does not want to wait for it. buffer-api refuses any other action, the page offers only

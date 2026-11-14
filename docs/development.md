@@ -97,6 +97,21 @@ posting it to GitHub.
 refuses any other action and the page offers only these; a round in progress accepts only `cancel` (and, for a
 buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round). A new stage or action goes into the table first.
 
+**Shelving is beside the stage tables** (spec `docs/specs/2026-11-14-shelved-subjects.md`). A person sets a
+subject of any kind aside with a reason: `shelve`, with the reason in `note`, is accepted whenever the subject's
+status is `not started`, `stuck` or `done` and no action is waiting for its workflow's answer; `unshelve` takes it
+back. One function gives a subject its status word and its actions (`BufferService._rules`): the stage's, or
+`shelved` and `unshelve` alone for a shelved one. buffer-api carries both actions out itself (`_hold`): the row of
+the ledger's `shelved` table, the action and its timeline entry are one transaction, and nothing is sent to
+Temporal. The stage and the dataset's stored row are not touched. What reads the hold:
+
+- `GET /needs` leaves a shelved subject out, counts them as `shelved` and lists them with `?shelved=1`.
+- `Ledger.dataset` and `Ledger.datasets` give a shelved dataset `state: shelved` and the hold's reason (a row is
+  made up for one that never ran), so `POST /plan`, the `plan` activity and the Datasets list need no rule of
+  their own; `shelved` is not a state a worker can write.
+- A preparation request sends a shelved dataset no `go` and follows it as `needs-human` (`prep_nudge`,
+  `_followed_state`); the Designer's *to prepare* list leaves it out.
+
 **Every stage write is awaited.** `set_stage` writes the subject's stage, its timeline entry and the dataset's
 registry row, and the workflow waits for it: the registry's stage is what buffer-api checks an action against and
 what the page shows as waiting on a person, so it may not lag the round. With buffer-api away the activity fails
@@ -748,7 +763,9 @@ code is compared without whitespace (`has()`, `count()`), so it holds however Bi
 
 Each tab is one kind of thing, and each thing has one page:
 
-- **Needs you** reads `/needs`: everything that waits on a person, with the buttons that answer it.
+- **Needs you** reads `/needs`: everything that waits on a person, with the buttons that answer it. *Shelve…* on
+  a row (or on the subject's page) takes it off the list with a reason; the *Shelved* toggle lists those, each with
+  its reason and *Unshelve*.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
   download, staged artifacts and buffers; filters by state, modality, dims and licence. Every row has a tick (the
   header's and *Select all* tick the page that is showing). While something is ticked, a box says how many datasets are

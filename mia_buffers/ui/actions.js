@@ -24,14 +24,23 @@ export const BUTTON_HELP = {
   clearSelection: "Untick every dataset.",
   sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
   cancelReject: "Close this without sending anything.",
+  sendShelve: "Shelve it with this reason. Unshelve on its page takes it back.",
+  cancelShelve: "Close this without shelving anything.",
   approveHosts: "Allow jobs to download from the ticked hosts, then start.",
   startUnapproved:
     "Start with the policy as it is. A dataset on one of these hosts stops and needs a person; a buffer waits for that dataset's files to be copied in by hand, or refuses its job.",
   cancelHosts: "Close this without starting anything.",
   showChange: "Redraw the page with what changed; what you typed here is dropped.",
 };
+// Shelving is the same for every kind of subject: the service carries it out itself, no workflow hears of it.
+const SHELF_HELP = {
+  shelve:
+    "Set this aside with a reason. It leaves Needs you and nothing can be asked of it until someone unshelves it; a shelved dataset is also left out of every buffer plan and started by no preparation request. Its stage and its timeline stay as they are.",
+  unshelve: "Take this back: it is listed, planned and started again as its stage says.",
+};
 export const ACTION_HELP = {
   dataset: {
+    ...SHELF_HELP,
     go: s =>
       s.stage === "debugging"
         ? "Run a new round now, without waiting for the debugging agent. Use it when you already know what was wrong and have fixed it."
@@ -53,6 +62,7 @@ export const ACTION_HELP = {
     cancel: "Stop the round in progress: its cluster jobs are killed and nothing is saved.",
   },
   buffer: {
+    ...SHELF_HELP,
     approve: s =>
       s.stage === "plan-review"
         ? "Accept the plan and start the jobs: the pool's datasets are downloaded and converted, then the round stops for your approval."
@@ -63,6 +73,7 @@ export const ACTION_HELP = {
     stop: "For a run that does not answer Cancel: the workflow is terminated and the spec's buffers are retired. A cluster job already running is not killed.",
   },
   prep: {
+    ...SHELF_HELP,
     go: "Run the request again: its datasets that have not settled are handed to the preparation workflow again.",
     cancel: "Stop the request, and the dataset rounds it started.",
     stop: "For a request that does not answer Cancel: its workflow is terminated. The dataset rounds it started keep running.",
@@ -72,7 +83,18 @@ const actionHelp = (subject, action) => {
   const help = ACTION_HELP[subject.kind]?.[action];
   return typeof help === "function" ? help(subject) : help;
 };
-export const ACTION_ORDER = ["approve", "reject", "keep", "go", "revoke", "retire", "cancel", "stop"];
+export const ACTION_ORDER = [
+  "approve",
+  "reject",
+  "keep",
+  "go",
+  "revoke",
+  "retire",
+  "shelve",
+  "unshelve",
+  "cancel",
+  "stop",
+];
 const ACTION_WORDS = {
   approve: "Approve",
   reject: "Reject…",
@@ -80,6 +102,8 @@ const ACTION_WORDS = {
   go: "Run again",
   revoke: "Revoke",
   retire: "Retire",
+  shelve: "Shelve…",
+  unshelve: "Unshelve",
   cancel: "Cancel the round",
   stop: "Force stop",
 };
@@ -150,19 +174,33 @@ export async function sendAction(subject, body, after) {
 }
 
 // ---- the dialogs before a send
-// Reject has more to enter: a dialog takes the feedback, and a rejection with none cannot be sent. The dialog hangs
-// off the body, so a redraw of the view behind it (the stream's) does not take what was typed.
-function askReject(subject, send) {
-  const note = el("textarea", {
-    rows: 7,
-    placeholder: "What is wrong with these crops?",
-    "aria-label": "what is wrong with these crops",
-  });
-  const sendButton = el(
-    "button",
-    { type: "submit", class: "btn danger", value: "send", title: BUTTON_HELP.sendReject, disabled: true },
-    "Send rejection",
-  );
+// Reject and Shelve have more to enter: a dialog takes the feedback or the reason, and neither can be sent with
+// none. The dialog hangs off the body, so a redraw of the view behind it (the stream's) does not take what was typed.
+const NOTE_DIALOGS = {
+  reject: {
+    title: "Reject these crops",
+    about:
+      "What you write goes to the agent that fixes the dataset's reader. It then makes new crops, which come back for review.",
+    ask: "What is wrong with these crops?",
+    sending: "Rejecting…",
+    send: { class: "btn danger", title: BUTTON_HELP.sendReject },
+    sendWord: "Send rejection",
+    cancel: { title: BUTTON_HELP.cancelReject },
+  },
+  shelve: {
+    title: "Shelve this",
+    about:
+      "It leaves Needs you, and no request or buffer plan takes it until it is unshelved. The reason is shown wherever it is listed, and in its timeline.",
+    ask: "Why can it wait?",
+    sending: "Shelving…",
+    send: { class: "btn", title: BUTTON_HELP.sendShelve },
+    sendWord: "Shelve",
+    cancel: { title: BUTTON_HELP.cancelShelve },
+  },
+};
+function askNote(subject, dialog, send) {
+  const note = el("textarea", { rows: 7, placeholder: dialog.ask, "aria-label": dialog.ask });
+  const sendButton = el("button", { type: "submit", value: "send", disabled: true, ...dialog.send }, dialog.sendWord);
   note.addEventListener("input", () => {
     sendButton.disabled = !note.value.trim();
   });
@@ -172,19 +210,15 @@ function askReject(subject, send) {
     el(
       "form",
       { method: "dialog" },
-      el("h2", { id: "askTitle" }, "Reject these crops"),
+      el("h2", { id: "askTitle" }, dialog.title),
       el("div", { class: "mono small" }, subject.key),
-      el(
-        "p",
-        { class: "small" },
-        "What you write goes to the agent that fixes the dataset's reader. It then makes new crops, which come back for review.",
-      ),
+      el("p", { class: "small" }, dialog.about),
       note,
       el(
         "div",
         { class: "actions" },
         sendButton,
-        el("button", { type: "submit", class: "btn", value: "cancel", title: BUTTON_HELP.cancelReject }, "Cancel"),
+        el("button", { type: "submit", class: "btn", value: "cancel", ...dialog.cancel }, "Cancel"),
       ),
     ),
   );
@@ -304,7 +338,8 @@ export function actionBar(subject, after, skip) {
   let checking = false; // a click while the host check or its dialog is open starts nothing
   for (const action of offered) {
     const word = actionWord(subject, action);
-    const sending = action === "reject" ? "Rejecting…" : word + "…"; // Reject… already ends in the dots of "more to enter"
+    const dialog = NOTE_DIALOGS[action]; // its word already ends in the dots of "more to enter"
+    const sending = dialog ? dialog.sending : word + "…";
     // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
     const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
     bar.append(
@@ -323,7 +358,7 @@ export function actionBar(subject, after, skip) {
               e.target.textContent = sending;
               sendAction(subject, { action, key: newKey(), ...verdict, ...more }, after);
             };
-            if (action === "reject") return askReject(subject, note => send({ note }));
+            if (dialog) return askNote(subject, dialog, note => send({ note }));
             if (ACTION_CONFIRM[action] && !confirm(actionConfirm(subject, action))) return;
             const run = hostsRun(subject, action);
             if (run) {

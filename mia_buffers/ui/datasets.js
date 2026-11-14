@@ -170,7 +170,8 @@ export function viewDatasetList(_arg, params) {
         label: "state",
         title: 'preparation, then the raw cache\'s state, then "staged" when a pyramid of it exists',
         cell: x => {
-          const pills = el("span", { class: "pills" }, statePill(x.state));
+          const state = x.state === "shelved" && x.reason ? pill("shelved", "", [{ t: x.reason }]) : statePill(x.state);
+          const pills = el("span", { class: "pills" }, state);
           if (x.raw) pills.append(" ", assetPill(x.raw.state));
           if (x.staged) pills.append(" ", pill("staged", "pool"));
           if (x.quarantined) pills.append(" ", assetPill("quarantined"));

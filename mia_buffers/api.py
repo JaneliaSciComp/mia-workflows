@@ -90,6 +90,11 @@ OFF_LINE = ("debugging", "failed", "blocked", "needs-human", "cancelled")
 # kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
 LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
 NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
+# Shelving (spec shelved-subjects): a person sets a subject aside with a reason. Its stage stays; its status reads
+# `shelved`, it takes `unshelve` alone, and a shelved dataset reads `shelved` to every plan and request. A subject
+# with one of these status words (no round in progress, none at review) also takes `shelve`.
+SHELVABLE = ("not started", "stuck", "done")
+HOLD_ACTIONS = ("shelve", "unshelve")  # carried out by this service: no workflow hears of them
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
 DROP_QUIET_S = 60  # `dropped` is refused while a file under incoming/ changed this recently
@@ -250,13 +255,35 @@ class MirroredBody(_Strict):
     comment_url: str | None = None
 
 
+def _action_entry(action: dict) -> tuple[str, str]:
+    """The timeline entry (body, marker) of an action that was carried out: who asked for what, and with what."""
+    payload = action["payload"]
+    text = f"**Action:** `{action['action']}` by `{action['actor']}`"
+    if payload.get("plan_first"):
+        text += " (plan first)"
+    if payload.get("records"):
+        text += ": " + ", ".join(f"`{neutralize(record)}`" for record in payload["records"])
+    if payload.get("record"):
+        text += f": `{neutralize(payload['record'])}`"
+    if note := payload.get("note"):
+        # the mirror posts this under the bot's name: it must ping nobody (no mentions; spec §2 non-goals)
+        quiet = neutralize(note)[:16000].replace("@", "@\u200b")
+        text += "\n\n" + "\n".join(f"> {line}" for line in quiet.splitlines())
+    if spec := payload.get("spec"):  # the timeline, and so the issue, says exactly what ran
+        fenced = neutralize(spec).replace("```", "` ` `")
+        text += f"\n\n```yaml\n{fenced}{'' if fenced.endswith(chr(10)) else chr(10)}```"
+    return text, f"<!-- mia: action {action['id']} -->"
+
+
 class ActionBody(_Strict):
     """One thing a person (or a worker for a request) asks of a subject (spec webapp-actions §4.2)."""
 
-    action: Literal["go", "approve", "reject", "revoke", "keep", "retire", "dropped", "cancel", "stop"]
+    action: Literal[
+        "go", "approve", "reject", "revoke", "keep", "retire", "dropped", "cancel", "stop", "shelve", "unshelve"
+    ]
     key: str | None = None  # the sender's own name for this request: a repeat is the same action
     revision: int | None = None  # approve, reject: the subject's revision the person was looking at
-    note: str = ""  # reject: the feedback for the agent
+    note: str = ""  # reject: the feedback for the agent; shelve: why it can wait
     root: str | None = None  # a worker's go: the root request this round is charged to
     actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
     spec: str | None = None  # a buffer's or a request's go: the YAML text that runs (default: the stored one)
@@ -858,20 +885,40 @@ class BufferService:
 
     # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
 
-    def _subject_view(self, row: dict) -> dict:
-        """The row plus its status word, the actions its stage accepts (sorted, for a stable page) and `asked`:
-        the action that was sent to its workflow and that the workflow has not answered yet. Until it does the
-        stage is still the old one, and the page must not offer that stage's buttons as if nothing was clicked."""
+    def _rules(self, row: dict, hold: dict | None, gaps: list[str]) -> tuple[str, frozenset[str]]:
+        """A subject's status word and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
+        dataset whose record cannot be run (`gaps`: no Start until a synced catalog holds one that can), with
+        `shelve` while no round is open and none was just asked for. A shelved subject (`hold`) is `shelved` and
+        takes `unshelve` alone."""
+        if hold is not None:
+            return "shelved", frozenset({"unshelve"})
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
-        gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
-        if gaps:  # the record cannot be run: no Start until a synced catalog holds one that can
+        if gaps:
             actions = actions - {"go"}
-        asked = None
-        if (held := self._asked.get((row["kind"], row["number"]))) is not None:
-            action, since = held
-            if (wait_s := ASKED_WAIT_S - (time.monotonic() - since)) > 0:
-                asked = {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
-        return {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps}
+        if status in SHELVABLE and self._asking(row["kind"], row.get("number")) is None:
+            actions = actions | {"shelve"}
+        return status, actions
+
+    def _asking(self, kind: str, number: int | None) -> dict | None:
+        """The action that was sent to the subject's workflow and that the workflow has not answered yet, while
+        its wait lasts."""
+        if number is None or (held := self._asked.get((kind, number))) is None:
+            return None
+        action, since = held
+        if (wait_s := ASKED_WAIT_S - (time.monotonic() - since)) <= 0:
+            return None
+        return {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
+
+    def _subject_view(self, row: dict, holds: dict[tuple[str, int], dict] | None = None) -> dict:
+        """The row plus its status word, the actions it accepts (`_rules`; sorted, for a stable page), its hold
+        when it is shelved, and `asked`: the action that was sent to its workflow and that the workflow has not
+        answered yet. Until it does the stage is still the old one, and the page must not offer that stage's
+        buttons as if nothing was clicked. `holds`: `Ledger.shelved()`, read once by a caller with many rows."""
+        hold = (self.ledger.shelved() if holds is None else holds).get((row["kind"], row["number"]))
+        gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
+        status, actions = self._rules(row, hold, gaps)
+        asked = self._asking(row["kind"], row["number"])
+        return {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
 
     def _gaps(self, record: str) -> list[str]:
         """What the dataset's record, as the newest synced catalog that holds it has it, lacks for a round to run
@@ -903,7 +950,8 @@ class BufferService:
         if kind not in SUBJECT_RULES:
             raise HttpError(404, f"no subjects of kind {kind!r}")
         page = self._page_of(query, SUBJECT_SORTS)
-        subjects = [self._subject_view(row) for row in self.ledger.find_subjects(kind=kind)]
+        holds = self.ledger.shelved()
+        subjects = [self._subject_view(row, holds) for row in self.ledger.find_subjects(kind=kind)]
         if page is None:
             return 200, {"subjects": subjects}, {}
         rows, total = paged(subjects, page, SUBJECT_SORTS, _subject_haystack)
@@ -912,9 +960,11 @@ class BufferService:
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
         """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
         for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
-        last day that did not reach Temporal (each with its subject, for the Retry). `kind` narrows the list to
+        last day that did not reach Temporal (each with its subject, for the Retry). A shelved subject is not
+        among them: `shelved` counts those, and `?shelved=1` lists them instead. `kind` narrows the list to
         one kind of subject; `kinds` counts every kind's share of the whole list."""
-        views = [self._subject_view(row) for row in self.ledger.find_subjects()]
+        holds = self.ledger.shelved()
+        views = [self._subject_view(row, holds) for row in self.ledger.find_subjects()]
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
         for index, view in enumerate(views):
             if view["kind"] == "buffer" and "dropped" in view["actions"]:
@@ -926,8 +976,11 @@ class BufferService:
         failed = []
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
-            failed.append({**action, "subject": self._subject_view(found[0]) if found else None})
-        needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+            failed.append({**action, "subject": self._subject_view(found[0], holds) if found else None})
+        if query.get("shelved"):
+            needs = [view for view in views if view["shelved"]]
+        else:
+            needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
         kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
         if (kind := query.get("kind")) is not None:
             if kind not in SUBJECT_RULES:
@@ -935,9 +988,9 @@ class BufferService:
             needs = [view for view in needs if view["kind"] == kind]
         page = self._page_of(query, SUBJECT_SORTS)
         if page is None:
-            return 200, {"needs": needs, "failed": failed, "kinds": kinds}, {}
+            return 200, {"needs": needs, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
         rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
-        return 200, {"needs": rows, "total": total, "failed": failed, "kinds": kinds}, {}
+        return 200, {"needs": rows, "total": total, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
@@ -1274,7 +1327,9 @@ class BufferService:
             if seen["state"] == "sent" or age < RETRY_WINDOW_S:
                 return
         kind, key, stage = subject["kind"], subject["key"], subject["stage"]
-        status, accepted = SUBJECT_RULES[kind][stage]
+        number = subject.get("number")  # none yet for a buffer spec that its first go creates
+        hold = self.ledger.shelved().get((kind, number)) if number is not None else None
+        status, accepted = self._rules(subject, hold, self._gaps(key) if kind == "dataset" else [])
         if parsed.action not in accepted:
             takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
             raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
@@ -1323,6 +1378,8 @@ class BufferService:
         action is recorded."""
         kind, number = subject["kind"], subject["number"]
         self._accepts(subject, parsed)
+        if parsed.action in HOLD_ACTIONS:
+            return self._hold(subject, parsed, actor)
         if self.dispatcher is None:
             raise HttpError(503, "this service has no way to Temporal: no workflow can be started from it")
         if self._check_hosts(parsed, needed, kind, number):
@@ -1368,21 +1425,7 @@ class BufferService:
             failed = self.ledger.settle_action(action["id"], "failed", str(error))
             self.changes.announce(kind, number)
             return 503, {"error": f"not delivered: {error}", "action": failed}, {}
-        text = f"**Action:** `{parsed.action}` by `{action['actor']}`"
-        if payload.get("plan_first"):
-            text += " (plan first)"
-        if payload.get("records"):
-            text += ": " + ", ".join(f"`{neutralize(record)}`" for record in payload["records"])
-        if payload.get("record"):
-            text += f": `{neutralize(payload['record'])}`"
-        if note := payload.get("note"):
-            # the mirror posts this under the bot's name: it must ping nobody (no mentions; spec §2 non-goals)
-            quiet = neutralize(note)[:16000].replace("@", "@\u200b")
-            text += "\n\n" + "\n".join(f"> {line}" for line in quiet.splitlines())
-        if spec := payload.get("spec"):  # the timeline, and so the issue, says exactly what ran
-            fenced = neutralize(spec).replace("```", "` ` `")
-            text += f"\n\n```yaml\n{fenced}{'' if fenced.endswith(chr(10)) else chr(10)}```"
-        sent = self.ledger.settle_action(action["id"], "sent", entry=(text, f"<!-- mia: action {action['id']} -->"))
+        sent = self.ledger.settle_action(action["id"], "sent", entry=_action_entry(action))
         if parsed.action == "stop" or not running:
             self._asked.pop((kind, number), None)  # the service answers these itself, just below
         if parsed.action == "stop":
@@ -1395,6 +1438,25 @@ class BufferService:
             self.ledger.append_entry(kind, number, body=said, marker=marker, stage="cancelled")
         self._changed(kind, number)
         return 202, sent, {}
+
+    def _hold(self, subject: dict, parsed: ActionBody, actor: str) -> Response:
+        """A `shelve` (its `note` says why) or an `unshelve`: recorded like any action and carried out here, in
+        the transaction that puts it on the timeline. A key seen before is the same action again."""
+        kind, number = subject["kind"], subject["number"]
+        reason = parsed.note.strip()
+        if parsed.action == "shelve" and not reason:
+            raise HttpError(422, "a shelve says why the subject can wait: `note`")
+        self._check_hosts(parsed, None, kind, number)  # 422: nothing here starts a job
+        payload = {"note": reason} if parsed.action == "shelve" else {}
+        try:
+            action, _ = self.ledger.add_action(kind, number, parsed.action, actor, key=parsed.key, payload=payload)
+        except ValueError as error:
+            raise HttpError(409, str(error)) from None
+        if action["state"] != "sent":
+            held = action["payload"].get("note") if parsed.action == "shelve" else None
+            action = self.ledger.settle_hold(action["id"], held, _action_entry(action)) or action
+            self._changed(kind, number)
+        return 202, action, {}
 
     def _get_action(self, action_id: str, *, query: dict[str, str], body: bytes) -> Response:
         action = self.ledger.action(int(action_id))

@@ -1402,6 +1402,76 @@ def test_only_the_actions_the_stage_accepts_are_taken(tmp_path):
     assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent[0][2] == "cancel"
 
 
+def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(tmp_path):
+    """Shelving is a person's decision beside the stage (spec shelved-subjects): no workflow hears of it, the
+    stage stays, and the dataset reads `shelved` to whatever asks which datasets are prepared."""
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "failed"})
+    worker(s, "PUT", "/subjects/dataset/8", {"key": "rec-b", "stage": "testing"})
+    worker(s, "PUT", "/datasets/rec-a", {"state": "prepared", "data_stage": "failed", "folder": "f"})
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"] == ["go", "revoke", "shelve"]
+    assert act(s, "/datasets/rec-b/actions", {"action": "shelve", "note": "later"})[0] == 409  # a round is open
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "  "})[0] == 422  # it says why
+    assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 409  # nothing to take back
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "x", "approve_hosts": ["a.org"]})[0] == 422
+
+    status, action, _ = act(
+        s, "/datasets/rec-a/actions", {"action": "shelve", "note": "the masks @need work", "key": "k"}
+    )
+    assert (status, action["state"], action["actor"]) == (202, "sent", "page") and gateway.sent == []
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "again", "key": "k"})[1]["id"] == action["id"]
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["status"], view["actions"]) == ("failed", "shelved", ["unshelve"])
+    assert view["shelved"]["reason"] == "the masks @need work" and view["shelved"]["by"] == "page"
+    entries = call(s, "GET", "/timeline/dataset/7")[1]["entries"]
+    assert len(entries) == 1 and entries[0]["body"].startswith(
+        "**Action:** `shelve` by `page`\n\n> the masks @\u200bneed"
+    )
+    # nobody starts it, a worker included; it is not in Needs you, and no plan or request finds it prepared
+    assert act(s, "/datasets/rec-a/actions", {"action": "go"})[0] == 409
+    assert act(s, "/datasets/rec-a/actions", {"action": "go", "actor": "prep:9", "root": "prep:9"}, AUTH)[0] == 409
+    needs = call(s, "GET", "/needs")[1]
+    assert needs["needs"] == [] and needs["shelved"] == 1
+    held = call(s, "GET", "/needs", {"shelved": "1"})[1]
+    assert [row["key"] for row in held["needs"]] == ["rec-a"] and held["kinds"]["dataset"] == 1
+    row = call(s, "GET", "/datasets/rec-a")[1]
+    assert (row["state"], row["reason"], row["folder"]) == ("shelved", "the masks @need work", "f")
+    assert call(s, "GET", "/datasets", {"state": "prepared"})[1]["datasets"] == []
+    assert [d["id"] for d in call(s, "GET", "/datasets", {"state": "shelved"})[1]["datasets"]] == ["rec-a"]
+    assert worker(s, "PUT", "/datasets/rec-a", {"state": "shelved"})[0] == 422  # no worker writes it
+    # a folder scan does not bring it back: the stored row is read again only once it is unshelved
+    worker(s, "PUT", "/datasets/rec-a", {"crops": 4})
+    assert call(s, "GET", "/datasets/rec-a")[1]["state"] == "shelved"
+
+    assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["status"], view["actions"], view["shelved"]) == ("stuck", ["go", "revoke", "shelve"], None)
+    assert [row["key"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["rec-a"]
+    assert call(s, "GET", "/datasets/rec-a")[1]["state"] == "prepared"
+    assert [e["body"].split("\n")[0] for e in call(s, "GET", "/timeline/dataset/7")[1]["entries"]] == [
+        "**Action:** `shelve` by `page`",
+        "**Action:** `unshelve` by `page`",
+    ]
+
+
+def test_shelving_covers_specs_requests_and_a_dataset_that_never_ran(tmp_path):
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/buffer/8", {"key": "pool", "stage": "needs-human"})
+    worker(s, "PUT", "/subjects/buffer/9", {"key": "wait", "stage": "staged"})
+    worker(s, "PUT", "/subjects/prep/10", {"key": "prep-10", "stage": "done"})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})  # `new`, with no row in the datasets table
+    assert act(s, "/specs/wait/actions", {"action": "shelve", "note": "n"})[0] == 409  # at its review: cancel first
+    assert act(s, "/specs/pool/actions", {"action": "shelve", "note": "n"})[0] == 202
+    assert act(s, "/prep/10/actions", {"action": "shelve", "note": "n"})[0] == 202
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "no reader yet"})[0] == 202
+    assert gateway.sent == [] and call(s, "GET", "/needs")[1]["shelved"] == 3
+    assert [v["status"] for v in call(s, "GET", "/subjects/buffer")[1]["subjects"]] == ["shelved", "waiting"]
+    row = call(s, "GET", "/datasets/rec-a")[1]
+    assert (row["state"], row["reason"]) == ("shelved", "no reader yet") and row["updated_at"] > 0
+    assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202
+    assert call(s, "GET", "/datasets/rec-a")[0] == 404  # the made-up row goes with the hold
+
+
 def test_decisions_show_what_the_person_wrote_with_their_verdict(tmp_path):
     """An assessment names the action it came from, and the note is read from that action, whatever else the
     person did before or after."""
@@ -1473,7 +1543,7 @@ def test_a_cancel_with_no_workflow_running_settles_the_subject_itself(tmp_path):
     worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "matching"})  # its run was terminated by hand
     assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent == []
     subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
-    assert (subject["stage"], subject["actions"]) == ("cancelled", ["go", "revoke"])
+    assert (subject["stage"], subject["actions"]) == ("cancelled", ["go", "revoke", "shelve"])
     assert "no workflow was running" in call(s, "GET", "/timeline/dataset/7")[1]["entries"][-1]["body"]
 
 
@@ -1500,6 +1570,7 @@ def test_a_sent_action_is_asked_until_its_workflow_answers(tmp_path):
     number = action["number"]
     view = call(s, "GET", "/subjects/dataset/rec-a")[1]
     assert (view["stage"], view["actions"]) == ("new", ["go"])  # the stage table is not bent
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "n"})[0] == 409  # nor shelved under a go
     assert (view["asked"]["id"], view["asked"]["action"]) == (action["id"], "go") and 0 < view["asked"]["wait_s"] <= 60
     assert call(s, "GET", f"/timeline/dataset/{number}")[1]["subject"]["asked"]["id"] == action["id"]
     assert call(s, "GET", "/subjects/dataset", {"limit": "5"})[1]["subjects"][0]["asked"]["id"] == action["id"]

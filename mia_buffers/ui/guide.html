@@ -3,7 +3,7 @@
   <div class="eyebrow">user guide · training on a buffer</div>
   <h1>Training on a MIA buffer</h1>
   <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file, and it defines both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalisation, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process.</p>
-  <p>Everything a person does is a button on this page: plan a buffer, run it, approve it, cancel it. Every step the system takes is an entry in the spec's timeline, which its page shows as it happens. <a href="#needs">Needs you</a> lists whatever is waiting for a person. The page needs no login: anyone who can reach it can press its buttons.</p>
+  <p>Everything a person does is a button on this page: plan a buffer, run it, approve it, cancel it. Every step the system takes is an entry in the spec's timeline, which its page shows as it happens. <a href="#needs">Needs you</a> lists whatever is waiting for a person. Something that can wait is taken off that list with <i>Shelve…</i> and a reason: nothing starts it and no buffer plan takes it until <i>Unshelve</i> on its page. The page needs no login: anyone who can reach it can press its buttons.</p>
 </header>
 
 <h2>The whole loop</h2>
