@@ -113,7 +113,9 @@ export function markdown(text, crops) {
         flag = row => (judged && FLAGGED.includes(texts(row)[1]) ? `sev-${texts(row)[1]}` : "");
       const pictured = judged && rows.some(at);
       const picture = row =>
-        at(row) ? [cropImage(at(row).round, at(row).sha, texts(row)[0], "overlay", `crop ${flag(row)}`.trim())] : [];
+        at(row)
+          ? [cropImage(at(row).round, at(row).sha, texts(row)[0], "overlay", `crop finding ${flag(row)}`.trim())]
+          : [];
       const marked = row =>
         cells(row).map((cell, n) => (n === 1 && flag(row) ? [el("span", { class: flag(row) }, ...cell)] : cell));
       const head = [...(pictured ? [["overlay"]] : []), ...cells(line)];

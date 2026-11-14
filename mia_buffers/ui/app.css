@@ -106,6 +106,7 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .md h3,.md h4,.md h5,.md h6{font-size:13.5px;margin-top:6px}
 .md .tablewrap{width:max-content;max-width:100%}
 .md img.crop{display:block;width:256px;max-width:100%;height:auto;border-radius:4px;background:var(--grid)}
+.md img.finding{width:128px;max-width:none}  /* half a crop's size beside its finding, whatever the note's length */
 .md .sev-suspect{color:var(--s4)} .md .sev-bad{color:var(--warn)}  /* a finding's severity word, and its picture's border */
 .md img.sev-suspect,.md img.sev-bad{border:3px solid}
 .md summary{cursor:pointer;color:var(--fg2);margin:4px 0}
