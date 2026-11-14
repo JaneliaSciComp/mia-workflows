@@ -176,22 +176,22 @@ async def test_past_the_cap_the_newest_policy_hosts_are_kept(tmp_path):
 
 
 async def test_submit_reuses_job_found_by_name(tmp_path):
-    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd=str(tmp_path), state="RUN")])
+    fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd=str(tmp_path / "round"), state="RUN")])
     j = _jobs(tmp_path, fake)
-    ref = await j.submit(7, K, 1, Workspace(str(tmp_path), "abc", "b"))
+    ref = await j.submit(7, K, 1, Workspace(str(tmp_path / "round"), "abc", "b"))
     assert ref.job_id == "555" and fake.submitted == []
 
 
 async def test_submit_ignores_same_name_job_from_another_round_dir(tmp_path):
     fake = FakeCsub(existing=[SimpleNamespace(job_id="555", name="autodev-7-r1", cwd="/old/run", state="DONE")])
-    ref = await _jobs(tmp_path, fake).submit(7, "c0ffee02", 1, Workspace(str(tmp_path), "abc", "b"))
+    ref = await _jobs(tmp_path, fake).submit(7, "c0ffee02", 1, Workspace(str(tmp_path / "round"), "abc", "b"))
     assert ref.job_id == "777" and len(fake.submitted) == 1
 
 
 async def test_api_key_mode_passes_key_in_job_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SVC_KEY", "sk-1")
     fake = FakeCsub()
-    await _jobs(tmp_path, fake, api_key_env="SVC_KEY").submit(7, K, 1, Workspace(str(tmp_path), "a", "b"))
+    await _jobs(tmp_path, fake, api_key_env="SVC_KEY").submit(7, K, 1, Workspace(str(tmp_path / "round"), "a", "b"))
     assert fake.submitted[0]["env"] == {"ANTHROPIC_API_KEY": "sk-1"}
 
 
@@ -310,7 +310,7 @@ async def test_submit_rejection_is_permanent_transport_error_is_not(tmp_path, er
     j = _jobs(tmp_path, FakeCsub(error=err))
     a = Activities(j.cfg, None, None, j, "bot")
     with pytest.raises(Exception) as e:
-        await a.submit_agent(SubmitInput(7, K, 1, Workspace(str(tmp_path), "abc", "b")))
+        await a.submit_agent(SubmitInput(7, K, 1, Workspace(str(tmp_path / "round"), "abc", "b")))
     if permanent:
         assert isinstance(e.value, ApplicationError) and e.value.non_retryable and err.code in str(e.value)
     else:
@@ -322,7 +322,7 @@ async def test_submit_refuses_a_key_that_is_not_8_hex(tmp_path, key):
     j = _jobs(tmp_path, FakeCsub())
     with pytest.raises(ApplicationError) as e:
         await Activities(j.cfg, None, None, j, "bot").submit_agent(
-            SubmitInput(7, key, 1, Workspace(str(tmp_path), "a", "b"))
+            SubmitInput(7, key, 1, Workspace(str(tmp_path / "round"), "a", "b"))
         )
     assert e.value.non_retryable and not (tmp_path / "state" / "jobs").exists()
 
