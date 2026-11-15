@@ -111,13 +111,15 @@ def test_every_dataset_stage_has_a_rule():
 
     assert set(STAGE_ACTIONS) == set(STAGES)
     for status, actions in STAGE_ACTIONS.values():
-        assert status in STATUS_WORDS and actions <= {*HUMAN_LABELS, "cancel"}
+        assert status in STATUS_WORDS and actions <= {*HUMAN_LABELS, "cancel", "stop"}
     # a verdict, or a restart that drops the set under review
     assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "go", "cancel"}))
-    # a round in progress is cancelled before anything else is asked of its dataset; between a failed round and
-    # its re-run a go is taken too: the debugger's own, or a person's who does not wait for it
+    # a round in progress is cancelled (or, when it cannot answer, stopped) before anything else is asked of its
+    # dataset; between a failed round and its re-run a go is taken too: the debugger's own, or a person's who
+    # does not wait for it
     working = {stage: actions for stage, (status, actions) in STAGE_ACTIONS.items() if status == "working"}
-    assert working.pop("debugging") == {"go", "cancel"} and all(actions == {"cancel"} for actions in working.values())
+    assert working.pop("debugging") == {"go", "cancel", "stop"}
+    assert all(actions == {"cancel", "stop"} for actions in working.values())
     assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"go", "revoke"}))
 
 

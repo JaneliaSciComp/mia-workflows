@@ -27,7 +27,9 @@ import yaml
 from autodev.auth import bot_login, token_fn
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from autodev.github import GitHub
+from mia_core.checkout import head_commit
 from mia_core.fs import require_local_dir, require_secret_file
+from mia_core.registry import best_effort
 
 from .config import EXTRA_LABELS, STAGES, load_config
 
@@ -425,6 +427,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         cfg.task_queue,
         cfg.await_queue,
     )
+    # the commit this worker's activities were loaded from: the cleaner says when a restart is owed
+    best_effort(lambda: activities.registry.put_worker(cfg.task_queue, head_commit()), "worker commit", log)
     try:
         async with main_worker, await_worker:
             await asyncio.Event().wait()

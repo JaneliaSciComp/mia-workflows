@@ -224,6 +224,7 @@ class Activities:
             self.prep_stage_result,
             self.comment_prep,
             self.keep,
+            self.sweep,
             self.paused,
             self.reserve,
             self.settle,
@@ -1571,6 +1572,13 @@ class Activities:
         report_body = {**dataclasses.asdict(report), "dry_run": dry_run}  # the page shows the last pass
         await asyncio.to_thread(best_effort, lambda: registry.put_keeper(report_body), "keeper report", log)
         return report
+
+    @activity.defn(name="sweep")
+    async def sweep(self) -> dict:
+        """One pass of the cleaner (`mia_buffers.sweep`): its report, which the page shows."""
+        from .sweep import run_sweep
+
+        return await run_sweep(self)
 
     async def _keeper_catalog(self, report: KeeperReport, now: float) -> None:
         """Sync the catalog's main head when the last sync is `keeper.catalog_sync_hours` old (or never ran)."""

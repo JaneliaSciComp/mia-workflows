@@ -61,6 +61,7 @@ export const ACTION_HELP = {
     revoke:
       "Withdraw this dataset's saved crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Run again repairs it.",
     cancel: "Stop the round in progress: its cluster jobs are killed and nothing is saved.",
+    stop: "For a round that does not answer Cancel: its workflow is terminated. A cluster job already running is not killed.",
   },
   buffer: {
     ...SHELF_HELP,
@@ -78,6 +79,7 @@ export const ACTION_HELP = {
     go: "Run the request again: its datasets that have not settled are handed to the preparation workflow again.",
     cancel: "Stop the request, and the dataset rounds it started.",
     stop: "For a request that does not answer Cancel: its workflow is terminated. The dataset rounds it started keep running.",
+    recheck: "Look at the request's datasets again: it is done once each of them is prepared or shelved.",
   },
 };
 const actionHelp = (subject, action) => {
@@ -89,6 +91,7 @@ export const ACTION_ORDER = [
   "reject",
   "keep",
   "go",
+  "recheck",
   "revoke",
   "retire",
   "shelve",
@@ -101,6 +104,7 @@ const ACTION_WORDS = {
   reject: "Reject…",
   keep: "Keep",
   go: "Run again",
+  recheck: "Check again",
   revoke: "Revoke",
   retire: "Retire",
   shelve: "Shelve…",
@@ -134,7 +138,10 @@ const ACTION_CONFIRM = {
     s.kind === "prep"
       ? "Cancel the request's round in progress? The dataset rounds it started are stopped too."
       : "Cancel the round in progress? Its cluster jobs are killed and the work so far is not kept.",
-  stop: "Force stop? Use it when Cancel gets no answer. The workflow is terminated and the buffers are retired; a cluster job already running is NOT killed, and a request's dataset rounds keep running.",
+  stop: s =>
+    s.kind === "dataset"
+      ? "Force stop? Use it when Cancel gets no answer. The workflow is terminated; a cluster job already running is NOT killed."
+      : "Force stop? Use it when Cancel gets no answer. The workflow is terminated and the buffers are retired; a cluster job already running is NOT killed, and a request's dataset rounds keep running.",
 };
 const actionConfirm = (subject, action) => {
   const text = ACTION_CONFIRM[action];

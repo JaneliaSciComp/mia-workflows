@@ -218,3 +218,16 @@ def test_action_calls():
     assert json.loads(seen[3].content) == {"action": "go", "key": "p9-e1/rec a", "actor": "prep:9", "root": "o/b#9"}
     assert seen[3].headers["content-type"] == "application/json"
     assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).action(1) is None
+
+
+def test_head_commit_is_the_checkouts_commit_or_none(tmp_path):
+    import subprocess
+
+    from mia_core.checkout import head_commit
+
+    assert head_commit(tmp_path) is None  # no checkout
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    commit = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.org", "commit", "-q"]
+    subprocess.run([*commit, "--allow-empty", "-m", "first"], check=True)
+    found = head_commit(tmp_path)
+    assert found is not None and len(found) == 40

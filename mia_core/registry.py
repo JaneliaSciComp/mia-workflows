@@ -215,6 +215,52 @@ class Registry:
         """Store the keeper's last pass for the page (`at` added when absent); returns it as stored."""
         return self.request("PUT", "/keeper", json=report)
 
+    # --- the cleaner: what it reads of the installation, and its cases (spec cleaner §4.2, §4.8) -----
+
+    def subjects(self, kind: str) -> list[dict]:
+        """Every subject of the kind, each with its status word and the actions it accepts."""
+        return self.request("GET", f"/subjects/{quote(kind, safe='')}")["subjects"]
+
+    def health(self) -> dict:
+        """{temporal, queues}: whether Temporal answers and whether a worker polls each task queue."""
+        return self.request("GET", "/health")
+
+    def run(self, kind: str, number: int) -> dict:
+        """The subject's latest run: {status, run_id, task, activities}; `status` None when it never ran."""
+        return self.request("GET", f"/run/{quote(kind, safe='')}/{number}", params={"detail": "1"})
+
+    def runs(self) -> list[dict]:
+        return self.request("GET", "/runs")["runs"]
+
+    def terminate_run(self, namespace: str, workflow_id: str, run_id: str, reason: str) -> bool:
+        """Terminate one run by its ids; False when it was over already."""
+        body = {"namespace": namespace, "id": workflow_id, "run_id": run_id, "reason": reason}
+        return self.request("POST", "/runs/terminate", json=body)["terminated"]
+
+    def schedules(self) -> list[dict]:
+        return self.request("GET", "/schedules")["schedules"]
+
+    def workers(self) -> dict:
+        """Service -> {commit, at}: the commit each worker said it started on."""
+        return self.request("GET", "/workers")["workers"]
+
+    def put_worker(self, service: str, commit: str | None) -> dict:
+        return self.request("PUT", f"/workers/{quote(service, safe='')}", json={"commit": commit})
+
+    def open_case(self, **fields: Any) -> dict:
+        return self.request("POST", "/cases", json=fields)
+
+    def update_case(self, case_id: int, **fields: Any) -> dict:
+        return self.request("PUT", f"/cases/{case_id}", json=fields)
+
+    def cases(self, days: float | None = None) -> list[dict]:
+        """The cases that are not over, and with `days` also every case updated within them; newest first."""
+        return self.request("GET", "/cases", params={"days": days} if days is not None else None)["cases"]
+
+    def put_cleaner(self, report: dict) -> dict:
+        """Store the cleaner's last sweep for the page (`at` added when absent)."""
+        return self.request("PUT", "/cleaner", json=report)
+
     # --- assessments, budgets and volumes (spec autonomous-gates §5, §6, §8) ---------------------
 
     def put_assessment(self, assessment: dict) -> dict:

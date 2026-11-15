@@ -74,7 +74,7 @@ PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),  # a request has no `new` label: a subject before its first stage
     "requested": ("working", frozenset({"cancel", "stop"})),
     "done": ("done", frozenset({"go"})),
-    "needs-human": ("stuck", frozenset({"go"})),
+    "needs-human": ("stuck", frozenset({"go", "recheck"})),  # recheck: look at its datasets again
     "cancelled": ("done", frozenset({"go"})),
 }
 # What a round is doing at each stage it works or waits at: the sentence of the stage's start entry when the round

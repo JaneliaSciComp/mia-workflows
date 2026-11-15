@@ -283,10 +283,23 @@ class ActionBody(_Strict):
     """One thing a person (or a worker for a request) asks of a subject (spec webapp-actions §4.2)."""
 
     action: Literal[
-        "go", "approve", "reject", "revoke", "keep", "retire", "dropped", "cancel", "stop", "shelve", "unshelve"
+        "go",
+        "approve",
+        "reject",
+        "revoke",
+        "keep",
+        "retire",
+        "dropped",
+        "cancel",
+        "stop",
+        "shelve",
+        "unshelve",
+        "recheck",
     ]
     key: str | None = None  # the sender's own name for this request: a repeat is the same action
-    revision: int | None = None  # approve, reject: the subject's revision the person was looking at
+    # the subject's revision the sender was looking at: required of a verdict, checked on any action that has it
+    revision: int | None = None
+    run: str | None = None  # stop: the run to end; one that is over already is not replaced by a later run
     note: str = ""  # reject: the feedback for the agent; shelve: why it can wait
     root: str | None = None  # a worker's go: the root request this round is charged to
     actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
@@ -337,6 +350,13 @@ class CaseUpdate(_Strict):
     state: CaseState | None = None
     rule: str | None = None
     data: dict | None = None
+
+
+class TerminateBody(_Strict):
+    namespace: str
+    id: str
+    run_id: str
+    reason: str
 
 
 class WorkerBody(_Strict):
@@ -580,6 +600,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/workers/([^/]+)$"), "put_worker", "worker"),
     ("GET", re.compile(r"^/workers$"), "workers", "read"),
     ("GET", re.compile(r"^/runs$"), "runs", "read"),
+    ("POST", re.compile(r"^/runs/terminate$"), "terminate_run", "worker"),
     ("GET", re.compile(r"^/schedules$"), "schedules", "read"),
 ]
 
@@ -1361,8 +1382,8 @@ class BufferService:
     def _stop(self, subject: dict, action: dict, stopped: bool) -> None:
         """The force stop, for a run that does not answer a cancel (one frozen by nondeterminism), once its
         workflow is terminated (`stopped`: one was running): retire the subject's buffers with their `retired`
-        events and set the stage a stopped subject rests at (`retired`, or `done` for a request). The entry says what
-        was done and what is left running."""
+        events and set the stage a stopped subject rests at (`retired`, `done` for a request, `cancelled` for a
+        dataset). The entry says what was done and what is left running."""
         kind, number = subject["kind"], subject["number"]
         retired = []
         if kind == "buffer":
@@ -1384,12 +1405,13 @@ class BufferService:
             number,
             body=f"stopped: {what}. {left}\n\n{marker}",
             marker=marker,
-            stage="retired" if kind == "buffer" else "done",
+            stage={"buffer": "retired", "prep": "done", "dataset": "cancelled"}[kind],
         )
 
     def _accepts(self, subject: dict, parsed: ActionBody) -> None:
         """Steps 1 and 2 of spec §5: the subject's stage accepts the action (409 with what it does take), and a
-        verdict names the revision that was looked at (409 when the subject has moved on). A key seen before is
+        verdict names the revision that was looked at (409 when the subject has moved on; so does any other
+        action that names one). A key seen before is
         the same action: one already sent, or sent again within RETRY_WINDOW_S of the click, is not checked
         (the first try may have arrived and moved the stage; the workflow drops an event id it has handled).
         An older undelivered one is checked like a new click, so a stale Retry cannot pass the stage table."""
@@ -1404,11 +1426,10 @@ class BufferService:
         if parsed.action not in accepted:
             takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
             raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
-        if parsed.action in ("approve", "reject"):
-            if parsed.revision is None:
-                raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
-            if parsed.revision != subject["revision"]:
-                raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
+        if parsed.action in ("approve", "reject") and parsed.revision is None:
+            raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
+        if parsed.revision is not None and parsed.revision != subject["revision"]:
+            raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
 
     def _check_hosts(
         self, parsed: ActionBody, needed: Callable[[], Needed] | None, kind: str, number: int | None
@@ -1487,7 +1508,10 @@ class BufferService:
                     raise DispatchError("no workflow is running for it")
             elif parsed.action == "stop":  # a terminate needs no replay: it also ends a run nondeterminism froze
                 reason = f"stopped from the page (action {action['id']})"
-                running = self.dispatcher.terminate(kind, number, reason)
+                running = self.dispatcher.terminate(kind, number, reason, parsed.run)
+            elif parsed.action == "recheck":  # the request's plain `recheck()`: it looks at its datasets again
+                if not self.dispatcher.signal_running(kind, number, "recheck"):
+                    raise DispatchError("no workflow is running for it")
             else:
                 # a dataset's go is its workflow's `restart`: the round starts in a new run, on today's code
                 self.dispatcher.send(kind, number, "restart" if (kind, signal) == ("dataset", "go") else signal, event)
@@ -1589,6 +1613,17 @@ class BufferService:
             return 200, {"runs": self.dispatcher.open_runs()}, {}
         except DispatchError as error:
             raise HttpError(503, str(error)) from None
+
+    def _terminate_run(self, *, query: dict[str, str], body: bytes) -> Response:
+        """End one run by its ids: a run no worker can execute has no subject to stop it through."""
+        parsed = _parse(TerminateBody, body)
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal")
+        try:
+            done = self.dispatcher.terminate_run(parsed.namespace, parsed.id, parsed.run_id, parsed.reason)
+        except DispatchError as error:
+            raise HttpError(503, str(error)) from None
+        return 200, {"terminated": done}, {}
 
     def _schedules(self, *, query: dict[str, str], body: bytes) -> Response:
         """Every Temporal schedule and when it last fired; none when Temporal cannot be asked."""

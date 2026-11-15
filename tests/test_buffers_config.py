@@ -193,7 +193,12 @@ def test_every_buffer_and_prep_stage_has_a_rule():
     from mia_data.config import STATUS_WORDS
 
     assert set(STAGE_ACTIONS) == set(STAGES) and set(PREP_STAGE_ACTIONS) == {"new", *PREP_STAGES}
-    vocabulary = (set(HUMAN_LABELS) - {"plan"}) | {"dropped", "stop", "cancel"}  # plan is an option of go (§4.2)
+    vocabulary = (set(HUMAN_LABELS) - {"plan"}) | {
+        "dropped",
+        "stop",
+        "cancel",
+        "recheck",
+    }  # plan is an option of go (§4.2)
     for status, actions in [*STAGE_ACTIONS.values(), *PREP_STAGE_ACTIONS.values()]:
         assert status in STATUS_WORDS and actions <= vocabulary
     assert STAGE_ACTIONS["idle"] == ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"}))

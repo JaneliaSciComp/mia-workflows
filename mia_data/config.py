@@ -66,12 +66,12 @@ STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done", "shelved")
 # these. The workflow stays the code that carries a round out.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
-    "matching": ("working", frozenset({"cancel"})),
-    "developing": ("working", frozenset({"cancel"})),
-    "testing": ("working", frozenset({"cancel"})),
+    "matching": ("working", frozenset({"cancel", "stop"})),
+    "developing": ("working", frozenset({"cancel", "stop"})),
+    "testing": ("working", frozenset({"cancel", "stop"})),
     "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),  # go: start over, the set is dropped
-    "merging": ("working", frozenset({"cancel"})),
-    "debugging": ("working", frozenset({"go", "cancel"})),
+    "merging": ("working", frozenset({"cancel", "stop"})),
+    "debugging": ("working", frozenset({"go", "cancel", "stop"})),
     "done": ("done", frozenset({"go", "revoke"})),
     "failed": ("stuck", frozenset({"go", "revoke"})),
     "blocked": ("stuck", frozenset({"go", "revoke"})),

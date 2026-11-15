@@ -1023,6 +1023,45 @@ def test_keeper_kv_routes(tmp_path):
     assert worker(s, "PUT", "/keeper", {"at": 5.0})[1] == {"at": 5.0}  # replaced whole; a given `at` kept
 
 
+def test_any_action_that_names_a_revision_is_refused_once_the_subject_moved(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    revision = _stage(s, "dataset", number, "matching")
+    stale = {"action": "cancel", "revision": revision - 1, "actor": "cleaner"}
+    status, out, _ = act(s, "/datasets/rec-a/actions", stale, AUTH)
+    assert status == 409 and "changed since it was shown" in out["error"]
+    assert [sent[2] for sent in gateway.sent] == ["restart"]  # the go alone: no cancel reached the workflow
+    sent = act(s, "/datasets/rec-a/actions", {**stale, "revision": revision}, AUTH)
+    assert sent[0] == 202 and sent[1]["actor"] == "cleaner" and gateway.sent[-1][2] == "cancel"
+
+
+def test_a_dataset_is_stopped_by_the_run_it_names_and_rests_cancelled(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    _stage(s, "dataset", number, "developing")
+    assert act(s, "/datasets/rec-a/actions", {"action": "stop", "run": "run-1"})[0] == 202
+    assert gateway.terminated == [("dataset", number, "run-1")]
+    out = call(s, "GET", f"/timeline/dataset/{number}")[1]
+    assert out["subject"]["stage"] == "cancelled" and "go" in out["subject"]["actions"]
+    assert (
+        "stopped: workflow stopped. A cluster job that was already running is not killed." in out["entries"][-1]["body"]
+    )
+
+
+def test_a_request_at_needs_human_is_told_to_look_again(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/prep", {"spec": PREP_TEXT})[1]["number"]
+    _stage(s, "prep", number, "requested")
+    assert act(s, f"/prep/{number}/actions", {"action": "recheck"})[0] == 409  # a round in progress: cancel or stop
+    _stage(s, "prep", number, "needs-human")
+    assert act(s, f"/prep/{number}/actions", {"action": "recheck"})[0] == 202
+    assert gateway.sent[-1] == ("prep", number, "recheck")
+    gateway.running = False
+    status, out, _ = act(s, f"/prep/{number}/actions", {"action": "recheck"})
+    assert status == 503 and "no workflow is running" in out["error"]
+    assert call(s, "GET", f"/subjects/prep/prep-{number}")[1]["stage"] == "needs-human"  # nothing was written
+
+
 def test_case_routes(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
     opened = {"kind": "dataset", "number": 224, "key": "rec-a", "rule": "no run", "data": {"seen": "no run"}}
@@ -1372,8 +1411,12 @@ class Gateway(Kicks):
         super().__init__()
         self.sent, self.fail, self.running, self.terminated = [], None, running, []
 
-    def terminate(self, kind, number, reason):
-        self.terminated.append((kind, number))
+    def terminate(self, kind, number, reason, run_id=None):
+        self.terminated.append((kind, number, run_id) if run_id else (kind, number))
+        return self.running
+
+    def terminate_run(self, namespace, workflow_id, run_id, reason):
+        self.terminated.append((namespace, workflow_id, run_id))
         return self.running
 
     def send(self, kind, number, signal, event):
@@ -1483,7 +1526,7 @@ def test_a_dataset_whose_row_holds_an_open_rounds_stage_gets_its_subject_at_that
     status, out, _ = act(s, "/datasets/rec-b/actions", {"action": "go"})
     assert status == 409 and "`developing`" in out["error"] and "cancel" in out["error"] and gateway.sent == []
     subject = call(s, "GET", "/subjects/dataset/rec-b")[1]
-    assert (subject["number"], subject["stage"], subject["actions"]) == (234, "developing", ["cancel"])
+    assert (subject["number"], subject["stage"], subject["actions"]) == (234, "developing", ["cancel", "stop"])
     assert act(s, "/datasets/rec-b/actions", {"action": "cancel"})[0] == 202  # the round can be cancelled
     # a subject already made at `new`, which no workflow has written, is corrected by the next click
     worker(s, "PUT", "/datasets/rec-a", {"state": "in-progress", "data_stage": "testing", "issue": 7})
@@ -1767,7 +1810,7 @@ def test_a_sent_action_is_asked_until_its_workflow_answers(tmp_path):
     # a stage the workflow writes is
     worker(s, "POST", f"/timeline/dataset/{number}", {"stage": "matching"})
     view = call(s, "GET", "/subjects/dataset/rec-a")[1]
-    assert view["asked"] is None and view["actions"] == ["cancel"]
+    assert view["asked"] is None and view["actions"] == ["cancel", "stop"]
 
 
 def test_what_ends_an_asked_action(tmp_path, monkeypatch):

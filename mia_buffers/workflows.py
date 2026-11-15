@@ -2097,6 +2097,20 @@ class MiaPrep:
         await self._stage("needs-human", detail)
 
 
+@workflow.defn(name="MiaCleaner")
+class MiaCleaner:
+    """Run on a schedule: one pass of the cleaner (the `sweep` activity), which finds what is stuck, opens a
+    case for each and carries every open case on (spec cleaner §4)."""
+
+    @workflow.run
+    async def run(self) -> dict:
+        return await workflow.execute_activity(
+            "sweep",
+            start_to_close_timeout=timedelta(minutes=20),
+            retry_policy=RetryPolicy(maximum_attempts=1),  # the next scheduled pass is the retry
+        )
+
+
 @workflow.defn(name="MiaCacheKeeper")
 class MiaCacheKeeper:
     """Run on a schedule: the `keep` activity's housekeeping of the raw and staged roots."""

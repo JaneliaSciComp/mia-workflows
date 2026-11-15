@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import signal
 import socket
@@ -19,8 +20,9 @@ import httpx
 
 from autodev.auth import bot_login
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
+from mia_core.checkout import head_commit
 from mia_core.fs import require_local_dir, require_secret_file
-from mia_core.registry import Registry, RegistryError, read_token
+from mia_core.registry import Registry, RegistryError, best_effort, read_token
 from mia_data.cli import _gh, _github_clients
 from mia_data.jobspec import harness_env, harness_pin
 
@@ -28,6 +30,8 @@ from .config import PREP_STAGES, STAGES, load_config
 from .jobspec import catalog_snapshot
 from .plan import build_plan, load_records, plan_hash
 from .spec import SpecError, load_spec, spec_hash
+
+log = logging.getLogger("mia_buffers")
 
 if TYPE_CHECKING:
     from autodev.github import GitHub
@@ -116,7 +120,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
 
     from .activities import Activities
     from .mirror import buffer_issue, prep_issue, request_page, spec_page
-    from .workflows import MiaBuffer, MiaCacheKeeper, MiaPrep
+    from .workflows import MiaBuffer, MiaCacheKeeper, MiaCleaner, MiaPrep
 
     client = await _client(cfg)
     clients = _github_clients(cfg)
@@ -136,7 +140,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
-        workflows=[MiaBuffer, MiaCacheKeeper, MiaPrep, MiaMirror],
+        workflows=[MiaBuffer, MiaCacheKeeper, MiaCleaner, MiaPrep, MiaMirror],
         activities=[*activities.all(), mirror.mirror],
         max_concurrent_activities=8,
     )
@@ -149,6 +153,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     print(
         f"worker up as {bot}: {cfg.temporal.address} ns={cfg.temporal.namespace} queues {cfg.task_queue}, {cfg.await_queue}"
     )
+    # the commit this worker's activities were loaded from: the cleaner says when a restart is owed
+    best_effort(lambda: activities.registry.put_worker(cfg.task_queue, head_commit()), "worker commit", log)
     try:
         async with main_worker, await_worker:
             await asyncio.Event().wait()
@@ -174,8 +180,9 @@ async def delete_schedule(client: Any, schedule_id: str) -> bool:
 
 
 async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> int:
-    """Create or update the Temporal schedule of MiaCacheKeeper (every `keeper.minutes`), and delete a
-    `mia-buffers-poll` schedule if one exists: nothing polls GitHub for a command, so no workflow type answers it."""
+    """Create or update the Temporal schedules of MiaCacheKeeper (every `keeper.minutes`) and MiaCleaner (every
+    `cleaner.minutes`; deleted while `cleaner.mode` is `off`), and delete a `mia-buffers-poll` schedule if one
+    exists: nothing polls GitHub for a command, so no workflow type answers it."""
     from temporalio.client import (
         Schedule,
         ScheduleActionStartWorkflow,
@@ -185,18 +192,25 @@ async def cmd_schedule(cfg: Config, args: argparse.Namespace | None = None) -> i
         ScheduleSpec,
     )
 
-    from .workflows import MiaCacheKeeper
+    from .workflows import MiaCacheKeeper, MiaCleaner
 
     client = await _client(cfg)
     if await delete_schedule(client, f"{cfg.deployment}-poll"):
         print(f"deleted schedule {cfg.deployment}-poll")
-    schedule_id = f"{cfg.deployment}-keeper"
-    schedule = Schedule(
-        action=ScheduleActionStartWorkflow(MiaCacheKeeper.run, id=f"{schedule_id}-run", task_queue=cfg.task_queue),
-        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=cfg.keeper.minutes))]),
-        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
-    )
-    print(f"{await apply_schedule(client, schedule_id, schedule)} schedule {schedule_id}")
+    passes: list[tuple[str, Any, int]] = [("keeper", MiaCacheKeeper.run, cfg.keeper.minutes)]
+    if cfg.cleaner.mode == "off":
+        if await delete_schedule(client, f"{cfg.deployment}-cleaner"):
+            print(f"deleted schedule {cfg.deployment}-cleaner")
+    else:
+        passes.append(("cleaner", MiaCleaner.run, cfg.cleaner.minutes))
+    for name, run, minutes in passes:
+        schedule_id = f"{cfg.deployment}-{name}"
+        schedule = Schedule(
+            action=ScheduleActionStartWorkflow(run, id=f"{schedule_id}-run", task_queue=cfg.task_queue),
+            spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=minutes))]),
+            policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+        )
+        print(f"{await apply_schedule(client, schedule_id, schedule)} schedule {schedule_id}")
     return 0
 
 

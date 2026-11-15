@@ -192,6 +192,9 @@ def sighting(item: dict, cfg: CleanerCfg, now: float) -> dict | None:
         if now - since < cfg.stopped_minutes * 60:
             return None
         said = entry_text(stop) if stop else ""
+        if subject["kind"] == "prep" and (item.get("party") or {}).get("settled"):
+            seen = f"at `{stage}` for {_age(now - since)} though each of its datasets is prepared or shelved"
+            return {"what": "stopped", "rule": "request behind", "seen": seen}
         return {
             "what": "stopped",
             "rule": None,
@@ -236,6 +239,8 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         return [{"do": "cancel"}, {"do": "kill_jobs"}, {"do": "go"}]
     if rule == "frozen run":
         return [{"do": "stop"}, {"do": "kill_jobs"}, {"do": "go"}]
+    if rule == "request behind":
+        return [{"do": "recheck"}]
     if rule == "activity retrying":
         failure = found["activity"]["failure"]
         if NOT_REGISTERED_RE.search(failure):

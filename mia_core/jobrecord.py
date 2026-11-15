@@ -65,6 +65,18 @@ def job_link(page_url: str, where: str) -> str:
     return f"{page_url.rstrip('/')}/#job/{where}"
 
 
+def open_records(work_root: Path, under: str) -> list[dict]:
+    """The records at the addresses under `under` (a round's workspace relative to `work_root`) that have no
+    end: jobs whose wait never saw them finish. Each as stored, with its `address`."""
+    directory = Path(work_root) / RECORDS_DIR / under
+    found = []
+    for path in sorted(directory.glob("*.json.gz")):
+        record = _load(path)
+        if record and "finished_at" not in record:
+            found.append({**record, "address": f"{under}/{path.name.removesuffix('.json.gz')}"})
+    return found
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
