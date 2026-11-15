@@ -147,6 +147,43 @@ def test_the_docs_describe_the_system_as_it_is() -> None:
         assert needle in docs, needle
 
 
+def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
+    assert has('data-tab="cleaner"') and has('data-view="cleaner"') and has("cleaner: viewCleaner")
+    assert resolve("GET", "/cleaner") == "read" and resolve("GET", "/cases") == "read"
+    findings = [
+        {"id": "worker snippets", "text": "no worker polls `snippets`"},  # the health check says this itself
+        {"id": "restart mia-data", "text": "the `mia-data` worker runs commit `aaaaaaa`: a restart is owed"},
+    ]
+    health = {"temporal": True, "queues": {"mia-data": True}}
+    lines = run_js(
+        "print(downLines(input.health, input.findings));",
+        {"app.js": "downLines"},
+        {"health": health, "findings": findings},
+    )
+    assert lines == ["the mia-data worker runs commit aaaaaaa: a restart is owed"]
+    cases = [
+        {
+            "kind": "dataset",
+            "key": "rec-a",
+            "rule": "no run",
+            "state": "needs-person",
+            "updated": 5.0,
+            "data": {"seen": "no open run", "steps": [{"do": "cancel"}], "plan": [{"do": "go"}], "needs": "look"},
+        },
+        {
+            "kind": "job",
+            "key": "issue-9/i9-e1/crops-1",
+            "rule": "left-over job",
+            "state": "open",
+            "updated": 6.0,
+            "data": {"plan": [{"do": "kill_job"}]},
+        },
+    ]
+    stuck, job = run_js("print(caseRows(input));", {"operations.js": "caseRows"}, cases)
+    assert (stuck["href"], stuck["done"], stuck["next"]) == ("#datasets/rec-a", "cancel", "look")
+    assert (job["href"], job["next"]) == ("#job/issue-9/i9-e1/crops-1", "kill_job")
+
+
 def test_page_has_a_decisions_tab() -> None:
     assert has('data-tab="decisions"') and has('data-view="decisions"')
     assert has("decisions: viewDecisions")

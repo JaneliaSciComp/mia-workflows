@@ -1077,6 +1077,11 @@ def test_case_routes(tmp_path):
     assert [row["id"] for row in call(s, "GET", "/cases", {"days": "7"})[1]["cases"]] == [left["id"], case["id"]]
     assert [row["id"] for row in call(s, "GET", "/cases", {"state": "resolved"})[1]["cases"]] == [case["id"]]
     assert call(s, "GET", "/cases", {"state": "gone"})[0] == 422
+    # what the cleaner could not resolve is on the subject's row in Needs you
+    worker(s, "PUT", "/subjects/dataset/224", {"key": "rec-a"})
+    worker(s, "POST", "/timeline/dataset/224", {"stage": "blocked"})
+    worker(s, "POST", "/cases", {**opened, "state": "needs-person", "data": {"needs": "approve the host"}})
+    assert [row["cleaner"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["approve the host"]
 
 
 def test_the_cleaners_report_and_the_workers_commits(tmp_path):

@@ -1059,6 +1059,11 @@ class BufferService:
                 board = self.ledger.buffer_datasets(f"i{view['number']}-e{gos[-1]['id']}") if gos else []
                 if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
                     views[index] = {**view, "drops": drops}
+        # what the cleaner could not resolve, on the subject's row
+        for case in self.ledger.cases(("needs-person",)):
+            for index, view in enumerate(views):
+                if (view["kind"], view["number"]) == (case["kind"], case["number"]) and "cleaner" not in view:
+                    views[index] = {**view, "cleaner": case["data"].get("needs", "")}
         failed = []
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])

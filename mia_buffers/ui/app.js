@@ -7,7 +7,7 @@ import { onScreen } from "./actions.js";
 import { bindControls, viewDesigner } from "./designer.js";
 import { viewBuffers } from "./buffers.js";
 import { viewDatasetList } from "./datasets.js";
-import { viewCache, viewDecisions, viewPreparation } from "./operations.js";
+import { viewCache, viewCleaner, viewDecisions, viewPreparation } from "./operations.js";
 import { viewJob } from "./job.js";
 import { viewFind, viewNeeds, viewSubject } from "./subjects.js";
 
@@ -44,19 +44,24 @@ async function viewDocs(arg) {
 
 // ---- health and the stream
 const HEALTH_MS = 60000; // how often the page asks whether Temporal and every worker are still there
-export function downLines(health) {
-  // what is away, in words; a service's task queue carries its name
+export function downLines(health, findings) {
+  // what is away, in words; a service's task queue carries its name. `findings`: what the cleaner's last sweep
+  // found wrong with the installation, less what the health check says itself
   const away = Object.keys(health.queues || {}).filter(queue => !health.queues[queue]);
   return [
     !health.temporal && "Temporal does not answer: nothing can be started or cancelled from this page right now.",
     away.length &&
       `No worker is running for ${away.join(", ")}: nothing that waits on ${away.length > 1 ? "them" : "it"} is moving. On the host: pixi run mia restart ${away.join(" ")}`,
+    ...(Array.isArray(findings) ? findings : [])
+      .filter(finding => finding.id !== "temporal" && !finding.id.startsWith("worker "))
+      .map(finding => finding.text.replaceAll("`", "")),
   ].filter(Boolean);
 }
 async function checkHealth() {
   // so that "working" is true: these lines stay until a later check finds everything back
-  const health = await load("/health");
-  if (health) $("down").replaceChildren(...downLines(health).map(line => el("div", {}, el("span", {}, line))));
+  const [health, cleaner] = await Promise.all([load("/health"), load("/cleaner", true)]);
+  if (health)
+    $("down").replaceChildren(...downLines(health, cleaner?.findings).map(line => el("div", {}, el("span", {}, line))));
 }
 function followStream() {
   // told what changed, the page refetches it; a lost stream reconnects by itself
@@ -89,6 +94,7 @@ const VIEWS = {
   datasets: viewDatasetList,
   buffers: viewBuffers,
   cache: viewCache,
+  cleaner: viewCleaner,
   preparation: viewPreparation,
   decisions: viewDecisions,
   docs: viewDocs,

@@ -1,4 +1,4 @@
-// The operator's views: Cache, Preparation and Decisions.
+// The operator's views: Cache, Cleaner, Preparation and Decisions.
 import {
   $,
   assetPill,
@@ -187,6 +187,87 @@ export async function viewCache() {
           { label: "", cell: l => (l.stale ? pill("stale", "warn") : "") },
         ],
       }),
+    ),
+  );
+}
+// ---- cleaner: what the last sweep found wrong with the installation, and its cases (spec cleaner §4.8)
+const CASE_HREF = c => (SUBJECT_HASH[c.kind] ? SUBJECT_HASH[c.kind](c.key) : c.kind === "job" ? "#job/" + c.key : null);
+const stepsText = steps => (steps || []).map(step => step.text || step.do).join(", ");
+export function caseRows(cases) {
+  // a case as the table shows it: what it is about, what was seen, what was done and what is left or needed
+  return cases.map(c => ({
+    href: CASE_HREF(c),
+    about: c.key,
+    rule: c.rule,
+    state: c.state,
+    seen: c.data.seen || "",
+    done: stepsText(c.data.steps),
+    next: c.state === "needs-person" ? c.data.needs || "" : stepsText(c.data.plan) || c.data.note || "",
+    updated: c.updated,
+  }));
+}
+function caseTable(cases, nextLabel, empty) {
+  if (!cases.length) return el("div", { class: "empty" }, empty);
+  const cell = (text, wrap) => el("td", wrap ? { class: "wrap" } : {}, text);
+  return el(
+    "table",
+    { class: "plain" },
+    el("thead", {}, el("tr", {}, ...["about", "rule", "seen", "done", nextLabel, "updated"].map(h => el("th", {}, h)))),
+    el(
+      "tbody",
+      {},
+      ...caseRows(cases).map(row =>
+        el(
+          "tr",
+          {},
+          cell(row.href ? el("a", { href: row.href }, row.about) : row.about),
+          cell(row.rule),
+          cell(row.seen, true),
+          cell(row.done, true),
+          cell(row.next, true),
+          cell(when(row.updated)),
+        ),
+      ),
+    ),
+  );
+}
+export async function viewCleaner() {
+  const root = $("cleanerBody");
+  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
+  const [report, listed] = await Promise.all([load("/cleaner"), load("/cases?days=7")]);
+  const cases = listed?.cases || [];
+  const inState = (...states) => cases.filter(c => states.includes(c.state));
+  const findings = report?.findings || [];
+  const modes = {
+    off: "It is off.",
+    report: "It reports only: each case says what would be done, and nothing is done.",
+    act: "It acts: each case is carried out step by step.",
+  };
+  root.replaceChildren(
+    card(
+      "The installation",
+      report
+        ? `Last sweep ${when(report.at)}. ${modes[report.mode] || ""} While something is listed here, the subjects behind it are left alone.`
+        : "The cleaner has not reported a sweep yet.",
+      findings.length
+        ? el("div", {}, ...findings.map(finding => el("div", { class: "notice" }, finding.text.replaceAll("`", ""))))
+        : el("div", { class: "empty" }, "Nothing is wrong with the installation."),
+      report?.errors?.length ? kv([["errors of the last sweep", list(report.errors)]]) : null,
+    ),
+    card(
+      "Needs a person",
+      "What the cleaner could not resolve, with what it takes.",
+      caseTable(inState("needs-person"), "needed", "Nothing."),
+    ),
+    card(
+      "In work",
+      "Stuck subjects, left-over jobs and runs the cleaner is carrying on, or would in act mode.",
+      caseTable(inState("open", "working", "waiting"), "next", "Nothing is stuck."),
+    ),
+    card(
+      "Closed in the last week",
+      "Resolved, or dropped because somebody acted on the subject.",
+      caseTable(inState("resolved", "dropped"), "how it ended", "Nothing yet."),
     ),
   );
 }

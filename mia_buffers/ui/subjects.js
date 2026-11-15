@@ -572,6 +572,7 @@ export function viewNeeds(arg, refresh) {
               {},
               actionBar(x, again, x.kind === "buffer" ? ["go", "revoke"] : []),
               x.shelved ? el("div", { class: "small" }, x.shelved.reason) : "",
+              x.cleaner ? el("div", { class: "small" }, "Cleaner: " + x.cleaner) : "",
               ...(x.drops || []).map(record =>
                 el(
                   "div",
