@@ -1816,6 +1816,8 @@ def test_files_are_in_place_is_refused_while_a_copy_is_still_writing(tmp_path):
     os.utime(incoming / "a.tif", (old, old))
     assert act(s, SPEC_ACTIONS, dropped)[0] == 202 and gateway.sent == [("buffer", number, "dropped", "rec-a")]
     assert act(s, SPEC_ACTIONS, {"action": "dropped"})[0] == 422  # which record?
+    _stage(s, "buffer", number, "ready")  # approved while the dataset waited: it joins when its files land
+    assert act(s, SPEC_ACTIONS, dropped)[0] == 202
     assert act(s, SPEC_ACTIONS, {"action": "dropped", "record": "../x"})[0] == 422
 
 
@@ -1932,7 +1934,10 @@ def test_needs_lists_a_buffer_whose_dataset_waits_for_its_files(tmp_path):
     worker(s, "PUT", f"/buffers/{buffer}/datasets/rec-b", {"status": "staging", "reason": "", "job": None})
     (waiting,) = call(s, "GET", "/needs")[1]["needs"]
     assert (waiting["key"], waiting["status"], waiting["drops"]) == (SPEC_NAME, "working", ["rec-a"])
-    _stage(s, "buffer", number, "ready")
+    _stage(s, "buffer", number, "ready")  # approved as it is: the waiting dataset joins when its files land
+    (waiting,) = call(s, "GET", "/needs")[1]["needs"]
+    assert (waiting["status"], waiting["drops"]) == ("done", ["rec-a"])
+    _stage(s, "buffer", number, "retired")
     assert call(s, "GET", "/needs")[1]["needs"] == []  # the round is over: a waiting row of it asks for nothing
 
 

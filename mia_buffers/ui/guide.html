@@ -65,7 +65,7 @@ ready:
 <tr><td><i>Plan</i></td><td>not in a round; or waiting at a gate</td><td>Saves the spec text and starts a round that stops at its plan. Each round builds a buffer with a new id. A buffer that is already serving keeps serving the training jobs connected to it; a staged buffer nobody approved is retired.</td></tr>
 <tr><td><i>Run</i></td><td><code>plan-review</code></td><td>Accepts the plan: download, convert, then stop once at <code>staged</code>.</td></tr>
 <tr><td><i>Approve</i></td><td><code>staged</code></td><td>Serves the buffer as the board shows it.</td></tr>
-<tr><td><i>Files are in place</i></td><td><code>sourcing</code>, <code>staged</code></td><td>For a dataset waiting on files placed by hand: tells the round they are in its <code>incoming/</code> directory.</td></tr>
+<tr><td><i>Files are in place</i></td><td><code>sourcing</code>, <code>staged</code>, <code>ready</code></td><td>For a dataset waiting on files placed by hand: tells the round they are in its <code>incoming/</code> directory.</td></tr>
 <tr><td><i>Keep</i></td><td><code>idle</code></td><td>An idle buffer stays; back to ready.</td></tr>
 <tr><td><i>Retire</i></td><td><code>ready</code>, <code>idle</code></td><td>Releases the buffer's staged data.</td></tr>
 <tr><td><i>Revoke the ticked</i></td><td><code>ready</code>, <code>idle</code></td><td>Withdraws the ticked datasets from a serving buffer. Their volumes leave the buffer and their artifacts are quarantined; the buffer serves on at its floor or asks for a person.</td></tr>

@@ -205,3 +205,9 @@ def test_every_buffer_and_prep_stage_has_a_rule():
     assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "cancel" in actions} == set(CANCELLABLE)
     for status, actions in STAGE_ACTIONS.values():
         assert status != "working" or actions <= {"cancel", "dropped", "stop"}
+    # a dataset can wait for its files from sourcing until it lands, which may be after the approve
+    assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "dropped" in actions} == {
+        "sourcing",
+        "staged",
+        "ready",
+    }

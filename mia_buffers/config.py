@@ -52,16 +52,18 @@ PREP_STAGES = {
 PREP_HUMAN_LABELS = {"go": ("0e8a16", "Prepare the datasets this request names")}
 # stage -> (status word, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
 # A round in progress (`working`) accepts `cancel`, what feeds it (`dropped`) and the force stop; a new go, a
-# revoke or a retire waits until it has ended or been cancelled. The workflow stays the code that carries a round
-# out, and two things a stage does not say stay its refusal: a `staged` buffer whose late datasets still have a
-# job running refuses a go, and a `ready` buffer rebuilding a lost volume abandons the rebuild on a go or retire.
+# revoke or a retire waits until it has ended or been cancelled. `ready` takes `dropped` too: a dataset that
+# waited for its files at the approve keeps its place and joins when they land. The workflow stays the code that
+# carries a round out, and two things a stage does not say stay its refusal: a `staged` buffer whose late
+# datasets still have a job running refuses a go, and a `ready` buffer rebuilding a lost volume abandons the
+# rebuild on a go or retire.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
     "planning": ("working", frozenset({"cancel", "stop"})),
     "plan-review": ("waiting", frozenset({"approve", "go", "cancel", "stop"})),
     "sourcing": ("working", frozenset({"cancel", "dropped", "stop"})),
     "staged": ("waiting", frozenset({"approve", "go", "dropped", "cancel", "stop"})),
-    "ready": ("done", frozenset({"go", "revoke", "retire", "stop"})),
+    "ready": ("done", frozenset({"go", "revoke", "retire", "dropped", "stop"})),
     "idle": ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"})),
     "retired": ("done", frozenset({"go"})),
     "needs-human": ("stuck", frozenset({"go"})),
