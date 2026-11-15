@@ -86,18 +86,22 @@ def _register(args: argparse.Namespace) -> int:
         return 1
     plan_text = args.plan.read_text()
     commit, digest = harness_pin(load_config(args.config))
-    out = register(
-        args.url,
-        args.buffer,
-        json.loads(plan_text),
-        spec,
-        args.staged_root,
-        tensorizer=args.tensorizer,
-        split_sizes={"val": args.val_size, "test": args.test_size},
-        recipe=recipe_for(spec, tensorizer=args.tensorizer, harness_commit=commit, env_digest=digest),
-        plan_hash=args.plan_hash or plan_hash(plan_text),
-        token=token,
-    )
+    try:
+        out = register(
+            args.url,
+            args.buffer,
+            json.loads(plan_text),
+            spec,
+            args.staged_root,
+            tensorizer=args.tensorizer,
+            split_sizes={"val": args.val_size, "test": args.test_size},
+            recipe=recipe_for(spec, tensorizer=args.tensorizer, harness_commit=commit, env_digest=digest),
+            plan_hash=args.plan_hash or plan_hash(plan_text),
+            token=token,
+        )
+    except RegistryError as error:
+        print(f"{args.url}: {error.message}", file=sys.stderr)
+        return 1
     print(json.dumps(out, indent=1))
     return 0 if out["registered"] else 2
 

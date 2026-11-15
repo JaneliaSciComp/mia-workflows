@@ -17,6 +17,7 @@ from mia_buffers.register import (
     register,
     volume_bodies,
 )
+from mia_core.registry import RegistryError
 from tests.test_buffers_plan import spec, spec_2d, spec_2d_mixed, spec_with  # noqa: F401  (fixtures)
 
 
@@ -221,7 +222,7 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
         ],
     }
     sizes = {"val": 4, "test": 4}
-    with pytest.raises(httpx.HTTPStatusError):  # worker routes need the token
+    with pytest.raises(RegistryError) as refused:  # worker routes need the token
         register(
             token_server,
             "demo",
@@ -233,6 +234,7 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
             recipe=RECIPE,
             plan_hash="h",
         )
+    assert refused.value.status == 401
     out = register(
         token_server,
         "demo",
