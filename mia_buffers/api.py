@@ -1515,6 +1515,13 @@ class BufferService:
             elif parsed.action == "stop":  # a terminate needs no replay: it also ends a run nondeterminism froze
                 reason = f"stopped from the page (action {action['id']})"
                 running = self.dispatcher.terminate(kind, number, reason, parsed.run)
+                if parsed.run and not running and self.dispatcher.run_status(kind, number) == "RUNNING":
+                    # the run it names is over and a later one is open: that one's round is not this stop's
+                    self._asked.pop((kind, number), None)
+                    detail = f"run {parsed.run} is over and a later run is open: nothing was stopped"
+                    refused = self.ledger.settle_action(action["id"], "refused", detail)
+                    self.changes.announce(kind, number)
+                    return 409, {"error": detail, "action": refused}, {}
             elif parsed.action == "recheck":  # the request's plain `recheck()`: it looks at its datasets again
                 if not self.dispatcher.signal_running(kind, number, "recheck"):
                     raise DispatchError("no workflow is running for it")

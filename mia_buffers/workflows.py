@@ -2107,6 +2107,7 @@ class MiaCleaner:
         return await workflow.execute_activity(
             "sweep",
             start_to_close_timeout=timedelta(minutes=20),
+            heartbeat_timeout=timedelta(minutes=5),
             retry_policy=RetryPolicy(maximum_attempts=1),  # the next scheduled pass is the retry
         )
 

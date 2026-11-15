@@ -1048,6 +1048,20 @@ def test_a_dataset_is_stopped_by_the_run_it_names_and_rests_cancelled(tmp_path):
     )
 
 
+def test_a_stop_that_names_a_run_which_is_over_leaves_a_later_run_alone(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    _stage(s, "dataset", number, "matching")
+    gateway.terminate = lambda kind, number, reason, run_id=None: False  # run-0 is over; a later run is open
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "stop", "run": "run-0"})
+    assert status == 409 and "run run-0 is over and a later run is open" in out["error"]
+    assert out["action"]["state"] == "refused"
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["stage"] == "matching"  # its round is not ended
+    gateway.running = False  # no run at all: the round is ended, as for a cancel that finds none
+    assert act(s, "/datasets/rec-a/actions", {"action": "stop", "run": "run-0"})[0] == 202
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["stage"] == "cancelled"
+
+
 def test_a_request_at_needs_human_is_told_to_look_again(tmp_path):
     s, gateway = _acting(tmp_path)
     number = act(s, "/prep", {"spec": PREP_TEXT})[1]["number"]

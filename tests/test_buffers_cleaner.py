@@ -335,3 +335,27 @@ def test_only_remedies_on_the_menu_are_kept_with_the_cases_own_issue_and_pull_re
         {"diagnosis": "d", "remedies": [{"do": "stop"}, {"do": "go"}, {"do": "recheck"}]}, "prep", None
     )
     assert [step["do"] for step in request["plan"]] == ["stop", "kill_jobs", "go", "recheck"]
+
+
+def test_a_buffer_spec_is_never_stopped_by_the_cleaner():
+    from mia_buffers.diagnose import reduce_outcome
+
+    evidence = item(kind="buffer", stage="sourcing", task=40)
+    found = sighting(evidence, CFG, NOW)
+    (step,) = plan_for(found, evidence)  # a stop retires every buffer of the spec, also one that is served
+    assert found["rule"] == "frozen run" and step["do"] == "needs" and "Force stop" in step["text"]
+    asked = {"diagnosis": "d", "remedies": [{"do": "stop"}, {"do": "cancel"}, {"do": "wait", "hours": 1}, {"do": "go"}]}
+    assert [step["do"] for step in reduce_outcome(asked, "buffer", None)["plan"]] == [
+        "cancel",
+        "wait",
+        "kill_jobs",
+        "go",
+    ]
+    # a round that was ended has its jobs seen dead before a go, whatever lies between the two
+    assert [step["do"] for step in reduce_outcome(asked, "dataset", None)["plan"]] == [
+        "stop",
+        "cancel",
+        "wait",
+        "kill_jobs",
+        "go",
+    ]

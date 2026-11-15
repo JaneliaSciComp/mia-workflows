@@ -183,14 +183,19 @@ def reduce_outcome(outcome: dict, kind: str, party: dict | None) -> dict:
     old round's jobs ended before a go, autodev's answer awaited after a command to it)."""
     party = party or {}
     plan: list[dict] = []
+    ended = False  # a round was ended by an earlier step: its jobs are seen dead before a go
     raw = outcome.get("remedies")
     for remedy in raw[:MAX_REMEDIES] if isinstance(raw, list) else ():
         do = remedy.get("do") if isinstance(remedy, dict) else None
-        if do not in PROPOSABLE or (do == "recheck" and kind != "prep"):
+        # a stop retires a buffer spec's buffers, which the cleaner never does
+        if do not in PROPOSABLE or (do == "recheck" and kind != "prep") or (do == "stop" and kind == "buffer"):
             continue
+        if do in ("cancel", "stop"):
+            ended = True
         if do == "go":
-            if plan and plan[-1]["do"] in ("cancel", "stop"):
+            if ended:
                 plan.append({"do": "kill_jobs"})
+                ended = False
             plan.append({"do": "go", "note": _text(remedy.get("note"))} if _text(remedy.get("note")) else {"do": "go"})
         elif do == "wait":
             hours = remedy.get("hours")

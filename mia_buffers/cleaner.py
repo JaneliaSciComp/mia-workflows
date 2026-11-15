@@ -5,6 +5,7 @@ fixture. `mia_buffers.sweep` gathers the evidence and carries the steps out."""
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import datetime
 
 from mia_data.models import RERUNNERS
@@ -129,13 +130,23 @@ def service_findings(
     return findings
 
 
-def evidence_findings(evidence: list[dict], pend_hours: float, now: float) -> list[dict]:
+def evidence_findings(evidence: list[dict], pend_hours: float, now: float, cases: Sequence[dict] = ()) -> list[dict]:
     """The findings that only show across subjects: workflow tasks failing on more than one run of a kind (the
     code and the histories disagree), a service that refuses several rounds at once, and jobs the cluster has
-    kept pending for `pend_hours`."""
+    kept pending for `pend_hours`. `cases`: the cases so far, whose `frozen run`s of the last day count too,
+    since runs frozen by one cause come due in different passes."""
     findings = []
+    day = now - 86400
     for kind in ALL_KINDS:
         frozen = [item["subject"]["key"] for item in evidence if item["subject"]["kind"] == kind and _frozen(item)]
+        frozen += [
+            case["key"]
+            for case in cases
+            if case["kind"] == kind
+            and case["rule"] == "frozen run"
+            and case["opened"] >= day
+            and case["key"] not in frozen
+        ]
         if len(frozen) > 1:
             text = (
                 f"workflow tasks fail on {len(frozen)} {kind} runs ({', '.join(frozen[:5])}): code and history disagree"
@@ -299,6 +310,9 @@ def plan_for(found: dict, item: dict) -> list[dict]:
     if rule == "no run":
         return [{"do": "cancel"}, {"do": "kill_jobs"}, {"do": "go"}]
     if rule == "frozen run":
+        if kind == "buffer":  # a stop retires every buffer of the spec, also one that is served: a person's call
+            text = "its run is frozen: Force stop on its page ends it and retires the spec's buffers, then Plan again"
+            return [{"do": "needs", "text": text}]
         return [{"do": "stop"}, {"do": "kill_jobs"}, {"do": "go"}]
     if rule == "request behind":
         return [{"do": "recheck"}]

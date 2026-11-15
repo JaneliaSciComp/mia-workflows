@@ -38,6 +38,9 @@ class Temporal(Gateway):
     def run(self, kind, number):
         return self.runs.get(number)
 
+    def run_status(self, kind, number):
+        return "RUNNING" if number in self.runs else None
+
     def open_runs(self):
         return list(self.open)
 
@@ -686,3 +689,102 @@ def test_a_defect_is_filed_once_in_the_repository_named_for_it(tmp_path, monkeyp
         step["result"] for case in world.cases() for step in case["data"]["steps"] if step["do"] == "report_defect"
     ]
     assert sorted(results) == [f"added to issue #{filed['number']}", f"filed as issue #{filed['number']}"]
+
+
+# --- what the cleaner must not do (the review of the first build) ---
+
+
+def test_a_job_of_a_round_at_a_persons_turn_is_not_left_over(world):
+    number = world.dataset(stage="review")
+    world.job(number, "judge-1")  # the crop judge runs after the stage was written
+    world.sweep(0.5)
+    assert world.cases() == [] and world.csub.killed == []
+
+
+def test_a_go_the_round_has_not_answered_yet_is_neither_resolved_nor_not_helped(world):
+    number = world.dataset(run=False)
+    world.sweep()  # cancel, go: the subject reads `cancelled` until the new round writes its first stage
+    world.sweep(3.2)
+    assert world.cases()[0]["state"] == "waiting" and world.submitted == []
+    world.temporal.queues["mia-data"] = False  # and while its worker is away nothing is concluded at all
+    world.sweep(9.0)
+    assert world.cases()[0]["state"] == "waiting"
+    world.temporal.queues["mia-data"] = True
+    world.sweep(9.0)  # six hours and nothing moved: the remedy did not help
+    assert world.cases()[0]["state"] == "working" and "nothing changed in 2 h" in world.cases()[0]["data"]["seen"]
+    world.sweep(9.2)
+    assert len(world.submitted) == 1  # its diagnosis
+    assert cleaner_actions(world, number) == ["cancel", "go"]
+
+
+def test_runs_that_freeze_one_after_another_are_a_finding_from_the_second_on(world):
+    first = world.dataset("rec-a")
+    world.temporal.runs[first] = {**RUN, "task": 40}
+    world.sweep()
+    assert world.temporal.terminated == [("dataset", first, "run-1")]
+    second = world.dataset("rec-b")  # frozen by the same cause, due a pass later
+    world.temporal.runs[second] = {**RUN, "task": 12}
+    report = world.sweep()
+    assert [finding["id"] for finding in report["findings"]] == ["tasks dataset"]
+    assert world.temporal.terminated == [("dataset", first, "run-1")] and len(world.cases()) == 1
+
+
+def test_a_step_that_fails_on_every_pass_ends_its_case_at_a_person(world):
+    number = world.dataset(run=False)
+    world.job(number)
+
+    def refuse(job_ids):
+        raise RuntimeError("csub: not_found")
+
+    world.csub.kill = refuse
+    report = world.sweep(3.0)
+    assert any("csub: not_found" in error for error in report["errors"])
+    (case,) = world.cases()
+    assert case["state"] == "working" and [step["do"] for step in case["data"]["steps"]] == ["cancel"]  # kept
+    world.sweep(6.0)
+    (case,) = world.cases()
+    assert case["state"] == "needs-person" and "kept failing for 2 h: csub: not_found" in case["data"]["needs"]
+
+
+def test_an_issue_number_in_a_timeline_that_is_not_this_datasets_is_not_acted_on(world):
+    number = world.dataset(run=False)
+    world.stage("dataset", number, "blocked", "the agent wrote: see mia-snippets issue #99, autodev stopped")
+    world.snippets.issue(99, number + 1, ["snippets:needs-human"], said=["agent job 1 ended EXIT (exit 1)"])
+    world.sweep()
+    (case,) = world.cases()
+    assert case["rule"] == "diagnosis" and "party" not in case["data"]
+    assert world.snippets.labels(99) == ["snippets:needs-human"] and len(world.snippets.comments[99]) == 1
+
+
+def test_runs_are_not_judged_unrunnable_while_a_worker_owes_a_restart(world, monkeypatch):
+    stray = {"namespace": "mia-buffers", "id": "new/1", "run_id": "run-0", "type": "MiaNewThing"}
+    theirs = {
+        "namespace": "mia-buffers",
+        "id": "temporal-sys-scheduler:x",
+        "run_id": "r",
+        "type": "temporal-sys-scheduler-workflow",
+    }
+    world.temporal.open = [stray, theirs]
+    worker(world.service, "PUT", "/workers/mia-buffers", {"commit": "a" * 40, "code": "0" * 16})
+    report = world.sweep()
+    assert [finding["id"] for finding in report["findings"]] == ["restart mia-buffers"] and world.cases() == []
+    worker(world.service, "PUT", "/workers/mia-buffers", {"commit": "c" * 40, "code": "b" * 16})
+    world.temporal.running = True
+    world.sweep()
+    assert [case["key"] for case in world.cases()] == ["mia-buffers/new/1"]  # ours by its name; never Temporal's own
+
+
+def test_a_request_that_selects_its_datasets_is_never_run_again_by_the_cleaner(world):
+    import yaml
+
+    from tests.test_buffers_api import SPEC_TEXT
+
+    spec = yaml.safe_load(PREP_TEXT)
+    spec.pop("records")
+    spec["select"] = yaml.safe_load(SPEC_TEXT)["select"]
+    request = act(world.service, "/prep", {"spec": yaml.safe_dump(spec)})[1]["number"]
+    world.stage("prep", request, "requested")
+    world.sweep()
+    (case,) = world.cases()
+    assert case["state"] == "needs-person" and "it selects its datasets" in case["data"]["needs"]
+    assert cleaner_actions(world, request, "prep") == ["cancel"]

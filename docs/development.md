@@ -747,7 +747,11 @@ action goes to buffer-api as the actor `cleaner` with the revision just read (bu
 ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses while a
 job may still write. A dataset's `go` after a command to autodev waits until the snippets issue has lost
 `snippets:needs-human` (`await_autodev`). A request gets a `go` only when that starts no dataset round
-(`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days.
+(`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The cleaner never
+sends a `stop` to a buffer spec (it retires the spec's buffers), kills a left-over job only where no job of the
+round can be wanted any more (never at a person's turn or at `ready`), acts on a snippets issue only when its
+first line names the dataset and the bot wrote it, and judges a remedy's outcome only once the subject has moved
+since the remedy's last action.
 
 **The diagnosis.** A case no rule covers, or whose remedy did not help, gets one diagnosis
 (`mia_buffers/diagnose.py`): a read-only agent job (the judge's command, no host, no mount but its workspace
