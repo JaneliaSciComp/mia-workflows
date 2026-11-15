@@ -237,6 +237,14 @@ def rendered(*bodies: str) -> list[str]:
     return run_js("print(input.map(body => markdown(body).map(html).join('')));", {"markdown.js": "markdown"}, bodies)
 
 
+def test_a_bare_url_ends_before_the_punctuation_that_follows_it() -> None:
+    (said,) = rendered(
+        "snippet PR https://github.com/o/r/pull/44: closed. See https://a.org/x?y=1, then (https://b.org)."
+    )
+    assert 'href="https://github.com/o/r/pull/44"' in said and "</a>: closed" in said
+    assert 'href="https://a.org/x?y=1"' in said and 'href="https://b.org"' in said
+
+
 def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
     healths = [
         {"temporal": True, "queues": {"mia-data": True, "snippets": False, "autodev": False}},

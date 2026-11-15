@@ -38,10 +38,10 @@ export function cropsOf(text, crops) {
   return crops;
 }
 export function mdInline(text) {
-  // `code`, **bold**, *italic*, [text](url), ![alt](url) and bare URLs
+  // `code`, **bold**, *italic*, [text](url), ![alt](url) and bare URLs (one ends before the sentence's punctuation)
   const out = [],
     token =
-      /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]+/g;
+      /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]*[^\s)>\]"'`.,:;!?]/g;
   let last = 0,
     m;
   while ((m = token.exec(text))) {
