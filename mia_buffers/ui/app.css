@@ -93,6 +93,7 @@ dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0
 .flow li.apart::before,.flow li.apart::after{content:none}
 .entry{border-top:1px solid var(--grid);padding:8px 0}
 .entry .at{font-size:12px;color:var(--muted);margin-bottom:2px}
+.latest{font-size:13px;color:var(--fg2);margin:-4px 0 12px;max-width:110ch}
 .md{font-size:13.5px;overflow-wrap:anywhere}
 .md>*{margin:0 0 6px}
 .md>:last-child{margin-bottom:0}

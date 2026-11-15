@@ -788,7 +788,7 @@ above it in this table, never in a circle:
 | `dom.js` | nodes built from text (never parsed HTML), numbers and times, links and addresses, pills, the tooltip, cards, a lifecycle's line |
 | `api.js` | the page's one `fetch`, the banner its errors go to, and what the service said at boot |
 | `table.js` | a table paged by the server |
-| `markdown.js` | a timeline entry's markdown as DOM nodes |
+| `markdown.js` | a timeline entry's markdown as DOM nodes, and its gist as one line |
 | `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
 | `job.js` | a job's record, every value of it inserted as text |
 | `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views |
@@ -823,7 +823,9 @@ Each tab is one kind of thing, and each thing has one page:
 - **A lifecycle** tops the page of a dataset, a spec, a request and a buffer: the kind's stages as boxes and arrows
   with the current one filled. The stages are `lines` of `/meta`, which is each stage table in its own order
   without the stages a round can end in from any step (`failed`, `blocked`, `needs-human`, `cancelled`); those
-  hang under the step the round stopped at.
+  hang under the step the round stopped at. Under it one line says what the newest timeline entry says and
+  when (`gist` in `markdown.js`: the entry's sentence, at most 220 characters, cut between words); a line that is
+  cut ends in a link that scrolls to the timeline.
 - **A job's record** (`#job/<address>`) reads `/jobs/<address>`. The address is the job's workspace relative to
   `paths.work_root`, slashes included, and buffer-api answers with the file `<work_root>/_jobs/<address>.json.gz`
   as it is on disk (`Content-Encoding: gzip`; the browser inflates it). Every segment of the address is a plain

@@ -37,11 +37,12 @@ export function cropsOf(text, crops) {
   for (const m of text.matchAll(GALLERY_CROP)) crops[m[3]] = { round: m[1], sha: m[2] };
   return crops;
 }
+// `code`, **bold**, *italic*, [text](url), ![alt](url) and bare URLs (one ends before the sentence's punctuation)
+const inlineToken = () =>
+  /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]*[^\s)>\]"'`.,:;!?]/g;
 export function mdInline(text) {
-  // `code`, **bold**, *italic*, [text](url), ![alt](url) and bare URLs (one ends before the sentence's punctuation)
   const out = [],
-    token =
-      /(`+)([\s\S]+?)\1|\*\*(.+?)\*\*|\*(?=\S)(.+?)(?<=\S)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s)>\]"'`]*[^\s)>\]"'`.,:;!?]/g;
+    token = inlineToken();
   let last = 0,
     m;
   while ((m = token.exec(text))) {
@@ -56,6 +57,31 @@ export function mdInline(text) {
   }
   out.push(text.slice(last));
   return out.filter(part => part !== "");
+}
+// What a timeline entry says, as one line of inline markdown of at most `limit` characters: the first line under
+// its heading (`**Stage:** …`) that is prose, so neither a labelled line (`**Folders:** …`) nor a table or a fold.
+// A stage's or a result's heading is left out (the lifecycle shows the stage) unless nothing else is there; any
+// other heading (an action, a judge's verdict) leads the line. `cut`: there is more of it to read in the entry.
+const LABELLED = /^\*\*[^*]+:\*\*/;
+export function gist(body, limit = 220) {
+  const paras = (body || "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .split(/\n\s*\n/)
+    .map(para => para.trim().split("\n"))
+    .filter(para => para[0]);
+  const head = paras.length && LABELLED.test(paras[0][0]) ? paras[0][0] : "";
+  const said = paras.slice(head ? 1 : 0).find(para => !LABELLED.test(para[0]) && !/^(<details|\|)/.test(para[0]));
+  const line = said ? said[0].replace(/^>\s*/, "") : "";
+  const whole = /^\*\*(Stage|Result):\*\*/.test(head) ? line || head : [head, line].filter(Boolean).join(" · ");
+  if (whole.length <= limit) return { text: whole, cut: (said?.length || 0) > 1 };
+  // between two words, and never inside a link, a code span or a bold run
+  let end = 0;
+  for (const m of whole.matchAll(inlineToken())) {
+    if (m.index >= limit) break;
+    if (m.index + m[0].length > limit) return { text: whole.slice(0, m.index).trimEnd() + "…", cut: true };
+    end = m.index + m[0].length;
+  }
+  return { text: whole.slice(0, Math.max(whole.lastIndexOf(" ", limit), end) || limit).trimEnd() + "…", cut: true };
 }
 // paragraphs, headings, fenced code, pipe tables, lists, quotes and a <details> fold; comments (markers) are dropped.
 // A fold is built closed: whoever shows the nodes says which one is open. `crops` (see cropsOf) is optional.

@@ -401,6 +401,37 @@ def test_a_github_issue_is_the_mark_with_a_tooltip() -> None:
     assert has("a read-only copy of the timeline")
 
 
+def test_the_gist_of_an_entry_is_its_sentence_cut_between_words() -> None:
+    """The line under the lifecycle says what the newest entry says: the sentence under a stage's or a result's
+    heading (the diagram shows the stage), the heading too for any other entry, never the folders or a table. A
+    long one is cut between two words and never inside a link or a code span."""
+    long_url = "https://github.com/o/r/pull/44"
+    bodies = [
+        "**Stage:** `data:developing`\n\nautodev is writing the snippet in issue #84\n\n**Folders:** [W](https://x.org/w)\n\n<!-- m -->",
+        "**Stage:** `data:review`\n\n**Snippet PR:** https://x.org/pull/1\n\n**Folders:** [W](https://x.org/w)",
+        "**Crop judge:** `reject`\n\nThe labels are empty.\n\n| item | severity | note |\n|---|---|---|\n| a | bad | b |",
+        "**Action:** `reject` by `page`\n\n> the masks are empty",
+        "**Result:** `data:matching`\n\nMatched: a reader fits. The agent's reasons:\n- raw: the sample\n\n**Jobs:** [m](https://x.org/#job/m)",
+        f"**Result:** `data:developing`\n\n**blocked**: one two three snippet PR {long_url}: closed",
+        "Refused `data:go`: busy, ignored: a round is already running.",
+        "",
+    ]
+    stage, bare, judge, action, listed, cut, plain, empty = run_js(
+        "print(input.map(body => gist(body, 40)));", {"markdown.js": "gist"}, bodies
+    )
+    assert stage == {"text": "autodev is writing the snippet in issue…", "cut": True}
+    assert bare == {"text": "**Stage:** `data:review`", "cut": False}
+    assert judge == {"text": "**Crop judge:** `reject` · The labels…", "cut": True}
+    assert action == {"text": "**Action:** `reject` by `page` · the…", "cut": True}
+    assert listed == {"text": "Matched: a reader fits. The agent's…", "cut": True}
+    assert cut == {"text": "**blocked**: one two three snippet PR…", "cut": True}  # the link is not cut in two
+    assert plain["text"].startswith("Refused `data:go`: busy,") and empty == {"text": "", "cut": False}
+    (whole,) = run_js("print(input.map(body => gist(body)));", {"markdown.js": "gist"}, bodies[:1])
+    assert whole == {"text": "autodev is writing the snippet in issue #84", "cut": False}
+    # the subject's page shows it under the lifecycle, and a cut one links down to the timeline
+    assert has("const said = gist(entries.at(-1)?.body") and has("log.scrollIntoView(")
+
+
 def test_markdown_never_becomes_html_or_a_script_link() -> None:
     """A timeline body can carry text from a sandboxed job: tags stay text, and only http(s) links are links."""
     (unsafe,) = rendered("<img src=x onerror=alert(1)> [click](javascript:alert(1)) <script>alert(2)</script>")

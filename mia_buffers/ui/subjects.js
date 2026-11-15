@@ -18,7 +18,7 @@ import {
 } from "./dom.js";
 import { api, banner, load, newKey, S } from "./api.js";
 import { pagedTable, pageOf, TABLE_STATE } from "./table.js";
-import { cropsOf, markdown, mdInline } from "./markdown.js";
+import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
 import { actionBar, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
 import { servableText, stageOf } from "./buffers.js";
 import { datasetCards } from "./datasets.js";
@@ -309,6 +309,35 @@ export async function viewSubject(kind, key, refresh) {
     row = links || (more.length ? el("div", { class: "links" }) : null);
   if (row) row.append(...more);
   const parts = [el("h2", {}, key), row, flowRow(kind, flow)].filter(Boolean);
+  // what the newest entry says, so that nobody scrolls to the timeline to see what is going on
+  const said = gist(entries.at(-1)?.body);
+  if (said.text)
+    parts.push(
+      el(
+        "div",
+        { class: "latest" },
+        when(entries.at(-1).at),
+        " · ",
+        ...mdInline(said.text),
+        ...(said.cut
+          ? [
+              " ",
+              el(
+                "a",
+                {
+                  href: location.hash,
+                  title: "Go to the timeline below, where the newest entry is the first.",
+                  onclick: event => {
+                    event.preventDefault();
+                    log.scrollIntoView({ behavior: "smooth" });
+                  },
+                },
+                "read it all",
+              ),
+            ]
+          : []),
+      ),
+    );
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
   if (subject.status === "working" && run && run.status !== "RUNNING")
     parts.push(
