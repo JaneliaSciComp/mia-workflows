@@ -1185,7 +1185,7 @@ def test_adopt_then_read_a_subject(tmp_path):
     status, row, _ = call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "stage": "review"})
     assert status == 200 and row["issue"] == 234
     status, row, _ = call(s, "GET", "/subjects/dataset/rec-a")
-    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "go", "reject"])
+    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "go", "reject", "shelve"])
     assert call(s, "GET", "/subjects/dataset/nope")[0] == 404
     assert call(s, "GET", "/subjects/widget/x")[0] == 404
     assert call(s, "PUT", "/subjects/dataset/235", payload={"key": "rec-b", "stage": "bogus"})[0] == 422
@@ -1542,18 +1542,58 @@ def test_a_request_at_needs_human_is_told_when_a_dataset_it_names_settles(tmp_pa
     assert len(gateway.sent) == 5
 
 
+def test_a_shelve_at_review_cancels_the_round_first(tmp_path):
+    """A round that waits for a person's verdict is cancelled by the shelve that sets its subject aside: its
+    workflow gets the cancel, then the hold is written. A cancel that is not delivered shelves nothing."""
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    assert "shelve" in call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"]
+    shelve = {"action": "shelve", "note": "later", "key": "k"}
+    gateway.fail = "temporal is away"
+    assert act(s, "/datasets/rec-a/actions", shelve)[0] == 503
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["shelved"] is None
+    gateway.fail = None
+    status, action, _ = act(s, "/datasets/rec-a/actions", shelve)
+    assert (status, action["action"], action["state"]) == (202, "shelve", "sent")
+    assert [sent[:3] for sent in gateway.sent] == [("dataset", 7, "cancel")]
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["status"], view["actions"]) == ("review", "shelved", ["unshelve"])
+    assert view["asked"]["action"] == "cancel"  # the round has not answered yet
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "cancelled"})  # the workflow's answer
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["status"], view["asked"]) == ("cancelled", "shelved", None)
+    said = [entry["body"].split("\n")[0] for entry in call(s, "GET", "/timeline/dataset/7")[1]["entries"]]
+    assert said[:2] == ["**Action:** `cancel` by `page`", "**Action:** `shelve` by `page`"]
+    # a click that shelved with no round open, sent again once the subject was taken back and started, cancels nothing
+    worker(s, "PUT", "/subjects/dataset/8", {"key": "rec-b", "stage": "failed"})
+    early = {"action": "shelve", "note": "later", "key": "b"}
+    first = act(s, "/datasets/rec-b/actions", early)[1]
+    assert act(s, "/datasets/rec-b/actions", {"action": "unshelve"})[0] == 202
+    worker(s, "POST", "/timeline/dataset/8", {"stage": "matching"})
+    assert act(s, "/datasets/rec-b/actions", early)[1]["id"] == first["id"] and len(gateway.sent) == 1
+
+
+def test_a_shelve_at_review_ends_a_round_no_workflow_runs(tmp_path):
+    s, gateway = _acting(tmp_path, running=False)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "later"})[0] == 202
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["status"], gateway.sent) == ("cancelled", "shelved", [])
+
+
 def test_shelving_covers_specs_requests_and_a_dataset_that_never_ran(tmp_path):
     s, gateway = _acting(tmp_path)
     worker(s, "PUT", "/subjects/buffer/8", {"key": "pool", "stage": "needs-human"})
     worker(s, "PUT", "/subjects/buffer/9", {"key": "wait", "stage": "staged"})
     worker(s, "PUT", "/subjects/prep/10", {"key": "prep-10", "stage": "done"})
     worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})  # `new`, with no row in the datasets table
-    assert act(s, "/specs/wait/actions", {"action": "shelve", "note": "n"})[0] == 409  # at its review: cancel first
     assert act(s, "/specs/pool/actions", {"action": "shelve", "note": "n"})[0] == 202
     assert act(s, "/prep/10/actions", {"action": "shelve", "note": "n"})[0] == 202
     assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "no reader yet"})[0] == 202
     assert gateway.sent == [] and call(s, "GET", "/needs")[1]["shelved"] == 3
-    assert [v["status"] for v in call(s, "GET", "/subjects/buffer")[1]["subjects"]] == ["shelved", "waiting"]
+    assert act(s, "/specs/wait/actions", {"action": "shelve", "note": "n"})[0] == 202  # at its review: cancelled
+    assert [sent[:3] for sent in gateway.sent] == [("buffer", 9, "cancel")]
+    assert [v["status"] for v in call(s, "GET", "/subjects/buffer")[1]["subjects"]] == ["shelved", "shelved"]
     row = call(s, "GET", "/datasets/rec-a")[1]
     assert (row["state"], row["reason"]) == ("shelved", "no reader yet") and row["updated_at"] > 0
     assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202

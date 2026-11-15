@@ -1,8 +1,9 @@
 # MIA: shelving a subject — Spec
 
-**Status:** v0.2 · 2026-11-14 · approved by the user 2026-11-14 (as v0.1) and built. v0.2 says what the build
+**Status:** v0.3 · 2026-11-15 · approved by the user 2026-11-14 (as v0.1) and built. v0.2 says what the build
 settled: a subject with an action waiting for its workflow's answer takes no `shelve` (§3.2), and a request is
-kept from a shelved dataset in `prep_nudge`, with buffer-api's refusal behind it (§3.3).
+kept from a shelved dataset in `prep_nudge`, with buffer-api's refusal behind it (§3.3). v0.3 (user ruling
+2026-11-15): a subject at review takes `shelve`, which cancels its round (§3.2).
 
 ## 1. Intent
 
@@ -66,8 +67,10 @@ The rule, in one function that `_subject_view` and `_accepts` both call (it also
 that removes `go`):
 
 - a subject that is not shelved and whose status is `not started`, `stuck` or `done` also accepts `shelve`;
-  one with a round in progress or at review does not (cancel first), nor one whose last action is still waiting
-  for its workflow's answer (`asked`): the round that action starts would run on a shelved subject;
+  so does one whose round waits for a verdict (status `waiting`, and its stage takes `cancel`), and that shelve
+  sends the round a `cancel` first, as an action of its own: when the cancel is not delivered nothing is shelved.
+  One with a round at work does not (cancel first), nor one whose last action is still waiting for its
+  workflow's answer (`asked`): the round that action starts would run on a shelved subject;
 - a shelved subject has the status `shelved` and accepts `unshelve` and nothing else, whoever asks.
 
 `shelved` joins `STATUS_WORDS`. It is in neither `NEEDS_A_PERSON` nor a stage table.

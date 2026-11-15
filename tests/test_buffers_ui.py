@@ -635,6 +635,7 @@ def test_shelving_is_offered_for_every_kind_and_asks_for_its_reason() -> None:
     assert has('shelve: "Shelve…"') and has("if (dialog) return askNote(subject, dialog, note => send({ note }))")
     assert has("if (subject.shelved) parts.push(shelvedNotice(subject.shelved))")
     assert has('"aria-pressed": String(needsShelved)') and has('"shelved": "Set aside by a person')
+    assert has('dialog.cancels && subject.actions.includes("cancel")')  # a round at review is said to be cancelled
 
 
 def test_shelve_sends_its_reason_once_one_is_typed() -> None:

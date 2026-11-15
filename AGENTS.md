@@ -47,7 +47,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   workflow's.
 - **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
   `shelve` (with a reason); a shelved one reads the status `shelved` and takes `unshelve` alone (`_rules` in
-  `mia_buffers/api.py`). The subject's workflow hears of neither; a request resting at `needs-human` is told to
+  `mia_buffers/api.py`). The subject's workflow hears of neither, except that a shelve of a subject whose round
+  waits for a verdict (a dataset at `review`) sends that round a `cancel` first; a request resting at `needs-human` is told to
   look again (`recheck`) when a dataset it names is shelved or prepared, and is `done` when each is one of the
   two. The hold is a row of the ledger's `shelved` table; a shelved dataset reads `state: shelved` from
   `Ledger.dataset(s)` while its stored row stays, so no plan and no request takes it. Anything new that selects

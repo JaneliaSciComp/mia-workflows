@@ -95,7 +95,8 @@ LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, tab
 NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
 # Shelving (spec shelved-subjects): a person sets a subject aside with a reason. Its stage stays; its status reads
 # `shelved`, it takes `unshelve` alone, and a shelved dataset reads `shelved` to every plan and request. A subject
-# with one of these status words (no round in progress, none at review) also takes `shelve`.
+# with one of these status words (no round open) also takes `shelve`; so does one whose round waits for a person's
+# verdict (`waiting`, and its stage takes `cancel`), and that shelve cancels the round first.
 SHELVABLE = ("not started", "stuck", "done")
 HOLD_ACTIONS = ("shelve", "unshelve")  # carried out by this service: the subject's workflow hears of neither
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
@@ -910,14 +911,15 @@ class BufferService:
     def _rules(self, row: dict, hold: dict | None, gaps: list[str]) -> tuple[str, frozenset[str]]:
         """A subject's status word and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
         dataset whose record cannot be run (`gaps`: no Start until a synced catalog holds one that can), with
-        `shelve` while no round is open and none was just asked for. A shelved subject (`hold`) is `shelved` and
-        takes `unshelve` alone."""
+        `shelve` while no round is working and none was just asked for (a round that waits for a verdict is
+        cancelled by the shelve, `_hold`). A shelved subject (`hold`) is `shelved` and takes `unshelve` alone."""
         if hold is not None:
             return "shelved", frozenset({"unshelve"})
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
         if gaps:
             actions = actions - {"go"}
-        if status in SHELVABLE and self._asking(row["kind"], row.get("number")) is None:
+        resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
+        if resting and self._asking(row["kind"], row.get("number")) is None:
             actions = actions | {"shelve"}
         return status, actions
 
@@ -1469,12 +1471,20 @@ class BufferService:
 
     def _hold(self, subject: dict, parsed: ActionBody, actor: str) -> Response:
         """A `shelve` (its `note` says why) or an `unshelve`: recorded like any action and carried out here, in
-        the transaction that puts it on the timeline. A key seen before is the same action again."""
+        the transaction that puts it on the timeline. A key seen before is the same action again. A shelve at a
+        stage that takes `cancel` (a round waits there for a verdict) sends that cancel first, as an action of
+        its own; one that is not delivered shelves nothing."""
         kind, number = subject["kind"], subject["number"]
         reason = parsed.note.strip()
         if parsed.action == "shelve" and not reason:
             raise HttpError(422, "a shelve says why the subject can wait: `note`")
         self._check_hosts(parsed, None, kind, number)  # 422: nothing here starts a job
+        again = parsed.key is not None and self.ledger.action_by_key(parsed.key) is not None  # its cancel went
+        if parsed.action == "shelve" and not again and "cancel" in SUBJECT_RULES[kind][subject["stage"]][1]:
+            cancel = ActionBody(action="cancel", key=f"{parsed.key}:cancel" if parsed.key else None)
+            answer = self._act_on(subject, cancel, actor, {})
+            if answer[0] != 202:
+                return answer
         payload = {"note": reason} if parsed.action == "shelve" else {}
         try:
             action, _ = self.ledger.add_action(kind, number, parsed.action, actor, key=parsed.key, payload=payload)

@@ -32,10 +32,11 @@ export const BUTTON_HELP = {
   cancelHosts: "Close this without starting anything.",
   showChange: "Redraw the page with what changed; what you typed here is dropped.",
 };
-// Shelving is the same for every kind of subject: the service carries it out itself, no workflow hears of it.
+// Shelving is the same for every kind of subject: the service carries it out itself, and a workflow hears only the
+// cancel of a round that was waiting for a verdict.
 const SHELF_HELP = {
   shelve:
-    "Set this aside with a reason. It leaves Needs you and nothing can be asked of it until someone unshelves it; a shelved dataset is also left out of every buffer plan and started by no preparation request. Its stage and its timeline stay as they are.",
+    "Set this aside with a reason. It leaves Needs you and nothing can be asked of it until someone unshelves it; a shelved dataset is also left out of every buffer plan and started by no preparation request. A round that waits for a verdict is cancelled first; otherwise its stage stays as it is.",
   unshelve: "Take this back: it is listed, planned and started again as its stage says.",
 };
 export const ACTION_HELP = {
@@ -191,6 +192,7 @@ const NOTE_DIALOGS = {
     title: "Shelve this",
     about:
       "It leaves Needs you, and no request or buffer plan takes it until it is unshelved. The reason is shown wherever it is listed, and in its timeline.",
+    cancels: "Its round is waiting for a verdict: shelving cancels that round first, as Cancel does.",
     ask: "Why can it wait?",
     sending: "Shelving…",
     send: { class: "btn", title: BUTTON_HELP.sendShelve },
@@ -213,6 +215,7 @@ function askNote(subject, dialog, send) {
       el("h2", { id: "askTitle" }, dialog.title),
       el("div", { class: "mono small" }, subject.key),
       el("p", { class: "small" }, dialog.about),
+      dialog.cancels && subject.actions.includes("cancel") ? el("p", { class: "small" }, dialog.cancels) : "",
       note,
       el(
         "div",

@@ -100,10 +100,13 @@ buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debuggin
 **Shelving is beside the stage tables** (spec `docs/specs/2026-11-14-shelved-subjects.md`). A person sets a
 subject of any kind aside with a reason: `shelve`, with the reason in `note`, is accepted whenever the subject's
 status is `not started`, `stuck` or `done` and no action is waiting for its workflow's answer; `unshelve` takes it
-back. One function gives a subject its status word and its actions (`BufferService._rules`): the stage's, or
+back. A subject whose round waits for a verdict (`waiting`, and its stage takes `cancel`: a dataset at `review`, a
+buffer at `plan-review` or `staged`) takes it too, and that shelve sends the round a `cancel` first, as an action
+of its own: a cancel that is not delivered shelves nothing. One function gives a subject its status word and its actions (`BufferService._rules`): the stage's, or
 `shelved` and `unshelve` alone for a shelved one. buffer-api carries both actions out itself (`_hold`): the row of
-the ledger's `shelved` table, the action and its timeline entry are one transaction, and nothing is sent to
-Temporal. The stage and the dataset's stored row are not touched. What reads the hold:
+the ledger's `shelved` table, the action and its timeline entry are one transaction, and nothing but that cancel
+is sent to Temporal. `_hold` writes neither the stage (a cancelled round writes its own `cancelled`) nor the
+dataset's stored row. What reads the hold:
 
 - `GET /needs` leaves a shelved subject out, counts them as `shelved` and lists them with `?shelved=1`.
 - `Ledger.dataset` and `Ledger.datasets` give a shelved dataset `state: shelved` and the hold's reason (a row is
