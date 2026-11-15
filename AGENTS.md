@@ -42,7 +42,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
   `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there.
   buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`
-  (a dataset at `debugging` also the `go` of its next round).
+  and, for a run that cannot answer one, `stop` (a dataset at `debugging` also the `go` of its next round). Any
+  action may name the `revision` it was decided at and is refused once the subject moved.
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
 - **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
@@ -72,6 +73,14 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   ends `blocked` when autodev stopped or `limits.autodev_quiet_hours` passed with no agent round running; the
   poller's `pr_update` only makes it faster. autodev says a stop with the `needs-human` label, never a comment
   alone. A new wait on something outside the round gets the same: a look and a limit.
+- **The cleaner asks, like anyone, and service problems come first.** `MiaCleaner` (the buffers worker's `sweep`;
+  rules in `mia_buffers/cleaner.py`) names what is wrong with the installation before it looks at a subject, and
+  leaves alone every subject behind a finding: it never cancels or re-runs what waits on a worker that is down or
+  on old code. What it does to a subject goes through the action routes as the actor `cleaner`, with the
+  revision it just read, a key per step and for a `stop` the run it saw; it writes no stage. It sends no `go`
+  while a job of a round it ended is alive, none to a subject a person acted on since the case opened, and
+  none to a request that would start a dataset round. Its diagnosing agent is read-only and proposes;
+  `reduce_outcome` keeps only steps of the menu. A new remedy is a rule with a test named after its incident.
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
   (`Activities._post`); the `MiaMirror` workflow copies them to GitHub.
 - **Nothing reads a data or buffers issue.** No label, comment, body, close or reopen is input: nothing polls

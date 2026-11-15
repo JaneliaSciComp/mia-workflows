@@ -145,8 +145,9 @@ tested again under a new round, and no second snippets issue is opened. The new 
 example binding is adopted whatever catalog commit it names (the round that asked for the reader wrote it), and the
 stored binding names the commits of the round that adopted it. A PR closed or merged by then means a new
 match, and a reader that match asks for gets a new snippets issue: closing a snippet PR is how a person has the
-reader written again. The debugger's go matches first even while the PR is open, so that its advice is read; the PR is resumed
-only if that match asks for a reader again. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
+reader written again. A go that carries advice (the debugger's, and the cleaner's after its diagnosis: actor
+`cleaner-advice`) matches first even while the PR is open, so that its advice is read; the PR is resumed only if
+that match asks for a reader again. The cleaner's plain go (actor `cleaner`) is a *Run again*. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
 `/approve` and `/revise` from the worker because its login is in autodev's `github.trusted_bots`), mia-snippets
 CI, the GitHub client.
 

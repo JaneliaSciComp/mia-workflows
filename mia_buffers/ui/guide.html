@@ -71,6 +71,7 @@ ready:
 <tr><td><i>Revoke the ticked</i></td><td><code>ready</code>, <code>idle</code></td><td>Withdraws the ticked datasets from a serving buffer. Their volumes leave the buffer and their artifacts are quarantined; the buffer serves on at its floor or asks for a person.</td></tr>
 <tr><td><i>Cancel the round</i></td><td>a round before <code>ready</code></td><td>Ends the round: its cluster jobs are killed and its buffer is retired.</td></tr>
 <tr><td><i>Force stop</i></td><td>any stage with a run</td><td>For a run that does not answer a cancel: terminates the workflow and retires the buffers. It does not kill a job already running.</td></tr>
+<tr><td><i>Check again</i></td><td>a request at <code>needs-human</code></td><td>The request looks at its datasets again and is done once each is prepared or shelved.</td></tr>
 </table></div>
 <p>A round in progress accepts only <i>Cancel the round</i>: cancel it before asking for anything else. After a click the buttons are held, with the pressed one marked, until the round answers.</p>
 <div class="tw"><table>
@@ -138,7 +139,8 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorised to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
 <tr><td>410 buffer retired</td><td>the buffer was retired: by <i>Retire</i>, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
-<tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td><i>Cancel the round</i> on the spec's page; if that gets no answer, <i>Force stop</i>, then <i>Plan</i> again</td></tr>
+<tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td>the cleaner finds it within the hour and says on the <i>Cleaner</i> tab what it saw and did. By hand: <i>Cancel the round</i> on its page; if that gets no answer, <i>Force stop</i>, then run it again</td></tr>
+<tr><td>a line under the top bar says a restart is owed, or a schedule has stopped</td><td>the cleaner found something wrong with the installation; the rounds behind it are left alone until it clears</td><td>do what the line says on the host (<code>pixi run mia restart …</code>)</td></tr>
 <tr><td><code>blocked</code> (a dataset) or <code>needs-human</code> (a buffer, a request) whose entry starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then press the button again</td></tr>
 <tr><td><code>blocked</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a round that saves its crops repairs it</td></tr>
 </table></div>
@@ -155,6 +157,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>crop, level</td><td>a crop is one training window, served at each pyramid level the spec lists, all centred on the same point: level 1 is full resolution, level 2 half, and so on.</td></tr>
 <tr><td>split</td><td>train, val or test. Volumes are assigned by the spec's fractions and seed; a record in <code>holdout_ids</code> is all test.</td></tr>
 <tr><td>keeper</td><td>the background pass that watches quotas, idle buffers and lost pyramids. It is the only thing that deletes.</td></tr>
+<tr><td>cleaner</td><td>the background pass that looks for stuck rounds and what rounds left behind. Each thing it finds is a case on the <i>Cleaner</i> tab: what it saw, what it did, and what it needs from a person when it could not resolve it. Its actions are in a timeline as <code>cleaner</code>.</td></tr>
 <tr><td>GitHub mark</td><td>a link to the GitHub issue that holds a copy of a timeline. The copy is for reading: nothing done to the issue reaches the system.</td></tr>
 </table></div>
 <p>How the services, workflows and storage fit together is in <a href="#docs/architecture">Architecture</a>.</p>

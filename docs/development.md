@@ -707,6 +707,61 @@ nothing to mia-data: a dataset that was prepared when the plan was made and is n
 **`evaluate.enabled`.** mia-data's config has `evaluate: {enabled: false}`. It is a switch only: no evaluate job
 exists.
 
+## The cleaner
+
+`MiaCleaner` runs on the schedule `<deployment>-cleaner` every `cleaner.minutes` (`mia-buffers schedule`; the
+schedule is deleted while `cleaner.mode` is `off`). Its one activity, `sweep` (`mia_buffers/sweep.py`), is a pass
+over the whole installation; the rules it applies are pure functions in `mia_buffers/cleaner.py`. Spec:
+`docs/specs/2026-11-15-cleaner.md`.
+
+**What a pass does.**
+
+1. **The installation first.** `service_findings` reads `GET /health` (Temporal, a worker per task queue),
+   `GET /workers` (what each worker said it started on: `mia_core.checkout.code_digest`, a digest of the
+   packages' git trees, against the checkout's now; a commit that touches only docs or tests changes nothing),
+   `GET /schedules` and `autonomy.pause`. Each finding names the subject kinds behind it, and those are left
+   alone for the pass: a worker that is down or runs old code is said once, never "fixed" by cancelling what waits
+   on it. Findings that only show across subjects (`evidence_findings`: workflow tasks failing on more than one
+   run of a kind, a service refusing several rounds, jobs pending in the cluster queue) are added after step 2.
+   They are the report's `findings`: the page's banner and the Cleaner view show them.
+2. **Evidence.** For every subject that has been `working` for `quiet_minutes` or `stuck` for `stopped_minutes`
+   and has no case of its present revision: its timeline and actions, its run (`GET /run/<kind>/<number>?detail=1`:
+   run id, a workflow task that keeps failing, pending activities), the jobs of its round whose record has no end
+   (`mia_core.jobrecord.open_records`, each asked of the cluster by id), and the party it waits for (the snippets
+   issue of a dataset in the develop path, a request's datasets).
+3. **Sightings and cases.** `sighting` says whether the subject is quiet or stopped and which rule covers it;
+   `plan_for` turns the rule into steps. A case (ledger table `cases`, routes `POST /cases`, `PUT /cases/<id>`,
+   `GET /cases`) holds what was seen, the revision and run it was seen at, the steps done and the steps left.
+   Leftovers get cases of their own kind: `run` (an open run of a workflow type in no worker, `WORKFLOW_TYPES`),
+   `job` (alive after its round ended), `snippets` (an open issue or pull request of ours nobody follows).
+4. **Carrying cases on.** In `act` mode each open case does its remaining steps in order until one has to wait
+   (it returns None and is tried at the next pass), one is refused (the case is `needs-person` and says why), or
+   none is left (`waiting` for the outcome when a step started work, else `resolved`). `report` mode opens cases
+   and does nothing; at most `max_parallel` cases are in work.
+
+**What keeps a remedy on the round it was decided about.** Before a step the subject is read again; a person's
+action since the case opened drops the case, and so does a subject that moved before the case did anything. An
+action goes to buffer-api as the actor `cleaner` with the revision just read (buffer-api refuses any action whose
+`revision` is not the subject's), the key `cleaner/<case>/<step>` and, for a `stop`, the run id the sweep saw
+(`run`). A `go` after a `cancel` that found no run, or after a `stop`, waits for `kill_jobs`: every job of the
+ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses while a
+job may still write. A dataset's `go` after a command to autodev waits until the snippets issue has lost
+`snippets:needs-human` (`await_autodev`). A request gets a `go` only when that starts no dataset round
+(`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days.
+
+**The diagnosis.** A case no rule covers, or whose remedy did not help, gets one diagnosis
+(`mia_buffers/diagnose.py`): a read-only agent job (the judge's command, no host, no mount but its workspace
+`<work_root>/cleaner/case-<id>/diagnose-<n>/`) over the evidence the worker wrote. Its answer is read as
+untrusted text and reduced by `reduce_outcome` to steps of the menu, with the issue and pull request of the
+case's own evidence; anything else is dropped. Its cost is reserved against the root `cleaner-<date>` under
+`max_usd_per_day`. A `go` it asks for with a note is sent as the actor `cleaner-advice`: mia-data hands the note
+to the match agent and matches before it resumes an open snippet PR (`ADVISERS` in `mia_data/models.py`). A cause
+in this installation's code is a `report_defect` step: an issue in `cleaner.defects_repo`, one per defect.
+
+**A new rule** is a pattern or a condition in `stop_rule` or `_quiet`, its steps in `plan_for`, and a test in
+`tests/test_buffers_cleaner.py` named after the incident it comes from; a new step is a branch of `Sweep._do`
+that returns what it did, None while it has to wait, or raises `Refused`.
+
 ## Serving a buffer by hand
 
 The `MiaBuffer` workflow runs these steps for a round; each can also be run by hand.
