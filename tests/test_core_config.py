@@ -46,8 +46,14 @@ def test_a_buffers_service_learns_where_the_datasets_pipeline_runs():
     cfg = service_config(manifest, "buffers")
     assert cfg["datasets_pipeline"] == {"namespace": "data-ns", "task_queue": "mia-data"}  # the queue is the name
     assert "datasets_pipeline" not in service_config(manifest, "mia-data")
-    # every service's queue (its name) and namespace, for /health: a block's own, else the shared section's
-    assert cfg["workers"] == {"mia-data": "data-ns", "snippets": "default", "buffers": "default"}
+    # every service's queue (its name) and namespace, for /health: a block's own, else the shared section's, else
+    # its application's (the shared section here names none, and the buffers worker then works in `mia-buffers`)
+    assert cfg["workers"] == {"mia-data": "data-ns", "snippets": "default", "buffers": "mia-buffers"}
+    manifest["temporal"]["namespace"] = "shared-ns"
+    assert service_config(manifest, "buffers")["workers"]["buffers"] == "shared-ns"
+    del manifest["temporal"]["namespace"]
+    del manifest["services"]["mia-data"]["temporal"]  # the datasets pipeline under a shared section with no namespace
+    assert service_config(manifest, "buffers")["datasets_pipeline"]["namespace"] == "mia-data"
     bare = {"services": {"buffers": {"app": "mia-buffers"}, "dev": {"app": "autodev"}}}  # no temporal section at all
     assert service_config(bare, "buffers")["workers"] == {"buffers": "mia-buffers", "dev": "default"}
     del manifest["services"]["mia-data"]

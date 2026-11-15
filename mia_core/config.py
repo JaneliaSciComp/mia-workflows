@@ -184,18 +184,18 @@ def _app_of(block: object) -> str | None:
     return block.get("app") if isinstance(block, dict) else None
 
 
-# the namespace each application's Config works in when mia.yaml gives it no temporal section at all
+# the namespace each application's Config works in when mia.yaml names none for it
 APP_NAMESPACE = {"autodev": "default", "mia-data": "mia-data", "mia-buffers": "mia-buffers"}
 
 
 def _namespace(services: dict, shared: object, name: str) -> str:
-    """The Temporal namespace service `name` works in: its block's, else the shared section's, else its
-    application's default (`default` once either temporal section exists)."""
+    """The Temporal namespace service `name` works in, by the rule its application's Config follows: the one its
+    block names, else the one the shared section names, else its application's default."""
     block = services[name] if isinstance(services[name], dict) else {}
-    sections = [section for section in (shared, block.get("temporal")) if isinstance(section, dict)]
-    if not sections:
-        return APP_NAMESPACE.get(str(block.get("app")), "default")
-    return str({**sections[0], **sections[-1]}.get("namespace", "default"))
+    for section in (block.get("temporal"), shared):
+        if isinstance(section, dict) and "namespace" in section:
+            return str(section["namespace"])
+    return APP_NAMESPACE.get(str(block.get("app")), "default")
 
 
 def service_config(manifest: dict, name: str) -> dict:
