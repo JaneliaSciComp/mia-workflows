@@ -1187,7 +1187,9 @@ async def test_head_test_that_cannot_run_posts_error(env):
 
 @pytest.mark.parametrize("now, why", [(head(H1, "closed"), "closed"), (head(H1, needs_human=True), "needs-human")])
 async def test_closed_pr_needs_human(env, now, why):
-    m = Mocks(outcome="needs_snippet")
+    """The round ends `blocked`, naming the PR and quoting what autodev last said, so the entry says why."""
+    said = "Approved, but merging failed: Pull Request has merge conflicts"
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(5, False, True, said))
     async with started(env, m) as h:
         await idle(h, m, "developing")
         await h.signal(MiaDataDataset.go, ev("go", "12"))  # busy: a round is developing
@@ -1197,6 +1199,7 @@ async def test_closed_pr_needs_human(env, now, why):
     assert m.of("refuse_label")[0][0] == "data:go" and "busy" in m.of("refuse_label")[0][1]
     detail = m.of("set_stage")[-1][1]
     assert why in detail and PR_URL in detail and not [a for a in m.jobs() if a.n_crops]
+    assert f'Its last comment: "{said}"' in detail and m.of("autodev_look") == [(100, 5)]
 
 
 LOOK = timedelta(minutes=16)  # past one look of a round that waits for autodev

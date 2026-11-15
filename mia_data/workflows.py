@@ -1403,7 +1403,7 @@ class MiaDataDataset:
             where = f"snippet PR {pr.url or f'#{pr.pr}'}"
             if pr.needs_human or pr.state == "closed":
                 why = "its issue has `snippets:needs-human`" if pr.needs_human else "it was closed without merging"
-                await self._finish("blocked", f"{where}: {why}")
+                await self._finish("blocked", f"{where}: {why}{await self._autodev_said(pr.pr)}")
                 return True
             if pr.state == "merged":
                 await self._merged(pr)
@@ -1417,6 +1417,15 @@ class MiaDataDataset:
                 return True
             pr = await self._test_head(pr)
         return False
+
+    async def _autodev_said(self, pr: int) -> str:
+        """Why autodev stopped, as the sentence that ends the round's `blocked` entry: its last comment on the
+        snippets issue or the PR (a merge refused for conflicts, a failed round). Empty when it left none, and in
+        a history without the `blocked-quotes-autodev` patch."""
+        if not workflow.patched("blocked-quotes-autodev"):
+            return ""
+        look = await self._act("autodev_look", self.state.snippet_issue, pr, result_type=AutodevLook)
+        return f'. Its last comment: "{look.last_word}"' if look.last_word else ""
 
     async def _test_head(self, pr: PrUpdate) -> PrUpdate:
         """Make the dataset's set at an untested PR head with the example binding the PR ships, posting the

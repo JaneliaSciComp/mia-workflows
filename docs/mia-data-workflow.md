@@ -128,7 +128,8 @@ moved. Every new PR head gets the round's crops (step 4), made by an untrusted j
 required `mia-data/crops` commit status on that exact commit. A head whose crops pass goes to `review` like a
 matched binding's; one whose crops fail gets the report as a `/revise` on the PR, and autodev fixes it. When
 autodev stops instead (a failed round, its revision limit, a merge that fails), the snippets issue is labelled
-`snippets:needs-human` and the round ends `blocked`, naming the PR. The round does not rely on being told: while
+`snippets:needs-human` and the round ends `blocked`, naming the PR and quoting autodev's last comment (a merge
+refused for conflicts says so there). The round does not rely on being told: while
 it waits for autodev (`developing`, `testing` after a failed head, `merging`; not `review`, where a person is
 awaited) it looks at the snippets issue itself every 15 minutes. A PR is acted on as it is then; an issue that
 stopped before any PR was opened ends the round `blocked`; and so does `limits.autodev_quiet_hours` (default 2)
