@@ -72,6 +72,7 @@ from .jobspec import (
 from .models import (
     DEBUGGER,
     AssessmentWritten,
+    AutodevLook,
     DatasetState,
     DebugResult,
     GalleryResult,
@@ -292,6 +293,7 @@ class Activities:
             self.read_feedback,
             self.open_snippet_issue,
             self.pr_state,
+            self.autodev_look,
             self.set_crop_status,
             self.tree_sha,
             self.adopt_pr_binding,
@@ -498,6 +500,7 @@ class Activities:
             cfg.judge.max_budget_usd,
             cfg.limits.debug_cycles,
             cfg.limits.debug_wait_min,
+            cfg.limits.autodev_quiet_hours,
         )
 
     # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
@@ -1478,6 +1481,33 @@ class Activities:
             snippet_issue,
             "snippets:needs-human" in labels,
             pr_data.get("html_url"),
+        )
+
+    @activity.defn(name="autodev_look")
+    @mia_permanent_errors
+    async def autodev_look(self, snippet_issue: int, pr: int | None) -> AutodevLook:
+        """What a round that waits for autodev finds when it looks itself, whatever the poller told it: the PR
+        (`pr`, the one the round follows, else the open one on the issue's branch), whether an agent round is
+        running or autodev has stopped, and the last comment autodev left on the issue or the PR."""
+        gh = self.gh_snippets
+        issue = await gh.get_issue(int(snippet_issue))
+        labels = {label["name"] for label in issue.get("labels", [])}
+        if pr is None:
+            found = await gh.find_pr(f"snippets/issue-{int(snippet_issue)}")
+            pr = found["number"] if found else None
+        ours = self.cfg.marker("").removesuffix(" -->")  # the worker comments under the same login as autodev
+        comments = await gh.issue_comments(int(snippet_issue)) + (await gh.issue_comments(pr) if pr else [])
+        said = [
+            comment
+            for comment in comments
+            if (comment.get("user") or {}).get("login") == self.bot and ours not in (comment.get("body") or "")
+        ]
+        last = max(said, key=lambda comment: comment.get("created_at") or "", default=None)
+        return AutodevLook(
+            pr,
+            "snippets:working" in labels,
+            issue.get("state") == "closed" or "snippets:needs-human" in labels,
+            _text(self._clean(" ".join((last.get("body") or "").split())), 400) if last else "",
         )
 
     @activity.defn(name="set_crop_status")

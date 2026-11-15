@@ -35,6 +35,16 @@ class PrUpdate:
 
 
 @dataclass
+class AutodevLook:
+    """What a round that waits for autodev finds when it looks at the snippets issue itself."""
+
+    pr: int | None  # the PR the round follows, else the open one on the issue's branch
+    working: bool  # the issue has `snippets:working`: an agent round is running
+    stopped: bool  # the issue is closed or has `snippets:needs-human`
+    last_word: str  # autodev's last comment on the issue or the PR: one line, cut and neutralized
+
+
+@dataclass
 class Pins:
     """What a round is pinned to at admission: the record, the snippets commit and the harness version.
 
@@ -103,6 +113,7 @@ class DatasetState:
     pass_jobs: list[str] = field(default_factory=list)  # workspaces of the jobs the open pass submitted
     result: str = ""  # what the open pass found
     result_binding: bool = False  # whether its result entry shows the round's binding
+    waiting_since: str | None = None  # when the round last heard from autodev while it waits for it (ISO time)
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:
@@ -191,6 +202,9 @@ class RoundLimits:
     judge_max_budget_usd: float = 2.0  # what one judge run may cost: reserved like the match agent's
     debug_cycles: int = 0  # limits.debug_cycles: failed rounds debugged and run again before one stops as failed
     debug_wait_min: int = 5  # limits.debug_wait_min: the wait between a failure and its debugging agent
+    autodev_quiet_hours: float = (
+        2.0  # limits.autodev_quiet_hours: how long a round waits on an autodev that is not at work
+    )
 
 
 @dataclass

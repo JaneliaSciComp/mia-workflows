@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
     from .models import (
         DEBUGGER,
         AssessmentWritten,
+        AutodevLook,
         DatasetState,
         DebugResult,
         GalleryResult,
@@ -67,6 +68,7 @@ DEBUG_NEXT = (
     "needed from you; *Run again* skips the wait and the debugger."
 )
 DEBUGGED = "This round was the re-run after debugging; nothing more is tried automatically."
+LOOK_EVERY = timedelta(minutes=15)  # how often a round that waits for autodev looks at the snippets issue itself
 GO_PATIENCE = timedelta(minutes=30)  # how long the debugger's own go may take to arrive as a signal
 MAX_ROUNDS_PER_EXECUTION = 20  # roll the history over between rounds at the latest after this many
 DEVELOP = ("developing", "testing", "pr-ready", "merging")  # the stages spent following a snippet PR
@@ -899,7 +901,7 @@ class MiaDataDataset:
             await self._flush()
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
-        state.tests, state.attempts, state.pending = [], {}, []
+        state.tests, state.attempts, state.pending, state.waiting_since = [], {}, [], None
         state.passes, state.pass_stage, state.pass_jobs, state.result, state.result_binding = {}, "", [], "", False
         try:
             state.pins = await self._act("admit", state.issue, event.event_id, seconds=300, result_type=Pins)
@@ -1301,14 +1303,30 @@ class MiaDataDataset:
     async def _follow_pr(self) -> None:
         """The develop round's one wait: wake on pr_update and on labels until the round ends. At `review` (the
         PR head's set passed) an approve or reject is the verdict (spec §14) and a `restart` ends the round; any
-        other label is refused (a plain go is busy throughout). Rolls over only here, idle."""
+        other label is refused (a plain go is busy throughout). Rolls over only here, idle.
+
+        Away from `review` the round waits for autodev, and that wait is timed: every LOOK_EVERY it looks at the
+        snippets issue itself (see _look), so a signal that never came cannot hold it."""
         state = self.state
         await self._limits()
         loop = workflow.patched("review-loop")
+        timed = workflow.patched("autodev-look")
         while True:
-            await workflow.wait_condition(lambda: bool(state.pending) or self._labels() or self._roll_due())
+            looks = timed and state.stage not in ("review", "pr-ready")  # there a person is awaited
+            if looks and not state.waiting_since:
+                state.waiting_since = workflow.now().isoformat()
+            try:
+                await workflow.wait_condition(
+                    lambda: bool(state.pending) or self._labels() or self._roll_due(),
+                    timeout=LOOK_EVERY if looks else None,
+                )
+            except TimeoutError:
+                if await self._look():
+                    return
+                continue
             if not (state.pending or self._labels()):
                 await self._rollover()  # the develop state is all in `state`: the next run resumes here
+            state.waiting_since = None  # something came: the quiet starts over
             if await self._revokes():
                 return  # the round stopped
             if loop and state.stage == "review" and state.pr and (verdict := await self._verdict()):
@@ -1320,6 +1338,29 @@ class MiaDataDataset:
             while state.pending:
                 if await self._on_pr(state.pending.pop(0).pr):
                     return
+
+    async def _look(self) -> bool:
+        """The round looks at autodev itself; True when that ended the round. A PR is acted on as it is now (a
+        head, a merge or a stop the round was not told of). Otherwise the round ends `blocked`, with autodev's
+        last comment, when autodev stopped before it opened a PR, or when `limits.autodev_quiet_hours` passed
+        with nothing from it and no agent round running."""
+        state = self.state
+        look = await self._act("autodev_look", state.snippet_issue, state.pr, result_type=AutodevLook)
+        before = (state.stage, len(state.tests))
+        if look.pr and await self._on_pr(look.pr):
+            return True
+        where = f"mia-snippets issue #{state.snippet_issue}" + (f" (PR #{look.pr})" if look.pr else "")
+        said = f' Its last comment: "{look.last_word}"' if look.last_word else ""
+        if look.stopped and not look.pr:
+            await self._finish("blocked", f"{where}: autodev stopped before it opened a pull request.{said}")
+            return True
+        now, hours = workflow.now(), (await self._limits()).autodev_quiet_hours
+        if look.working or not state.waiting_since or (state.stage, len(state.tests)) != before:
+            state.waiting_since = now.isoformat()  # at work, or the look itself found something to do
+        elif now - datetime.fromisoformat(state.waiting_since) >= timedelta(hours=hours):
+            await self._finish("blocked", f"{where}: nothing from autodev for {hours:g} h.{said}")
+            return True
+        return False
 
     async def _approve_pr(self, event: LabelEvent) -> None:
         """The reviewer approved the PR head's set: `/approve <head>` tells autodev to merge it. The merge wakes

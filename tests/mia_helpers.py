@@ -87,6 +87,9 @@ class FakeGH:
         )
         return c
 
+    async def find_pr(self, branch):
+        return getattr(self, "open_prs", {}).get(branch)
+
     async def get_pr(self, n):
         heads = self.prs[n]
         return {"number": n, "head": {"sha": heads.pop(0) if len(heads) > 1 else heads[0]}}

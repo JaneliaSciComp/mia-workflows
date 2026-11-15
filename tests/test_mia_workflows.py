@@ -21,6 +21,7 @@ from mia_data import workflows
 from mia_data.activities import Activities
 from mia_data.models import (
     AssessmentWritten,
+    AutodevLook,
     DatasetState,
     DebugResult,
     GalleryResult,
@@ -98,7 +99,9 @@ class Mocks:
         admit_error=None,
         debug_cycles=0,
         debug_result=None,
+        look=None,
     ):
+        self.look = look or AutodevLook(None, True, False, "")  # what autodev_look finds (a list: one per look)
         self.debug_cycles = debug_cycles  # limits.debug_cycles the limits activity reports
         self.debug_result = debug_result or DebugResult("rerun", "the host sent 30 KB/s", "bind the first volume only")
         self.admit_error = admit_error  # a message: admit refuses the record with it, non-retryable
@@ -289,6 +292,13 @@ class Mocks:
             rec("pr_state", pr)
             return self.pr_now
 
+        @activity.defn(name="autodev_look")
+        async def autodev_look(snippet_issue: int, pr: int | None) -> AutodevLook:
+            rec("autodev_look", snippet_issue, pr)
+            if isinstance(self.look, list):
+                return self.look.pop(0) if len(self.look) > 1 else self.look[0]
+            return self.look
+
         @activity.defn(name="set_crop_status")
         async def set_crop_status(sha: str, state: str, url: str | None, description: str = "") -> None:
             rec("set_crop_status", sha, state, url)
@@ -382,6 +392,7 @@ class Mocks:
             open_snippet_issue,
             read_feedback,
             pr_state,
+            autodev_look,
             set_crop_status,
             tree_sha,
             adopt_pr_binding,
@@ -433,9 +444,14 @@ async def until(cond, timeout=10.0):
 
 async def idle(h, m, stage):
     """Wait until set_stage(stage) ran and the workflow is blocked again (its last history event is a completed
-    workflow task, not a scheduled activity), so the next signal finds it waiting rather than busy."""
+    workflow task, not a scheduled activity), so the next signal finds it waiting rather than busy. A wait for
+    autodev is timed, so a started timer may follow the task."""
     await until(lambda: m.stages[-1:] == [stage])
-    trailing = {EventType.EVENT_TYPE_MARKER_RECORDED, EventType.EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES}
+    trailing = {
+        EventType.EVENT_TYPE_MARKER_RECORDED,
+        EventType.EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES,
+        EventType.EVENT_TYPE_TIMER_STARTED,
+    }
     for _ in range(500):
         events = [e for e in (await h.fetch_history()).events if e.event_type not in trailing]  # a patch marker
         if events[-1].event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
@@ -1181,6 +1197,59 @@ async def test_closed_pr_needs_human(env, now, why):
     assert m.of("refuse_label")[0][0] == "data:go" and "busy" in m.of("refuse_label")[0][1]
     detail = m.of("set_stage")[-1][1]
     assert why in detail and PR_URL in detail and not [a for a in m.jobs() if a.n_crops]
+
+
+LOOK = timedelta(minutes=16)  # past one look of a round that waits for autodev
+
+
+async def test_a_waiting_round_ends_when_autodev_stopped_before_it_opened_a_pr(env):
+    """autodev's first run failed: there is no PR for the poller to see, and the round's own look finds the issue."""
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(None, False, True, "snippets: stopped. agent job 1 ended EXIT"))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        await idle(h, m, "blocked")
+    detail = m.of("set_stage")[-1][1]
+    assert "mia-snippets issue #100: autodev stopped before it opened a pull request" in detail
+    assert "agent job 1 ended EXIT" in detail and m.of("autodev_look") == [(100, None)]
+
+
+async def test_a_waiting_round_ends_after_the_quiet_limit_unless_autodev_is_at_work(env):
+    quiet, at_work = AutodevLook(None, False, False, "Round 1 started"), AutodevLook(None, True, False, "")
+    m = Mocks(outcome="needs_snippet", look=[at_work] * 12 + [quiet])
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await env.sleep(timedelta(hours=3, minutes=5))  # autodev is at work at every look: the limit starts over
+        assert m.stages[-1] == "developing" and len(m.of("autodev_look")) == 12
+        await env.sleep(timedelta(hours=1))
+        assert m.stages[-1] == "developing"  # quiet, but not for two hours yet
+        await env.sleep(timedelta(hours=1, minutes=16))
+        await idle(h, m, "blocked")
+    detail = m.of("set_stage")[-1][1]
+    assert "mia-snippets issue #100: nothing from autodev for 2 h" in detail and "Round 1 started" in detail
+
+
+async def test_a_look_acts_on_a_pr_the_round_was_not_told_of_and_review_is_not_timed(env):
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(5, False, False, ""), pr_now=head(H1))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        await idle(h, m, "review")  # the head's crops were made without a pr_update
+        await env.sleep(timedelta(hours=5))  # a person is awaited at review, not autodev
+        assert m.stages[-1] == "review" and m.of("autodev_look") == [(100, None)]
+
+
+async def test_a_merge_that_does_not_come_ends_the_round(env):
+    said = "Approved, but merging failed: Pull Request has merge conflicts"
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(5, False, False, said), pr_now=head(H1))
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await approve_review(h, m, eid="13")
+        await idle(h, m, "merging")
+        await env.sleep(timedelta(hours=2, minutes=16))
+        await idle(h, m, "blocked")
+    detail = m.of("set_stage")[-1][1]
+    assert "nothing from autodev for 2 h" in detail and "merge conflicts" in detail and "PR #5" in detail
 
 
 async def test_revision_limit(env):

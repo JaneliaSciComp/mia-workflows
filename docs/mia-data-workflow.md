@@ -127,8 +127,13 @@ the draft binding and what failed. A second autodev deployment, `snippets`, turn
 moved. Every new PR head gets the round's crops (step 4), made by an untrusted job with a private cache, and a
 required `mia-data/crops` commit status on that exact commit. A head whose crops pass goes to `review` like a
 matched binding's; one whose crops fail gets the report as a `/revise` on the PR, and autodev fixes it. When
-autodev stops instead (a failed round, its revision limit), the snippets issue is labelled
-`snippets:needs-human` and the round ends `blocked`, naming the PR. Nobody
+autodev stops instead (a failed round, its revision limit, a merge that fails), the snippets issue is labelled
+`snippets:needs-human` and the round ends `blocked`, naming the PR. The round does not rely on being told: while
+it waits for autodev (`developing`, `testing` after a failed head, `merging`; not `review`, where a person is
+awaited) it looks at the snippets issue itself every 15 minutes. A PR is acted on as it is then; an issue that
+stopped before any PR was opened ends the round `blocked`; and so does `limits.autodev_quiet_hours` (default 2)
+with no change and no agent round running (`snippets:working` starts the limit over). Either end quotes
+autodev's last comment. Nobody
 merges the PR by hand: *Approve* on the dataset's page makes the worker post `/approve <head>` on the PR (stage
 `merging`), autodev merges, and if the merged snippet tree is the approved head's, the approved crops are
 saved; otherwise the merge commit gets its own crops, reviewed again. If the round stops (`failed` or `blocked`)

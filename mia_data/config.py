@@ -185,6 +185,9 @@ class LimitsCfg(BaseModel):
     max_pr_revisions: int = 5
     debug_cycles: int = 1  # how often a failed round is debugged and run again before it stops as `failed`; 0 = never
     debug_wait_min: int = 5  # how long a failed round waits before its debugging agent starts
+    autodev_quiet_hours: float = (
+        2  # a round waiting for a snippet ends `blocked` after this long without autodev at work
+    )
     fetch_bytes: float = 50e9
     fetch_walltime_min: int = 480
     fetch_attempts: int = 4

@@ -65,6 +65,11 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   nothing deletes a record, buffer-api serves the file as it is (`GET /jobs/<address>`) and the page shows it at
   `#job/<address>`. Writing one is best effort and never fails a submit or a wait. An agent command prints
   `stream-json` to `claude.jsonl` and `keep_result` copies its last line to the file the result is read from.
+- **A round's wait on autodev is timed.** While a dataset round waits for a snippet PR, a new head or a merge it
+  looks at the snippets issue itself every 15 minutes (`autodev_look`, `_look` in `mia_data/workflows.py`) and
+  ends `blocked` when autodev stopped or `limits.autodev_quiet_hours` passed with no agent round running; the
+  poller's `pr_update` only makes it faster. autodev says a stop with the `needs-human` label, never a comment
+  alone. A new wait on something outside the round gets the same: a look and a limit.
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
   (`Activities._post`); the `MiaMirror` workflow copies them to GitHub.
 - **Nothing reads a data or buffers issue.** No label, comment, body, close or reopen is input: nothing polls

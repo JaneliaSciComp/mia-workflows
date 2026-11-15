@@ -75,6 +75,8 @@ harness:
 # `agent_max_budget_usd` (one match-agent run, default 5) and `max_pr_revisions` (one round, default 5).
 # `debug_cycles` (default 1): how often a failed dataset round is handed to a debugging agent and run again before
 # it stops as `failed`; 0 turns that off. `debug_wait_min` (default 5): the wait before the debugging agent starts.
+# `autodev_quiet_hours` (default 2): a dataset round that waits for autodev (a snippet PR, a new head, a merge) ends
+# `blocked` when this long passes with no change and no agent round running.
 limits:
   job_bytes: 5e9
   # stage_bytes: 2e9
