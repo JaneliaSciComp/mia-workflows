@@ -1688,8 +1688,13 @@ class BufferService:
     def _put_worker(self, service: str, *, query: dict[str, str], body: bytes) -> Response:
         """A worker says the commit it started on; the cleaner compares it with the checkout's."""
         parsed = _parse(WorkerBody, body)
+        now = time.time()
         with self._lock:
-            workers = {**(self.ledger.kv("workers") or {}), service: {"commit": parsed.commit, "at": time.time()}}
+            workers = self.ledger.kv("workers") or {}
+            known = workers.get(service) or {}
+            # `since`: when the worker first started on this commit; a restart on the same code keeps it
+            since = known.get("since", now) if known.get("commit") == parsed.commit else now
+            workers[service] = {"commit": parsed.commit, "at": now, "since": since}
             self.ledger.put_kv("workers", workers)
         return 200, workers[service], {}
 

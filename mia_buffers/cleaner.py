@@ -36,6 +36,21 @@ SERVICE_RE = re.compile(
 NOT_REGISTERED_RE = re.compile(r"not registered", re.IGNORECASE)
 ENTRY_NOISE_RE = re.compile(r"(?s:<!--.*?-->)|^\*\*(Stage|Result|Folders|Jobs):\*\*[^\n]*$", re.MULTILINE)
 SEEN_CHARS = 600  # how much of a stop's own words a case quotes
+# what a stop says, by the remedy it calls for (spec §4.5); the first that matches decides
+HOSTS_RE = re.compile(r"host not allowed: ([^)\n]+)")
+RECORD_GAP_RE = re.compile(r"match blocked:")
+REVISION_LIMIT_RE = re.compile(r"revision limit", re.IGNORECASE)
+CONFLICT_RE = re.compile(r"conflict|not mergeable", re.IGNORECASE)
+RUN_FAILED_RE = re.compile(r"agent job \S+ ended|snippets: (stopped|failed)|made no commits", re.IGNORECASE)
+TIME_LIMIT_RE = re.compile(r"exit 140|time limit|TERM_RUNLIMIT", re.IGNORECASE)
+PASSING_RE = re.compile(
+    r"timed? ?out|timeout|connection (reset|aborted|refused)|reset by peer|truncated|incomplete ?read|"
+    r"temporarily unavailable|rate limit|job (was )?lost|\b(403|429|500|502|503|504)\b",
+    re.IGNORECASE,
+)
+WORKER_ERROR_RE = re.compile(r"\b[A-Z][A-Za-z]*(Error|Exception)\b")
+SECOND_RETRY = 6  # the second run after a passing cause waits this many times as long as the first
+REVISE_TEXT = "/revise Merge `main` into this branch and resolve the conflicts. Change nothing else."
 
 STEP_WORDS = {
     "cancel": "cancel the round",
@@ -195,11 +210,8 @@ def sighting(item: dict, cfg: CleanerCfg, now: float) -> dict | None:
         if subject["kind"] == "prep" and (item.get("party") or {}).get("settled"):
             seen = f"at `{stage}` for {_age(now - since)} though each of its datasets is prepared or shelved"
             return {"what": "stopped", "rule": "request behind", "seen": seen}
-        return {
-            "what": "stopped",
-            "rule": None,
-            "seen": f"stopped at `{stage}` {_age(now - since)} ago" + (f": {said}" if said else ""),
-        }
+        seen = f"stopped at `{stage}` {_age(now - since)} ago" + (f": {said}" if said else "")
+        return {"what": "stopped", "rule": stop_rule(item, said, since), "seen": seen}
     return None  # a person's turn, done, not started, shelved
 
 
@@ -229,6 +241,52 @@ def _quiet(item: dict, where: str) -> dict | None:
     }
 
 
+def stop_rule(item: dict, said: str, since: float) -> str | None:
+    """Which remedy a stop calls for, from what it said, the snippets issue it waited on (`party`) and when
+    the worker of its rounds started on its present commit (`worker`); None when no rule covers it."""
+    party, worker = item.get("party") or {}, item.get("worker") or {}
+    if item["subject"]["kind"] != "dataset":
+        return None
+    if party.get("stopped") and party.get("state") == "open":  # autodev stopped on the snippets issue
+        words = f"{said} {party.get('last_word') or ''}"
+        if party.get("pr") and (party.get("mergeable") is False or CONFLICT_RE.search(words)):
+            return "merge conflict"
+        if REVISION_LIMIT_RE.search(words):
+            return "revision limit"
+        if not party.get("pr") and RUN_FAILED_RE.search(words):
+            return "autodev's run failed"
+        return None
+    for rule, pattern in (
+        ("host not approved", HOSTS_RE),
+        ("record gap", RECORD_GAP_RE),
+        ("revision limit", REVISION_LIMIT_RE),
+        ("time limit", TIME_LIMIT_RE),
+        ("passing cause", PASSING_RE),
+    ):
+        if pattern.search(said):
+            return rule
+    if WORKER_ERROR_RE.search(said) and (worker.get("since") or 0) > since:
+        return "fixed since"
+    return None
+
+
+def leftover_reason(view: dict | None, labels: set[str], newer: bool, leftover_days: float, now: float) -> str | None:
+    """Why an open snippets issue of ours is left over, given its dataset's subject (`view`), the issue's labels
+    and whether the dataset has opened a newer one; None when it is not, or autodev is at work on it."""
+    if view is None or "snippets:working" in labels:
+        return None
+    if newer:
+        return "its dataset has opened a newer snippets issue"
+    if view["status"] == "shelved":
+        return "its dataset is shelved"
+    if view["stage"] == "done":
+        return "its dataset is prepared through another reader"
+    rested = now - (view.get("updated") or now)
+    if view["status"] in ("stuck", "done") and rested >= leftover_days * 86400:
+        return f"its dataset has rested at `{view['stage']}` for {rested / 86400:.0f} days"
+    return None
+
+
 # --- what is done (spec §4.5) ----------------------------------------------------------------------------------
 
 
@@ -241,6 +299,39 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         return [{"do": "stop"}, {"do": "kill_jobs"}, {"do": "go"}]
     if rule == "request behind":
         return [{"do": "recheck"}]
+    party = item.get("party") or {}
+    earlier = [case for case in item.get("earlier") or () if case["rule"] == rule]
+    if rule == "autodev's run failed":
+        issue = party["issue"]
+        tried = [step for case in earlier for step in case["data"].get("steps", ())]
+        if any(step["do"] == "snippets_go" and step.get("issue") == issue for step in tried):  # once per issue
+            return [{"do": "diagnose"}]
+        return [{"do": "snippets_go", "issue": issue}, {"do": "await_autodev", "issue": issue}, {"do": "go"}]
+    if rule == "merge conflict":
+        issue, pr = party["issue"], party["pr"]
+        if REVISION_LIMIT_RE.search(party.get("last_word") or ""):  # no revision left: start over from the match
+            why = "the pull request cannot be merged and autodev has no revision left"
+            return [{"do": "close", "issue": issue, "pr": pr, "why": why}, {"do": "go"}]
+        return [{"do": "revise", "issue": issue, "pr": pr}, {"do": "await_autodev", "issue": issue}, {"do": "go"}]
+    if rule == "passing cause":
+        if len(earlier) >= 2:  # at most twice
+            return [{"do": "diagnose"}]
+        return [{"do": "wait", "hours": item["retry_hours"] * (SECOND_RETRY if earlier else 1)}, {"do": "go"}]
+    if rule == "fixed since":
+        commit = (item.get("worker") or {}).get("commit")
+        if any(case["data"].get("commit") == commit for case in earlier):  # once per commit
+            return [{"do": "diagnose"}]
+        return [{"do": "go"}]
+    if rule == "host not approved":
+        hosts = HOSTS_RE.search(found["seen"])
+        named = hosts.group(1).strip() if hosts else "see its page"
+        text = f"approve the hosts its jobs need ({named}): press Run again on its page and tick them"
+        return [{"do": "needs", "text": text}]
+    if rule == "record gap":
+        text = "its catalog record needs a decision or a correction; the round runs again once the record changes"
+        return [{"do": "needs", "text": text}]
+    if rule == "input changed":
+        return [{"do": "go"}]
     if rule == "activity retrying":
         failure = found["activity"]["failure"]
         if NOT_REGISTERED_RE.search(failure):

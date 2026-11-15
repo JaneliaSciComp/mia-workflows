@@ -181,3 +181,103 @@ def test_entry_text_and_the_last_person():
     )
     actions = [{"actor": "page", "at": at(300)}, {"actor": "prep:7", "at": at(200)}, {"actor": "cleaner", "at": at(5)}]
     assert last_person(actions) == NOW - 200 * 60 and last_person([{"actor": "debugger", "at": at(1)}]) is None
+
+
+# --- stopped rounds: which remedy a stop calls for (spec §4.5, the incidents of §2 B) ---
+
+
+def stopped(said, party=None, worker=None, earlier=(), minutes=120.0):
+    evidence = item(status="stuck", stage="blocked", minutes=minutes, party=party)
+    evidence["entries"][0]["body"] = f"**Result:** `data:developing`\n\n**blocked**: {said}"
+    evidence |= {"worker": worker, "earlier": list(earlier), "retry_hours": CFG.retry_hours}
+    found = sighting(evidence, CFG, NOW)
+    return found["rule"], plan_for(found, evidence)
+
+
+AUTODEV_STOPPED = {"issue": 72, "state": "open", "stopped": True, "pr": None, "mergeable": None, "last_word": ""}
+
+
+def test_autodevs_failed_run_is_asked_for_again_once_per_issue():
+    # air-ug-…: "Refusing to create empty bundle"; empiar-10554: agent job ended EXIT (exit 140)
+    said = "mia-snippets issue #72: autodev stopped before it opened a pull request."
+    party = {
+        **AUTODEV_STOPPED,
+        "last_word": "### snippets: stopped **Error:** agent job 155317003 ended EXIT (exit 140)",
+    }
+    rule, plan = stopped(said, party)
+    assert rule == "autodev's run failed"
+    assert plan == [{"do": "snippets_go", "issue": 72}, {"do": "await_autodev", "issue": 72}, {"do": "go"}]
+    before = [{"rule": rule, "data": {"steps": [{"do": "snippets_go", "issue": 72}]}}]
+    assert stopped(said, party, earlier=before)[1] == [{"do": "diagnose"}]
+    other = [{"rule": rule, "data": {"steps": [{"do": "snippets_go", "issue": 49}]}}]
+    assert stopped(said, party, earlier=other)[1][0]["do"] == "snippets_go"  # another issue's try does not count
+
+
+def test_a_merge_refused_for_conflicts_asks_autodev_to_merge_main():
+    # empiar-10070 waited seven hours at `merging` for a pull request that could not merge
+    party = {**AUTODEV_STOPPED, "pr": 44, "mergeable": False, "last_word": "Approved, but merging failed: conflicts"}
+    rule, plan = stopped("snippet PR #44: its issue has `snippets:needs-human`", party)
+    assert rule == "merge conflict" and [step["do"] for step in plan] == ["revise", "await_autodev", "go"]
+    spent = {**party, "last_word": "Needs a human: revision limit (3) reached; merging failed: conflicts"}
+    rule, plan = stopped("snippet PR #44: its issue has `snippets:needs-human`", spent)
+    assert rule == "merge conflict" and [step["do"] for step in plan] == ["close", "go"] and plan[0]["pr"] == 44
+
+
+def test_autodev_at_its_revision_limit_goes_to_the_diagnosis():
+    party = {**AUTODEV_STOPPED, "pr": 53, "mergeable": True, "last_word": "Needs a human: revision limit (3) reached"}
+    assert stopped("snippet PR #53: its issue has `snippets:needs-human`", party) == (
+        "revision limit",
+        [{"do": "diagnose"}],
+    )
+    assert stopped("autodev left nothing", {**AUTODEV_STOPPED, "pr": 53, "mergeable": True}) == (
+        None,
+        [{"do": "diagnose"}],
+    )
+
+
+def test_a_passing_cause_is_run_again_later_and_at_most_twice():
+    # EBI: timeouts, truncated bodies, a 403 after hours of good answers
+    for said in (
+        "download failed: read timed out",
+        "IncompleteRead(0 bytes read)",
+        "HTTP 403 for https://ftp.example.org/x",
+    ):
+        assert stopped(said) == ("passing cause", [{"do": "wait", "hours": 2.0}, {"do": "go"}]), said
+    once = [{"rule": "passing cause", "data": {}}]
+    assert stopped("read timed out", earlier=once)[1] == [{"do": "wait", "hours": 12.0}, {"do": "go"}]
+    assert stopped("read timed out", earlier=once * 2)[1] == [{"do": "diagnose"}]
+
+
+def test_a_stop_of_the_workers_own_is_run_again_once_the_worker_runs_a_new_commit():
+    # a 310 KB binding in a comment: GitHubError 422, fixed and restarted the same day
+    said = "GitHubError: 422 body is too long (maximum is 65536 characters)"
+    assert stopped(said, worker={"commit": "new", "since": NOW - 3600}) == ("fixed since", [{"do": "go"}])
+    assert stopped(said, worker={"commit": "old", "since": NOW - 3 * 3600})[0] is None  # no new commit since the stop
+    tried = [{"rule": "fixed since", "data": {"commit": "new"}}]
+    assert stopped(said, worker={"commit": "new", "since": NOW - 3600}, earlier=tried)[1] == [{"do": "diagnose"}]
+
+
+def test_what_only_a_person_can_settle_says_so():
+    rule, (step,) = stopped("smoke failed (host not allowed: ftp.example.org, s3.example.org)")
+    assert rule == "host not approved" and "ftp.example.org, s3.example.org" in step["text"] and step["do"] == "needs"
+    rule, (step,) = stopped("match blocked: Someone has to decide what class the two label arrays mark")
+    assert rule == "record gap" and step["do"] == "needs"
+    assert stopped("crops job 9 ended EXIT (exit 140)") == ("time limit", [{"do": "diagnose"}])
+    assert stopped("the crops do not match the annotation") == (None, [{"do": "diagnose"}])
+
+
+def test_left_over_snippet_work_is_named_by_why_it_is_left():
+    from mia_buffers.cleaner import leftover_reason
+
+    def reason(status="stuck", stage="blocked", days=1.0, labels=(), newer=False):
+        view = {"status": status, "stage": stage, "updated": NOW - days * 86400}
+        return leftover_reason(view, set(labels), newer, CFG.leftover_days, NOW)
+
+    assert reason(status="done", stage="done") == "its dataset is prepared through another reader"
+    assert reason(status="shelved") == "its dataset is shelved"
+    assert reason(newer=True) == "its dataset has opened a newer snippets issue"
+    assert reason(days=4) == "its dataset has rested at `blocked` for 4 days" and reason(days=2) is None
+    assert reason(status="done", stage="cancelled", days=4) == "its dataset has rested at `cancelled` for 4 days"
+    assert reason(status="working", stage="developing", days=9) is None
+    assert reason(status="done", stage="done", labels=["snippets:working"]) is None  # autodev is at work on it
+    assert leftover_reason(None, set(), False, CFG.leftover_days, NOW) is None  # no dataset of ours behind it

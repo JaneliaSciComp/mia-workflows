@@ -9,10 +9,13 @@ changes something carries a key, and a step that has to wait returns None and is
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 import time
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from mia_core import autonomy
 from mia_core.checkout import head_commit
@@ -23,10 +26,12 @@ from mia_core.untrusted import neutralize
 
 from .cleaner import (
     ALL_KINDS,
+    REVISE_TEXT,
     SNIPPETS,
     WORKFLOW_TYPES,
     evidence_findings,
     last_person,
+    leftover_reason,
     plan_for,
     plan_words,
     service_findings,
@@ -46,6 +51,10 @@ STEP_WAIT_S = 2 * 3600  # a step that is still not possible after this long ends
 ROUND_ENDED_S = 600  # a job still alive this long after its round ended is left over
 RECENT_S = 86400  # how long after a round ended its jobs are looked for
 ISSUE_RE = re.compile(r"mia-snippets issue #(\d+)")
+PULL_RE = re.compile(r"/pull/(\d+)")
+BRANCH_RE = re.compile(r"snippets/issue-(\d+)")
+OURS_RE = re.compile(r"<!-- mia-data: issue=(\d+) round=")  # the first line of a snippets issue a round opened
+LAST_WORD_CHARS = 400
 DEVELOP_STAGES = ("developing", "testing", "merging")  # where a dataset round may wait on autodev
 ACTION_PATHS = {
     "dataset": "/datasets/{key}/actions",
@@ -63,6 +72,8 @@ class Sweep:
         self.report: dict[str, Any] = {"mode": self.rules.mode, "findings": [], "opened": [], "did": [], "errors": []}
         self.cases: list[dict] = []
         self.working = 0  # cases in work, against `max_parallel`
+        self.workers: dict = {}  # service -> {commit, at, since}
+        self.present: set[tuple[str, str]] = set()  # the left-over things this pass saw: (case kind, key)
 
     async def _ask(self, call: Any, *args: Any, **fields: Any) -> Any:
         """A registry call, off the event loop (the client is synchronous)."""
@@ -96,6 +107,10 @@ class Sweep:
         for view in views:
             await self._try(view["key"], self._left_jobs(view))
         by_subject = {(view["kind"], view["number"]): view for view in views}
+        if SNIPPETS not in skipped:
+            await self._try("snippet work", self._left_snippets(by_subject))
+        for case in [case for case in self.cases if case["state"] == "needs-person" and case["rule"] == "record gap"]:
+            await self._try(case["key"], self._record_changed(case, by_subject))
         for case in [case for case in self.cases if case["state"] in ACTIVE]:
             await self._try(case["key"], self._advance(case, by_subject, skipped))
         return await self._done()
@@ -120,7 +135,8 @@ class Sweep:
             return service_findings(health, {}, [], None, False, {}, self.now)
         queue_kinds = {queue: [SNIPPETS] for queue in cfg.workers}
         queue_kinds |= {cfg.datasets_pipeline.task_queue: ["dataset"], cfg.task_queue: ["buffer", "prep"]}
-        workers, schedules = await self._ask(registry.workers), await self._ask(registry.schedules)
+        self.workers = workers = await self._ask(registry.workers)
+        schedules = await self._ask(registry.schedules)
         checkout = await asyncio.to_thread(head_commit)
         pause = await asyncio.to_thread(autonomy.paused, manifest_path())
         return service_findings(health, workers, schedules, checkout, pause, queue_kinds, self.now)
@@ -161,8 +177,11 @@ class Sweep:
         if view["status"] == "working":
             item["run"] = await self._run(kind, number)
             item["jobs"] = await self._jobs(number, item["round"])
-        if view["status"] == "working" or kind == "prep":
+        if view["status"] == "working" or kind in ("prep", "dataset"):
             item["party"] = await self._party(item, skipped)
+        queue = self.cfg.datasets_pipeline.task_queue if kind == "dataset" else self.cfg.task_queue
+        item |= {"worker": self.workers.get(queue), "retry_hours": self.rules.retry_hours}
+        item["earlier"] = self._cases_of(kind, number)
         evidence.append(item)
 
     async def _run(self, kind: str, number: int) -> dict | None:
@@ -194,15 +213,13 @@ class Sweep:
         """Who the working subject waits for, and whether they are at work: autodev for a dataset whose round
         waits on a snippet, its datasets for a request. None when it waits for nobody."""
         subject = item["subject"]
-        if subject["kind"] == "dataset" and subject["stage"] in DEVELOP_STAGES:
-            issues = [int(match) for entry in item["entries"] for match in ISSUE_RE.findall(entry.get("body") or "")]
-            if not issues:
+        if subject["kind"] == "dataset" and (subject["stage"] in DEVELOP_STAGES or subject["status"] == "stuck"):
+            issue = await self._snippet_issue(item)
+            if issue is None:
                 return None
             if SNIPPETS in skipped:
-                return {"issue": issues[-1], "working": True}  # autodev's worker is away: not this round's fault
-            issue = await self.activities.gh_snippets.get_issue(issues[-1])
-            labels = {label["name"] for label in issue.get("labels", [])}
-            return {"issue": issues[-1], "state": issue.get("state"), "working": "snippets:working" in labels}
+                return {"issue": issue, "working": True}  # autodev's worker is away: not this round's fault
+            return await self._snippets(issue)
         if subject["kind"] == "prep":
             datasets = await self._request_datasets(subject)
             return {
@@ -211,6 +228,43 @@ class Sweep:
                 and all(view["status"] == "shelved" or view["stage"] == "done" for view in datasets),
             }
         return None
+
+    async def _snippet_issue(self, item: dict) -> int | None:
+        """The snippets issue the subject's last round waited on: the one its entries name, else the one behind
+        the pull request they link."""
+        said = " ".join(entry.get("body") or "" for entry in item["entries"] if entry.get("round") == item["round"])
+        if named := ISSUE_RE.findall(said):
+            return int(named[-1])
+        if pulls := PULL_RE.findall(said):
+            pull = await self.activities.gh_snippets.get_pr(int(pulls[-1]))
+            branch = BRANCH_RE.fullmatch((pull.get("head") or {}).get("ref") or "")
+            return int(branch.group(1)) if branch else None
+        return None
+
+    async def _snippets(self, number: int) -> dict:
+        """The snippets issue as the rules read it: {issue, state, working, stopped, pr, mergeable, last_word}.
+        `last_word` is autodev's last comment on the issue or its pull request, on one line."""
+        gh, bot = self.activities.gh_snippets, self.activities.bot
+        issue = await gh.get_issue(number)
+        labels = {label["name"] for label in issue.get("labels", [])}
+        found = await gh.find_pr(f"snippets/issue-{number}")
+        pull = await gh.get_pr(found["number"]) if found else None
+        comments = await gh.issue_comments(number) + (await gh.issue_comments(pull["number"]) if pull else [])
+        said = [
+            comment
+            for comment in comments
+            if (comment.get("user") or {}).get("login") == bot and "<!-- mia" not in (comment.get("body") or "")
+        ]
+        last = max(said, key=lambda comment: comment.get("created_at") or "", default=None)
+        return {
+            "issue": number,
+            "state": issue.get("state"),
+            "working": "snippets:working" in labels,
+            "stopped": "snippets:needs-human" in labels,
+            "pr": pull["number"] if pull else None,
+            "mergeable": pull.get("mergeable") if pull else None,
+            "last_word": neutralize(" ".join((last.get("body") or "").split()))[:LAST_WORD_CHARS] if last else "",
+        }
 
     async def _request_datasets(self, subject: dict) -> list[dict]:
         """The dataset subjects a request names in its text (none for a request that selects them)."""
@@ -252,13 +306,40 @@ class Sweep:
             "plan": plan_for(found, item),
             "steps": [],
         }
+        if found["rule"] == "fixed since":
+            data["commit"] = (item.get("worker") or {}).get("commit")
+        if found["rule"] == "record gap":
+            data["record"] = await self._record_digest(subject["key"])
         await self._open(kind, number, subject["key"], found["rule"] or "diagnosis", data)
+
+    async def _record_digest(self, record: str) -> str | None:
+        """A digest of the dataset's record as the newest synced catalog has it; None when no catalog holds it."""
+        try:
+            found = await self._ask(self.registry.request, "GET", f"/catalog/datasets/{quote(record, safe='')}")
+        except RegistryError:
+            return None
+        return hashlib.sha256(json.dumps(found.get("record"), sort_keys=True).encode()).hexdigest()
+
+    async def _record_changed(self, case: dict, views: dict) -> None:
+        """A dataset that waits for its record to be corrected (`record gap`) and whose record has changed since:
+        its case is closed and a new one runs it again."""
+        view = views.get((case["kind"], case["number"]))
+        before, now = case["data"].get("record"), await self._record_digest(case["key"])
+        if view is None or view["revision"] != case["data"].get("revision") or now in (None, before):
+            return
+        await self._save(case, "resolved", "its record changed")
+        seen = f"{case['data']['seen']}. Its catalog record has changed since"
+        data = {"seen": seen, "what": "stopped", "revision": view["revision"], "plan": [{"do": "go"}], "steps": []}
+        await self._open(case["kind"], case["number"], case["key"], "input changed", data)
 
     async def _unrunnable(self) -> None:
         """Open runs of a workflow type no worker registers: each logs an error on every task and never ends."""
         for run in await self._ask(self.registry.runs):
             key = f"{run['namespace']}/{run['id']}"
-            if run["type"] in WORKFLOW_TYPES or self._cases_of("run", None, key):
+            if run["type"] in WORKFLOW_TYPES:
+                continue
+            self.present.add(("run", key))
+            if self._cases_of("run", None, key):
                 continue
             step = {"do": "terminate", "namespace": run["namespace"], "workflow_id": run["id"], "run_id": run["run_id"]}
             seen = f"an open run of the workflow type `{run['type']}`, which no worker registers"
@@ -274,11 +355,58 @@ class Sweep:
         timeline = await self._ask(self.registry.timeline, view["kind"], view["number"])
         round_id = next((entry["round"] for entry in reversed(timeline["entries"]) if entry.get("round")), None)
         for job in await self._jobs(view["number"], round_id):
+            if job["live"]:
+                self.present.add(("job", job["address"]))
             if job["live"] and not self._cases_of("job", None, job["address"]):
                 seen = f"job {job['job_id']} of `{view['key']}` is {job['state']} though its round ended"
                 plan = [{"do": "kill_job", "job_id": job["job_id"], "address": job["address"]}]
                 await self._open(
                     "job", None, job["address"], "left-over job", {"seen": seen, "plan": plan, "steps": []}
+                )
+
+    async def _left_snippets(self, views: dict) -> None:
+        """Snippets issues and pull requests of ours that nobody follows any more (spec §4.5, leftovers): an open
+        issue whose dataset is prepared another way, is shelved, opened a newer issue or has rested for
+        `leftover_days`, while autodev is not at work on it; and an open pull request whose issue is closed."""
+        gh, bot = self.activities.gh_snippets, self.activities.bot
+        ours: list[tuple[int, int, dict]] = []  # (dataset number, issue number, issue)
+        for issue in await gh.list_issues(state="open"):
+            marker = OURS_RE.match(issue.get("body") or "")
+            if marker and (issue.get("user") or {}).get("login") == bot:
+                ours.append((int(marker.group(1)), issue["number"], issue))
+        newest = {dataset: max(number for other, number, _ in ours if other == dataset) for dataset, _, _ in ours}
+        for dataset, number, issue in ours:
+            labels = {label["name"] for label in issue.get("labels", [])}
+            view = views.get(("dataset", dataset))
+            why = leftover_reason(view, labels, number != newest[dataset], self.rules.leftover_days, self.now)
+            if why is None:
+                continue
+            self.present.add(("snippets", f"issue-{number}"))
+            if not self._cases_of("snippets", None, f"issue-{number}"):
+                pull = await gh.find_pr(f"snippets/issue-{number}")
+                step = {"do": "close", "issue": number, "pr": pull["number"] if pull else None, "why": why}
+                seen = f"snippets issue #{number} of `{view['key'] if view else dataset}` is open, and {why}"
+                await self._open(
+                    "snippets",
+                    None,
+                    f"issue-{number}",
+                    "left-over snippet work",
+                    {"seen": seen, "plan": [step], "steps": []},
+                )
+        for pull in await gh.list_prs(state="open"):
+            branch = BRANCH_RE.fullmatch((pull.get("head") or {}).get("ref") or "")
+            if not branch or (pull.get("user") or {}).get("login") != bot:
+                continue
+            issue = await gh.get_issue(int(branch.group(1)))
+            if issue.get("state") != "closed" or not OURS_RE.match(issue.get("body") or ""):
+                continue
+            key = f"pull-{pull['number']}"
+            self.present.add(("snippets", key))
+            if not self._cases_of("snippets", None, key):
+                step = {"do": "close", "issue": None, "pr": pull["number"], "why": "its snippets issue is closed"}
+                seen = f"snippet pull request #{pull['number']} is open though its issue #{issue['number']} is closed"
+                await self._open(
+                    "snippets", None, key, "pull request of a closed issue", {"seen": seen, "plan": [step], "steps": []}
                 )
 
     # --- carrying cases on -------------------------------------------------------------------------------------
@@ -294,7 +422,9 @@ class Sweep:
     async def _advance(self, case: dict, views: dict, skipped: set[str]) -> None:
         """Carry one case as far as it goes in this pass."""
         data, acting = case["data"], self.rules.mode == "act"
-        if case["kind"] not in ALL_KINDS:  # a run or a job that was left behind
+        if case["kind"] not in ALL_KINDS:  # a run, a job, an issue or a pull request that was left behind
+            if (case["kind"], case["key"]) not in self.present and not _acted(data):
+                return await self._save(case, "resolved", "it is gone")
             if acting:
                 await self._work(case, None)
             return
@@ -325,6 +455,10 @@ class Sweep:
         while data["plan"]:
             step = data["plan"][0]
             try:
+                if step["do"] in STARTS_WORK and (tried := self._remedies(case)) >= self.rules.max_remedies:
+                    raise Refused(f"the cleaner has started work on this subject {tried} times in seven days")
+                if not _acted(data) and step["do"] not in QUIET_STEPS:
+                    await self._say(case, f"{data['seen']}. Doing: {plan_words(data['plan'])}.", "start")
                 result = await self._do(case, step, timeline)
             except Refused as refused:
                 data["steps"].append({**step, "at": self.now, "result": f"refused: {refused}"})
@@ -335,7 +469,7 @@ class Sweep:
                 waiting = data.setdefault("waiting", {"step": len(data["steps"]), "since": self.now})
                 if waiting["step"] != len(data["steps"]):
                     data["waiting"] = {"step": len(data["steps"]), "since": self.now}
-                elif self.now - waiting["since"] > STEP_WAIT_S and step["do"] not in ("wait", "await_autodev"):
+                elif self.now - waiting["since"] > STEP_WAIT_S and not _patient(case, step):
                     data["needs"] = f"{plan_words([step])} was not possible for {STEP_WAIT_S // 3600} h"
                     state = "needs-person"
                 break
@@ -401,6 +535,8 @@ class Sweep:
         if do == "wait":
             step.setdefault("until", self.now + step.get("hours", 1.0) * 3600)
             return "waited" if self.now >= step["until"] else None
+        if do in ("snippets_go", "revise", "close", "await_autodev"):
+            return await self._github(case, step)
         if do == "needs":
             return "left to a person"
         if do == "diagnose":
@@ -428,8 +564,8 @@ class Sweep:
         subject, do, data = timeline["subject"], step["do"], case["data"]
         if do not in subject["actions"]:
             return None
-        if do in STARTS_WORK and (tried := self._remedies(case)) >= self.rules.max_remedies:
-            raise Refused(f"the cleaner has started work on this subject {tried} times in seven days")
+        if do == "go" and case["kind"] == "prep" and not await self._request_may_go(subject):
+            return None
         fields: dict[str, Any] = {"key": f"cleaner/{case['id']}/{len(data['steps'])}", "actor": "cleaner"}
         fields["revision"] = subject["revision"]
         if do == "stop" and data.get("run_id"):
@@ -442,8 +578,6 @@ class Sweep:
                 fields["root"] = gos[-1]["payload"]["root"]  # charged to whoever the last round was charged to
             if step.get("note"):
                 fields["note"] = step["note"]
-        if not _acted(data):
-            await self._say(case, f"{data['seen']}. Doing: {plan_words(data['plan'])}.", "start")
         path = ACTION_PATHS[case["kind"]].format(key=case["key"], number=case["number"])
         try:
             action = await self._ask(self.registry.send_action, path, do, **fields)
@@ -452,6 +586,61 @@ class Sweep:
                 raise Refused(error.message) from None
             raise
         return f"action {action['id']}"
+
+    async def _request_may_go(self, subject: dict) -> bool:
+        """Whether a `go` to the request would start no dataset round (spec §4.7): its text has no `again` and
+        every dataset it names is in a round, at a person's turn, prepared or shelved. A request's go is sent
+        as `prep:<number>`, past each dataset's own limits, so until then the request waits on its datasets'
+        cases. Refused when one of those needs a person, or the text says `again`."""
+        from .spec import SpecError, load_prep_text
+
+        try:
+            again = load_prep_text((subject.get("data") or {}).get("spec") or "").again
+        except SpecError:
+            again = False
+        if again:
+            raise Refused("its text says `again`: a go would run every dataset it names again")
+        for view in await self._request_datasets(subject):
+            if view["status"] in ("working", "waiting", "shelved") or view["stage"] == "done":
+                continue
+            stuck = [case for case in self._cases_of("dataset", view["number"]) if case["state"] == "needs-person"]
+            if stuck:
+                raise Refused(f"its dataset `{view['key']}` needs a person: {stuck[0]['data'].get('needs', '')}")
+            return False
+        return True
+
+    async def _github(self, case: dict, step: dict) -> str | None:
+        """A step on the snippets repository. A comment carries the step's marker, so a second try posts none."""
+        gh, do = self.activities.gh_snippets, step["do"]
+        marker = f"<!-- mia: cleaner {case['id']}/{len(case['data']['steps'])} -->"
+
+        async def say(number: int, text: str) -> None:
+            if not any(marker in (comment.get("body") or "") for comment in await gh.issue_comments(number)):
+                await gh.comment(number, f"{text}\n\n{marker}")
+
+        if do == "await_autodev":  # a command to autodev is read at its next poll: until then the label stays
+            issue = await gh.get_issue(step["issue"])
+            if "snippets:needs-human" not in {label["name"] for label in issue.get("labels", [])}:
+                return "autodev has taken it"
+            step.setdefault("since", self.now)
+            if self.now - step["since"] > self.rules.quiet_minutes * 60:
+                raise Refused(f"autodev did not take it within {self.rules.quiet_minutes} min")
+            return None
+        if do == "snippets_go":
+            await say(
+                step["issue"],
+                "The cleaner asks autodev to try this issue again: its last run stopped before a pull request.",
+            )
+            await gh.add_labels(step["issue"], ["snippets:go"])
+            return f"asked on issue #{step['issue']}"
+        if do == "revise":
+            await say(step["pr"], REVISE_TEXT)
+            return f"asked on pull request #{step['pr']}"
+        for number in (step.get("pr"), step.get("issue")):  # close: the pull request first, which ends autodev's run
+            if number is not None and (await gh.get_issue(number)).get("state") == "open":
+                await say(number, f"Closed by the cleaner: {neutralize(step['why'])}.")
+                await gh.update_issue(number, state="closed")
+        return "closed"
 
     def _remedies(self, case: dict) -> int:
         """How many steps that start work the cleaner did on the case's subject in the last seven days."""
@@ -467,9 +656,18 @@ class Refused(Exception):
     """A step that will never be possible as the case stands; the text says why."""
 
 
+QUIET_STEPS = ("wait", "needs", "diagnose", "await_autodev")  # steps that change nothing
+
+
 def _acted(data: dict) -> bool:
     """Whether the case has changed anything yet (a wait or a note to a person changes nothing)."""
-    return any(step["do"] not in ("wait", "needs") for step in data.get("steps", ()))
+    return any(step["do"] not in QUIET_STEPS for step in data.get("steps", ()))
+
+
+def _patient(case: dict, step: dict) -> bool:
+    """Whether the step has a wait of its own, so the common limit on a step that is not possible yet is not
+    its limit: a wait, autodev's answer, and a request's go, which waits on its datasets' cases."""
+    return step["do"] in ("wait", "await_autodev") or (case["kind"] == "prep" and step["do"] == "go")
 
 
 def _epoch(stamp: str | None) -> float:

@@ -65,9 +65,80 @@ class Csub:
         self.alive -= set(job_ids)
 
 
+class Snippets:
+    """The snippets repository: issues and pull requests by number (a pull request is also an issue), each a
+    dict as GitHub returns it; comments by number."""
+
+    def __init__(self):
+        self.issues, self.pulls, self.comments = {}, {}, {}
+
+    def issue(self, number, dataset, labels=(), state="open", said=()):
+        body = f"<!-- mia-data: issue={dataset} round=i{dataset}-e1 -->\nwrite a reader"
+        named = [{"name": label} for label in labels]
+        self.issues[number] = {
+            "number": number,
+            "state": state,
+            "labels": named,
+            "body": body,
+            "user": {"login": "bot"},
+        }
+        self.comments[number] = [
+            {"body": text, "user": {"login": "bot"}, "created_at": f"2027-01-0{index + 1}"}
+            for index, text in enumerate(said)
+        ]
+
+    def pull(self, number, issue, mergeable=True):
+        head = {"ref": f"snippets/issue-{issue}"}
+        self.pulls[number] = {
+            "number": number,
+            "state": "open",
+            "head": head,
+            "mergeable": mergeable,
+            "user": {"login": "bot"},
+        }
+        self.issues[number] = {"number": number, "state": "open", "labels": [], "body": "", "pull_request": {}}
+        self.comments.setdefault(number, [])
+
+    def labels(self, number):
+        return [label["name"] for label in self.issues[number]["labels"]]
+
+    async def get_issue(self, number):
+        return self.issues[number]
+
+    async def get_pr(self, number):
+        return self.pulls[number]
+
+    async def find_pr(self, branch):
+        return next(
+            (pull for pull in self.pulls.values() if pull["head"]["ref"] == branch and pull["state"] == "open"), None
+        )
+
+    async def list_issues(self, state):
+        return [issue for issue in self.issues.values() if issue["state"] == state and "pull_request" not in issue]
+
+    async def list_prs(self, state):
+        return [pull for pull in self.pulls.values() if pull["state"] == state]
+
+    async def issue_comments(self, number):
+        return self.comments.get(number, [])
+
+    async def comment(self, number, body):
+        self.comments.setdefault(number, []).append(
+            {"body": body, "user": {"login": "bot"}, "created_at": "2027-02-01"}
+        )
+
+    async def add_labels(self, number, labels):
+        self.issues[number]["labels"] += [{"name": label} for label in labels]
+
+    async def update_issue(self, number, state):
+        self.issues[number]["state"] = state
+        if number in self.pulls:
+            self.pulls[number]["state"] = state
+
+
 class World:
     def __init__(self, tmp_path, monkeypatch, **cleaner):
-        self.temporal, self.csub = Temporal(), Csub()
+        self.temporal, self.csub, self.snippets = Temporal(), Csub(), Snippets()
         self.service = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", dispatcher=self.temporal)
 
         def handler(request):
@@ -81,7 +152,7 @@ class World:
         self.cfg = cfg
         registry = Registry("http://svc", "t", transport=httpx.MockTransport(handler))
         self.activities = SimpleNamespace(
-            cfg=cfg, registry=registry, jobs=SimpleNamespace(client=self.csub), gh_snippets=None
+            cfg=cfg, registry=registry, jobs=SimpleNamespace(client=self.csub), gh_snippets=self.snippets, bot="bot"
         )
         monkeypatch.setattr(sweep_module, "head_commit", lambda: "b" * 40)
         monkeypatch.setattr(sweep_module.autonomy, "paused", lambda manifest: False)
@@ -106,11 +177,11 @@ class World:
             self.temporal.runs[number] = dict(RUN)
         return number
 
-    def stage(self, kind, number, stage):
+    def stage(self, kind, number, stage, said=""):
         body = {
             "stage": stage,
             "round": f"i{number}-e1",
-            "body": f"**Stage:** `{stage}`",
+            "body": f"**Stage:** `{stage}`\n\n{said}",
             "marker": f"<!-- {stage} {time.time_ns()} -->",
         }
         assert worker(self.service, "POST", f"/timeline/{kind}/{number}", body)[0] == 200
@@ -314,3 +385,150 @@ def test_a_request_whose_datasets_are_all_prepared_is_told_to_look_again(world):
     assert case["rule"] == "request behind" and case["state"] == "waiting"
     assert world.temporal.sent[-1] == ("prep", number, "recheck")
     assert dataset
+
+
+# --- stopped rounds and what they left behind (spec §4.5: remedies, leftovers) ---
+
+
+def cleaner_actions(world, number, kind="dataset"):
+    return [action["action"] for action in world.timeline(kind, number)["actions"] if action["actor"] == "cleaner"]
+
+
+def test_autodevs_failed_run_is_asked_for_again_and_the_dataset_follows_once_autodev_took_it(world):
+    number = world.dataset(run=False)
+    world.stage(
+        "dataset", number, "blocked", "mia-snippets issue #72: autodev stopped before it opened a pull request."
+    )
+    world.snippets.issue(
+        72, number, ["snippets:needs-human"], said=["### snippets: stopped agent job 1 ended EXIT (exit 140)"]
+    )
+    world.sweep()
+    (case,) = world.cases()
+    assert case["rule"] == "autodev's run failed" and case["state"] == "working"
+    assert [step["do"] for step in case["data"]["steps"]] == ["snippets_go"] and cleaner_actions(world, number) == []
+    assert "snippets:go" in world.snippets.labels(72) and len(world.snippets.comments[72]) == 2
+    assert "**Cleaner:**" in world.timeline("dataset", number)["entries"][-1]["body"]
+    world.snippets.issues[72]["labels"] = [{"name": "snippets:working"}]  # autodev read the label
+    world.sweep()
+    (case,) = world.cases()
+    assert case["state"] == "waiting" and cleaner_actions(world, number) == ["go"]
+    assert len(world.snippets.comments[72]) == 2  # asked once
+
+
+def test_a_dataset_is_not_run_again_when_autodev_does_not_take_the_command(world):
+    number = world.dataset(run=False)
+    world.stage(
+        "dataset", number, "blocked", "mia-snippets issue #72: autodev stopped before it opened a pull request."
+    )
+    world.snippets.issue(72, number, ["snippets:needs-human"], said=["agent job 1 ended EXIT (exit 1)"])
+    world.sweep(3.0)
+    world.sweep(4.0)  # the label is still there after the quiet time
+    (case,) = world.cases()
+    assert case["state"] == "needs-person" and "autodev did not take it within 30 min" in case["data"]["needs"]
+    assert cleaner_actions(world, number) == []
+
+
+def test_a_merge_conflict_is_handed_to_autodev_as_a_revision(world):
+    number = world.dataset(run=False)
+    world.snippets.issue(72, number, ["snippets:needs-human"], said=["Approved, but merging failed: conflicts"])
+    world.snippets.pull(44, 72, mergeable=False)
+    world.stage(
+        "dataset",
+        number,
+        "blocked",
+        "snippet PR https://github.example/o/snippets/pull/44: its issue has `snippets:needs-human`",
+    )
+    world.sweep()
+    (case,) = world.cases()
+    assert case["rule"] == "merge conflict" and world.snippets.comments[44][-1]["body"].startswith(
+        "/revise Merge `main`"
+    )
+
+
+def test_a_passing_cause_is_run_again_after_the_retry_time(world):
+    number = world.dataset(run=False)
+    world.stage("dataset", number, "failed", "fetch failed: read timed out after 300 s")
+    world.sweep(3.0)
+    world.sweep(4.0)
+    assert world.cases()[0]["state"] == "working" and cleaner_actions(world, number) == []  # two hours are not over
+    world.sweep(5.5)
+    (case,) = world.cases()
+    assert case["rule"] == "passing cause" and case["state"] == "waiting" and cleaner_actions(world, number) == ["go"]
+
+
+def test_a_record_gap_waits_for_a_person_and_runs_again_once_the_record_changed(world):
+    number = world.dataset(run=False)
+    world.stage("dataset", number, "blocked", "match blocked: Someone has to decide what class the label arrays mark")
+    world.sweep()
+    (case,) = world.cases()
+    assert case["rule"] == "record gap" and case["state"] == "needs-person" and cleaner_actions(world, number) == []
+    assert call(world.service, "GET", "/needs")[1]["needs"][0]["cleaner"].startswith(
+        "its catalog record needs a decision"
+    )
+    world.sweep()
+    assert len(world.cases()) == 1  # nothing changed: nothing new
+    changed = {"id": "rec-a", "data": {"download_url": "https://data.example.org/rec-a.zip"}, "classes": ["nucleus"]}
+    records = {"records": [{"path": "rec-a.yaml", "record": changed}]}
+    assert worker(world.service, "PUT", f"/records/{'c' * 40}", records)[0] == 200
+    world.sweep()
+    new, old = world.cases()
+    assert (old["state"], old["data"]["note"]) == ("resolved", "its record changed")
+    assert new["rule"] == "input changed" and cleaner_actions(world, number) == ["go"]
+
+
+def test_snippet_work_nobody_follows_is_closed_pull_request_first(world):
+    number = world.dataset(stage="done", run=False)
+    world.snippets.issue(72, number)
+    world.snippets.pull(44, 72)
+    busy = world.dataset("rec-b", stage="done", run=False)
+    world.snippets.issue(73, busy, ["snippets:working"])  # autodev is at work on it: left alone
+    world.sweep()
+    (case,) = world.cases()
+    assert (case["rule"], case["key"], case["state"]) == ("left-over snippet work", "issue-72", "resolved")
+    assert world.snippets.issues[72]["state"] == world.snippets.pulls[44]["state"] == "closed"
+    assert "prepared through another reader" in world.snippets.comments[44][-1]["body"]
+    assert world.snippets.issues[73]["state"] == "open"
+
+
+def test_a_pull_request_opened_after_its_issue_was_closed_is_closed(world):
+    number = world.dataset(stage="done", run=False)
+    world.snippets.issue(72, number, state="closed")
+    world.snippets.pull(45, 72)  # autodev's run went on after the close and opened it
+    world.sweep()
+    (case,) = world.cases()
+    assert case["rule"] == "pull request of a closed issue" and world.snippets.pulls[45]["state"] == "closed"
+
+
+def test_a_request_is_not_set_going_over_a_dataset_that_stopped(world):
+    request = act(world.service, "/prep", {"spec": PREP_TEXT})[1]["number"]  # names rec-a
+    world.stage("prep", request, "requested")
+    dataset = world.dataset("rec-a", stage="failed", run=False)
+    world.stage("dataset", dataset, "failed", "fetch failed: read timed out")  # its own case runs it again later
+    world.sweep()
+    case = next(case for case in world.cases() if case["kind"] == "prep")
+    assert case["rule"] == "no run" and [step["do"] for step in case["data"]["steps"]] == ["cancel", "kill_jobs"]
+    assert cleaner_actions(world, request, "prep") == ["cancel"]  # no go: it would start rec-a's round
+    world.stage("dataset", dataset, "review")  # the dataset came to a person's turn
+    world.sweep()
+    assert cleaner_actions(world, request, "prep") == ["cancel", "go"]
+
+
+def test_a_request_whose_dataset_needs_a_person_needs_one_too(world):
+    request = act(world.service, "/prep", {"spec": PREP_TEXT})[1]["number"]
+    world.stage("prep", request, "requested")
+    dataset = world.dataset("rec-a", stage="blocked", run=False)
+    world.stage("dataset", dataset, "blocked", "match blocked: Someone has to decide the label classes")
+    world.sweep()
+    case = next(case for case in world.cases() if case["kind"] == "prep")
+    assert case["state"] == "needs-person" and "its dataset `rec-a` needs a person" in case["data"]["needs"]
+    assert cleaner_actions(world, request, "prep") == ["cancel"]
+
+
+def test_a_request_that_says_again_is_never_run_again_by_the_cleaner(world):
+    text = PREP_TEXT + "again: true\n"
+    request = act(world.service, "/prep", {"spec": text})[1]["number"]
+    world.stage("prep", request, "requested")
+    world.sweep()
+    (case,) = world.cases()
+    assert case["state"] == "needs-person" and "its text says `again`" in case["data"]["needs"]
+    assert cleaner_actions(world, request, "prep") == ["cancel"]

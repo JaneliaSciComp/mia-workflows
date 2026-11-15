@@ -1094,6 +1094,11 @@ def test_the_cleaners_report_and_the_workers_commits(tmp_path):
     assert call(s, "PUT", "/workers/mia-data", payload={"commit": "abc"})[0] == 401
     assert worker(s, "PUT", "/workers/mia-data", {"commit": "abc"})[1]["commit"] == "abc"
     assert worker(s, "PUT", "/workers/mia-buffers", {"commit": None})[0] == 200
+    first = call(s, "GET", "/workers")[1]["workers"]["mia-data"]
+    again = worker(s, "PUT", "/workers/mia-data", {"commit": "abc"})[1]  # a restart on the same code
+    assert again["since"] == first["since"] and again["at"] >= first["at"]
+    assert worker(s, "PUT", "/workers/mia-data", {"commit": "abd"})[1]["since"] > first["since"]
+    worker(s, "PUT", "/workers/mia-data", {"commit": "abc"})
     commits = call(s, "GET", "/workers")[1]["workers"]
     assert {name: row["commit"] for name, row in commits.items()} == {"mia-data": "abc", "mia-buffers": None}
     number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
