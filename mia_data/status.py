@@ -89,10 +89,20 @@ def stage_entries(
     return [*entries, (start, start_marker, stage)]
 
 
+# crop.json's `placement` (the harness's crop job) -> what the crops table says: the job aims every other crop of
+# a raw with labels at an annotation and leaves the rest where its sampler drew them
+PLACED = {"annotation": "on an annotation", "random": "at random"}
+
+
 def render_crops_table(rows: list[dict]) -> str:
     """A markdown table of crop thumbnails (raw, overlay, caption), folded into <details> when it is long.
 
-    Each row has crop_id, plane, box, raw_url and overlay_url (see Activities.publish_gallery)."""
+    Each row has crop_id, plane, box, raw_url and overlay_url (see Activities.publish_gallery), and `placement`
+    when the crop says how it was placed: the `placed` column is there when any row does."""
+    placed = any(row.get("placement") for row in rows)
+
+    def where(row: dict) -> str:
+        return f"| {PLACED.get(row.get('placement') or '', '')} " if placed else ""
 
     def caption(row: dict) -> str:
         plane, box = row.get("plane") or {}, row.get("box") or {}
@@ -101,11 +111,11 @@ def render_crops_table(rows: list[dict]) -> str:
         )
 
     lines = [
-        "| raw | overlay | caption |",
-        "|---|---|---|",
+        f"| raw | overlay |{' placed |' if placed else ''} caption |",
+        f"|---|---|{'---|' if placed else ''}---|",
         *(
             f"| ![raw]({quote(row['raw_url'], safe=':/?=&%')}) | ![overlay]({quote(row['overlay_url'], safe=':/?=&%')}) "
-            f"| {caption(row)} |"
+            f"{where(row)}| {caption(row)} |"
             for row in rows
         ),
     ]

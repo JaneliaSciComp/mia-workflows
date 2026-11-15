@@ -114,7 +114,9 @@ person would have to do: `blocked` when something has to be decided or changed b
 The worker never trusts the agent's claim. It checks the binding (right record and commit, URLs from the
 record, https only, snippets exist), and the crop job of step 4, a plain `harness crop` with no agent, opens
 every array itself and makes `harness smoke`'s checks before it samples: a binding that cannot be read, or a
-label that is not on its raw's grid, ends the round `failed` with the crop job's errors. Components:
+label that is not on its raw's grid, ends the round `failed` with the crop job's errors. Of a raw with labels
+the job places every other crop on an annotation and leaves the rest where its sampler drew them; each crop's
+`crop.json` says which (`placement`), and the crops table shows it in its `placed` column. Components:
 `autodev.jobs` (the csub runner), csub broker and LSF, agentic-sandbox, the harness from mia-snippets. The match
 agent mounts no writable cache and takes no lock.
 

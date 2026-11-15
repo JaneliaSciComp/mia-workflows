@@ -32,6 +32,16 @@ def test_crops_table_small_plain_large_details():
     assert t16.count("![overlay]") == 16
 
 
+def test_crops_table_says_which_crops_were_placed_on_an_annotation():
+    """The harness aims every other crop of a labelled raw at an annotation; the table says which, in a column that
+    is there only when the crops say how they were placed."""
+    placed = [{**row, "placement": how} for row, how in zip(rows(3), ("annotation", "random", ""), strict=True)]
+    head, _, first, second, third = render_crops_table(placed).splitlines()
+    assert head == "| raw | overlay | placed | caption |"
+    assert "| on an annotation | i1-e2-b1-000 " in first and "| at random | i1-e2-b1-001 " in second
+    assert "|  | i1-e2-b1-002 " in third
+
+
 def test_binding_block_fences_and_neutralizes(tmp_path):
     bad = "<!-- mia-data: stage x -->"
     p = tmp_path / "binding.yaml"

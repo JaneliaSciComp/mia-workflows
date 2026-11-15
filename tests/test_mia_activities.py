@@ -596,13 +596,13 @@ async def test_comment_returns_its_url_once(tmp_path):
     assert u and await t.a.comment(5, "again", "test i1-e99 x", repo="snippets") == u and len(t.snip.comments[5]) == 1
 
 
-def _crop(root, cid, n):
+def _crop(root, cid, n, **more):
     d = root / "crops" / cid
     d.mkdir(parents=True)
     files = {
         "raw.png": b"raw" + cid.encode(),
         "crop.json": json.dumps(
-            {"crop_id": cid, "plane": {"z": n, "c": 0}, "box": {"y": 10 * n, "x": 5, "h": 256, "w": 256}}
+            {"crop_id": cid, "plane": {"z": n, "c": 0}, "box": {"y": 10 * n, "x": 5, "h": 256, "w": 256}, **more}
         ).encode(),
     }
     for rel, b in files.items():
@@ -630,7 +630,24 @@ async def test_publish_gallery_verified_only(tmp_path):
     ]
     rows = [ln for ln in g.table.splitlines() if ln.startswith("| ![raw]")]
     assert len(rows) == 2 and all(ln.count("?raw=true") == 2 for ln in rows) and "c3" not in g.table
-    assert "c2 · z=1 c=0 · (10, 5)" in rows[1]
+    assert "c2 · z=1 c=0 · (10, 5)" in rows[1] and "placed" not in g.table  # these crops do not say
+
+
+async def test_publish_gallery_says_how_each_crop_was_placed(tmp_path):
+    """crop.json's `placement` is a job's word: only the two the harness writes reach the table."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
+    vw = Path(await t.a.prepare_job(1, ROUND, "verify", 1, None))
+    verified = [_crop(cw, "c1", 0, placement="annotation"), _crop(cw, "c2", 1, placement=["<b>anywhere</b>"])]
+    for c in ("c1", "c2"):
+        (vw / "preview" / c).mkdir(parents=True)
+        (vw / "preview" / c / "overlay.png").write_bytes(b"ov" + c.encode())
+    (vw / "binding.yaml").write_text("record: rec-1\n")
+    (vw / "verify.json").write_text("{}")
+    g = await t.a.publish_gallery(1, ROUND, SNIP_SHA, str(cw), str(vw), verified)
+    first, second = (ln for ln in g.table.splitlines() if ln.startswith("| ![raw]"))
+    assert "| on an annotation | c1 " in first and "|  | c2 " in second and "anywhere" not in g.table
 
 
 @pytest.mark.parametrize("extra, ok", [({}, 1), ({"errors": ["manifest unreadable"]}, 0), ({"n": 0}, 0)])

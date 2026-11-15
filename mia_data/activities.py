@@ -93,6 +93,7 @@ from .poll import run_poll
 from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
 from .seed import ID_RE
 from .status import (
+    PLACED,
     render_binding,
     render_crops_table,
     render_jobs,
@@ -1206,11 +1207,13 @@ class Activities:
             if raw is None or hashlib.sha256(raw).hexdigest() != crop["files"]["crop.json"]:
                 raise ValueError(f"{crop_id}/crop.json is missing or differs from the verified checksum")
             crop_json = parsed if isinstance(parsed := _loads(raw), dict) else {}
+            placement = crop_json.get("placement")  # a job's word: only the harness's two reach the table
             rows.append(
                 {
                     "crop_id": crop_id,
                     "plane": crop_json.get("plane") if isinstance(crop_json.get("plane"), dict) else {},
                     "box": crop_json.get("box") if isinstance(crop_json.get("box"), dict) else {},
+                    "placement": placement if isinstance(placement, str) and placement in PLACED else "",
                     "raw_url": urls[f"{crop_id}/raw.png"],
                     "overlay_url": urls[f"{crop_id}/overlay.png"],
                 }
