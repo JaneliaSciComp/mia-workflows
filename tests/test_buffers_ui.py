@@ -807,6 +807,7 @@ def test_the_yaml_the_page_writes_is_what_the_service_reads() -> None:
     patch = spec.sampling.patch.model_dump(by_alias=True, exclude_none=True)
     assert patch == {"2D": {"y": 256, "x": 256}, "3D": {"z": 32, "y": 256, "x": 256}, "c": 1}
     assert spec.sampling.levels == [1, 2, 4] and spec.sampling.weighting.temperature == 0.25
+    assert spec.plan.auto_approve is False  # a person approves, unless the spec's author edits the line
     # a catalog repo is any string, and a name is trimmed: what was typed between the n's comes back
     for text, written in zip(AWKWARD, named, strict=True):
         read = load_spec_text(written)

@@ -80,7 +80,7 @@ export function toSpecYaml(c, ref, repo) {
     "  fractions: {train: 0.8, val: 0.1, test: 0.1}",
     "",
     "plan:",
-    "  auto_approve: true",
+    "  auto_approve: false",
     "",
   ].join("\n");
 }
