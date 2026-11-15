@@ -1,6 +1,7 @@
 // The operator's views: Cache, Cleaner, Preparation and Decisions.
 import {
   $,
+  ago,
   assetPill,
   bufferCount,
   card,
@@ -192,7 +193,31 @@ export async function viewCache() {
 }
 // ---- cleaner: what the last sweep found wrong with the installation, and its cases (spec cleaner §4.8)
 const CASE_HREF = c => (SUBJECT_HASH[c.kind] ? SUBJECT_HASH[c.kind](c.key) : c.kind === "job" ? "#job/" + c.key : null);
-const stepsText = steps => (steps || []).map(step => step.text || step.do).join(", ");
+// a step in words, as the timeline's Cleaner entries say it (mia_buffers.cleaner.STEP_WORDS)
+const STEP_WORDS = {
+  cancel: "cancel the round",
+  stop: "force-stop the run",
+  kill_jobs: "end the round's cluster jobs",
+  go: "run it again",
+  recheck: "tell the request to look at its datasets again",
+  terminate: "terminate the run",
+  kill_job: "kill the job",
+  snippets_go: "ask autodev to try again",
+  revise: "ask autodev to merge main into the pull request",
+  await_autodev: "wait until autodev has taken it",
+  close: "close the snippet pull request and issue",
+  wait: "wait",
+  diagnose: "diagnose it",
+  report_defect: "report the defect",
+};
+const plain = text => String(text || "").replaceAll("`", "");
+const stepsText = steps =>
+  (steps || [])
+    .filter(step => step.do !== "needs") // what a person must do is the case's `needs`
+    .map(
+      step => (STEP_WORDS[step.do] || step.do) + (String(step.result || "").startsWith("refused") ? " (refused)" : ""),
+    )
+    .join(", then ");
 export function caseRows(cases) {
   // a case as the table shows it: what it is about, what was seen, what was done and what is left or needed
   return cases.map(c => ({
@@ -200,9 +225,9 @@ export function caseRows(cases) {
     about: c.key,
     rule: c.rule,
     state: c.state,
-    seen: c.data.seen || "",
+    seen: plain(c.data.seen),
     done: stepsText(c.data.steps),
-    next: c.state === "needs-person" ? c.data.needs || "" : stepsText(c.data.plan) || c.data.note || "",
+    next: plain(c.state === "needs-person" ? c.data.needs : stepsText(c.data.plan) || c.data.note),
     updated: c.updated,
   }));
 }
@@ -247,10 +272,10 @@ export async function viewCleaner() {
     card(
       "The installation",
       report
-        ? `Last sweep ${when(report.at)}. ${modes[report.mode] || ""} While something is listed here, the subjects behind it are left alone.`
+        ? `Last sweep ${ago(report.at)}. ${modes[report.mode] || ""} While something is listed here, the subjects behind it are left alone.`
         : "The cleaner has not reported a sweep yet.",
       findings.length
-        ? el("div", {}, ...findings.map(finding => el("div", { class: "notice" }, finding.text.replaceAll("`", ""))))
+        ? el("div", {}, ...findings.map(finding => el("div", { class: "notice" }, plain(finding.text))))
         : el("div", { class: "empty" }, "Nothing is wrong with the installation."),
       report?.errors?.length ? kv([["errors of the last sweep", list(report.errors)]]) : null,
     ),

@@ -180,8 +180,8 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
         },
     ]
     stuck, job = run_js("print(caseRows(input));", {"operations.js": "caseRows"}, cases)
-    assert (stuck["href"], stuck["done"], stuck["next"]) == ("#datasets/rec-a", "cancel", "look")
-    assert (job["href"], job["next"]) == ("#job/issue-9/i9-e1/crops-1", "kill_job")
+    assert (stuck["href"], stuck["done"], stuck["next"]) == ("#datasets/rec-a", "cancel the round", "look")
+    assert (job["href"], job["next"]) == ("#job/issue-9/i9-e1/crops-1", "kill the job")
 
 
 def test_page_has_a_decisions_tab() -> None:
