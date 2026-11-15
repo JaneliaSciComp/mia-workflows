@@ -257,12 +257,15 @@ async def test_revision_limit_escalates_and_the_requesters_approval_merges(env):
 
 
 async def test_escalation_is_raised_once_then_waits(env):
+    """The issue is labelled needs-human with the comment: whoever follows it by its label (a dataset's round
+    waiting for a new head) learns that none is coming."""
     f1, f2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
     stuck = snap(feedback=[f1, f2])
     m = Mocks([snap(feedback=[f1]), stuck, stuck, stuck, snap(approved=True)])
     assert await run(env, m, IssueInput(7, max_revisions=1)) == "merged"
     assert m.names().count("observe") == 5
     assert sum("revision limit" in c.body for c in m.of("comment")) == 1
+    assert m.of("set_stage")[-2:] == ["needs-human", "done"] and m.of("set_stage").count("needs-human") == 1
 
 
 async def test_an_outsiders_pending_request_blocks_the_merge_at_the_limit(env):

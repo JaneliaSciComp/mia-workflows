@@ -11,7 +11,8 @@ request, and merges it after a human approves. Design: [agentic-dev-infrastructu
 | review with *Request changes*, or comment `/revise <what>` (write access) | runs another round on the same branch (up to `max_revisions`) |
 | approve the PR (or comment `/approve <sha>` under a personal token, after the latest round's summary) | squash-merges that exact commit, closes the issue (a change request you made earlier on the same head is withdrawn by your approval; anyone else's still blocks) |
 | close the PR | stops; re-add `autodev:go` to start over (closing the *issue* does not stop a running workflow) |
-| sees `autodev:needs-human` | read the failure comment, fix, re-add `autodev:go` (an open PR is resumed) |
+| sees `autodev:needs-human` after a failure | read the failure comment, fix, re-add `autodev:go` (an open PR is resumed) |
+| sees `autodev:needs-human` after "Needs a human: …" on the PR (the revision limit, an approval with failing checks or with someone else's change request) | autodev still watches the PR: approve it, or close it and re-add `autodev:go` to start over; no further round runs by itself |
 
 Trust boundaries:
 - Only people with write access can trigger (`:go`), approve, or request changes, and only their comments reach
