@@ -158,6 +158,8 @@ refusal names the root, the cap and the usage and ends the round (mia-data) or f
 caps bound an episode of work: a root with nothing running whose budget is older than `max_days` starts a fresh
 epoch at its next job, while one busy for `max_days` straight is stopped. `mia pause` stops every round at its
 next job with "paused by the operator"; a buffer round met mid-sourcing leaves its datasets `pending`, not failed.
+An autodev round is stopped by its submit activity, which refuses to start a job while the pause is set: the
+issue gets the failure comment and `needs-human`, and a review judge is skipped with a comment.
 
 **Approvals are assessments, authorization is a function.** Every human verdict is written to buffer-api's
 `assessments` table (`by: human:<who>`, gate `crops` for a crop set or PR head, `staged` for an artifact) before

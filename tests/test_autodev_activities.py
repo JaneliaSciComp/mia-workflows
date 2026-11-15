@@ -13,7 +13,16 @@ from test_buffers_register import token_server  # noqa: F401  (fixture)
 from autodev.activities import Activities, neutralize
 from autodev.github import GitHub
 from autodev.gitops import GitError, Mirror
-from autodev.models import FailureInput, JudgeInput, ObserveInput, PublishInput, RoundInput, StageInput, SubmitInput
+from autodev.models import (
+    FailureInput,
+    JudgeInput,
+    ObserveInput,
+    PublishInput,
+    RoundInput,
+    StageInput,
+    SubmitInput,
+    Workspace,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -611,6 +620,18 @@ async def test_submit_judge_uses_the_judge_dir_and_key(tmp_path, gh):
     a.jobs = Jobs()
     assert (await a.submit_judge(SubmitInput(7, K, 1, ws))).job_id == "j-1"
     assert seen == {"issue": 7, "key": K, "round": 1, "judge_dir": str(d.parent / "judge-r1")}
+
+
+async def test_no_job_is_submitted_while_the_operator_has_paused(tmp_path, monkeypatch):
+    manifest = tmp_path / "mia.yaml"
+    manifest.write_text("autonomy:\n  pause: true\n")
+    monkeypatch.setenv("MIA_CONFIG", str(manifest))
+    a = Activities(make_cfg(tmp_path), None, None, None, "bot")  # no job runner: a submit would raise otherwise
+    request = SubmitInput(7, K, 1, Workspace(str(tmp_path / "round"), "abc", "b"))
+    for submit in (a.submit_agent, a.submit_judge):
+        with pytest.raises(ApplicationError) as refused:
+            await submit(request)
+        assert refused.value.non_retryable and "paused by the operator" in str(refused.value)
 
 
 @respx.mock
