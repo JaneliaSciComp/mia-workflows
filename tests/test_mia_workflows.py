@@ -1360,7 +1360,7 @@ async def test_the_debuggers_go_resumes_the_snippet_pr_when_its_match_asks_for_a
 
 @pytest.mark.parametrize("now", [head(H1, "closed"), head(H1, "merged", MC)], ids=["closed", "merged"])
 async def test_go_after_needs_human_with_a_finished_pr_matches_again(env, now):
-    """The PR is gone by the time `go` arrives: a new match, which hands the snippets issue back for reuse."""
+    """The PR is gone by the time `go` arrives: a new match, and a reader it asks for gets a new snippets issue."""
     m = Mocks(outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
     async with started(env, m) as h:
         await to_needs_human_in_develop(h, m)
@@ -1370,7 +1370,7 @@ async def test_go_after_needs_human_with_a_finished_pr_matches_again(env, now):
         st = await h.query(MiaDataDataset.status)
     assert m.stages == ["matching", "developing", "testing", "failed", "matching", "developing"]
     assert m.of("pr_state") == [(5,), (5,)] and [a[1] for a in m.of("submit")] == ["match", "crop", "match"]
-    assert m.of("open_snippet_issue") == [("i7-e11", None), ("i7-e12", 100)]
+    assert m.of("open_snippet_issue") == [("i7-e11", None), ("i7-e12", None)]
     assert (st.round_id, st.snippet_issue, st.pr) == ("i7-e12", 100, None) and not m.of("refuse_label")
 
 
@@ -1718,6 +1718,19 @@ async def test_run_again_after_cancelling_a_develop_round_reuses_its_snippet_iss
     assert remembered[0] is None and (
         len(remembered) == 1 or remembered[1] == 100
     )  # resumed, or reopened by its number
+
+
+async def test_run_again_after_its_snippet_pr_was_closed_asks_for_a_new_snippet(env):
+    """A person closed the round's snippet PR so that another reader gets written. autodev has nothing left to do
+    in that PR's issue, so the next round opens a new one and does not read the closed PR as its own stop."""
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1, "closed"))
+        await idle(h, m, "blocked")
+        await h.signal(MiaDataDataset.go, ev("go", "12"))
+        await until(lambda: m.stages.count("developing") == 2)
+    assert m.of("open_snippet_issue") == [("i7-e11", None), ("i7-e12", None)]
 
 
 async def test_replay_dataset_history_cancel(env):

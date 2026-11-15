@@ -142,7 +142,8 @@ while the PR is still open (a lost job, a failed status write), *Run again* resu
 tested again under a new round, and no second snippets issue is opened. The new round has its own pins: the PR's
 example binding is adopted whatever catalog commit it names (the round that asked for the reader wrote it), and the
 stored binding names the commits of the round that adopted it. A PR closed or merged by then means a new
-match. The debugger's go matches first even while the PR is open, so that its advice is read; the PR is resumed
+match, and a reader that match asks for gets a new snippets issue: closing a snippet PR is how a person has the
+reader written again. The debugger's go matches first even while the PR is open, so that its advice is read; the PR is resumed
 only if that match asks for a reader again. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
 `/approve` and `/revise` from the worker because its login is in autodev's `github.trusted_bots`), mia-snippets
 CI, the GitHub client.

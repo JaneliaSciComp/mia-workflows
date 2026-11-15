@@ -886,7 +886,8 @@ class MiaDataDataset:
 
         After a develop round stopped, a person's `go` resumes its snippet PR instead when that PR is still
         open (see _resume_pr); the debugger's `go` matches, so its advice is read. The snippets issue is
-        remembered either way, so a retry never opens a second one."""
+        remembered while its PR is open or not yet opened, so a retry never opens a second one; once that PR
+        was merged or closed, a round that needs a reader opens a new issue."""
         state = self.state
         snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
         # (a cancelled develop round left its snippet issue and PR open too: autodev is not asked twice)
@@ -918,8 +919,10 @@ class MiaDataDataset:
         advised = bool(snippet_issue and snippet_pr and event.actor == DEBUGGER) and workflow.patched(
             "debugger-go-matches"
         )
-        if snippet_issue and snippet_pr and not advised and await self._resume_pr(snippet_issue, snippet_pr):
-            return
+        if snippet_issue and snippet_pr and not advised:
+            if await self._resume_pr(snippet_issue, snippet_pr):
+                return
+            snippet_issue = None  # its PR was merged or closed: autodev is done there, a reader is asked for anew
         await self._stage("matching")
 
         # Match: the agent picks a snippet and writes a binding; the worker's crop job is what tests that binding.
@@ -935,8 +938,10 @@ class MiaDataDataset:
         if match.outcome == "needs_snippet":
             fails = (match.draft or {}).get("what_fails")
             self._found("No existing reader snippet fits this dataset" + (f": {fails}" if fails else "."))
-            if advised and snippet_issue and snippet_pr and await self._resume_pr(snippet_issue, snippet_pr):
-                return  # the reader it asks for is the open PR's: its head is tested, as a person's go would
+            if advised and snippet_issue and snippet_pr:
+                if await self._resume_pr(snippet_issue, snippet_pr):
+                    return  # the reader it asks for is the open PR's: its head is tested, as a person's go would
+                snippet_issue = None  # as for a person's go
             return await self._develop(match.draft or {}, snippet_issue)
         if match.outcome not in (("matched",) if no_size_verdict else ("matched", "ineligible")):
             stopped = "failed" if match.outcome == "failed" else "blocked"  # the agent says which of the two
@@ -1286,7 +1291,7 @@ class MiaDataDataset:
         and test the current head afresh under the new round and pins (spec §7.4, "comment and re-trigger").
 
         Returns False when the PR was merged or closed meanwhile, or is not this snippets issue's: the round
-        then matches as usual (a merged snippet is on main now)."""
+        then matches as usual (a merged snippet is on main now) and no longer goes back to that issue."""
         state = self.state
         pr = await self._act("pr_state", pr_number, result_type=PrUpdate)
         if pr.state != "open" or pr.snippet_issue != snippet_issue:
