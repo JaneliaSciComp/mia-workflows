@@ -53,6 +53,7 @@ class JobDone:
     job_id: str
     state: str
     exit_code: int | None
+    bytes_fetched: int = 0  # what a crop job says it downloaded (its report.json); 0 for any other job
 
 
 @dataclass

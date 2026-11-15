@@ -771,6 +771,11 @@ async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path):
     assert await env.run(t.a.await_job, "j1", "/w", ["raw", "rec-1", "me"]) == JobDone("j1", "DONE", 0)
     assert beats == [("PEND",), ("RUN",)] and locks.holder("raw", "rec-1").heartbeat_at > before
     assert await env.run(t.a.await_job, "j2", "/w") == JobDone("j2", "DONE", 0)  # no lock: two arguments still work
+    crops = tmp_path / "crop-ws" / "crops"
+    crops.mkdir(parents=True)
+    for report, fetched in (({"bytes_fetched": 4096}, 4096), ({"bytes_fetched": "lots"}, 0), ([], 0)):
+        (crops / "report.json").write_text(json.dumps(report))  # a crop job's report: untrusted, a count or nothing
+        assert (await env.run(t.a.await_job, "j4", str(tmp_path / "crop-ws"))).bytes_fetched == fetched
     locks.release("raw", "rec-1", "me")
     with pytest.raises(ApplicationError) as info:  # the lock is gone: the wait fails, never retried
         await env.run(t.a.await_job, "j3", "/w", ["raw", "rec-1", "me"])

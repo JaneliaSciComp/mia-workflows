@@ -175,6 +175,13 @@ def _job_json(workspace: str | Path, rel: str) -> Any:
     return _loads(read_untrusted(Path(workspace), rel, 1 << 20))
 
 
+def _bytes_fetched(workspace: str) -> int:
+    """What the crop job of `workspace` says it downloaded (`crops/report.json`); 0 when there is no such report."""
+    report = _job_json(workspace, "crops/report.json")
+    fetched = report.get("bytes_fetched") if isinstance(report, dict) else None
+    return fetched if type(fetched) is int and fetched >= 0 else 0
+
+
 def _action(event_id: str | None) -> int | None:
     """The action id an event id is (buffer-api sends an action as an event with its id); None for no event."""
     return int(event_id) if event_id and event_id.isdecimal() else None
@@ -962,13 +969,15 @@ class Activities:
     @activity.defn(name="await_job")
     async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
         """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock.
-        A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3)."""
+        A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3). The answer
+        carries what a crop job downloaded, which its reservation is settled with."""
         heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
         try:
             outcome = await self.jobs.wait(job_id, workspace, heartbeat)
         except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
             raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
-        return JobDone(outcome.job_id, outcome.state, outcome.exit_code)
+        fetched = await asyncio.to_thread(_bytes_fetched, workspace)
+        return JobDone(outcome.job_id, outcome.state, outcome.exit_code, fetched)
 
     @activity.defn(name="kill_job")
     async def kill_job(self, job_id: str) -> None:
