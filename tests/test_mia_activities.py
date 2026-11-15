@@ -1008,6 +1008,7 @@ async def test_read_judge_records_assessment_and_comment(tmp_path, token_server)
             "schema_version": 1,
         },
     )
+    write_submitted(t.cfg.paths.work_root, ws, service="mia-data", key="k", job_id="5", request={})  # its record
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
     assert (out.verdict, out.effective, out.confidence, out.cost_usd) == ("approve", "approve", 0.9, 0.31)
     assert out.assessment and out.findings[0]["note"] == "cells | nuclei &lt;!-- x -->"
@@ -1020,8 +1021,8 @@ async def test_read_judge_records_assessment_and_comment(tmp_path, token_server)
     assert "**Crop judge:** `approve`" in out.comment and "Shadow mode" in out.comment
     assert "| c0 | ok | cells \\| nuclei &lt;!-- x --> |" in out.comment and "$0.31" in out.comment
     assert "model `claude-opus-5-5`" in out.comment
-    # the entry that reports a job links its record
-    assert f"[The judge's conversation]({t.a.page_url}/#job/issue-1/{ROUND}/{ws.name})" in out.comment
+    # the entry that reports a job links its record, as a pass's result does
+    assert f"\n\n**Jobs:** [{ws.name}]({t.a.page_url}/#job/issue-1/{ROUND}/{ws.name})\n" in out.comment
 
 
 async def test_read_judge_garbage_is_escalate(tmp_path, token_server):  # noqa: F811

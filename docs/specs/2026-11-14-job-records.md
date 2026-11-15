@@ -166,7 +166,8 @@ A round is a series of stage passes. Each pass writes two entries, both naming t
 - **Result**, when the pass ends: `Result: data:matching` and one sentence saying what happened, then whatever
   the stage has to show (the crops table and the binding for a test, a debugging agent's diagnosis, a snippet
   PR's link), then `**Jobs:**`, a link to the record of every job the pass submitted, folded when there are
-  many. A result does not set a stage.
+  many. A result does not set a stage. A job whose finding is an entry of its own (the crop judge's verdict)
+  is linked by that entry's `**Jobs:**` line and not by the pass's result: each record is linked once.
 
 What the result says, for a dataset: matching, which snippet the binding uses and the agent's reasons, or what
 fails with the existing ones; testing, the sentence its report opens with today (`Crops at <sha>: passed, 12

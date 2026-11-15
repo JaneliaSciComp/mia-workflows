@@ -636,13 +636,16 @@ class MiaDataDataset:
         workspace: str,
         workspace_kind: str | None = None,
         lock: list[str] | None = None,
+        own_entry: bool = False,
         **job_args: Any,
     ) -> JobDone:
         """Submit a job (at most once per key) and wait for it on the await queue.
 
         The wait is its own activity on a separate queue so a worker restart reattaches to the running job.
         `workspace_kind` distinguishes several jobs of one kind in a round (crop-<sha>); it defaults to `kind`.
-        `lock` ([kind, key, owner], from _hold_raw) is heartbeated by the wait while the job runs."""
+        `lock` ([kind, key, owner], from _hold_raw) is heartbeated by the wait while the job runs.
+        The open pass's result links the job's record, unless the caller writes an entry of its own that reports
+        the job and links it (`own_entry`): a record is linked once, by the entry that says what the job found."""
         state = self.state
         assert state.round_id and state.pins  # a round is admitted before any job runs
         key = job_key(state.issue, state.round_id, workspace_kind or kind, 1)
@@ -663,7 +666,7 @@ class MiaDataDataset:
                 seconds=600,
                 result_type=str,
             )
-            if self._results() and workspace not in state.pass_jobs:
+            if self._results() and not own_entry and workspace not in state.pass_jobs:
                 state.pass_jobs = [*state.pass_jobs, workspace]  # the pass's result links the job's record
             done = await workflow.execute_activity(
                 "await_job",
@@ -1060,7 +1063,7 @@ class MiaDataDataset:
             return None
         state = self.state
         assert state.round_id
-        marker, failed = f"judge crops {state.round_id} {test.sha}", ""
+        marker, failed, workspace = f"judge crops {state.round_id} {test.sha}", "", ""
         try:
             verify = await self._act(
                 "read_verify", test.verify_workspace, test.crop_workspace, result_type=VerifyResult
@@ -1079,7 +1082,8 @@ class MiaDataDataset:
                 result_type=str,
             )
             try:
-                job = await self._job("judge", workspace, workspace_kind=f"judge-{test.sha[:12]}")
+                # the judge's entry (read_judge's comment) links the job's record
+                job = await self._job("judge", workspace, workspace_kind=f"judge-{test.sha[:12]}", own_entry=True)
             except RoundFailed as refused:  # the operator's switches: the judge is skipped, the round goes on
                 if limits.crop_judge != "shadow":
                     raise
@@ -1105,6 +1109,8 @@ class MiaDataDataset:
                 result_type=JudgeResult,
             )
         except ActivityError as error:
+            if self._results() and workspace and workspace not in state.pass_jobs:
+                state.pass_jobs = [*state.pass_jobs, workspace]  # no judge's entry: review's result links the job
             await self._act(
                 "comment",
                 state.issue,

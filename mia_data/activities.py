@@ -641,8 +641,8 @@ class Activities:
             cost,
             mode,
         )
-        if where := address(self.cfg.paths.work_root, path):  # the entry that reports a job links its record
-            comment += f"\n\n[The judge's conversation]({job_link(self.page_url, where)})\n"
+        if jobs := render_jobs(self._job_links([str(path)])):  # the entry that reports a job links its record
+            comment += f"\n\n{jobs}"
         return JudgeResult(
             verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings
         )
@@ -731,14 +731,18 @@ class Activities:
 
     def _shown(self, state: DatasetState) -> str:
         """What goes under the result of the pass open in `state`: the round's binding when the result is about
-        it, and a link to the record of each job the pass submitted (a job that left none is not listed)."""
+        it, and a link to the record of each job the pass submitted."""
+        binding = render_binding(state.binding, state.binding_hash) if state.result_binding else ""
+        return "\n".join(part for part in (binding, render_jobs(self._job_links(state.pass_jobs))) if part)
+
+    def _job_links(self, workspaces: list[str]) -> dict[str, str]:
+        """Each job's name and the page's link to its record; a job that left no record is not listed."""
         links = {}
-        for workspace in state.pass_jobs:
+        for workspace in workspaces:
             where = address(self.cfg.paths.work_root, workspace)
             if where and record_path(self.cfg.paths.work_root, where).is_file():
                 links[Path(workspace).name] = job_link(self.page_url, where)
-        binding = render_binding(state.binding, state.binding_hash) if state.result_binding else ""
-        return "\n".join(part for part in (binding, render_jobs(links)) if part)
+        return links
 
     @activity.defn(name="stage_result")
     @mia_permanent_errors

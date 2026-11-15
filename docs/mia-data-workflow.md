@@ -232,7 +232,9 @@ A round is a series of stage passes, and a pass writes two entries, never an edi
 data:matching`, says what the stage is doing and links the folders to look at. Its result, `Result:
 data:matching`, says what happened (what the agent matched and why, the crops report with its table and binding,
 who decided what at review, the debugger's diagnosis) and links the record of every job the pass ran: the script
-that was sent, what the cluster answered and used, and for an agent its prompt and conversation. A stage the round
+that was sent, what the cluster answered and used, and for an agent its prompt and conversation. A record is
+linked once, as a `Jobs:` line under the entry that says what the job found: the crop judge's job under the
+judge's own entry, every other job under its pass's result. A stage the round
 comes back to (`testing` again for the next head of a snippet PR) is a pass of its own. A pass that fails, is
 blocked or is cancelled says so in its own result, which also moves the dataset to the stage it rests at and
 names it; only a round that ends with no pass open (a `go` refused at admission) writes that stage as an entry of

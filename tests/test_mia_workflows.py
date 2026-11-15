@@ -363,6 +363,8 @@ class Mocks:
             issue: int, round_id: str, ws: str, gate: str, subject_kind: str, subject_ref: str, mode: str
         ) -> JudgeResult:
             rec("read_judge", ws, gate, subject_kind, subject_ref, mode)
+            if isinstance(self.judge_result, Exception):
+                raise self.judge_result
             return self.judge_result
 
         @activity.defn(name="adopt_pr_binding")
@@ -1918,6 +1920,18 @@ async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env)
         await approve_review(h, m)
         await idle(h, m, "done")
     assert "publish_crops" in m.names()
+    # the judge's own entry links its job: review's result, which reports the person's verdict, does not
+    assert next(r for r in m.of("result") if r[0] == "review")[3] == []
+
+
+async def test_a_judge_that_leaves_no_entry_of_its_own_is_linked_by_the_reviews_result(env):
+    m = Mocks(crop_judge="shadow", judge_result=ApplicationError("the registry is away", non_retryable=True))
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await until(lambda: any("did not run to the end" in call[0] for call in m.of("comment")))
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert next(r for r in m.of("result") if r[0] == "review")[3] == [f"/w/i7-e11/judge-crops-{SHA[:12]}-1"]
 
 
 async def test_shadow_judge_failure_is_a_comment_not_a_stop(env):

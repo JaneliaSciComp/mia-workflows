@@ -215,7 +215,8 @@ artifacts and takes the keeper's `revoked` path at once.
 its stage table is `working` or `waiting` (`mia_data.config.round_open`, `mia_buffers.config.stage_pass`). A
 pass's start entry is the stage line and one sentence (the round's own detail, else the stage's from
 `STAGE_SENTENCES`); its result entry, `**Result:** …`, says what happened and links the record of every job the
-pass submitted. The workflow keeps the open pass in its state (`pass_stage`, `passes`, `pass_jobs`, `result`):
+pass submitted (`render_jobs`). A job whose finding has an entry of its own is linked there, in the same
+`**Jobs:**` line, and not by the pass (`own_entry` of `_job`: the crop judge's). The workflow keeps the open pass in its state (`pass_stage`, `passes`, `pass_jobs`, `result`):
 `_found` sets what it found, a job's workspace is added when its submit returns, and the stage activity, which
 gets the state with every write, writes the open pass's result before the next stage's start
 (`mia_data.status.stage_entries`). A stage the subject rests at is written by the open pass's result itself:

@@ -54,7 +54,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `Ledger.dataset(s)` while its stored row stays, so no plan and no request takes it. Anything new that selects
   or starts datasets reads their state through those two.
 - **A stage pass writes its start and its result.** A stage a round works or waits at (`STAGE_ACTIONS`) writes
-  a start entry and, when it ends, a result entry that says what happened and links its jobs' records. The
+  a start entry and, when it ends, a result entry that says what happened and links its jobs' records (each
+  record once, as a `**Jobs:**` line: a job with an entry of its own, the crop judge's, is linked there). The
   workflow keeps the open pass in its state (`pass_stage`, `passes`, `pass_jobs`, `result`) and the stage write
   carries its result out (`mia_data.status.stage_entries`); a failed or cancelled pass's result is also the entry
   that moves the subject to the stage it rests at, so no stage ends without saying how. A new ending or a new
