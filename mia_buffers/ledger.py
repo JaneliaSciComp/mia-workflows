@@ -100,7 +100,12 @@ CREATE TABLE IF NOT EXISTS actions (id INTEGER PRIMARY KEY, kind TEXT, number IN
 CREATE INDEX IF NOT EXISTS actions_subject ON actions (kind, number);
 CREATE TABLE IF NOT EXISTS shelved (kind TEXT, number INTEGER, by TEXT, at TEXT, reason TEXT NOT NULL,
     PRIMARY KEY (kind, number));
+CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, number INTEGER, key TEXT NOT NULL,
+    rule TEXT NOT NULL, state TEXT NOT NULL, opened REAL, updated REAL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS cases_state ON cases (state);
 """
+
+CASE_COLUMNS = ("id", "kind", "number", "key", "rule", "state", "opened", "updated", "data")
 
 ACTION_COLUMNS = ("id", "kind", "number", "action", "actor", "at", "key", "payload", "state", "detail")
 NUMBER_EPOCH = 1767225600  # 2026-01-01T00:00:00Z: a new subject's number is the whole seconds since then
@@ -784,6 +789,56 @@ class Ledger:
     def actions(self, kind: str, number: int) -> list[dict]:
         with self._lock:
             return self._actions(self._db, "WHERE kind = ? AND number = ?", (kind, number))
+
+    # --- cases: what the cleaner found stuck, what it did and whether that helped (spec cleaner §4.8) ----
+
+    @staticmethod
+    def _cases(db: sqlite3.Connection, where: str, values: tuple) -> list[dict]:
+        rows = db.execute(f"SELECT {', '.join(CASE_COLUMNS)} FROM cases {where} ORDER BY id DESC", values)
+        return [{**dict(zip(CASE_COLUMNS, row, strict=True)), "data": json.loads(row[8])} for row in rows]
+
+    def open_case(self, kind: str, number: int | None, key: str, rule: str, state: str, data: dict) -> dict:
+        """A new case about a subject (`kind`, `number`, `key`) or something left behind (no number)."""
+        now = time.time()
+        with self._transaction() as db:
+            added = db.execute(
+                "INSERT INTO cases (kind, number, key, rule, state, opened, updated, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (kind, number, key, rule, state, now, now, json.dumps(data)),
+            )
+            return self._cases(db, "WHERE id = ?", (added.lastrowid,))[0]
+
+    def update_case(
+        self, case_id: int, *, state: str | None = None, rule: str | None = None, data: dict | None = None
+    ) -> dict | None:
+        """Set a case's state, rule or data (each only when given; `data` whole). None when there is no such case."""
+        with self._transaction() as db:
+            found = self._cases(db, "WHERE id = ?", (case_id,))
+            if not found:
+                return None
+            case = found[0]
+            db.execute(
+                "UPDATE cases SET state = ?, rule = ?, data = ?, updated = ? WHERE id = ?",
+                (
+                    state or case["state"],
+                    rule or case["rule"],
+                    json.dumps(case["data"] if data is None else data),
+                    time.time(),
+                    case_id,
+                ),
+            )
+            return self._cases(db, "WHERE id = ?", (case_id,))[0]
+
+    def cases(self, states: Iterable[str] = (), since: float | None = None) -> list[dict]:
+        """The cases, newest first: those in one of `states` (all when none is given) and, with `since`, also
+        every case updated after it."""
+        states = tuple(states)
+        marks = ", ".join("?" * len(states))
+        with self._lock:
+            if not states:
+                return self._cases(self._db, "WHERE updated > ?", (since or 0.0,))
+            if since is None:
+                return self._cases(self._db, f"WHERE state IN ({marks})", states)
+            return self._cases(self._db, f"WHERE state IN ({marks}) OR updated > ?", (*states, since))
 
     # --- assessments: the append-only record every gate decision leaves (spec autonomous-gates §5) ----
 

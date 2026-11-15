@@ -123,6 +123,26 @@ keeper:
   minutes: 30
   catalog_sync_hours: 24
 
+# The cleaner (`MiaCleaner`, on the buffers worker; `mia-buffers schedule` creates its schedule): every `minutes`
+# it looks for subjects that read "in progress" with nothing running (`quiet_minutes`), that stopped
+# (`stopped_minutes` ago) for a reason with a known remedy, and for jobs, snippet issues and pull requests a
+# round left behind. `mode`: `off`, `report` (cases say what would be done; the default) or `act`.
+# A stop with a passing cause is run again after `retry_hours`; a subject a person acted on is left alone for
+# `hands_off_hours`; at most `max_remedies` remedies start work on one subject in seven days, `max_parallel`
+# cases are in work at once, and diagnosis jobs spend at most `max_usd_per_day`.
+cleaner:
+  mode: act
+  minutes: 10
+  quiet_minutes: 30
+  stopped_minutes: 30
+  retry_hours: 2
+  leftover_days: 3
+  pend_hours: 6
+  hands_off_hours: 2
+  max_remedies: 3
+  max_parallel: 3
+  max_usd_per_day: 20
+
 # The judge (autonomous-gates spec §4, §9): a read-only Claude Code job that looks at the evidence of a gate (crop
 # galleries, a PR diff) and answers approve / reject / escalate. A `model` other than the authors' agent.model is a
 # precaution, not a rule.

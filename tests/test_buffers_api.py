@@ -1023,6 +1023,43 @@ def test_keeper_kv_routes(tmp_path):
     assert worker(s, "PUT", "/keeper", {"at": 5.0})[1] == {"at": 5.0}  # replaced whole; a given `at` kept
 
 
+def test_case_routes(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    opened = {"kind": "dataset", "number": 224, "key": "rec-a", "rule": "no run", "data": {"seen": "no run"}}
+    assert call(s, "POST", "/cases", payload=opened)[0] == 401
+    assert worker(s, "POST", "/cases", {**opened, "state": "gone"})[0] == 422
+    status, case, _ = worker(s, "POST", "/cases", opened)
+    assert status == 201 and case["state"] == "open" and case["data"] == {"seen": "no run"}
+    left = worker(s, "POST", "/cases", {"kind": "job", "key": "issue-9/i9-e1/crops-1", "rule": "left-over job"})[1]
+    assert worker(s, "PUT", "/cases/999", {"state": "resolved"})[0] == 404
+    done = worker(s, "PUT", f"/cases/{case['id']}", {"state": "resolved", "data": {"seen": "no run", "steps": []}})[1]
+    assert done["state"] == "resolved" and done["data"]["steps"] == [] and done["rule"] == "no run"
+    assert [row["id"] for row in call(s, "GET", "/cases")[1]["cases"]] == [left["id"]]  # what is not over
+    assert [row["id"] for row in call(s, "GET", "/cases", {"days": "7"})[1]["cases"]] == [left["id"], case["id"]]
+    assert [row["id"] for row in call(s, "GET", "/cases", {"state": "resolved"})[1]["cases"]] == [case["id"]]
+    assert call(s, "GET", "/cases", {"state": "gone"})[0] == 422
+
+
+def test_the_cleaners_report_and_the_workers_commits(tmp_path):
+    s, _ = _acting(tmp_path)
+    assert call(s, "GET", "/cleaner")[:2] == (200, b"null")
+    assert call(s, "PUT", "/cleaner", payload={"findings": []})[0] == 401
+    stored = worker(s, "PUT", "/cleaner", {"findings": [{"id": "restart mia-data", "text": "a restart is owed"}]})[1]
+    assert call(s, "GET", "/cleaner")[1] == stored and isinstance(stored["at"], float)
+    assert call(s, "GET", "/workers")[1] == {"workers": {}}
+    assert call(s, "PUT", "/workers/mia-data", payload={"commit": "abc"})[0] == 401
+    assert worker(s, "PUT", "/workers/mia-data", {"commit": "abc"})[1]["commit"] == "abc"
+    assert worker(s, "PUT", "/workers/mia-buffers", {"commit": None})[0] == 200
+    commits = call(s, "GET", "/workers")[1]["workers"]
+    assert {name: row["commit"] for name, row in commits.items()} == {"mia-data": "abc", "mia-buffers": None}
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    assert call(s, "GET", f"/run/dataset/{number}", {"detail": "1"})[1]["run_id"] == "run-1"
+    assert call(s, "GET", "/runs")[1]["runs"][0]["type"] == "MiaBufferPoll"
+    assert call(s, "GET", "/schedules")[1]["schedules"][0]["id"] == "mia-buffers-keeper"
+    bare = svc(tmp_path / "bare")
+    assert call(bare, "GET", "/schedules")[1] == {"schedules": []} and call(bare, "GET", "/runs")[0] == 503
+
+
 # --- assessments, budgets, volumes routes, revoked datasets -------------------------
 
 
@@ -1356,6 +1393,15 @@ class Gateway(Kicks):
 
     def run_status(self, kind, number):
         return "RUNNING" if self.running else None
+
+    def run(self, kind, number):
+        return {"status": "RUNNING", "run_id": "run-1", "task": None, "activities": []} if self.running else None
+
+    def open_runs(self):
+        return [{"namespace": "mia-buffers", "id": "old/1", "run_id": "run-0", "type": "MiaBufferPoll"}]
+
+    def schedules(self):
+        return [{"namespace": "mia-buffers", "id": "mia-buffers-keeper", "every_s": 1800.0, "last": 5.0}]
 
 
 def _acting(tmp_path, **gateway_kwargs):

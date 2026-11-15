@@ -316,6 +316,33 @@ class IssueBody(_Strict):
     issue: int
 
 
+CASE_STATES = ("open", "working", "waiting", "resolved", "needs-person", "dropped")
+CASES_OPEN = ("open", "working", "waiting", "needs-person")  # what `GET /cases` lists whatever its age
+CaseState = Literal["open", "working", "waiting", "resolved", "needs-person", "dropped"]
+
+
+class CaseBody(_Strict):
+    """A case the cleaner opens: what is stuck (a subject, or with no number something left behind), the rule
+    that matched and what was seen (spec cleaner §4.8)."""
+
+    kind: str
+    number: int | None = None
+    key: str
+    rule: str
+    state: CaseState = "open"
+    data: dict = {}
+
+
+class CaseUpdate(_Strict):
+    state: CaseState | None = None
+    rule: str | None = None
+    data: dict | None = None
+
+
+class WorkerBody(_Strict):
+    commit: str | None  # the commit the worker's code was at when it started; None when it could not tell
+
+
 class AssessmentBody(_Strict):
     """One assessment as `mia_core.judge.policy.new_assessment` shapes it (spec autonomous-gates §5)."""
 
@@ -545,6 +572,15 @@ ROUTES = [
     ("GET", re.compile(r"^/health$"), "health", "read"),
     ("GET", re.compile(r"^/run/([a-z]+)/(\d+)$"), "run_status", "read"),
     ("POST", re.compile(r"^/hosts/missing$"), "hosts_missing", "read"),
+    ("POST", re.compile(r"^/cases$"), "open_case", "worker"),
+    ("PUT", re.compile(r"^/cases/(\d+)$"), "update_case", "worker"),
+    ("GET", re.compile(r"^/cases$"), "cases", "read"),
+    ("PUT", re.compile(r"^/cleaner$"), "put_cleaner", "worker"),
+    ("GET", re.compile(r"^/cleaner$"), "cleaner", "read"),
+    ("PUT", re.compile(r"^/workers/([^/]+)$"), "put_worker", "worker"),
+    ("GET", re.compile(r"^/workers$"), "workers", "read"),
+    ("GET", re.compile(r"^/runs$"), "runs", "read"),
+    ("GET", re.compile(r"^/schedules$"), "schedules", "read"),
 ]
 
 
@@ -1533,13 +1569,92 @@ class BufferService:
         return 200, self.dispatcher.health(), {}
 
     def _run_status(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        """The Temporal status of the subject's latest run; with `?detail=1` what the cleaner reads of it (its
+        run id, a workflow task that keeps failing, its pending activities)."""
         self._numbered(kind, number)
         if self.dispatcher is None:
             raise HttpError(503, "this service has no way to Temporal")
         try:
+            if query.get("detail"):
+                return 200, self.dispatcher.run(kind, int(number)) or {"status": None}, {}
             return 200, {"status": self.dispatcher.run_status(kind, int(number))}, {}
         except DispatchError as error:
             raise HttpError(503, str(error)) from None
+
+    def _runs(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Every open run of every namespace the services use."""
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal")
+        try:
+            return 200, {"runs": self.dispatcher.open_runs()}, {}
+        except DispatchError as error:
+            raise HttpError(503, str(error)) from None
+
+    def _schedules(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Every Temporal schedule and when it last fired; none when Temporal cannot be asked."""
+        return 200, {"schedules": self.dispatcher.schedules() if self.dispatcher is not None else []}, {}
+
+    # --- the cleaner: its cases, its last sweep and the commit each worker started on (spec cleaner §4.8) ---
+
+    def _open_case(self, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(CaseBody, body)
+        case = self.ledger.open_case(parsed.kind, parsed.number, parsed.key, parsed.rule, parsed.state, parsed.data)
+        self._case_changed(case)
+        return 201, case, {}
+
+    def _update_case(self, case_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(CaseUpdate, body)
+        case = self.ledger.update_case(int(case_id), state=parsed.state, rule=parsed.rule, data=parsed.data)
+        if case is None:
+            raise HttpError(404, f"no case {case_id}")
+        self._case_changed(case)
+        return 200, case, {}
+
+    def _case_changed(self, case: dict) -> None:
+        if case["kind"] in SUBJECT_RULES and case["number"] is not None:  # the subject's row in Needs you
+            self.changes.announce(case["kind"], case["number"])
+
+    def _cases(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The cases, newest first: `state` (comma-separated; default: every state that is not over) and, with
+        `days`, also every case updated within that many days."""
+        states = tuple(part for part in query.get("state", ",".join(CASES_OPEN)).split(",") if part)
+        if unknown := [state for state in states if state not in CASE_STATES]:
+            raise HttpError(422, f"state must be among {list(CASE_STATES)}, got {unknown}")
+        try:
+            since = time.time() - float(query["days"]) * 86400 if "days" in query else None
+        except ValueError:
+            raise HttpError(422, "days must be a number") from None
+        return 200, {"cases": self.ledger.cases(states, since)}, {}
+
+    def _put_cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, self._put_report("cleaner", body), {}
+
+    def _cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
+        report = self.ledger.kv("cleaner")
+        return (200, *JSON_NULL) if report is None else (200, report, {})
+
+    def _put_report(self, name: str, body: bytes) -> dict:
+        """Store a scheduled pass's last report whole under `name` (`at` added when absent)."""
+        try:
+            report = json.loads(body)
+        except ValueError as error:
+            raise HttpError(422, f"invalid JSON: {error}") from None
+        if not isinstance(report, dict):
+            raise HttpError(422, f"a {name} report is a JSON object")
+        report.setdefault("at", time.time())
+        self.ledger.put_kv(name, report)
+        return report
+
+    def _put_worker(self, service: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A worker says the commit it started on; the cleaner compares it with the checkout's."""
+        parsed = _parse(WorkerBody, body)
+        with self._lock:
+            workers = {**(self.ledger.kv("workers") or {}), service: {"commit": parsed.commit, "at": time.time()}}
+            self.ledger.put_kv("workers", workers)
+        return 200, workers[service], {}
+
+    def _workers(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"workers": self.ledger.kv("workers") or {}}, {}
 
     def _mark_mirrored(self, kind: str, number: str, seq: str, *, query: dict[str, str], body: bytes) -> Response:
         parsed = _parse(MirroredBody, body)
@@ -2012,15 +2127,7 @@ class BufferService:
         return 200, {**out, "days": rows, "total": total}, {}
 
     def _put_keeper(self, *, query: dict[str, str], body: bytes) -> Response:
-        try:
-            report = json.loads(body)
-        except ValueError as error:
-            raise HttpError(422, f"invalid JSON: {error}") from None
-        if not isinstance(report, dict):
-            raise HttpError(422, "a keeper report is a JSON object")
-        report.setdefault("at", time.time())
-        self.ledger.put_kv("keeper", report)
-        return 200, report, {}
+        return 200, self._put_report("keeper", body), {}
 
     def _keeper(self, *, query: dict[str, str], body: bytes) -> Response:
         report = self.ledger.kv("keeper")

@@ -708,3 +708,17 @@ def test_subject_data_and_issue_can_be_written(tmp_path):
     assert ledger.set_subject_data("buffer", number, {"spec": "b"})["data"] == {"spec": "b"}
     assert ledger.set_subject_issue("buffer", number, 77)["issue"] == 77
     assert ledger.find_subjects(issue=77)[0]["key"] == "pool" and ledger.set_subject_issue("buffer", 1, 2) is None
+
+
+def test_cases_are_opened_updated_and_listed_by_state_or_age(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    first = ledger.open_case("dataset", 224, "empiar-10791", "no run", "working", {"seen": "no run", "plan": []})
+    left = ledger.open_case("job", None, "issue-9/i9-e1/crops-1", "left-over job", "open", {})
+    assert first["id"] != left["id"] and first["data"] == {"seen": "no run", "plan": []} and left["number"] is None
+    done = ledger.update_case(first["id"], state="resolved", data={"seen": "no run", "steps": ["cancel"]})
+    assert done is not None and done["state"] == "resolved" and done["rule"] == "no run"
+    assert done["data"]["steps"] == ["cancel"] and done["updated"] >= first["updated"]
+    assert ledger.update_case(999, state="resolved") is None
+    assert [case["id"] for case in ledger.cases()] == [left["id"], first["id"]]  # newest first
+    assert [case["id"] for case in ledger.cases(states=("open", "working"))] == [left["id"]]
+    assert [case["id"] for case in ledger.cases(states=("open",), since=0.0)] == [left["id"], first["id"]]

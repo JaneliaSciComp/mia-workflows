@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -150,6 +150,22 @@ class SourcingCfg(BaseModel):
     test_size: int = Field(default=256, ge=1)
 
 
+class CleanerCfg(BaseModel):
+    """The cleaner (spec cleaner §4.10): what counts as stuck, how long it waits, and how much it may do."""
+
+    mode: Literal["off", "report", "act"] = "report"  # report: cases say what would be done; nothing is done
+    minutes: int = Field(default=10, ge=1)  # how often MiaCleaner runs
+    quiet_minutes: int = Field(default=30, ge=1)  # a working subject with nothing going on for this long
+    stopped_minutes: int = Field(default=30, ge=0)  # a stopped subject is looked at after this long
+    retry_hours: float = Field(default=2, gt=0)  # before a stop with a passing cause is run again
+    leftover_days: float = Field(default=3, gt=0)  # a resting dataset's open snippet work is closed after this
+    pend_hours: float = Field(default=6, gt=0)  # a job pending in the cluster queue this long is a finding
+    hands_off_hours: float = Field(default=2, ge=0)  # after a person acted on a subject
+    max_remedies: int = Field(default=3, ge=0)  # remedies that start work, per subject in seven days
+    max_parallel: int = Field(default=3, ge=1)  # cases in work at once
+    max_usd_per_day: float = Field(default=20, ge=0)  # the diagnosis jobs' budget
+
+
 class PipelineCfg(BaseModel):
     """Where another pipeline's workflows run: buffer-api starts and signals them (spec webapp-actions §5)."""
 
@@ -171,6 +187,7 @@ class Config(mia_data_config.Config):
     service: ServiceCfg
     quota: QuotaCfg = QuotaCfg()
     keeper: KeeperCfg = KeeperCfg()
+    cleaner: CleanerCfg = CleanerCfg()
     csub: CsubCfg = CsubCfg()
     sourcing: SourcingCfg = SourcingCfg()
 
