@@ -1333,14 +1333,16 @@ async def debugged_in_develop(env, h, m):
     await debugged(env, h, m)
 
 
-async def test_the_debuggers_go_matches_again_while_the_snippet_pr_is_open(env):
-    """A develop round that failed and was debugged: the debugger's go starts from the match, whose agent reads
-    the advice, and a reader on main that fits ends the round at review. Only a person's go resumes the PR."""
+@pytest.mark.parametrize("adviser", ["debugger", "cleaner-advice"])
+async def test_a_go_with_advice_matches_again_while_the_snippet_pr_is_open(env, adviser):
+    """A develop round that failed and was debugged: a go that carries advice (the debugger's, the cleaner's
+    after its diagnosis) starts from the match, whose agent reads the advice, and a reader on main that fits
+    ends the round at review. Any other go resumes the PR."""
     m = Mocks(debug_cycles=1, outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
     async with started(env, m, signal="restart") as h:
         await debugged_in_develop(env, h, m)
         m.outcome = "matched"  # the advice names a reader that is on main
-        await h.signal(MiaDataDataset.restart, ev("go", "21", actor="debugger"))
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor=adviser))
         await idle(h, m, "review")
     assert m.stages == ["matching", "developing", "testing", "debugging", "matching", "testing", "review"]
     assert [a[1] for a in m.of("submit")] == ["match", "crop", "debug", "match", "crop", "verify"]

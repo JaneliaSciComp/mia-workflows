@@ -65,16 +65,21 @@ def job_link(page_url: str, where: str) -> str:
     return f"{page_url.rstrip('/')}/#job/{where}"
 
 
-def open_records(work_root: Path, under: str) -> list[dict]:
-    """The records at the addresses under `under` (a round's workspace relative to `work_root`) that have no
-    end: jobs whose wait never saw them finish. Each as stored, with its `address`."""
+def round_records(work_root: Path, under: str) -> dict[str, dict]:
+    """The records at the addresses under `under` (a round's workspace relative to `work_root`): address ->
+    record as stored."""
     directory = Path(work_root) / RECORDS_DIR / under
-    found = []
-    for path in sorted(directory.glob("*.json.gz")):
-        record = _load(path)
-        if record and "finished_at" not in record:
-            found.append({**record, "address": f"{under}/{path.name.removesuffix('.json.gz')}"})
-    return found
+    found = {
+        f"{under}/{path.name.removesuffix('.json.gz')}": _load(path) for path in sorted(directory.glob("*.json.gz"))
+    }
+    return {address: record for address, record in found.items() if record}
+
+
+def open_records(work_root: Path, under: str) -> list[dict]:
+    """The records of that round that have no end: jobs whose wait never saw them finish. Each as stored, with
+    its `address`."""
+    records = round_records(work_root, under)
+    return [{**record, "address": address} for address, record in records.items() if "finished_at" not in record]
 
 
 def _now() -> str:

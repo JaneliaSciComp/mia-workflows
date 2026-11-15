@@ -220,14 +220,25 @@ def test_action_calls():
     assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).action(1) is None
 
 
-def test_head_commit_is_the_checkouts_commit_or_none(tmp_path):
+def test_the_code_digest_changes_with_the_packages_alone(tmp_path):
     import subprocess
 
-    from mia_core.checkout import head_commit
+    from mia_core.checkout import PACKAGES, code_digest, head_commit
 
-    assert head_commit(tmp_path) is None  # no checkout
+    assert head_commit(tmp_path) is None and code_digest(tmp_path) is None  # no checkout
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    commit = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.org", "commit", "-q"]
-    subprocess.run([*commit, "--allow-empty", "-m", "first"], check=True)
-    found = head_commit(tmp_path)
-    assert found is not None and len(found) == 40
+    git = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.org"]
+
+    def commit(file, text):
+        (tmp_path / file).parent.mkdir(exist_ok=True)
+        (tmp_path / file).write_text(text)
+        subprocess.run([*git, "add", file], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", file], check=True)
+        return head_commit(tmp_path), code_digest(tmp_path)
+
+    for package in PACKAGES:
+        first = commit(f"{package}/code.py", "one")
+    assert first[0] is not None and len(first[0]) == 40 and first[1] is not None
+    docs = commit("docs/notes.md", "words")
+    assert docs[0] != first[0] and docs[1] == first[1]  # a commit that touches no package: the same code
+    assert commit("mia_data/code.py", "two")[1] != first[1]

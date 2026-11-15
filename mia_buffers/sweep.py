@@ -9,20 +9,25 @@ changes something carries a key, and a step that has to wait returns None and is
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
 import re
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from mia_core import autonomy
-from mia_core.checkout import head_commit
+from mia_core.checkout import code_digest
 from mia_core.config import manifest_path
-from mia_core.jobrecord import open_records
+from mia_core.jobrecord import address, job_link, open_records, round_records
+from mia_core.judge.evidence import read_claude_json
 from mia_core.registry import RegistryError
 from mia_core.untrusted import neutralize
+from mia_data.models import CLEANER, CLEANER_ADVISED
 
 from .cleaner import (
     ALL_KINDS,
@@ -37,6 +42,7 @@ from .cleaner import (
     service_findings,
     sighting,
 )
+from .diagnose import diagnose_job, parse_outcome, reduce_outcome, workspace_of, write_evidence
 
 if TYPE_CHECKING:
     from .activities import Activities
@@ -137,7 +143,7 @@ class Sweep:
         queue_kinds |= {cfg.datasets_pipeline.task_queue: ["dataset"], cfg.task_queue: ["buffer", "prep"]}
         self.workers = workers = await self._ask(registry.workers)
         schedules = await self._ask(registry.schedules)
-        checkout = await asyncio.to_thread(head_commit)
+        checkout = await asyncio.to_thread(code_digest)
         pause = await asyncio.to_thread(autonomy.paused, manifest_path())
         return service_findings(health, workers, schedules, checkout, pause, queue_kinds, self.now)
 
@@ -166,12 +172,15 @@ class Sweep:
         return old and not seen
 
     async def _gather(self, view: dict, skipped: set[str], evidence: list[dict]) -> None:
+        timeline = await self._ask(self.registry.timeline, view["kind"], view["number"])
+        if timeline is not None:
+            evidence.append(await self._evidence(timeline, skipped))
+
+    async def _evidence(self, timeline: dict, skipped: set[str]) -> dict:
         """The subject's evidence: its timeline and actions, and for a working one its run, the jobs of its
         round and the party it waits for."""
+        view = timeline["subject"]
         kind, number = view["kind"], view["number"]
-        timeline = await self._ask(self.registry.timeline, kind, number)
-        if timeline is None:
-            return
         item = {"subject": timeline["subject"], "entries": timeline["entries"], "actions": timeline["actions"]}
         item["round"] = next((entry["round"] for entry in reversed(item["entries"]) if entry.get("round")), None)
         if view["status"] == "working":
@@ -182,7 +191,7 @@ class Sweep:
         queue = self.cfg.datasets_pipeline.task_queue if kind == "dataset" else self.cfg.task_queue
         item |= {"worker": self.workers.get(queue), "retry_hours": self.rules.retry_hours}
         item["earlier"] = self._cases_of(kind, number)
-        evidence.append(item)
+        return item
 
     async def _run(self, kind: str, number: int) -> dict | None:
         run = await self._ask(self.registry.run, kind, number)
@@ -306,6 +315,8 @@ class Sweep:
             "plan": plan_for(found, item),
             "steps": [],
         }
+        if (item.get("party") or {}).get("issue"):  # the snippets issue and pull request a remedy may name
+            data["party"] = {"issue": item["party"]["issue"], "pr": item["party"].get("pr")}
         if found["rule"] == "fixed since":
             data["commit"] = (item.get("worker") or {}).get("commit")
         if found["rule"] == "record gap":
@@ -457,7 +468,7 @@ class Sweep:
             try:
                 if step["do"] in STARTS_WORK and (tried := self._remedies(case)) >= self.rules.max_remedies:
                     raise Refused(f"the cleaner has started work on this subject {tried} times in seven days")
-                if not _acted(data) and step["do"] not in QUIET_STEPS:
+                if not _acted(data) and step["do"] not in QUIET_STEPS and "diagnosis" not in data:
                     await self._say(case, f"{data['seen']}. Doing: {plan_words(data['plan'])}.", "start")
                 result = await self._do(case, step, timeline)
             except Refused as refused:
@@ -465,6 +476,9 @@ class Sweep:
                 data["needs"] = f"{plan_words([step])} was refused: {refused}"
                 state = "needs-person"
                 break
+            except Exception:
+                await self._save(case, state)  # what the case did so far is kept; the next pass goes on from it
+                raise
             if result is None:  # not possible yet
                 waiting = data.setdefault("waiting", {"step": len(data["steps"]), "since": self.now})
                 if waiting["step"] != len(data["steps"]):
@@ -483,6 +497,8 @@ class Sweep:
                 timeline = await self._ask(self.registry.timeline, case["kind"], case["number"])
         else:
             state = "waiting" if any(step["do"] in (*STARTS_WORK, "recheck") for step in data["steps"]) else "resolved"
+            if data["steps"] and data["steps"][-1]["do"] == "wait":
+                data["revision"] = None  # the wait is over: the subject is looked at again as it stands
         if state == "needs-person":
             await self._say(case, f"needs a person: {data['needs']}", "needs")
         await self._save(case, state)
@@ -540,7 +556,10 @@ class Sweep:
         if do == "needs":
             return "left to a person"
         if do == "diagnose":
-            raise Refused("no rule covers this and no diagnosis is available")
+            assert timeline is not None  # only a subject's case is diagnosed
+            return await self._diagnose(case, timeline)
+        if do == "report_defect":
+            return await self._report_defect(case, step)
         raise Refused(f"`{do}` is not a step the cleaner knows")
 
     async def _kill(self, case: dict, step: dict, cluster: Any) -> str | None:
@@ -566,7 +585,8 @@ class Sweep:
             return None
         if do == "go" and case["kind"] == "prep" and not await self._request_may_go(subject):
             return None
-        fields: dict[str, Any] = {"key": f"cleaner/{case['id']}/{len(data['steps'])}", "actor": "cleaner"}
+        actor = CLEANER_ADVISED if do == "go" and step.get("note") else CLEANER  # advice makes the round match first
+        fields: dict[str, Any] = {"key": f"cleaner/{case['id']}/{len(data['steps'])}", "actor": actor}
         fields["revision"] = subject["revision"]
         if do == "stop" and data.get("run_id"):
             fields["run"] = data["run_id"]
@@ -586,6 +606,83 @@ class Sweep:
                 raise Refused(error.message) from None
             raise
         return f"action {action['id']}"
+
+    async def _diagnose(self, case: dict, timeline: dict) -> str | None:
+        """The diagnosis of one case (spec §4.6), over two or more passes: reserve its cost against the day's
+        budget, write the evidence and submit the job; once the job is over, read its answer, keep the steps
+        that are on the menu and put them in the plan. None while the budget is spent or the job runs."""
+        data, jobs = case["data"], self.activities.jobs
+        if jobs is None:
+            raise Refused("this worker has no job runner")
+        job = data.get("diagnosis_job")
+        if job is None:
+            week = self.now - 7 * 86400
+            earlier = [other for other in self._cases_of(case["kind"], case["number"]) if other["updated"] >= week]
+            if sum("diagnosis" in other["data"] for other in earlier) >= self.rules.max_remedies:
+                raise Refused(f"it was diagnosed {self.rules.max_remedies} times in seven days")
+            attempt = len(data["steps"])
+            root = f"cleaner-{datetime.fromtimestamp(self.now, UTC).date().isoformat()}"
+            reservation, usd = f"case-{case['id']}-{attempt}", self.cfg.judge.max_budget_usd
+            caps = {"max_usd": self.rules.max_usd_per_day}
+            held = await self._ask(self.registry.reserve, root, reservation, "diagnose", usd, caps)
+            if not held.get("ok"):
+                return None  # the day's budget is spent: the case waits
+            workspace = workspace_of(self.cfg, case["id"], attempt)
+            item = await self._evidence(timeline, set())
+            under = f"issue-{case['number']}/{item['round']}"
+            records = await asyncio.to_thread(round_records, self.cfg.paths.work_root, under) if item["round"] else {}
+            await asyncio.to_thread(write_evidence, workspace, case, item, self.report["findings"], records)
+            job_id = await jobs.submit(f"cleaner-case-{case['id']}-{attempt}", diagnose_job(self.cfg, workspace))
+            data["diagnosis_job"] = {
+                "id": job_id,
+                "workspace": str(workspace),
+                "root": root,
+                "reservation": reservation,
+            }
+            return None
+        statuses = await asyncio.to_thread(jobs.client.status, [job["id"]])
+        if statuses and not statuses[0].terminal:
+            return None
+        await jobs.wait(job["id"], job["workspace"], lambda state: None)  # it is over: this writes its record
+        answer, cost, _ = read_claude_json(Path(job["workspace"]))
+        await self._ask(self.registry.settle, job["root"], job["reservation"], usd=cost)
+        del data["diagnosis_job"]
+        outcome = parse_outcome(answer)
+        if outcome is None:
+            raise Refused("the diagnosis left no answer that can be read")
+        kept = reduce_outcome(outcome, case["kind"], data.get("party"))
+        plan = kept.pop("plan")
+        record = address(self.cfg.paths.work_root, job["workspace"])
+        data["diagnosis"], data["diagnosed"] = {**kept, "job": record}, True
+        if not plan:
+            needs = kept["needs"] or "the diagnosis proposes no remedy"
+            plan = [{"do": "needs", "text": f"{needs} (diagnosis: {kept['diagnosis'][:600]})"}]
+        if kept["defect"]:
+            plan.insert(0, {"do": "report_defect", **kept["defect"]})
+        data["plan"][1:] = plan  # after this step: what the diagnosis asks for replaces whatever was left
+        link = f" [Its job]({job_link(self.cfg.service.url, record)})." if record else ""
+        said = f"Diagnosis ({kept['cause']}): {kept['diagnosis']} Doing: {plan_words(plan)}.{link}"
+        await self._say(case, said, f"diagnosis {len(data['steps'])}")
+        return f"{kept['cause']}: {kept['diagnosis'][:300]}"
+
+    async def _report_defect(self, case: dict, step: dict) -> str:
+        """File a defect the diagnosis found in this installation's own code: an issue in `cleaner.defects_repo`,
+        one per defect (found again by its marker, where this case is added as a comment). With no repository
+        configured the defect stays on its case."""
+        repo = self.rules.defects_repo
+        if not repo:
+            return "kept on the case: no `cleaner.defects_repo` is set"
+        gh = copy.copy(self.activities.gh_issues)  # ponytail: the issue repo's client pointed at another repo
+        gh.repo = repo
+        marker = f"<!-- mia: defect {hashlib.sha256(step['title'].lower().encode()).hexdigest()[:12]} -->"
+        about = f"Cleaner case {case['id']} (`{case['key']}`): {case['data'].get('seen', '')}"
+        for issue in await gh.list_issues(state="open", creator=self.activities.bot):
+            if marker in (issue.get("body") or ""):
+                await gh.comment(issue["number"], f"Seen again. {neutralize(about)}")
+                return f"added to issue #{issue['number']}"
+        body = f"{step['evidence']}\n\n{neutralize(about)}\n\n{marker}"
+        created = await gh.create_issue(f"cleaner: {step['title']}", body, [])
+        return f"filed as issue #{created['number']}"
 
     async def _request_may_go(self, subject: dict) -> bool:
         """Whether a `go` to the request would start no dataset round (spec §4.7): its text has no `again` and
@@ -656,7 +753,7 @@ class Refused(Exception):
     """A step that will never be possible as the case stands; the text says why."""
 
 
-QUIET_STEPS = ("wait", "needs", "diagnose", "await_autodev")  # steps that change nothing
+QUIET_STEPS = ("wait", "needs", "diagnose", "await_autodev", "report_defect")  # steps that change no subject
 
 
 def _acted(data: dict) -> bool:
@@ -666,13 +763,12 @@ def _acted(data: dict) -> bool:
 
 def _patient(case: dict, step: dict) -> bool:
     """Whether the step has a wait of its own, so the common limit on a step that is not possible yet is not
-    its limit: a wait, autodev's answer, and a request's go, which waits on its datasets' cases."""
-    return step["do"] in ("wait", "await_autodev") or (case["kind"] == "prep" and step["do"] == "go")
+    its limit: a wait, autodev's answer, a diagnosis (its job, the day's budget) and a request's go, which
+    waits on its datasets' cases."""
+    return step["do"] in ("wait", "await_autodev", "diagnose") or (case["kind"] == "prep" and step["do"] == "go")
 
 
 def _epoch(stamp: str | None) -> float:
-    from datetime import datetime
-
     try:
         return datetime.fromisoformat(stamp or "").timestamp()
     except ValueError:

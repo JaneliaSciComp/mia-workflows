@@ -241,11 +241,12 @@ class Registry:
         return self.request("GET", "/schedules")["schedules"]
 
     def workers(self) -> dict:
-        """Service -> {commit, at}: the commit each worker said it started on."""
+        """Service -> {commit, code, at, since}: what each worker said it started on."""
         return self.request("GET", "/workers")["workers"]
 
-    def put_worker(self, service: str, commit: str | None) -> dict:
-        return self.request("PUT", f"/workers/{quote(service, safe='')}", json={"commit": commit})
+    def put_worker(self, service: str, commit: str | None, code: str | None) -> dict:
+        """Say what a worker started on: the checkout's commit and the digest of the code it loaded."""
+        return self.request("PUT", f"/workers/{quote(service, safe='')}", json={"commit": commit, "code": code})
 
     def open_case(self, **fields: Any) -> dict:
         return self.request("POST", "/cases", json=fields)

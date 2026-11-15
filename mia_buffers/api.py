@@ -360,7 +360,8 @@ class TerminateBody(_Strict):
 
 
 class WorkerBody(_Strict):
-    commit: str | None  # the commit the worker's code was at when it started; None when it could not tell
+    commit: str | None  # the commit the checkout was at when the worker started; None when it could not tell
+    code: str | None = None  # the digest of the code it loaded (`mia_core.checkout.code_digest`)
 
 
 class AssessmentBody(_Strict):
@@ -1686,15 +1687,15 @@ class BufferService:
         return report
 
     def _put_worker(self, service: str, *, query: dict[str, str], body: bytes) -> Response:
-        """A worker says the commit it started on; the cleaner compares it with the checkout's."""
+        """A worker says what it started on; the cleaner compares its code with the checkout's."""
         parsed = _parse(WorkerBody, body)
         now = time.time()
         with self._lock:
             workers = self.ledger.kv("workers") or {}
             known = workers.get(service) or {}
-            # `since`: when the worker first started on this commit; a restart on the same code keeps it
-            since = known.get("since", now) if known.get("commit") == parsed.commit else now
-            workers[service] = {"commit": parsed.commit, "at": now, "since": since}
+            # `since`: when the worker first started on this code; a restart on the same code keeps it
+            since = known.get("since", now) if known.get("code") == parsed.code else now
+            workers[service] = {"commit": parsed.commit, "code": parsed.code, "at": now, "since": since}
             self.ledger.put_kv("workers", workers)
         return 200, workers[service], {}
 

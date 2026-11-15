@@ -31,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from .config import round_open
     from .crop_test import describe_failure, job_succeeded, judge
     from .models import (
+        ADVISERS,
         DEBUGGER,
         AssessmentWritten,
         AutodevLook,
@@ -888,7 +889,7 @@ class MiaDataDataset:
         """One round from a `go`: admit, match, test crops, then wait for review.
 
         After a develop round stopped, a person's `go` resumes its snippet PR instead when that PR is still
-        open (see _resume_pr); the debugger's `go` matches, so its advice is read. The snippets issue is
+        open (see _resume_pr); a `go` with advice (ADVISERS) matches, so its advice is read. The snippets issue is
         remembered while its PR is open or not yet opened, so a retry never opens a second one; once that PR
         was merged or closed, a round that needs a reader opens a new issue."""
         state = self.state
@@ -918,8 +919,9 @@ class MiaDataDataset:
         self.limits = await self._act("limits", result_type=RoundLimits)
         if workflow.patched("l-budget") and await self._act("paused", result_type=bool):
             raise RoundFailed(PAUSED, blocked=True)
-        # the debugger's go starts from the match, whose agent reads its advice: only a person's go resumes the PR
-        advised = bool(snippet_issue and snippet_pr and event.actor == DEBUGGER) and workflow.patched(
+        # a go with advice (the debugger's, the cleaner's after a diagnosis) starts from the match, whose agent
+        # reads the advice: any other go resumes the PR
+        advised = bool(snippet_issue and snippet_pr and event.actor in ADVISERS) and workflow.patched(
             "debugger-go-matches"
         )
         if snippet_issue and snippet_pr and not advised:

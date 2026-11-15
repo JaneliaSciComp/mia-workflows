@@ -200,6 +200,21 @@ async def test_the_debuggers_go_is_charged_to_the_debugged_rounds_root_and_its_a
     advised = Path(await t.a.prepare_match(1, "i1-e97", await t.a.admit(1, "97"), 1))
     assert (advised / "advice.md").read_text() == "bind the first volume only\n"
     assert "advice.md" in (advised / "prompt.md").read_text() and "$" not in (advised / "prompt.md").read_text()
+    # the cleaner's go after a diagnosis carries advice the same way
+    row = (
+        96,
+        "dataset",
+        1,
+        "go",
+        "cleaner-advice",
+        "2026-11-01T00:00:00+00:00",
+        None,
+        json.dumps({"note": "read zyx"}),
+    )
+    with t.ledger._transaction() as db:
+        db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
+    cleaned = Path(await t.a.prepare_match(1, "i1-e96", await t.a.admit(1, "96"), 1))
+    assert (cleaned / "advice.md").read_text() == "read zyx\n"
     put_action(t, 99, payload={"note": "a person's note is no advice"})
     plain = Path(await t.a.prepare_match(1, ROUND, await t.a.admit(1, "99"), 1))
     assert not (plain / "advice.md").exists() and "advice.md" not in (plain / "prompt.md").read_text()

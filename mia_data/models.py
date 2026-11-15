@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 DEBUGGER = "debugger"  # the actor of the go that runs a round again after it was debugged
+CLEANER = "cleaner"  # the actor of what the cleaner asks for (spec cleaner §4.7)
+CLEANER_ADVISED = "cleaner-advice"  # the cleaner's go that carries its diagnosis' advice as its note
+ADVISERS = (DEBUGGER, CLEANER_ADVISED)  # whose go matches first, with its note as the match agent's advice
+RERUNNERS = (DEBUGGER, CLEANER, CLEANER_ADVISED)  # who runs a round again for whoever asked for the one before
 
 
 @dataclass

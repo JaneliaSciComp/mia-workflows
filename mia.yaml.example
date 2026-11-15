@@ -129,7 +129,9 @@ keeper:
 # round left behind. `mode`: `off`, `report` (cases say what would be done; the default) or `act`.
 # A stop with a passing cause is run again after `retry_hours`; a subject a person acted on is left alone for
 # `hands_off_hours`; at most `max_remedies` remedies start work on one subject in seven days, `max_parallel`
-# cases are in work at once, and diagnosis jobs spend at most `max_usd_per_day`.
+# cases are in work at once, and diagnosis jobs spend at most `max_usd_per_day`. `defects_repo` (owner/name,
+# optional): where a defect a diagnosis finds in this installation's own code is filed as an issue; unset, it is
+# kept on its case.
 cleaner:
   mode: act
   minutes: 10

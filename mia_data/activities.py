@@ -70,6 +70,7 @@ from .jobspec import (
     verify_job,
 )
 from .models import (
+    ADVISERS,
     DEBUGGER,
     AssessmentWritten,
     AutodevLook,
@@ -827,12 +828,12 @@ class Activities:
         (workspace / "SPEC.md").write_text(read_untrusted(snapshot_dir, "SPEC.md", 1 << 20) or "")
 
     async def _advice(self, issue: int, round_id: str) -> str:
-        """The debugger's advice for this round: the note of the go that started it, when that go is the
-        debugger's. "" for any other round."""
+        """The advice for this round: the note of the go that started it, when that go is the debugger's or the
+        cleaner's with its diagnosis (ADVISERS). "" for any other round."""
         if TEST_PR_RE.fullmatch(round_id):
             return ""
         action = await self._action(issue, round_id.split("-e", 1)[1])
-        if action is None or action["actor"] != DEBUGGER:
+        if action is None or action["actor"] not in ADVISERS:
             return ""
         return self._clean(_text(action["payload"].get("note"), 16000))
 

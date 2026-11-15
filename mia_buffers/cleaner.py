@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
+from mia_data.models import RERUNNERS
+
 from .config import CleanerCfg
 
 ALL_KINDS = ("dataset", "buffer", "prep")
@@ -25,7 +27,7 @@ WORKFLOW_TYPES = frozenset(
         "MiaCleaner",
     }
 )
-ACTORS = ("cleaner", "debugger")  # whose actions are not a person's: everyone else's keep the cleaner off
+ACTORS = RERUNNERS  # whose actions are not a person's: everyone else's keep the cleaner off
 RETRYING_ATTEMPTS = 10  # an activity past this attempt is not going to pass by itself soon
 YOUNG_ATTEMPTS = 3  # an activity on one of its first attempts is work in flight
 SCHEDULE_MISSES = 3  # a schedule this many intervals late has stopped firing
@@ -97,7 +99,8 @@ def service_findings(
 ) -> list[dict]:
     """What is wrong with the installation, each {id, text, kinds}: `kinds` are the subject kinds (and SNIPPETS)
     the cleaner leaves alone until the finding clears. `queue_kinds` maps a task queue (a service's name) to
-    the kinds whose rounds its worker runs."""
+    the kinds whose rounds its worker runs; `checkout` is the digest of the checkout's code now, which each
+    worker's `code` is compared with."""
     findings = []
     if not health.get("temporal"):
         return [
@@ -108,11 +111,11 @@ def service_findings(
             text = f"no worker polls the task queue `{queue}`: the service is down"
             findings.append({"id": f"worker {queue}", "text": text, "kinds": queue_kinds.get(queue, [])})
     for service, row in sorted(workers.items()):
-        commit = row.get("commit")
-        if commit and checkout and commit != checkout and health.get("queues", {}).get(service, True):
+        code = row.get("code")
+        if code and checkout and code != checkout and health.get("queues", {}).get(service, True):
             text = (
-                f"the `{service}` worker runs commit `{commit[:7]}` and the checkout is at `{checkout[:7]}`: "
-                f"a restart is owed (`mia restart {service}`)"
+                f"the `{service}` worker runs the code of commit `{(row.get('commit') or '?')[:7]}`, and the "
+                f"checkout's code has changed since: a restart is owed (`mia restart {service}`)"
             )
             findings.append({"id": f"restart {service}", "text": text, "kinds": queue_kinds.get(service, [])})
     for schedule in schedules:
@@ -337,6 +340,6 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         if NOT_REGISTERED_RE.search(failure):
             text = f"restart the worker that runs this {kind}'s rounds: its activity `{found['activity']['type']}` is not registered on it"
             return [{"do": "needs", "text": text}]
-        if SERVICE_RE.search(failure):
-            return [{"do": "wait", "hours": 1.0}]
+        if SERVICE_RE.search(failure):  # it may pass by itself: look again in an hour
+            return [{"do": "wait", "hours": 1.0}, {"do": "diagnose"}]
     return [{"do": "diagnose"}]

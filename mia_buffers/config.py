@@ -164,6 +164,7 @@ class CleanerCfg(BaseModel):
     max_remedies: int = Field(default=3, ge=0)  # remedies that start work, per subject in seven days
     max_parallel: int = Field(default=3, ge=1)  # cases in work at once
     max_usd_per_day: float = Field(default=20, ge=0)  # the diagnosis jobs' budget
+    defects_repo: str | None = None  # owner/name: where a defect the diagnosis finds is filed (unset: on its case)
 
 
 class PipelineCfg(BaseModel):

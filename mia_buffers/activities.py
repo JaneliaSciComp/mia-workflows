@@ -45,7 +45,7 @@ from mia_data.binding import missing_hosts, record_gaps
 from mia_data.catalog import dataset_folder
 from mia_data.config import round_open
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
-from mia_data.models import DEBUGGER, JobDone, LockTaken, Reservation
+from mia_data.models import RERUNNERS, JobDone, LockTaken, Reservation
 from mia_data.publish import prepared_row
 from mia_data.seed import ID_RE
 from mia_data.status import render_jobs, render_links, render_result, stage_entries
@@ -940,11 +940,12 @@ class Activities:
             if subject is None or "cancel" not in subject["actions"]:
                 continue
             found = await asyncio.to_thread(registry.timeline, "dataset", subject["number"])
-            # the debugger runs a round again for whoever asked for the one that failed: its go is not looked at
+            # the debugger and the cleaner run a round again for whoever asked for the one before: their go is
+            # not looked at
             gos = [
                 a
                 for a in (found or {}).get("actions", [])
-                if a["action"] == "go" and a["state"] == "sent" and a["actor"] != DEBUGGER
+                if a["action"] == "go" and a["state"] == "sent" and a["actor"] not in RERUNNERS
             ]
             if not gos or gos[-1]["actor"] != actor:
                 continue

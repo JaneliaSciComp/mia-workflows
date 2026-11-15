@@ -31,7 +31,7 @@ def findings(health=HEALTHY, workers=None, schedules=(), checkout="b" * 40, paus
 
 
 def test_a_healthy_installation_has_no_finding():
-    workers = {"mia-data": {"commit": "b" * 40}, "mia-buffers": {"commit": None}}
+    workers = {"mia-data": {"commit": "c" * 40, "code": "b" * 40}, "mia-buffers": {"commit": None, "code": None}}
     schedules = [{"id": "keeper", "every_s": 1800.0, "last": NOW - 1700}, {"id": "new", "every_s": 600.0, "last": None}]
     assert findings(workers=workers, schedules=schedules) == {}
 
@@ -53,12 +53,13 @@ def test_a_queue_without_a_worker_skips_the_kinds_its_worker_runs():
 
 
 def test_a_worker_on_another_commit_than_the_checkout_owes_a_restart():
-    found = findings(workers={"mia-data": {"commit": "a" * 40}, "mia-buffers": {"commit": "b" * 40}})
+    old = {"commit": "a" * 40, "code": "0" * 16}  # the code it loaded is not the checkout's (`b…`) any more
+    found = findings(workers={"mia-data": old, "mia-buffers": {"commit": "c" * 40, "code": "b" * 40}})
     assert list(found) == ["restart mia-data"] and found["restart mia-data"]["kinds"] == ["dataset"]
     assert (
         "`aaaaaaa`" in found["restart mia-data"]["text"] and "mia restart mia-data" in found["restart mia-data"]["text"]
     )
-    assert findings(workers={"mia-data": {"commit": "a" * 40}}, checkout=None) == {}  # the checkout cannot be read
+    assert findings(workers={"mia-data": old}, checkout=None) == {}  # the checkout cannot be read
 
 
 def test_a_schedule_three_intervals_late_and_the_pause_are_findings():
@@ -126,7 +127,7 @@ def test_an_activity_that_retries_for_ever_says_which_and_why():
     assert step["do"] == "needs" and "restart the worker" in step["text"] and "`read_feedback`" in step["text"]
     refused = {"type": "put_dataset", "attempt": 30, "failure": "RegistryError: 503 Service Unavailable"}
     evidence = item(activities=[refused])
-    assert plan_for(sighting(evidence, CFG, NOW), evidence) == [{"do": "wait", "hours": 1.0}]
+    assert plan_for(sighting(evidence, CFG, NOW), evidence) == [{"do": "wait", "hours": 1.0}, {"do": "diagnose"}]
     odd = {"type": "save", "attempt": 30, "failure": "PermissionError: [Errno 13] Permission denied"}
     evidence = item(activities=[odd])
     assert plan_for(sighting(evidence, CFG, NOW), evidence) == [{"do": "diagnose"}]
@@ -281,3 +282,56 @@ def test_left_over_snippet_work_is_named_by_why_it_is_left():
     assert reason(status="working", stage="developing", days=9) is None
     assert reason(status="done", stage="done", labels=["snippets:working"]) is None  # autodev is at work on it
     assert leftover_reason(None, set(), False, CFG.leftover_days, NOW) is None  # no dataset of ours behind it
+
+
+# --- the diagnosis' answer: what the worker keeps of it (spec §4.6, §4.7) ---
+
+
+def test_the_agents_answer_is_found_fenced_or_bare():
+    from mia_buffers.diagnose import parse_outcome
+
+    assert parse_outcome('Done.\n```json\n{"diagnosis": "x", "cause": "data"}\n```')["cause"] == "data"
+    assert parse_outcome('I think {"diagnosis": "y"} is it')["diagnosis"] == "y"
+    assert (
+        parse_outcome("no JSON here") is None
+        and parse_outcome('{"cause": "data"}') is None
+        and parse_outcome("") is None
+    )
+
+
+def test_only_remedies_on_the_menu_are_kept_with_the_cases_own_issue_and_pull_request():
+    from mia_buffers.diagnose import reduce_outcome
+
+    asked = [
+        {"do": "revise", "pr": 999},  # the number is the agent's: the case's own is used
+        {"do": "snippets_go", "issue": 1},
+        {"do": "wait", "hours": 500},
+        {"do": "recheck"},  # a dataset takes no recheck
+        {"do": "shelve"},
+        "go",
+    ]
+    outcome = {
+        "diagnosis": "d <!-- x -->",
+        "cause": "magic",
+        "remedies": asked,
+        "defect": {"title": "t", "evidence": "e"},
+    }
+    kept = reduce_outcome(outcome, "dataset", {"issue": 72, "pr": 44})
+    assert kept["plan"] == [
+        {"do": "revise", "issue": 72, "pr": 44},
+        {"do": "await_autodev", "issue": 72},
+        {"do": "snippets_go", "issue": 72, "pr": 44},
+        {"do": "await_autodev", "issue": 72},
+        {"do": "wait", "hours": 48.0},
+    ]
+    assert (
+        kept["cause"] == "unknown"
+        and kept["defect"] == {"title": "t", "evidence": "e"}
+        and "<!--" not in kept["diagnosis"]
+    )
+    none = reduce_outcome({"diagnosis": "d", "remedies": [{"do": "close"}, {"do": "revise"}]}, "dataset", None)
+    assert none["plan"] == [] and none["defect"] is None  # no snippets issue behind the case: nothing to close
+    request = reduce_outcome(
+        {"diagnosis": "d", "remedies": [{"do": "stop"}, {"do": "go"}, {"do": "recheck"}]}, "prep", None
+    )
+    assert [step["do"] for step in request["plan"]] == ["stop", "kill_jobs", "go", "recheck"]

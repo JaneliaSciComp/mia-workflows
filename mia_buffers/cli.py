@@ -20,7 +20,7 @@ import httpx
 
 from autodev.auth import bot_login
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
-from mia_core.checkout import head_commit
+from mia_core.checkout import code_digest, head_commit
 from mia_core.fs import require_local_dir, require_secret_file
 from mia_core.registry import Registry, RegistryError, best_effort, read_token
 from mia_data.cli import _gh, _github_clients
@@ -153,8 +153,9 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     print(
         f"worker up as {bot}: {cfg.temporal.address} ns={cfg.temporal.namespace} queues {cfg.task_queue}, {cfg.await_queue}"
     )
-    # the commit this worker's activities were loaded from: the cleaner says when a restart is owed
-    best_effort(lambda: activities.registry.put_worker(cfg.task_queue, head_commit()), "worker commit", log)
+    # the code this worker's activities were loaded from: the cleaner says when a restart is owed
+    started_on = (cfg.task_queue, head_commit(), code_digest())
+    best_effort(lambda: activities.registry.put_worker(*started_on), "worker commit", log)
     try:
         async with main_worker, await_worker:
             await asyncio.Event().wait()
