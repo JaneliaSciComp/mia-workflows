@@ -283,9 +283,11 @@ async def test_closed_pr_stops(env):
 
 
 async def test_merge_failure_comments_then_external_merge_finishes(env):
-    m = Mocks([snap(approved=True), snap(state="merged")], merge_ok=False)
+    """A merge that fails (conflicts) is retried at every look, and the issue is labelled needs-human once."""
+    m = Mocks([snap(approved=True), snap(approved=True), snap(state="merged")], merge_ok=False)
     assert await run(env, m) == "merged"
-    assert any("merging failed" in c.body for c in m.of("comment"))
+    assert any("merging failed" in c.body for c in m.of("comment")) and len(m.of("merge")) == 2
+    assert m.of("set_stage").count("needs-human") == 1
 
 
 async def test_continue_as_new_keeps_handled_feedback(env, monkeypatch):
