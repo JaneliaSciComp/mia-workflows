@@ -456,7 +456,11 @@ is under home, apart from every read-write sandbox mount, and that its `broker.t
 Withdrawing an approval is a hand edit: remove the host's lines, then `mia up` (or the next approval) regenerates. A
 redirect target still needs `network.redirect_hosts`, and a pattern or a host wanted before any run is added to the base
 policy by hand. `mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
-names its `agent.allow_hosts` plus the exact hosts its broker's policy allows, at most 64 (`autodev.agent.agent_hosts`).
+names its `agent.allow_hosts` plus the hosts its issue names, where the policy allows them, at most 64
+(`autodev.agent.agent_hosts`). An issue names hosts with `<!-- autodev: hosts a.org b.org -->` in its body
+(`hosts_marker`), and only when a bot of `github.trusted_bots` opened it: a dataset round writes there the hosts
+of its record's URLs and their redirect targets, so a reader's job reaches its own dataset's files and no other
+approved host.
 
 1. **The go.** A `go` action carries the spec text (the page's *Plan*). With `plan_first` the round waits at its
    plan; without it the round stages first and asks once, at `staged`.

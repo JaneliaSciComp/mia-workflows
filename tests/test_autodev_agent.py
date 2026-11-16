@@ -11,7 +11,16 @@ from csub.transport.base import TransportError
 from temporalio.exceptions import ApplicationError
 
 from autodev.activities import Activities
-from autodev.agent import AgentJobs, csub_client, job_script, log_tail, read_result, render_prompt
+from autodev.agent import (
+    AgentJobs,
+    csub_client,
+    hosts_marker,
+    issue_hosts,
+    job_script,
+    log_tail,
+    read_result,
+    render_prompt,
+)
 from autodev.gitops import Mirror
 from autodev.models import SubmitInput, Workspace
 
@@ -139,13 +148,54 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     assert spec["allow_hosts"] == ["pypi.org"] and spec["name"] == "autodev-7-r1" and "env" not in spec
 
 
-async def test_an_agent_job_names_its_configured_hosts_then_the_policys(tmp_path):
+async def test_an_agent_job_names_its_configured_hosts_then_those_its_issue_names(tmp_path):
+    """The broker's policy is the ceiling, never the list: a job gets the configured hosts and, of the hosts its
+    issue names, those the policy allows."""
     too_long = "a" * 64 + ".example.org"  # csub refuses a job host with a label over 63 characters
     policy = ["pypi.org", "zenodo.org", "*.huggingface.co", "github.com", too_long, "data.4tu.nl"]
+    named = ["zenodo.org", "cdn.huggingface.co", "github.com", too_long, "evil.example.org", "pypi.org", "10.0.0.1"]
     fake = FakeCsub(policy_hosts=policy)
     j = _jobs(tmp_path, fake, allow_hosts=["pypi.org"])
-    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
-    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "zenodo.org", "data.4tu.nl"]
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"), named)
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "zenodo.org", "cdn.huggingface.co"]
+    await j.submit(8, K, 1, Workspace(str(tmp_path / "work" / "r2"), "abc123", "autodev/issue-8"))
+    assert fake.submitted[1]["allow_hosts"] == ["pypi.org"]  # an issue that names none: nothing of the policy's
+
+
+def test_an_issue_names_its_jobs_hosts_in_a_marker():
+    marker = hosts_marker(["zenodo.org", "ftp.ebi.ac.uk"])
+    assert marker == "<!-- autodev: hosts zenodo.org ftp.ebi.ac.uk -->"
+    assert issue_hosts(f"For a dataset.\n\nIts job may reach `zenodo.org`. {marker}\n\nmore") == [
+        "zenodo.org",
+        "ftp.ebi.ac.uk",
+    ]
+    assert issue_hosts("no marker") == [] and issue_hosts("<!-- autodev: hosts -->") == [] and issue_hosts(None) == []
+    assert issue_hosts(f"{marker} <!-- autodev: hosts evil.example.org -->") == ["zenodo.org", "ftp.ebi.ac.uk"]
+
+
+async def test_only_an_issue_a_trusted_bot_opened_names_hosts(tmp_path):
+    body = "For a dataset. " + hosts_marker(["zenodo.org"])
+
+    class Issues:
+        def __init__(self, author):
+            self.author = author
+
+        async def get_issue(self, number):
+            return {"number": number, "user": {"login": self.author}, "body": body}
+
+    for author, trusted, expected in (
+        ("mia-bot[bot]", ["mia-bot"], ["pypi.org", "zenodo.org"]),
+        ("mallory", ["mia-bot"], ["pypi.org"]),
+        ("mia-bot[bot]", [], ["pypi.org"]),  # this deployment trusts no bot
+    ):
+        fake = FakeCsub(policy_hosts=["zenodo.org"])
+        cfg = make_cfg(
+            tmp_path / author / str(len(trusted)), agent={"allow_hosts": ["pypi.org"]}, github={"trusted_bots": trusted}
+        )
+        jobs = AgentJobs(cfg, client_factory=lambda fake=fake: fake)
+        activities = Activities(cfg, Issues(author), None, jobs, "bot")
+        await activities.submit_agent(SubmitInput(7, K, 1, Workspace(str(cfg.paths.work_root / "r1"), "abc", "b")))
+        assert fake.submitted[0]["allow_hosts"] == expected, (author, trusted)
 
 
 async def test_a_retry_does_not_probe_the_broker(tmp_path):
@@ -166,13 +216,12 @@ async def test_a_failed_probe_on_a_first_submission_submits_nothing(tmp_path):
     assert fake.submitted == []
 
 
-async def test_past_the_cap_the_newest_policy_hosts_are_kept(tmp_path):
-    fake = FakeCsub(policy_hosts=[f"h{n}.example.org" for n in range(70)])
+async def test_past_the_cap_the_configured_hosts_stay_and_the_last_named_are_dropped(tmp_path):
+    named = [f"h{n}.example.org" for n in range(70)]
+    fake = FakeCsub(policy_hosts=["*.example.org"])
     j = _jobs(tmp_path, fake, allow_hosts=["pypi.org", "files.pythonhosted.org"])
-    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"))
-    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "files.pythonhosted.org"] + [
-        f"h{n}.example.org" for n in range(8, 70)
-    ]
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"), named)
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "files.pythonhosted.org"] + named[:62]
 
 
 async def test_submit_reuses_job_found_by_name(tmp_path):

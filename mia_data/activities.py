@@ -28,6 +28,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, permanent_errors
+from autodev.agent import hosts_marker
 from autodev.jobs import JobSpec
 from mia_core import autonomy
 from mia_core.assets import raw_asset
@@ -1441,6 +1442,9 @@ class Activities:
         # number (spec webapp-actions §4.1, §9)
         data_link = f"[{pins.record}]({self.page_url}/#datasets/{quote(pins.record, safe='')})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
+        # the hosts the dataset's files are on: autodev grants its agent's job these and no other approved host
+        reach = [host for host in hosts(urls, self.cfg) if host not in self.cfg.network.package_hosts]
+        reach_line = f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}
             names = sorted(
@@ -1461,6 +1465,7 @@ class Activities:
                 f"Read {spec_link} first. A merged snippet is never edited: add a new one that **supersedes** the "
                 f"one at fault (`supersedes: <name>` in its `snippet.yaml`, SPEC §1), and add the binding you test, "
                 f"using the new snippet, as `examples/{pins.record}.yaml`.",
+                reach_line,
                 "**Record** (at `{pins.record_commit}`):".replace("{pins.record_commit}", pins.record_commit),
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
                 "**The rejected binding:**",
@@ -1472,6 +1477,7 @@ class Activities:
                 marker,
                 f"For {data_link}: dataset `{pins.record}` has no snippet that reads it.",
                 f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`.",
+                reach_line,
                 f"**Record** (at `{pins.record_commit}`):",
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
                 "**What fails** (the match agent's report):",

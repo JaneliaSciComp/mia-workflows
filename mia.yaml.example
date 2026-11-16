@@ -199,7 +199,7 @@ services:
       walltime_min: 60
       cpus: 1
       mem_mb: 4000
-      # package hosts only: the exact hosts the broker's policy allows are added to each job
+      # package hosts only: each job also gets the hosts its issue names (a dataset's own), where the policy allows them
       allow_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, prefix.dev, repo.prefix.dev]
       extra_mounts: []
       path_prepend: []

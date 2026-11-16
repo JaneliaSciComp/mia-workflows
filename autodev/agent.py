@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mia_core.hosts import HOST_RE
+from mia_core.hosts import HOST_RE, is_ip_literal, missing_hosts
 from mia_core.jobrecord import STREAM_FLAGS, TRANSCRIPT_FILE
 from mia_core.judge.evidence import EVIDENCE_DIR, QUESTION_FILE
 from mia_core.judge.evidence import command as judge_command
@@ -158,19 +159,35 @@ def csub_client(cfg: Config) -> Any:
     return jobs.csub_client(cfg.deployment)
 
 
-# ponytail: csub refuses more than 64 hosts on a job, so the oldest policy hosts drop first; upgrade is a per-issue
-# host list or a higher limit in csub.
-MAX_JOB_HOSTS = 64
+MAX_JOB_HOSTS = 64  # csub refuses more hosts than this on one job
+HOSTS_RE = re.compile(r"<!-- autodev: hosts([^>]*?)-->")
 
 
-def agent_hosts(configured: list[str], policy_hosts: list[str]) -> list[str]:
-    """The configured hosts, then the exact hosts the broker's policy allows (never patterns, names csub refuses
-    as a job host, or GitHub hosts), without repeats; past MAX_JOB_HOSTS the oldest policy hosts are dropped and
-    configured hosts stay."""
-    usable = [host for host in policy_hosts if HOST_RE.fullmatch(host) and not is_github_host(host)]
-    hosts = list(dict.fromkeys(configured))
-    extra = [host for host in dict.fromkeys(usable) if host not in hosts]
-    return hosts + extra[max(0, len(hosts) + len(extra) - MAX_JOB_HOSTS) :]
+def hosts_marker(hosts: Sequence[str]) -> str:
+    """The marker with which an issue names the hosts its agent's job may reach beyond the configured ones."""
+    return f"<!-- autodev: hosts {' '.join(hosts)} -->"
+
+
+def issue_hosts(body: str | None) -> list[str]:
+    """The hosts an issue's body names in its first `hosts_marker`; none without one."""
+    found = HOSTS_RE.search(body or "")
+    return found.group(1).split() if found else []
+
+
+def agent_hosts(configured: list[str], named: Sequence[str], policy: list[str]) -> list[str]:
+    """What an agent's job may reach: the configured hosts, then those its issue names that the broker's policy
+    allows (`policy`: its allowed_hosts patterns). The policy is the ceiling, never the list: a host no issue
+    names is not granted. Never a name csub refuses as a job host, an IP address or a GitHub host; without repeats; past
+    MAX_JOB_HOSTS the last named are dropped and configured hosts stay."""
+    usable = [
+        host
+        for host in named
+        if HOST_RE.fullmatch(host)
+        and not is_ip_literal(host)
+        and not is_github_host(host)
+        and not missing_hosts([host], policy)
+    ]
+    return list(dict.fromkeys([*configured, *usable]))[:MAX_JOB_HOSTS]
 
 
 class AgentJobs:
@@ -193,8 +210,11 @@ class AgentJobs:
             work_root=cfg.paths.work_root,
         )
 
-    async def submit(self, issue: int, key: str, round_number: int, workspace: Workspace) -> JobRef:
-        """Submit once per (issue, key, round); a retry returns the same job."""
+    async def submit(
+        self, issue: int, key: str, round_number: int, workspace: Workspace, named_hosts: Sequence[str] = ()
+    ) -> JobRef:
+        """Submit once per (issue, key, round); a retry returns the same job. `named_hosts`: the hosts the issue
+        names for its job (`issue_hosts`), granted where the broker's policy allows them."""
         agent_cfg = self.cfg.agent
         job_key = f"issue-{issue}-{check_key(key)}-r{round_number}"
 
@@ -208,7 +228,7 @@ class AgentJobs:
                 walltime_min=agent_cfg.walltime_min,
                 cpus=agent_cfg.cpus,
                 mem_mb=agent_cfg.mem_mb,
-                allow_hosts=agent_hosts(agent_cfg.allow_hosts, policy_hosts),
+                allow_hosts=agent_hosts(agent_cfg.allow_hosts, named_hosts, policy_hosts),
                 agent="claude",
                 ro_mounts=[mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts],  # Config guarantees ":ro"
                 env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},

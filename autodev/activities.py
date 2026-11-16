@@ -35,7 +35,7 @@ from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import judge_dir, log_tail, read_result, render_prompt
+from .agent import issue_hosts, judge_dir, log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
@@ -265,8 +265,14 @@ class Activities:
         from csub import CsubError  # pixi-only dependency, imported where used (as in agent.csub_client)
 
         await refuse_while_paused()
+        # an issue names its job's hosts only when a bot this deployment trusts opened it
+        named: list[str] = []
+        if self.cfg.github.trusted_bots:
+            issue = await self.gh.get_issue(request.issue)
+            if (issue.get("user") or {}).get("login") in self.cfg.github.trusted_bots:
+                named = issue_hosts(issue.get("body"))
         try:
-            return await self.jobs.submit(request.issue, request.key, request.round, request.workspace)
+            return await self.jobs.submit(request.issue, request.key, request.round, request.workspace, named)
         except CsubError as error:
             if error.code in PERMANENT_CSUB:
                 raise ApplicationError(str(error), non_retryable=True) from error

@@ -14,6 +14,7 @@ from temporalio.testing import ActivityEnvironment
 from test_autodev_agent import FakeCsub
 from test_buffers_register import token_server  # noqa: F401  (fixture)
 
+from autodev.agent import issue_hosts
 from autodev.jobs import CsubJobs
 from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
@@ -503,6 +504,8 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
         )
         and "<!-- x" not in body
     )
+    # the hosts the reader's job may reach, for autodev: those of the record's URLs and their redirect targets
+    assert issue_hosts(body) == ["data.example.org"] and "The reader's job may reach `data.example.org`." in body
 
 
 async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(tmp_path):
