@@ -102,8 +102,8 @@ class AutonomyCfg(BaseModel):
 
 class GateCfg(BaseModel):
     """One judged gate (spec autonomous-gates §9): `off` runs no judge, `shadow` records the verdict beside the human's and
-    decides nothing, `active` lets the verdict authorize. `max_suspect` is how many `suspect` crops a set may carry
-    and still be approved (§4.2)."""
+    decides nothing, `active` lets an approve authorize (a reject or an escalate still waits for a person).
+    `max_suspect` is how many `suspect` crops a set may carry and still be approved (§4.2)."""
 
     mode: Literal["off", "shadow", "active"] = "off"
     max_suspect: int = Field(default=2, ge=0)
@@ -111,10 +111,7 @@ class GateCfg(BaseModel):
     @field_validator("mode", mode="before")
     @classmethod
     def _bare_off(cls, value: object) -> object:
-        """YAML reads a bare `off` as false; take it as the mode it was meant to be. `active` waits for milestone N:
-        nothing grants on a judge's verdict yet, so the mode would only post a false "approved automatically"."""
-        if value == "active":
-            raise ValueError("mode: active is not available yet (milestone N); use shadow")
+        """YAML reads a bare `off` as false; take it as the mode it was meant to be."""
         return "off" if value is False else value
 
 
@@ -128,6 +125,15 @@ class JudgeCfg(BaseModel):
     min_confidence: float = Field(default=0.6, ge=0, le=1)
     crops: GateCfg = GateCfg()
     review: GateCfg = GateCfg()
+
+    @field_validator("review")
+    @classmethod
+    def _review_grants_nothing(cls, gate: GateCfg) -> GateCfg:
+        """Nothing merges on the review judge's verdict, so `active` there would only post a false "approved
+        automatically"."""
+        if gate.mode == "active":
+            raise ValueError("judge.review.mode: active is not available (nothing grants on its verdict); use shadow")
+        return gate
 
     def _gates(self) -> dict[str, GateCfg]:
         return {"crops": self.crops, "review": self.review}

@@ -116,8 +116,11 @@ over the gate's evidence. It earns authority in three steps, per gate, and nothi
 
    Twenty live rounds without a false approval, and none on the evaluation set, is the bar the spec sets
    (`autonomy.min_shadow_rounds`).
-3. **Active** (`mode: active`, not available yet): the judge's approve authorizes within policy; *Revoke* on the
-   dataset's or the spec's page withdraws it at any time, `mia pause` stops every workflow at its next job.
+3. **Active** (`mode: active`, the crop judge only; the config refuses it for `review`): the crop judge's approve
+   authorizes the set. A matched binding's crops are saved, and a snippet PR head gets `/approve <head>`, so
+   autodev merges it, with no person's verdict. A reject (the suspect cap's too), an escalate, a judge that did
+   not run and a verdict a person gave while it looked all leave the set at `review` for a person. *Revoke* on
+   the dataset's page withdraws an approval at any time, `mia pause` stops every workflow at its next job.
 
 ## Known gaps (deliberate, for later)
 

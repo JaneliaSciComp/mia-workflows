@@ -259,7 +259,9 @@ class GalleryResult:
 class JudgeResult:
     """What the judge said about a subject, after policy read it (spec autonomous-gates §4): `verdict` is the
     judge's own, `effective` what the assessment records (a reject without a `bad` finding is an approve, low
-    confidence is an escalate). `comment` is rendered for the timeline; `assessment` is "" when its write to the registry failed."""
+    confidence is an escalate). `comment` is rendered for the timeline; `assessment` is "" when its write to the
+    registry failed. `authorized`: the gate is active and the policy takes this approve as the subject's
+    authorization, so the round needs no person's verdict."""
 
     verdict: str
     effective: str
@@ -269,3 +271,4 @@ class JudgeResult:
     cost_usd: float | None = None
     comment: str = ""
     findings: list[dict] = field(default_factory=list)  # <= 64 of {"item", "severity", "note"}
+    authorized: bool = False

@@ -1988,3 +1988,48 @@ async def test_a_pr_heads_set_is_judged_too(env):
     names = m.names()
     status_at = max(i for i, name in enumerate(names) if name == "set_crop_status")
     assert m.of("set_crop_status")[-1][1] == "success" and status_at < names.index("prepare_judge")  # status first
+
+
+# --- the crop judge with authority (judge.crops.mode: active) ---------------------------------------------
+
+GRANTED = JudgeResult("approve", "approve", 0.9, "fine", "as-j", 0.5, "Crop judge: approve", authorized=True)
+
+
+async def test_an_active_judges_authorized_approve_saves_the_set_with_no_person(env):
+    m = Mocks(crop_judge="active", judge_result=GRANTED)
+    async with started(env, m) as h:
+        await idle(h, m, "done")
+    names = m.names()
+    assert names.index("read_judge") < names.index("publish_crops") and "assess" not in names  # no person's verdict
+    assert m.of("read_judge")[0][4] == "active"
+    assert "Approved by the crop judge." in next(r for r in m.of("result") if r[0] == "review")[1]
+
+
+@pytest.mark.parametrize(
+    "judged",
+    [
+        JudgeResult("approve", "approve", 0.9, "fine", "as-j", 0.5, "Crop judge: approve"),  # not authorized
+        JudgeResult("approve", "reject", 0.9, "4 suspect", "as-j", 0.5, "Crop judge: reject", authorized=False),
+        JudgeResult("escalate", "escalate", 0.3, "unsure", "as-j", 0.5, "Crop judge: escalate"),
+    ],
+)
+async def test_an_active_judge_that_does_not_grant_leaves_the_set_to_a_person(env, judged):
+    m = Mocks(crop_judge="active", judge_result=judged)
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        assert "publish_crops" not in m.names()
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert "publish_crops" in m.names() and m.of("assess")[0][3] == "approve"
+
+
+async def test_an_active_judges_approve_of_a_pr_head_asks_autodev_to_merge_it(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"}, crop_judge="active", judge_result=GRANTED)
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await idle(h, m, "merging")
+        assert f"/approve {H1}" in pr_comments(m) and "assess" not in m.names()
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done")
+    assert "publish_crops" in m.names()

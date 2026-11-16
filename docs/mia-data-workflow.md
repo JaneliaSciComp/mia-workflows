@@ -165,15 +165,17 @@ report is the judge); fewer ends the round `failed` with nothing saved. The pass
 and `overlay.png` are committed to the `galleries` branch of mia-workflow-data, and a timeline entry shows them
 with the binding and the agent's reasons. The stage is `review`, and the dataset is listed under *Needs you*.
 
-**The crop judge (shadow).** With `judge.crops.mode: shadow`, a second model looks at the same set before the
+**The crop judge.** With `judge.crops.mode: shadow` or `active`, a second model looks at the same set before the
 person does: the worker builds an evidence directory under the round's workspace (`judge-crops-1/evidence/`: the
 question, every verified crop's raw and overlay PNG, `verify.json`, the binding without the agent's reasons, the
 record) and runs a read-only Claude Code job over it, budgeted against the root like the match agent. Its verdict
 is written as an assessment `by: judge` on the same subject the person's verdict will use, and posted as a second
 entry under the crop table (verdict, findings per crop, confidence, model, prompt version, spend, and the line
-that it decides nothing). A judge job that fails leaves a one-line entry instead. The dataset still waits at
-`review` for the person; the Decisions tab shows the agreement. `mode: off` skips all of it; `mode: active` is
-not available.
+what the verdict does). A judge job that fails leaves a one-line entry instead. In shadow the dataset still
+waits at `review` for the person, and the Decisions tab shows the agreement. In active an approve the policy takes
+ends the review with no person: the entry says "Approved by the crop judge", the set is saved, or the snippet PR
+head is approved and autodev merges it. A reject, an escalate, or a verdict a person gave while the judge looked
+leaves the dataset at `review`. `mode: off` skips all of it.
 
 **Validation.** A person approves the set with *Approve* on the dataset's page, or rejects it with *Reject…*,
 which opens a dialog for the feedback. Either verdict carries the revision the page was showing, and buffer-api
