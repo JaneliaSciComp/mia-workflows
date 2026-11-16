@@ -92,6 +92,7 @@ class Plan:
     errors: list[str]
     warnings: list[str]
     excluded: dict[str, int] = field(default_factory=dict)  # selection rule -> how many records it threw out
+    crops: dict[str, int] = field(default_factory=dict)  # the spec's crops per split for the whole buffer
 
     @property
     def valid(self) -> bool:
@@ -129,8 +130,8 @@ class Plan:
         lines += [f"## Records ({len(pool)} in the pool, {self.n_seen} seen)", ""]
         lines += [
             "| id | decision | rule | dims | modality | channels | voxel nm | positions | weight | split preview "
-            "| planned | est. bytes |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "| crops | coverage | est. bytes |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for row in self.rows:
             rule = row.rule if row.fit is None else f"{row.rule}; {row.fit.reason}"
@@ -152,16 +153,17 @@ class Plan:
                 weight,
                 splits,
                 _planned_cell(row),
+                _coverage_cell(row),
                 _human_bytes(row.planned_bytes) if row.in_pool else "",
             ]
             lines.append("| " + " | ".join(_cell(cell) for cell in cells) + " |")
         if pool:
             planned = sum(sum(row.planned.values()) for row in pool)
-            requested = sum(sum((row.plan_rule or {}).get("samples", {}).values()) * row.volumes for row in pool)
+            requested = sum(self.crops.values())
             total_bytes = _human_bytes(sum(row.planned_bytes for row in pool))
             lines += [
                 "",
-                f"planned {planned} of requested {requested} samples; ~{total_bytes} uncompressed "
+                f"planned {planned} of requested {requested} crops; ~{total_bytes} uncompressed "
                 "(planned is an expectation over each record's items)",
             ]
         if self.excluded:
@@ -192,11 +194,17 @@ def _voxel_cell(row: Row) -> str:
 
 
 def _planned_cell(row: Row) -> str:
-    """`train 10 / 1000 · val 3 / 20 · …`: planned against requested samples per split, both over all its volumes."""
+    """`train 4096 · val 64 · …`: the crops the record is expected to stage per split."""
     if not row.in_pool or row.plan_rule is None:
         return ""
-    samples = row.plan_rule["samples"]
-    return " · ".join(f"{name} {row.planned.get(name, 0)} / {samples[name] * row.volumes}" for name in samples)
+    return " · ".join(f"{name} {row.planned.get(name, 0)}" for name in row.plan_rule["samples"])
+
+
+def _coverage_cell(row: Row) -> str:
+    """The record's crops over the crops it holds side by side: above 1× they overlap, far above they repeat."""
+    if not row.in_pool or not row.positions:
+        return ""
+    return f"{sum(row.planned.values()) / row.positions:.2g}×"
 
 
 def _human_bytes(size: int) -> str:
@@ -542,4 +550,5 @@ def build_plan(
     warnings = list(spec.warnings)
     if "content_hash" in spec.select.dedup.by:
         warnings.append(CONTENT_HASH_WARNING)
-    return Plan(spec.name, spec_hash, catalog_ref, rows, errors, warnings, dict(excluded.most_common()))
+    crops = dict(spec.sampling.crops)
+    return Plan(spec.name, spec_hash, catalog_ref, rows, errors, warnings, dict(excluded.most_common()), crops)

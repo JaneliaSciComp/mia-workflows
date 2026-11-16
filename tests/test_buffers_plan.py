@@ -411,3 +411,16 @@ def test_a_heavy_dataset_stops_at_the_cap(spec_2d, plan_2d):
     # the cap leaves the weights alone: a capped dataset's crops are drawn more often
     assert {row.id: row.weight for row in pool} == {row.id: row.weight for row in plan_2d.rows if row.in_pool}
 
+
+
+def test_the_plan_table_shows_each_datasets_crops_and_coverage(plan_2d, spec_2d):
+    row = plan_2d.rows_by_id[U937]
+    md = plan_2d.render_markdown()
+    cell = " · ".join(f"{name} {row.planned[name]}" for name in spec_2d.sampling.crops)
+    coverage = sum(row.planned.values()) / row.positions
+    assert f"| {cell} | {coverage:.2g}× |" in md
+    assert "| split preview | crops | coverage | est. bytes |" in md
+    planned = sum(sum(r.planned.values()) for r in plan_2d.rows if r.in_pool)
+    assert f"planned {planned} of requested {sum(spec_2d.sampling.crops.values())} crops; ~" in md
+    assert "expectation over each record's items" in md
+    assert plan_2d.crops == spec_2d.sampling.crops
