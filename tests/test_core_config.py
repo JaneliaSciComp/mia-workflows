@@ -235,3 +235,16 @@ def test_every_service_receives_the_csub_block():
     manifest = {**SHARED, "csub": {"policy_dir": "/h/p"}}
     assert service_config(manifest, "mia-data")["csub"] == service_config(manifest, "snippets")["csub"]
     assert service_config(manifest, "snippets")["csub"]["policy_dir"] == "/h/p"
+
+
+def test_a_buffers_service_learns_where_the_snippets_service_keeps_its_job_records():
+    # the service that runs autodev on the snippets repo, when it works under a root of its own
+    manifest = copy.deepcopy(SHARED)
+    manifest["services"]["buffers"] = {"app": "mia-buffers"}
+    manifest["services"]["dev"] = {"app": "autodev", "github": {"repo": "o/code"}, "paths": {"work_root": "/dev"}}
+    assert "snippets_work_root" not in service_config(manifest, "buffers")  # no service on the snippets repo
+    manifest["services"]["snippets"] = {"app": "autodev", "github": {"repo": "o/s"}}
+    assert "snippets_work_root" not in service_config(manifest, "buffers")  # it works under the shared root
+    manifest["services"]["snippets"]["paths"] = {"work_root": "/snips"}
+    assert service_config(manifest, "buffers")["snippets_work_root"] == "/snips"
+    assert "snippets_work_root" not in service_config(manifest, "mia-data")

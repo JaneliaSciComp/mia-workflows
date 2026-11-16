@@ -1124,6 +1124,42 @@ def test_a_case_lists_the_records_of_its_rounds_jobs_and_of_its_own(tmp_path):
         assert s.handle("GET", f"/jobs/{address}", {}, b"")[0] == 200
 
 
+def test_the_snippets_services_job_records_are_served_and_listed_on_the_cases_that_wait_on_its_issues(tmp_path):
+    """autodev's jobs on the snippets repo leave their records under that service's work root, at
+    `<owner>__<repo>/issue-<n>/<key>/<job>`: `GET /jobs/<address>` reads them too, and a case lists those of the
+    snippets issue it is about (a dataset's `party`, a left-over issue's key) after its round's."""
+    work, snips = tmp_path / "work", tmp_path / "snips"
+    s = BufferService(
+        Ledger(tmp_path / "l.sqlite"), token="t", work_root=work, snippets_work_root=snips, snippets_repo="o/s"
+    )
+    for root, where in (
+        (work, "issue-223/i223-e1/match-1"),
+        (snips, "o__s/issue-49/01a1/round-1"),
+        (snips, "o__s/issue-49/01a1/judge-r1"),
+        (snips, "o__s/issue-41/01a0/round-2"),
+        (snips, "o__s/issue-50/01a2/round-1"),  # no case is about it
+    ):
+        path = record_path(root, where)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(where.encode())
+    data = {"round": "i223-e1", "party": {"issue": 49, "pr": None}}
+    worker(s, "POST", "/cases", {"kind": "dataset", "number": 223, "key": "rec-a", "rule": "diagnosis", "data": data})
+    worker(s, "POST", "/cases", {"kind": "snippets", "key": "issue-41", "rule": "left-over snippet work"})
+    worker(s, "POST", "/cases", {"kind": "dataset", "number": 9, "key": "rec-b", "rule": "x", "data": {"party": {}}})
+    jobs = {row["key"]: row["jobs"] for row in call(s, "GET", "/cases")[1]["cases"]}
+    assert jobs == {
+        "rec-a": ["issue-223/i223-e1/match-1", "o__s/issue-49/01a1/judge-r1", "o__s/issue-49/01a1/round-1"],
+        "issue-41": ["o__s/issue-41/01a0/round-2"],
+        "rec-b": [],
+    }
+    for address in (*jobs["rec-a"], *jobs["issue-41"]):
+        assert s.handle("GET", f"/jobs/{address}", {}, b"")[:2] == (200, address.encode())
+    assert s.handle("GET", "/jobs/o__s/issue-49/01a1/round-9", {}, b"")[0] == 404
+    assert s.handle("GET", "/jobs/o__s/issue-49/../../../secret", {}, b"")[0] == 404
+    only = BufferService(Ledger(tmp_path / "m.sqlite"), work_root=work)  # no snippets service: the rounds' alone
+    assert only.handle("GET", "/jobs/o__s/issue-49/01a1/round-1", {}, b"")[0] == 404
+
+
 def test_the_cleaners_report_and_the_workers_commits(tmp_path):
     s, _ = _acting(tmp_path)
     assert call(s, "GET", "/cleaner")[:2] == (200, b"null")

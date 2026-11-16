@@ -169,7 +169,7 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
             "state": "needs-person",
             "updated": 5.0,
             "data": {"seen": "no open run", "steps": [{"do": "cancel"}], "plan": [{"do": "go"}], "needs": "look"},
-            "jobs": ["issue-224/i224-e1/match-1", "cleaner/case-1/diagnose-0"],
+            "jobs": ["issue-224/i224-e1/match-1", "o__s/issue-49/01a1/round-1", "cleaner/case-1/diagnose-0"],
         },
         {
             "kind": "job",
@@ -186,6 +186,7 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
     # each job record a case is about is linked, under the job's name
     assert stuck["jobs"] == [
         {"href": "#job/issue-224/i224-e1/match-1", "name": "match-1"},
+        {"href": "#job/o__s/issue-49/01a1/round-1", "name": "snippets #49 round-1"},
         {"href": "#job/cleaner/case-1/diagnose-0", "name": "diagnose-0"},
     ]
     assert job["jobs"] == []

@@ -240,7 +240,9 @@ credentials scrubbed. The agent commands print `--output-format stream-json --ve
 `keep_result` copies the stream's last line, the result object, to the file the result is read from. Writing a
 record is best effort; a job whose workspace is not under `work_root` leaves none; `CsubJobs` refuses a job that
 would get `_jobs` writable; nothing deletes a record. buffer-api serves the file as it is (`GET /jobs/<address>`,
-gzip passed through) and the page renders it at `#job/<address>`.
+gzip passed through) and the page renders it at `#job/<address>`. It looks under its own `work_root` and then
+under that of the service that runs autodev on the snippets repo (`snippets_work_root`, which the `mia.yaml`
+loader fills when that service has a root of its own), whose addresses begin with `<owner>__<repo>/`.
 
 ## Style
 
@@ -732,8 +734,9 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
 3. **Sightings and cases.** `sighting` says whether the subject is quiet or stopped and which rule covers it;
    `plan_for` turns the rule into steps. A case (ledger table `cases`, routes `POST /cases`, `PUT /cases/<id>`,
    `GET /cases`) holds what was seen, the revision and run it was seen at, the steps done and the steps left.
-   `GET /cases` adds `jobs` to each: the addresses of the job records of the round it saw and of the cleaner's
-   own jobs for it (`cleaner/case-<id>/diagnose-<n>`), which the Cleaner view links.
+   `GET /cases` adds `jobs` to each: the addresses of the job records of the round it saw, of autodev's jobs on
+   the snippets issue it is about, and of the cleaner's own jobs for it (`cleaner/case-<id>/diagnose-<n>`),
+   which the Cleaner view links.
    Leftovers get cases of their own kind: `run` (an open run of a workflow type in no worker, `WORKFLOW_TYPES`),
    `job` (alive after its round ended), `snippets` (an open issue or pull request of ours nobody follows).
 4. **Carrying cases on.** In `act` mode each open case does its remaining steps in order until one has to wait

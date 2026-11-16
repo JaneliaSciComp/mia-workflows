@@ -231,6 +231,15 @@ def service_config(manifest: dict, name: str) -> dict:
             result["datasets_pipeline"] = {"namespace": namespace, "task_queue": data_name}
         # and its /health says whether a worker polls each service's task queue: every service, by namespace
         result["workers"] = {other: _namespace(services, shared, other) for other in services}
+        # and it serves the job records of the service that runs autodev on the snippets repo, when that service
+        # works under a root of its own
+        github = result.get("github")
+        snippets_repo = github.get("snippets_repo") if isinstance(github, dict) else None
+        for other in services.values():
+            theirs, paths = (other.get("github"), other.get("paths")) if isinstance(other, dict) else (None, None)
+            if _app_of(other) == "autodev" and isinstance(theirs, dict) and isinstance(paths, dict):
+                if snippets_repo and theirs.get("repo") == snippets_repo and isinstance(paths.get("work_root"), str):
+                    result["snippets_work_root"] = paths["work_root"]
     paths = result.get("paths")
     if isinstance(paths, dict) and "state_root" in paths:
         state_root = paths.pop("state_root")

@@ -218,6 +218,8 @@ const stepsText = steps =>
       step => (STEP_WORDS[step.do] || step.do) + (String(step.result || "").startsWith("refused") ? " (refused)" : ""),
     )
     .join(", then ");
+// a job's record under its job's name; one of autodev's on a snippets issue (`<owner>__<repo>/issue-<n>/…`) says so
+const jobName = where => where.replace(/^[^/]+__[^/]+\/issue-(\d+)\/.*\//, "snippets #$1 ").replace(/^.*\//, "");
 export function caseRows(cases) {
   // a case as the table shows it: what it is about, what was seen, what was done, what is left or needed, and
   // the records (conversation and cluster logs) of the jobs it is about: its round's, then the cleaner's own
@@ -229,7 +231,7 @@ export function caseRows(cases) {
     seen: plain(c.data.seen),
     done: stepsText(c.data.steps),
     next: plain(c.state === "needs-person" ? c.data.needs : stepsText(c.data.plan) || c.data.note),
-    jobs: (c.jobs || []).map(where => ({ href: "#job/" + where, name: where.split("/").pop() })),
+    jobs: (c.jobs || []).map(where => ({ href: "#job/" + where, name: jobName(where) })),
     updated: c.updated,
   }));
 }

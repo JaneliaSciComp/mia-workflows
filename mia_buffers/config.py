@@ -184,6 +184,9 @@ class Config(mia_data_config.Config):
     datasets_pipeline: PipelineCfg = PipelineCfg(namespace="mia-data", task_queue="mia-data")
     # every service of mia.yaml, task queue (the service's name) -> namespace: the workers /health watches
     workers: dict[str, str] = {}
+    # the work root of the service that runs autodev on the snippets repo (the mia.yaml loader fills it when that
+    # service has a root of its own): buffer-api serves its job records beside the rounds'
+    snippets_work_root: Path | None = None
     paths: PathsCfg
     service: ServiceCfg
     quota: QuotaCfg = QuotaCfg()

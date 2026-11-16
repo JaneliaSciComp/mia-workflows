@@ -617,6 +617,8 @@ class BufferService:
         token: str | None = None,
         storage_root: Path | None = None,
         work_root: Path | None = None,
+        snippets_work_root: Path | None = None,
+        snippets_repo: str | None = None,
         raw_root: Path | None = None,
         staged_root: Path | None = None,
         locks: LockDir | None = None,
@@ -634,6 +636,10 @@ class BufferService:
         self.stale_s = stale_s
         self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
         self.work_root = work_root  # the rounds' job workspaces, for a round's crops before it publishes; None: none
+        # where autodev's jobs on the snippets repo leave their records, and the directory they are under there
+        # (`<owner>__<repo>`, autodev's `repo_slug`); None: that service's records are not served
+        self.snippets_work_root = snippets_work_root if snippets_repo else None
+        self.snippets_slug = (snippets_repo or "").replace("/", "__")
         self.raw_root, self.staged_root = raw_root, staged_root  # the assets sync scans these; None skips one
         self.locks = locks  # the workers' lock files, shown read-only; None shows none
         self.archive_dir = archive_dir  # a retire writes the buffer's draws here; None keeps them (a dev service)
@@ -1679,19 +1685,28 @@ class BufferService:
 
     def _case_jobs(self, case: dict) -> list[str]:
         """The addresses of the job records a case is about, as they are on disk now: the jobs of the round it
-        saw, then the cleaner's own jobs for it (its diagnoses). Only what `GET /jobs/<address>` serves."""
-        if self.work_root is None:
-            return []
-        under = [f"cleaner/case-{case['id']}"]
-        round_id = case["data"].get("round")
+        saw, autodev's jobs on the snippets issue it is about (a dataset's `party`, a left-over issue's key), then
+        the cleaner's own jobs for it (its diagnoses). Only what `GET /jobs/<address>` serves."""
+        data = case["data"]
+        round_id, issue = data.get("round"), (data.get("party") or {}).get("issue")
+        if case["kind"] == "snippets" and (named := re.fullmatch(r"issue-(\d+)", case["key"])):
+            issue = int(named.group(1))
+        places: list[tuple[Path | None, str, str]] = []  # (work root, directory of addresses, the records in it)
         if case["number"] is not None and isinstance(round_id, str) and UI_NAME_RE.fullmatch(round_id):
-            under.insert(0, f"issue-{case['number']}/{round_id}")
+            places.append((self.work_root, f"issue-{case['number']}/{round_id}", "*.json.gz"))
+        if isinstance(issue, int) and not isinstance(issue, bool):  # one directory per run of autodev on the issue
+            places.append((self.snippets_work_root, f"{self.snippets_slug}/issue-{issue}", "*/*.json.gz"))
+        places.append((self.work_root, f"cleaner/case-{case['id']}", "*.json.gz"))
         found = []
-        for directory in under:
-            for path in sorted((self.work_root / RECORDS_DIR / directory).glob("*.json.gz")):
-                name = path.name.removesuffix(".json.gz")
-                if UI_NAME_RE.fullmatch(name) and path.is_file() and not path.is_symlink():
-                    found.append(f"{directory}/{name}")
+        for root, directory, pattern in places:
+            if root is None:
+                continue
+            records = root / RECORDS_DIR / directory
+            for path in sorted(records.glob(pattern)):
+                where = path.relative_to(records).as_posix().removesuffix(".json.gz")
+                plain = all(UI_NAME_RE.fullmatch(segment) for segment in where.split("/"))
+                if plain and path.is_file() and not path.is_symlink() and not path.parent.is_symlink():
+                    found.append(f"{directory}/{where}")
         return found
 
     def _put_cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
@@ -1906,11 +1921,16 @@ class BufferService:
         address, the job's workspace relative to work_root. Every segment of it is a plain name (none empty, none
         starting with a dot, so no `.` or `..`), and the file is a regular file inside the records directory:
         a symlink is not followed to one, nor out of the directory. Nothing here writes or deletes a record."""
-        if self.work_root is None:
+        roots = [root for root in (self.work_root, self.snippets_work_root) if root is not None]
+        if not roots:
             raise HttpError(503, "the service has no work_root")
         if not all(UI_NAME_RE.fullmatch(segment) for segment in where.split("/")):
             raise HttpError(404, "no record for this job")
-        data = read_untrusted(self.work_root / RECORDS_DIR, f"{where}.json.gz", JOB_RECORD_LIMIT + 1, binary=True)
+        data = None
+        for root in roots:  # the rounds' records, then those of autodev's jobs on the snippets repo
+            data = read_untrusted(root / RECORDS_DIR, f"{where}.json.gz", JOB_RECORD_LIMIT + 1, binary=True)
+            if data is not None:
+                break
         if data is None:
             raise HttpError(404, "no record for this job")
         if len(data) > JOB_RECORD_LIMIT:
@@ -2370,6 +2390,8 @@ def serve(cfg: Config) -> None:
         token=token,
         storage_root=cfg.paths.storage_root,
         work_root=cfg.paths.work_root,
+        snippets_work_root=cfg.snippets_work_root,
+        snippets_repo=cfg.github.snippets_repo,
         raw_root=cfg.paths.raw_root,
         staged_root=cfg.paths.staged_root,
         locks=LockDir(cfg.paths.local_root / "locks"),
