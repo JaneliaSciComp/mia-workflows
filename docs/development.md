@@ -363,12 +363,17 @@ the reason.
 | subject | routes | actions |
 |---|---|---|
 | dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*, at `review` *Restart*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
-| buffer spec (`#specs/<name>`) | `POST /specs`, `POST /specs/<name>/actions` | `go` (*Plan*), `approve` (*Run* at the plan, *Approve* at the board), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel`, `stop` |
+| buffer spec (`#specs/<key>`) | `POST /specs`, `POST /specs/<key>/actions` | `go` (*Plan*), `approve` (*Run* at the plan, *Approve* at the board), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel`, `stop` |
 | preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go`, `cancel`, `stop` |
 
-`POST /specs` with `{spec}` saves a buffer spec under its `name` (a name that exists is an edit of that subject,
-never a second one); with `action: go` it also runs it, and `plan_first: true` makes it a round that waits at the
-plan (the workflow's `plan` signal). The page always sends `plan_first`, so a round a person starts stops at its
+`POST /specs` with `{spec}` saves a buffer spec as a new subject, every time: a spec's `name` is a label and
+need not be unique (the first subject of a name has it as its key, a later one `buffer-<number>`; the subject's
+view carries `name`). With `action: go` it also runs it, and `plan_first: true` makes it a round that waits at the
+plan (the workflow's `plan` signal). A `go` to `/specs/<key>/actions` runs the text the spec holds; it may carry a
+changed `spec` until a round of the spec has created its buffer (`frozen` in the view), and is refused with a 409
+after that: a change to a spec that has built a buffer is a new spec. On the spec's page *Edit* (until then) and
+*Clone* open New buffer with the controls set from the spec, read through `POST /specs/parse` (the spec as the
+service parses it, defaults filled in); what the controls cannot hold keeps the spec's own text in the box. The page always sends `plan_first`, so a round a person starts stops at its
 plan and the approve there is the button *Run*. The go's payload is the spec text, the round runs exactly that
 (`admit` reads the action), and its timeline entry shows it. `POST /prep` with `{spec}` files a preparation
 request as a new subject `prep-<number>` and runs it.
@@ -903,7 +908,8 @@ Each tab is one kind of thing, and each thing has one page:
   (`/catalog/datasets?request=<number>`: the records its stored spec names).
 - **Buffers** reads `/subjects/buffer` (specs) and `/buffers`. **New buffer** (`#buffers/new`) is the designer:
   its controls are a spec, run through `POST /plan` with `page` (debounced 300 ms) for the funnel, the charts and
-  one page of the plan's rows. A spec's page (`#specs/<name>`) has its buttons, its timeline and its buffers; a
+  one page of the plan's rows. A spec's page (`#specs/<key>`) has its buttons, its text with *Plan again*, *Edit* and *Clone*, its timeline and
+  its buffers; a
   buffer's page reads `/buffers/<id>/status`, `/events`, `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
 - **A lifecycle** tops the page of a dataset, a spec, a request and a buffer: the kind's stages as boxes and arrows
   with the current one filled. The stages are `lines` of `/meta`, which is each stage table in its own order

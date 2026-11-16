@@ -1,6 +1,6 @@
 // New buffer: the controls that describe a spec, its plan as numbers, charts and a table, and the buttons that
 // create the buffer or prepare what it lacks.
-import { DIMS, levelsKey, levelsOf, LIC, SRC, toSpecYaml } from "./spec.js";
+import { DIMS, fromSpec, levelsKey, levelsOf, LIC, SRC, specDiff, toSpecYaml } from "./spec.js";
 import {
   $,
   assetPill,
@@ -92,6 +92,9 @@ const C = {
   stagedGeom: false,
 };
 
+// ---- a spec opened from its own page: Edit (Plan saves to that spec) or Clone (Plan makes a new one)
+let FROM = null; // { subject, edit, lost: what the spec holds that the controls cannot say }
+
 // ---- creating the buffer: its spec is posted to the service, which runs it
 function createBuffer(container, yaml, blocker) {
   // built once and kept: what a person typed into the box survives the page's re-renders
@@ -117,11 +120,17 @@ function createBuffer(container, yaml, blocker) {
           run.disabled = true;
           status.textContent = "planning…";
           try {
-            const action = await api("/specs", {
-              method: "POST",
-              headers: JSON_HEADERS,
-              body: JSON.stringify({ spec: area.value, action: "go", plan_first: true, key: newKey() }),
-            });
+            const edited = FROM?.edit ? FROM.subject : null; // its revision: refused if the spec moved meanwhile
+            const go = { spec: area.value, action: "go", plan_first: true, key: newKey() };
+            const action = edited
+              ? await api(`/specs/${encodeURIComponent(edited.key)}/actions`, {
+                  method: "POST",
+                  headers: JSON_HEADERS,
+                  body: JSON.stringify({ ...go, revision: edited.revision }),
+                })
+              : await api("/specs", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(go) });
+            FROM = null;
+            delete area.dataset.edited;
             location.hash = "#find/" + action.number;
           } catch (e) {
             status.textContent = "";
@@ -159,7 +168,7 @@ function createBuffer(container, yaml, blocker) {
         el(
           "div",
           { class: "small" },
-          "The spec the controls describe; edit it here if you need what they do not offer. Plan saves it under its name and starts a round, which stops at its plan: Run on the spec's page starts the jobs.",
+          "The spec the controls describe; edit it here if you need what they do not offer. Plan saves it as a new spec, or to the spec being edited, and starts a round, which stops at its plan: Run on the spec's page starts the jobs.",
         ),
         area,
         el("div", { class: "actions" }, run, reset, status),
@@ -344,6 +353,39 @@ export function bindControls() {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   });
 }
+// A spec opened from its page: New buffer opens with the controls set from it. With `edit`, Plan saves to that spec
+// (the service refuses once it has built a buffer); without, Plan makes a new spec. What the spec holds that the
+// controls cannot say is found by parsing the spec the controls write for it: then its own text stays in the box.
+const parseSpec = async text =>
+  (await api("/specs/parse", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: text }) })).spec;
+export async function designFrom(subject, edit) {
+  const text = subject.data?.spec || "";
+  let parsed;
+  try {
+    parsed = await parseSpec(text);
+  } catch (e) {
+    banner(`The spec cannot be opened in New buffer: ${e.message}`);
+    return;
+  }
+  Object.assign(C, fromSpec(parsed), { preparedOnly: false, rawCached: false, stagedGeom: false });
+  SHOW.forEach(show => show());
+  let lost;
+  try {
+    lost = specDiff(parsed, await parseSpec(toSpecYaml(C, parsed.catalog.ref, parsed.catalog.repo)));
+  } catch {
+    lost = ["its sampling and splits"]; // the controls' own spec is refused: they cannot hold this one at all
+  }
+  FROM = { subject, edit, lost };
+  location.hash = "#buffers/new";
+  renderActions(); // the box exists from here on
+  renderPlanMessages(); // says what is open, before the plan answers
+  const area = $("bufferIssue").querySelector("textarea");
+  if (lost.length) {
+    area.value = text;
+    area.dataset.edited = "1";
+  } else delete area.dataset.edited;
+  schedulePlan(0);
+}
 // A spec for chosen datasets: New buffer opens on one that selects exactly them, each by its record's file name
 // (a record's path ends `/<id>.yaml`), with every filter that could drop one opened. The plan there says which of
 // them are in the pool: a dataset that is not prepared, or that the patch does not fit, still stays out.
@@ -397,6 +439,35 @@ function renderActions() {
 function renderPlanMessages() {
   const box = $("planMsgs");
   box.replaceChildren();
+  if (FROM) {
+    const { subject, edit, lost } = FROM,
+      named = `${subject.name || subject.key} (#${subject.number})`;
+    box.append(
+      el(
+        "div",
+        { class: "notice" },
+        edit ? `Editing ${named}: Plan saves to it. ` : `A copy of ${named}: Plan makes a new spec. `,
+        lost.length
+          ? `It holds what the controls do not offer (${lost.join(", ")}), so its full text is in the Create buffer box and Plan runs that text; the numbers here follow the controls. `
+          : "",
+        edit
+          ? el(
+              "button",
+              {
+                type: "button",
+                class: "btn",
+                title: "keep the controls as they are; Plan then makes a new spec",
+                onclick: () => {
+                  FROM = null;
+                  renderPlanMessages();
+                },
+              },
+              "Stop editing",
+            )
+          : "",
+      ),
+    );
+  }
   const e = S.planError;
   if (e)
     box.append(

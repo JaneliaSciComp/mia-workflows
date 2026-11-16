@@ -688,6 +688,14 @@ class Ledger:
             found = self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))
         return found[0] if found else None
 
+    def spec_has_buffer(self, number: int) -> bool:
+        """Whether a round of the buffer spec with this number has created its buffer (ids are `i<number>-e<go>`)."""
+        with self._lock:
+            return (
+                self._db.execute("SELECT 1 FROM buffers WHERE id LIKE ? LIMIT 1", (f"i{number}-e%",)).fetchone()
+                is not None
+            )
+
     def set_subject_data(self, kind: str, number: int, data: dict) -> dict | None:
         """Replace what the subject carries (a buffer spec's text); None when there is no such subject."""
         return self._set_subject(kind, number, "data", json.dumps(data))

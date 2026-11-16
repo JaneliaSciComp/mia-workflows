@@ -97,3 +97,43 @@ export function toPrepYaml(records, ref, repo) {
     "",
   ].join("\n");
 }
+
+// ---- a spec opened in the designer (Clone, Edit)
+// The controls' values for a spec as the service parsed it (POST /specs/parse).
+export function fromSpec(s) {
+  const where = s.select.where,
+    patch = s.sampling.patch,
+    crops = s.sampling.crops;
+  return {
+    name: s.name,
+    paths: s.select.paths.join(" "),
+    dims: new Set(where.dims.in || DIMS), // `any`, or a filter the chips cannot say: every one
+    lic: new Set(where.license.in),
+    allowUnknown: where.license.allow_unknown,
+    annRequired: where.annotations.required,
+    sources: new Set(where.annotations.source.in || SRC),
+    minVox: where.min_size_voxels,
+    patch: patch["2D"].y,
+    patchZ: (patch["3D"] || patch["3D+t"])?.z || 32,
+    level: Math.max(...s.sampling.levels),
+    dedup: s.select.dedup.by.includes("doi"),
+    T: s.sampling.weighting.temperature,
+    cropsTrain: crops.train,
+    cropsVal: crops.val,
+    cropsTest: crops.test,
+    maxCrops: s.sampling.max_crops_per_dataset,
+    holdout: s.splits.holdout_ids.join(" "),
+  };
+}
+// Where two parsed specs differ, as dotted paths: a spec against the one the controls write for it names what the
+// controls cannot hold. A list of words is compared as a set, except `over`, whose order is the weighting's.
+export function specDiff(a, b, path = "") {
+  const plain = v => v && typeof v === "object" && !Array.isArray(v);
+  if (plain(a) && plain(b))
+    return [...new Set([...Object.keys(a), ...Object.keys(b)])].flatMap(key =>
+      specDiff(a[key], b[key], path ? `${path}.${key}` : key),
+    );
+  const words = v =>
+    Array.isArray(v) && !path.endsWith(".over") && v.every(x => typeof x === "string") ? [...v].sort() : v;
+  return JSON.stringify(words(a)) === JSON.stringify(words(b)) ? [] : [path];
+}

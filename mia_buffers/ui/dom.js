@@ -359,7 +359,7 @@ export function lifecycle(line, stage, history, busy) {
 export const VERDICT_KIND = { approve: "pool", reject: "warn", escalate: "" };
 
 // ---- addresses: a subject's own page by kind, and the view and tab its address belongs to
-export const SUBJECT_VIEWS = { datasets: "dataset", specs: "buffer", requests: "prep" }; // #datasets/<record>, #specs/<name>, #requests/<key>
+export const SUBJECT_VIEWS = { datasets: "dataset", specs: "buffer", requests: "prep" }; // #datasets/<record>, #specs/<key>, #requests/<key>
 export const SUBJECT_TAB = { datasets: "datasets", specs: "buffers", requests: "preparation" };
 export const SUBJECT_HASH = {
   dataset: key => "#datasets/" + encodeURIComponent(key),

@@ -26,10 +26,10 @@ def request_page(cfg: Config) -> Callable[[dict], str]:
 
 def buffer_issue(cfg: Config) -> Describe:
     """A buffer spec's issue: titled by the spec's name, as the issues opened by hand were. The spec itself is in
-    the comment of each `go`, since every run may carry an edited one."""
+    the comment of each `go`, since a run before the spec's first buffer may carry an edited one."""
 
     async def describe(subject: dict) -> tuple[str, str, list[str]]:
-        name, page = subject["key"], spec_page(cfg)(subject)
+        name, page = (subject.get("data") or {}).get("name") or subject["key"], spec_page(cfg)(subject)
         body = "\n".join(
             [
                 cfg.marker(f"subject buffer {subject['number']}"),

@@ -67,7 +67,7 @@ export function viewBuffers(id, refresh) {
         dir: "desc",
         empty: "No spec yet: start with New buffer.",
         cols: [
-          { key: "key", label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.key) },
+          { key: "key", label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.name || x.key) },
           { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
           { key: "status", label: "stage", cell: x => stagePill(x.stage) },
           {
@@ -271,7 +271,7 @@ async function viewBuffer(root, id, refresh) {
                   href: SUBJECT_HASH.buffer(spec.key),
                   title: "the spec this buffer was built from: its buttons and its timeline",
                 },
-                spec.key,
+                spec.name || spec.key,
               ),
             )
           : null,
@@ -357,7 +357,10 @@ async function viewBuffer(root, id, refresh) {
           "What this buffer was built with, and what it serves.",
           status
             ? kv([
-                ["spec", spec ? el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.key) : cfg.spec_name],
+                [
+                  "spec",
+                  spec ? el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.name || spec.key) : cfg.spec_name,
+                ],
                 ["spec hash", code(cfg.spec_hash, 12)],
                 ["catalog commit", code(cfg.catalog_ref, 12)],
                 ["pyramid levels", (cfg.levels || []).join(", ")],

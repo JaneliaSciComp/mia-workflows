@@ -40,3 +40,7 @@ async def test_a_spec_and_a_request_created_on_the_page_get_their_issue(tmp_path
     assert [label["name"] for label in gh.issues[opened["buffer"]]["labels"]] == ["buffer:planning"]
     assert [label["name"] for label in gh.issues[opened["prep"]]["labels"]] == ["prep:requested"]
     assert await mirror.mirror("buffer", spec["number"]) == 0 and len(gh.created) == 2  # found again, not reopened
+    twin = ledger.create_subject("buffer", None, data={"spec": "name: EM pool / v2\n", "name": "EM pool / v2"})
+    registry.append_entry("buffer", twin["number"], body="planning\n<!-- p -->", marker="<!-- p -->", stage="planning")
+    assert await mirror.mirror("buffer", twin["number"]) == 1
+    assert gh.created[-1][0] == "EM pool / v2"  # a second spec of the name: titled by the name, not by its key

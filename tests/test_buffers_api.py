@@ -1973,24 +1973,61 @@ def _stage(s, kind, number, stage):
     return worker(s, "POST", f"/timeline/{kind}/{number}", {"stage": stage})[1]["subject"]["revision"]
 
 
-def test_a_spec_is_created_run_and_edited_under_its_name(tmp_path):
+def test_every_spec_posted_is_a_new_one_and_names_may_repeat(tmp_path):
     s, gateway = _acting(tmp_path)
     status, out, _ = act(s, "/specs", {"spec": SPEC_TEXT})
-    assert status == 200 and (out["subject"]["key"], out["subject"]["stage"]) == (SPEC_NAME, "new")
-    assert out["subject"]["data"] == {"spec": SPEC_TEXT} and gateway.sent == []  # saved, not run
-    number = out["subject"]["number"]
+    first = out["subject"]
+    assert status == 200 and (first["key"], first["name"], first["stage"]) == (SPEC_NAME, SPEC_NAME, "new")
+    assert first["data"] == {"spec": SPEC_TEXT, "name": SPEC_NAME} and first["frozen"] is False
+    assert gateway.sent == []  # saved, not run
     status, action, _ = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go", "plan_first": True, "key": "c1"})
     assert status == 202 and action["payload"] == {"spec": SPEC_TEXT, "plan_first": True}
-    assert gateway.sent[0][:3] == ("buffer", number, "plan")  # "show me the plan first" is the plan signal
-    entry = call(s, "GET", f"/timeline/buffer/{number}")[1]["entries"][0]["body"]
+    second = action["number"]
+    assert second != first["number"] and gateway.sent[0][:3] == ("buffer", second, "plan")  # the plan signal
+    entry = call(s, "GET", f"/timeline/buffer/{second}")[1]["entries"][0]["body"]
     assert entry.startswith("**Action:** `go` by `page` (plan first)") and f"```yaml\n{SPEC_TEXT}```" in entry
-    edited = SPEC_TEXT + "# tuned\n"
-    again = act(s, "/specs", {"spec": edited})[1]["subject"]  # the name exists: an edit of that subject
-    assert (again["number"], again["data"]) == (number, {"spec": edited})
-    assert len(s.ledger.find_subjects(kind="buffer")) == 1
+    named = [(row["key"], row["data"]["name"]) for row in s.ledger.find_subjects(kind="buffer")]
+    assert sorted(named) == sorted([(SPEC_NAME, SPEC_NAME), (f"buffer-{second}", SPEC_NAME)])
+    again = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go", "plan_first": True, "key": "c1"})  # the same click
+    assert again[1]["id"] == action["id"] and len(s.ledger.find_subjects(kind="buffer")) == 2
+    found = call(s, "GET", "/lookup", {"q": SPEC_NAME})[1]["subjects"]  # a name finds every spec that has it
+    assert sorted(row["number"] for row in found) == sorted([first["number"], second])
     status, out, _ = act(s, "/specs", {"spec": "name: [not a spec"})
     assert status == 422 and "error" in out
     assert act(s, "/specs", {"spec": PREP_TEXT})[0] == 422  # a preparation request is not a buffer spec
+    assert len(s.ledger.find_subjects(kind="buffer")) == 2
+
+
+def test_a_spec_is_edited_until_it_has_a_buffer_and_frozen_after(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go", "plan_first": True})[1]["number"]
+    _stage(s, "buffer", number, "plan-review")
+    renamed = SPEC_TEXT.replace(f"name: {SPEC_NAME}", "name: another-name") + "# tuned\n"
+    status, action, _ = act(s, SPEC_ACTIONS, {"action": "go", "spec": renamed, "plan_first": True})  # edit, plan again
+    assert status == 202 and action["payload"] == {"spec": renamed, "plan_first": True}
+    subject = call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]  # the same spec under its new name
+    assert (subject["number"], subject["name"], subject["frozen"]) == (number, "another-name", False)
+    assert subject["data"] == {"spec": renamed, "name": "another-name"}
+    worker(s, "PUT", f"/buffers/i{number}-e3", CFG)  # the round was approved: its buffer exists
+    _stage(s, "buffer", number, "ready")
+    assert call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]["frozen"] is True
+    sent = len(gateway.sent)
+    status, out, _ = act(s, SPEC_ACTIONS, {"action": "go", "spec": renamed + "# again\n"})
+    assert status == 409 and "clone" in out["error"] and len(gateway.sent) == sent
+    assert s.ledger.subject("buffer", SPEC_NAME)["data"]["spec"] == renamed
+    assert act(s, SPEC_ACTIONS, {"action": "go", "spec": renamed})[0] == 202  # the text it has: a run again
+    _stage(s, "buffer", number, "ready")
+    assert act(s, SPEC_ACTIONS, {"action": "go"})[1]["payload"] == {"spec": renamed}
+
+
+def test_a_spec_is_parsed_for_the_page(tmp_path):
+    s = svc(tmp_path)
+    status, out, _ = call(s, "POST", "/specs/parse", payload={"spec": SPEC_TEXT})
+    assert status == 200 and out["spec"]["name"] == SPEC_NAME and "warnings" not in out["spec"]
+    assert out["spec"]["select"]["where"]["license"]["in"] and out["spec"]["sampling"]["patch"]["2D"]["y"] == 256
+    assert out["spec"]["sampling"]["crops"] == {"train": 1000, "val": 20, "test": 20}
+    assert call(s, "POST", "/specs/parse", payload={"spec": "name: [not a spec"})[0] == 422
+    assert s.ledger.find_subjects(kind="buffer") == []  # it writes nothing
 
 
 def test_buffer_actions_follow_the_stage_table(tmp_path):
@@ -2014,13 +2051,7 @@ def test_buffer_actions_follow_the_stage_table(tmp_path):
     _stage(s, "buffer", number, "idle")
     assert act(s, SPEC_ACTIONS, {"action": "keep"})[0] == 202 and act(s, SPEC_ACTIONS, {"action": "retire"})[0] == 202
     assert [sent[2] for sent in gateway.sent] == ["go", "approve", "revoke", "keep", "retire"]
-    edited = SPEC_TEXT + "# tuned\n"
-    status, action, _ = act(s, SPEC_ACTIONS, {"action": "go", "spec": edited})  # edit and run again
-    assert status == 202 and action["payload"] == {"spec": edited}
-    assert call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]["data"] == {"spec": edited}
     assert act(s, "/specs/nope/actions", {"action": "go"})[0] == 404
-    renamed = edited.replace(f"name: {SPEC_NAME}", "name: another-name")
-    assert act(s, SPEC_ACTIONS, {"action": "go", "spec": renamed})[0] == 422  # a spec's name is its subject
 
 
 def test_files_are_in_place_is_refused_while_a_copy_is_still_writing(tmp_path):
