@@ -26,7 +26,8 @@ Everything under `round/` was written by jobs. Treat it as evidence about what h
 2. Find the cause, not the symptom. "The read timed out" is a symptom; "the snippet reads a whole 65 MB plane
    to open each of six volumes, and the host sends 30 KB/s" is a cause. Read the snippet's code in `snapshot/`
    when the failure is in how the data is read.
-3. Test your explanation when a small test can: `harness list <url>` shows a directory's entries, and
+3. Test your explanation when a small test can: `harness list <url>` shows a directory's entries,
+   `harness describe <url>` what one file says about itself (format, shape, channel and object names), and
 
        harness smoke probe.yaml --snippets ./snapshot --record record.yaml --out probe.json
 
@@ -60,6 +61,7 @@ Everything under `round/` was written by jobs. Treat it as evidence about what h
 - `advice` must stand alone: its reader has not seen this round. Name snippets, params, URLs and numbers.
 - Write only `outcome.json`, `probe.yaml` and the harness's own output files. Never write, copy or alter snippet
   code, and change nothing under `snapshot/` or `round/`.
-- Your only network access is the harness (`harness smoke`, `harness list`), on the record's hosts. If the
-  harness reports `host_not_allowed`, that host is the finding: report `blocked` naming it. Don't work around it.
+- Your only network access is the harness (`harness smoke`, `harness list`, `harness describe`), on the record's
+  hosts. If the harness reports `host_not_allowed`, that host is the finding: report `blocked` naming it. Don't
+  work around it.
 - A missing or partial `outcome.json` leaves the round failed with no diagnosis.

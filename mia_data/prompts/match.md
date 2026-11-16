@@ -26,7 +26,24 @@ All in the current directory:
    glob URL, `<dir url>/::<pattern>` (`fnmatch` syntax, e.g. `.../TIFs/::*.tif`), with a snippet whose
    `snippet.yaml` or README takes glob URLs. `harness list <dir url>/::<pattern>` prints the files the glob
    stands for.
-3. Write `binding.yaml` in the format SPEC.md gives, with `record: ${record}`,
+3. What the record leaves open, a file may state. Before you report `blocked` on such a point, ask the file:
+
+       harness describe <url>
+
+   prints what one file says about itself (the same addresses as `harness list`): a TIFF's or OME-TIFF's shape,
+   axes, colormap and channel names, an MRC header, an HDF5 or Zarr tree with its attributes, a PNG's palette,
+   and for an IMOD model every object's number and name. And
+
+       harness describe --binding binding.yaml --snippets ./snapshot --record record.yaml
+
+   measures the arrays of a draft binding on a few planes: per raw channel its intensity percentiles, per label
+   plane the fraction that is nonzero, how many ids it holds and how many connected components each id has. It
+   reports numbers and decides nothing; you read them. A label of `encoding: unknown` whose ids each have one
+   component on every measured plane holds instance ids; a few ids with many components each are class ids;
+   mixed numbers, or planes that are all empty (raise `--planes`), settle nothing, and the point stays `blocked`.
+   A placeholder such as `C:0` is not a name. What you take from either command goes into `reasons` with the
+   numbers or names it gave. Both read real data over the network: describe one file of a set, not each.
+4. Write `binding.yaml` in the format SPEC.md gives, with `record: ${record}`,
    `record_commit: ${record_commit}` and `snippets_commit: ${snippets_commit}`. List every raw array under
    `raw` and every label array under `labels`, each with a `snippet` from `catalog/`, its `urls` (https, from
    `record.yaml`) and its `params`. Labels also need `pairs_with`, `label_key` and `segmentation_type`.
@@ -42,13 +59,13 @@ All in the current directory:
    the key folds it into `semantic`). So manually drawn cell instance masks are `manual_gt-cell-instance`, and a
    binary nuclear mask of unknown provenance is `unknown-nucleus-semantic`. A class you cannot tell from the
    inputs is `blocked`; an unlisted provenance is not, it is `unknown`.
-4. Test it:
+5. Test it:
 
        harness smoke binding.yaml --snippets ./snapshot --record record.yaml --out smoke.json
 
    Read `smoke.json`. If it has errors, change the snippet choice or the params and run it again. You may try
    several snippets and params.
-5. When you are done, write `outcome.json` with exactly one of these, then finish with a short summary:
+6. When you are done, write `outcome.json` with exactly one of these, then finish with a short summary:
 
    - The binding passes smoke:
 
@@ -91,6 +108,6 @@ All in the current directory:
   the data, report `needs_snippet`.
 - If `smoke.json` reports `host_not_allowed`, report `blocked` naming that host (and the redirect chain). Don't
   work around it.
-- Your only network access is the harness (`harness smoke`, `harness list`), on the record's hosts; you have no
-  GitHub access. Don't try to download files yourself; the harness reads the data.
+- Your only network access is the harness (`harness smoke`, `harness list`, `harness describe`), on the record's
+  hosts; you have no GitHub access. Don't try to download files yourself; the harness reads the data.
 - A missing or partial `outcome.json` counts as `failed`.

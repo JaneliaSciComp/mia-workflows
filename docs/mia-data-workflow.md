@@ -104,8 +104,10 @@ The workflow sets the stage `matching` and submits the **match job**: a Claude a
 sandbox with the record, its downloads entry when the catalog has one, a read-only snapshot of mia-snippets at
 a pinned commit and the harness CLI. It picks a
 snippet for each raw and label array and writes a **binding**, a small YAML saying which files to read with which
-snippet and parameters, with reasons. It may run `harness smoke` to try bindings and `harness list` to see a
-directory URL's files, but may not change snippet code. The job runs Claude Code restricted to five built-in
+snippet and parameters, with reasons. It may run `harness smoke` to try bindings, `harness list` to see a
+directory URL's files and `harness describe` to see what a file says about itself (channel and object names,
+headers, a palette) or to measure a draft binding's arrays (ids and connected components per label plane), but may
+not change snippet code. The job runs Claude Code restricted to five built-in
 tools, with no settings files and no MCP servers; the sandbox mounts are the other half of that restriction. Its
 outcome is `matched`, `needs_snippet`, `blocked` or `failed`. The agent chooses between the last two by what a
 person would have to do: `blocked` when something has to be decided or changed before any run can bind the dataset,
@@ -218,7 +220,7 @@ Claude agent with the match agent's tools, mounts and budget. Its workspace hold
 `failure.md` (what stopped the round and the limits its jobs ran under), the round's checked binding when it got
 that far, and `round/<job>/` with what each job left: its reports, an agent's `claude.json`, its exit code and the
 end of its stdout and stderr, each read as untrusted and cut to size. The agent finds the cause, may test it with
-small `harness smoke` and `harness list` probes, and writes one of two outcomes:
+small `harness smoke`, `harness list` and `harness describe` probes, and writes one of two outcomes:
 
 - `rerun`: a new round can pass. The worker posts the diagnosis and sends the dataset a `go` as `debugger` through
   buffer-api (the debugged round's root, the advice as its note). That go starts a round like any other; its match
