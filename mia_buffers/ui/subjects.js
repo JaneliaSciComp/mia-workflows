@@ -22,6 +22,7 @@ import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
 import { actionBar, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
 import { servableText, stageOf } from "./buffers.js";
 import { datasetCards } from "./datasets.js";
+import { designFrom } from "./designer.js";
 
 // ---- a subject's page
 let subjectTurn = 0; // the newest load of a subject's page: one that started earlier never paints over it
@@ -126,35 +127,43 @@ async function specControls(subject) {
       ),
     );
   }
-  if (subject.actions.includes("go")) {
-    const area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML" });
-    area.value = subject.data?.spec || "";
-    box.append(
-      card(
-        subject.stage === "new" ? "Plan" : "Edit and plan again",
-        "The spec as it was last saved. Plan starts a new round with this text, which stops at its plan until you press Run; the buffer it builds gets a new id, and training jobs keep the buffer they connected to.",
-        area,
-        el(
-          "div",
-          { class: "actions" },
-          el(
-            "button",
-            {
-              type: "button",
-              class: "btn",
-              title: BUTTON_HELP.plan,
-              disabled: !!subject.asked,
-              onclick: e => {
-                e.target.disabled = true;
-                sendAction(subject, { action: "go", spec: area.value, plan_first: true, key: newKey() }, again);
+  const area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML" });
+  area.readOnly = true;
+  area.value = subject.data?.spec || "";
+  const canPlan = subject.actions.includes("go"),
+    open = (edit, label, title) =>
+      el("button", { type: "button", class: "btn", title, onclick: () => designFrom(subject, edit) }, label);
+  box.append(
+    card(
+      "Spec",
+      subject.frozen
+        ? "This spec has built a buffer and no longer changes. Plan again runs it as it is: the round stops at its plan until you press Run, the buffer it builds gets a new id, and training jobs keep the buffer they connected to. Clone opens New buffer on a copy, which becomes a spec of its own."
+        : "A spec can change until a round of it is run. Edit opens New buffer on it, and Plan there saves to this spec; Clone opens a copy, which becomes a spec of its own.",
+      area,
+      el(
+        "div",
+        { class: "actions" },
+        canPlan
+          ? el(
+              "button",
+              {
+                type: "button",
+                class: "btn",
+                title: BUTTON_HELP.plan,
+                disabled: !!subject.asked,
+                onclick: e => {
+                  e.target.disabled = true;
+                  sendAction(subject, { action: "go", plan_first: true, key: newKey() }, again);
+                },
               },
-            },
-            subject.asked?.action === "go" ? "Plan…" : "Plan",
-          ),
-        ),
+              subject.asked?.action === "go" ? "Plan…" : subject.stage === "new" ? "Plan" : "Plan again",
+            )
+          : "",
+        canPlan && !subject.frozen ? open(true, "Edit", "open New buffer on this spec; Plan there saves to it") : "",
+        open(false, "Clone", "open New buffer on a copy of this spec; Plan there makes a new spec"),
       ),
-    );
-  }
+    ),
+  );
   box.append(
     card(
       "Buffers of this spec",
@@ -308,7 +317,7 @@ export async function viewSubject(kind, key, refresh) {
   const more = subjectLinks(subject, entries),
     row = links || (more.length ? el("div", { class: "links" }) : null);
   if (row) row.append(...more);
-  const parts = [el("h2", {}, key), row, flowRow(kind, flow)].filter(Boolean);
+  const parts = [el("h2", {}, subject.name || key), row, flowRow(kind, flow)].filter(Boolean);
   // what the newest entry says, so that nobody scrolls to the timeline to see what is going on
   const said = gist(entries.at(-1)?.body);
   if (said.text)
@@ -433,7 +442,15 @@ export async function viewFind(text) {
   }
   const list = el("ul");
   for (const s of found)
-    list.append(el("li", {}, `${s.kind} `, el("a", { href: SUBJECT_HASH[s.kind](s.key) }, s.key), ` · ${s.stage}`));
+    list.append(
+      el(
+        "li",
+        {},
+        `${s.kind} `,
+        el("a", { href: SUBJECT_HASH[s.kind](s.key) }, s.name || s.key),
+        ` · #${s.number} · ${s.stage}`,
+      ),
+    );
   // issue numbers repeat across the two repos, so a bare number can be a dataset and a buffer spec
   root.replaceChildren(
     el("h2", {}, `“${text}”`),
@@ -552,7 +569,7 @@ export function viewNeeds(arg, refresh) {
               el(
                 "div",
                 {},
-                el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.key),
+                el("a", { href: SUBJECT_HASH[a.subject.kind](a.subject.key) }, a.subject.name || a.subject.key),
                 undelivered(a.subject, [a], again),
               ),
             ),
@@ -560,7 +577,7 @@ export function viewNeeds(arg, refresh) {
       },
       cols: [
         { key: "kind", label: "what", cell: x => KIND_WORDS[x.kind] },
-        { key: "key", label: "name", cell: x => el("a", { href: SUBJECT_HASH[x.kind](x.key) }, x.key) },
+        { key: "key", label: "name", cell: x => el("a", { href: SUBJECT_HASH[x.kind](x.key) }, x.name || x.key) },
         { key: "status", label: "stage", cell: x => stagePill(x.stage) },
         { key: "updated", label: "since", cell: x => when(x.updated) },
         {

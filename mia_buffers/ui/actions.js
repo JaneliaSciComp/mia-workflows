@@ -220,7 +220,7 @@ function askNote(subject, dialog, send) {
       "form",
       { method: "dialog" },
       el("h2", { id: "askTitle" }, dialog.title),
-      el("div", { class: "mono small" }, subject.key),
+      el("div", { class: "mono small" }, subject.name || subject.key),
       el("p", { class: "small" }, dialog.about),
       dialog.cancels && subject.actions.includes("cancel") ? el("p", { class: "small" }, dialog.cancels) : "",
       note,

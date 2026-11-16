@@ -106,6 +106,7 @@ def test_the_pages_buttons_call_action_routes_and_it_follows_the_stream() -> Non
     requested = requested_paths()
     for path in ("/datasets/x/actions", "/specs", "/specs/x/actions", "/prep", "/prep/x/actions"):
         assert ("POST", path) in requested and resolve("POST", path) == "action", path
+    assert ("POST", "/specs/parse") in requested and resolve("POST", "/specs/parse") == "read"  # it writes nothing
     for path in ("/needs", "/subjects/buffer", "/subjects/prep"):
         assert ("GET", path) in requested, path
     assert not has("issues/new")  # nothing is started by opening a GitHub issue
@@ -943,6 +944,47 @@ def test_the_yaml_the_page_writes_is_what_the_service_reads() -> None:
         read = load_spec_text(written)
         assert (read.catalog.repo, read.name) == (text, f"n {text} n"), text
     assert load_prep_text(prep_text).records == [text for text in AWKWARD if text]
+
+
+def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> None:
+    """Clone and Edit open New buffer on a spec: the controls take their values from the spec as the service parsed
+    it (fromSpec), and a spec the controls write comes back from them unchanged. For a spec written by hand,
+    specDiff names what the controls cannot say, so the page keeps its text."""
+    from mia_buffers.spec import load_spec_text
+
+    def parsed(text: str) -> dict:
+        return load_spec_text(text).model_dump(mode="json", by_alias=True, exclude={"warnings"})
+
+    ref, controls = "a" * 40, {
+        "name": "em pool", "paths": "datasets/2D/** */u937.yaml", "dims": ["2D", "3D"], "lic": ["CC0-1.0", "MIT"],
+        "allowUnknown": True, "annRequired": True, "sources": ["manual", "proofread"], "minVox": 1000000,
+        "patch": 128, "level": 8, "patchZ": 16, "dedup": False, "T": 0.25,
+        "cropsTrain": 5000, "cropsVal": 300, "cropsTest": 200, "maxCrops": 64, "holdout": "u937 bcss",
+    }  # fmt: skip
+    sets = "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources) });\n"
+    lists = "const listed = c => ({ ...c, dims: [...c.dims], lic: [...c.lic], sources: [...c.sources] });\n"
+    written = run_js(
+        sets + "print(toSpecYaml(filled(input.controls), input.ref, 'o/catalog'));",
+        {"spec.js": "toSpecYaml"},
+        {"controls": controls, "ref": ref},
+    )
+    by_hand = (Path(__file__).parent / "fixtures" / "buffers" / "spec.yaml").read_text()
+    back, same, lost = run_js(
+        sets + lists + "const again = fromSpec(input.written), hand = fromSpec(input.hand);\n"
+        "print([listed(again), specDiff(input.written, input.rewritten),\n"
+        "  [listed(hand), toSpecYaml(hand, input.hand.catalog.ref, input.hand.catalog.repo)]]);",
+        {"spec.js": "toSpecYaml, fromSpec, specDiff"},
+        {"written": parsed(written), "rewritten": parsed(written), "hand": parsed(by_hand)},
+    )
+    assert back == controls and same == []
+    hand_controls, hand_text = lost
+    assert hand_controls["name"] == "microscopy-foundation-pretrain" and hand_controls["level"] == 4
+    differs = run_js(
+        "print(specDiff(input.hand, input.rewritten));",
+        {"spec.js": "specDiff"},
+        {"hand": parsed(by_hand), "rewritten": parsed(hand_text)},
+    )
+    assert "sampling.patch.c" in differs and "name" not in differs and "select.where.license.in" not in differs
 
 
 def test_a_datasets_page_lists_every_address_of_its_catalog_record_in_its_links_card() -> None:
