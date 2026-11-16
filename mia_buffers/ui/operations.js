@@ -434,20 +434,17 @@ export async function viewCleaner() {
   const cases = listed?.cases || [];
   const inState = (...states) => cases.filter(c => states.includes(c.state));
   const findings = report?.findings || [];
-  const modes = {
-    off: "It is off.",
-    report: "It reports only: each case says what would be done, and nothing is done.",
-    act: "It acts: each case is carried out step by step.",
-  };
+  // act mode is the normal one and goes unsaid
+  const modes = { off: " The cleaner is off.", report: " Report mode: cases are listed and nothing is done." };
   root.replaceChildren(
     card(
-      "The installation",
+      "System status",
       report
-        ? `Last sweep ${ago(report.at)}. ${modes[report.mode] || ""} While something is listed here, the subjects behind it are left alone.`
+        ? `Last checked ${ago(report.at)}.${modes[report.mode] || ""}${findings.length ? " The subjects behind a problem listed here are left alone until it clears." : ""}`
         : "The cleaner has not reported a sweep yet.",
       findings.length
         ? el("div", {}, ...findings.map(finding => el("div", { class: "notice" }, plain(finding.text))))
-        : el("div", { class: "empty" }, "Nothing is wrong with the installation."),
+        : el("div", { class: "empty" }, "All services operating, no problems found."),
       report?.errors?.length ? kv([["errors of the last sweep", list(report.errors)]]) : null,
     ),
     card(
