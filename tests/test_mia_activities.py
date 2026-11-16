@@ -1143,6 +1143,28 @@ async def test_read_judge_applies_the_suspect_cap(tmp_path):
     assert out.effective == "reject" and "more than the cap of 2" in out.comment
 
 
+async def test_read_judge_at_an_active_gate_grants_on_an_approve_and_on_nothing_else(tmp_path, token_server):  # noqa: F811
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    t.a.registry = Registry(token_server, "t")
+    cw, vw, verified = _judged_round(t)
+
+    async def judged(tag, mode, findings=()):
+        ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified, 1, tag))
+        _claude_json(ws, {"verdict": "approve", "confidence": 0.9, "findings": list(findings), "summary": "fine"})
+        return await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:{tag}", mode)
+
+    t.a.cfg.judge.crops.mode = "shadow"
+    out = await judged("s", "shadow")
+    assert not out.authorized and "Shadow mode" in out.comment
+    t.a.cfg.judge.crops.mode = "active"
+    out = await judged("a", "active")
+    assert out.authorized and "Approved automatically" in out.comment
+    assert t.a.registry.dataset("rec-1")["assessment"] == out.assessment  # the row names it, as a person's approve
+    capped = await judged("c", "active", [{"item": f"c{i}", "severity": "suspect", "note": "dim"} for i in range(3)])
+    assert capped.effective == "reject" and not capped.authorized and "A person's verdict decides." in capped.comment
+
+
 # --- with buffer-api: a round writes the timeline, the mirror writes the issue (spec webapp-actions §6, §7) ---
 
 

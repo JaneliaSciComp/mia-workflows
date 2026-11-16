@@ -150,8 +150,9 @@ cleaner:
 # galleries, a PR diff) and answers approve / reject / escalate. A `model` other than the authors' agent.model is a
 # precaution, not a rule.
 # Each gate has a mode: `off` (no judge runs), `shadow` (the verdict is recorded beside the person's and decides
-# nothing; the Decisions tab shows the agreement), `active` (the verdict authorizes). A gate goes active only after
-# its shadow numbers say so. `min_confidence`: under it the judge abstains and a human decides.
+# nothing; the Decisions tab shows the agreement), `active` (`crops` only: the judge's approve saves the set or has
+# the snippet PR merged with no person; its reject or escalate waits for one). A gate goes active only after its
+# shadow numbers say so. `min_confidence`: under it the judge abstains and a human decides.
 judge:
   model: opus
   max_budget_usd: 2

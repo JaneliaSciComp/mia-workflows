@@ -30,7 +30,10 @@ def render_judge_comment(
     policy_version: int,
     cost_usd: float | None,
     mode: str,
+    authorized: bool = False,
 ) -> str:
+    """The judge's timeline entry. Its last line says what the verdict does: nothing in shadow, the subject's
+    authorization when `authorized` (an active gate's approve the policy took), else a person's verdict decides."""
     head = f"**{JUDGE_NAMES.get(gate, gate)}:** `{effective}`"
     if effective != verdict:
         head += f" (the judge said `{verdict}`: {_cell(why)})"
@@ -54,8 +57,8 @@ def render_judge_comment(
     lines += [provenance, ""]
     if mode == "shadow":
         lines.append(SHADOW_LINE)
-    elif effective == "approve":
-        lines.append(f"Approved automatically under policy v{policy_version}; a revoke label withdraws it at any time.")
+    elif authorized:
+        lines.append(f"Approved automatically under policy v{policy_version}; a revoke withdraws it at any time.")
     else:
-        lines.append(f"Decided automatically under policy v{policy_version}.")
+        lines.append("A person's verdict decides.")
     return "\n".join(lines) + "\n"

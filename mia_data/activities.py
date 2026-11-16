@@ -602,7 +602,8 @@ class Activities:
     ) -> JudgeResult:
         """Read the judge's claude.json, apply policy (serious issues only, the confidence floor), write the
         assessment `by: judge` to the registry and `verdict.json` beside the evidence, and render the comment.
-        A missing or unreadable verdict is an `escalate` on record, never an error: shadow must not block."""
+        A missing or unreadable verdict is an `escalate` on record, never an error: shadow must not block.
+        At an active gate an approve the policy takes is `authorized` (see _granted)."""
         path = self._job_workspace(issue, round_id, workspace)
         text, cost, model = read_claude_json(path)
         try:
@@ -639,6 +640,7 @@ class Activities:
             best_effort, lambda: registry.put_assessment(row), f"{round_id}: judge assessment", log
         )
         assessment_id = row["id"] if written else ""
+        granted = written and mode == "active" and await asyncio.to_thread(self._granted, row, round_id)
         comment = render_judge_comment(
             gate,
             verdict.verdict,
@@ -652,12 +654,33 @@ class Activities:
             POLICY_VERSION,
             cost,
             mode,
+            granted,
         )
         if jobs := render_jobs(self._job_links([str(path)])):  # the entry that reports a job links its record
             comment += f"\n\n{jobs}"
         return JudgeResult(
-            verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings
+            verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings, granted
         )
+
+    def _granted(self, row: dict, round_id: str) -> bool:
+        """Whether the judge's assessment `row`, already in the registry, authorizes its subject: an approve, at a
+        gate whose mode is active, that `authorized()` accepts over everything written about the subject. The
+        dataset row then names it, as it names a person's approve. A registry that does not answer grants
+        nothing, and a person decides."""
+        gates = self.cfg.judge.enabled_gates()
+        if row["verdict"] != "approve" or row["gate"] not in gates:
+            return False
+        registry = self.registry
+        try:
+            rows = registry.assessments(subject_kind=row["subject"]["kind"], subject_ref=row["subject"]["ref"])
+        except RegistryError as error:
+            log.warning("%s: the judge's approve grants nothing, the registry did not answer: %s", round_id, error)
+            return False
+        if not authorized(rows, enabled_gates=gates).ok:
+            return False
+        record = self._pins(round_id).record
+        best_effort(lambda: registry.put_dataset(record, assessment=row["id"]), f"{record}: assessment", log)
+        return True
 
     # --- the operator's switches: the pause and the root budget (spec autonomous-gates §8) -----------
 

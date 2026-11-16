@@ -974,7 +974,11 @@ class MiaDataDataset:
             return await self._finish("failed", "; ".join(["the crops failed; nothing is saved", *failed_jobs]))
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
-        await self._judge_crops(test)  # in shadow: after the gate opens, so a human verdict is only queued, never held
+        # after the gate opens, so a person's verdict is only queued, never held
+        if self._judge_grants(await self._judge_crops(test)):
+            test.approved_at = workflow.now().isoformat()
+            self._found("Approved by the crop judge.")
+            return await self._publish_set()
         await self._from_review()
 
     async def _smoke(self, match: MatchResult, no_size_verdict: bool) -> bool:
@@ -1125,6 +1129,12 @@ class MiaDataDataset:
         ) + result.comment
         await self._act("comment", state.issue, body, marker)
         return result
+
+    def _judge_grants(self, judged: JudgeResult | None) -> bool:
+        """Whether the crop judge's verdict approves the set under review with no person: the gate is active and
+        the policy took its approve (`authorized`), and nobody's verdict, go or revoke came while it looked. A
+        reject, an escalate and a judge that did not run leave the set to a person."""
+        return bool(judged and judged.authorized and not self._labels())
 
     async def _assess(self, verdict: str, event: LabelEvent, subject: tuple[str, str]) -> AssessmentWritten:
         """Record a human verdict as an assessment (spec autonomous-gates §5) and ask whether the subject is
@@ -1378,13 +1388,18 @@ class MiaDataDataset:
     async def _approve_pr(self, event: LabelEvent) -> None:
         """The reviewer approved the PR head's set: `/approve <head>` tells autodev to merge it. The merge wakes
         the round (_merged), which publishes these very crops when the merged snippet is the reviewed one."""
-        state, test = self.state, self.state.tests[-1]
+        test = self.state.tests[-1]
         written = await self._assess("approve", event, ("pr_head", test.sha))
         if not written.authorized:
             return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
-        test.approved_at = event.at
+        await self._pr_approved(test, event.actor, event.at)
+
+    async def _pr_approved(self, test: Test, by: str, at: str) -> None:
+        """The PR head's set is approved, by a person or by the crop judge: autodev is told to merge that head."""
+        state = self.state
+        test.approved_at = at
         await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
-        self._found(f"Approved by {event.actor}: the crops at `{test.sha}`.")
+        self._found(f"Approved by {by}: the crops at `{test.sha}`.")
         await self._stage(
             "merging", f"the crops at `{test.sha}` are approved; autodev merges the snippet PR, then they are saved"
         )
@@ -1490,12 +1505,15 @@ class MiaDataDataset:
         await self._act(
             "set_crop_status", head, "success" if test.ok else "failure", url
         )  # the head's own, current or not
-        if test.ok and current.head_sha == head and current.state == "open":
+        shown = test.ok and current.head_sha == head and current.state == "open"
+        if shown:
             await self._stage("review" if loop else "pr-ready", extra=f"**Snippet PR:** {current.url or f'#{pr.pr}'}\n")
         elif results:  # no stage follows: this head's pass ends here, and the next head starts its own
             await self._flush()
         if test.ok:
-            await self._judge_crops(test)  # after the status and the stage: the required status never waits on it
+            # after the status and the stage: the required status never waits on it
+            if self._judge_grants(await self._judge_crops(test)) and shown and loop:
+                await self._pr_approved(test, "the crop judge", workflow.now().isoformat())
         return current
 
     async def _merged(self, pr: PrUpdate) -> None:

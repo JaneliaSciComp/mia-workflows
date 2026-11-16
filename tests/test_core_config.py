@@ -211,8 +211,9 @@ def test_judge_cfg_defaults_and_enabled_gates():
     assert cfg.enabled_gates() == frozenset()
     assert JudgeCfg(crops={"mode": "shadow"}).on_gates() == frozenset({"crops"})
     assert JudgeCfg(crops={"mode": "shadow"}).enabled_gates() == frozenset()  # shadow authorizes nothing
-    with pytest.raises(ValueError, match="milestone N"):  # nothing grants on a judge yet: active would lie
-        JudgeCfg(crops={"mode": "active"})
+    assert JudgeCfg(crops={"mode": "active"}).enabled_gates() == frozenset({"crops"})
+    with pytest.raises(ValueError, match="judge.review.mode"):  # nothing grants on the review judge: it would lie
+        JudgeCfg(review={"mode": "active"})
 
 
 def test_gate_mode_takes_yamls_bare_off():

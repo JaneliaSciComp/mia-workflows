@@ -185,6 +185,13 @@ policy (`schema.effective_verdict`) turns a `reject` without a `bad` finding int
 confidence under `judge.min_confidence` into an escalate, and the result is an assessment `by: judge` with the
 evidence digest, model and prompt version. A `judge.model` other than `agent.model` is a precaution, not a rule.
 
+**An active crop judge approves, and does nothing else.** With `judge.crops.mode: active`, `read_judge` asks
+`authorized()` (with the gate enabled) about the judge's approve and returns `JudgeResult.authorized`; the round
+then goes on as it does after a person's approve (`_judge_grants` in `mia_data/workflows.py`): it saves a matched
+binding's set, or comments `/approve <head>` on the snippet PR. Anything else the judge says, and any verdict, go
+or revoke queued while it looked, leaves the set to a person. `judge.review.mode: active` is refused by the
+config: nothing grants on the review judge's verdict.
+
 **Shadow never blocks.** With `judge.<gate>.mode: shadow` the judge runs on every live round (the crop judge after
 a passing set, the review judge after a pushed head), its assessment and comment are written, and the round goes
 on to the human gate: `authorized()` ignores a judge's approve for a gate that is not `active`, and a judge job
