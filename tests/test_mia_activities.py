@@ -19,7 +19,7 @@ from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
 from mia_core.jobrecord import write_submitted
 from mia_core.registry import Registry, RegistryError
-from mia_data.activities import Activities
+from mia_data.activities import Activities, visible_snippets
 from mia_data.binding import record_gaps
 from mia_data.jobspec import lock_dir
 from mia_data.models import (
@@ -585,6 +585,25 @@ async def test_adopt_pr_binding_takes_an_example_written_in_an_earlier_round(tmp
     assert r["errors"] == []
     stored = yaml.safe_load(Path(r["path"]).read_text())
     assert (stored["record_commit"], stored["snippets_commit"]) == (REC_SHA, SNIP_SHA)
+
+
+async def test_adopt_pr_binding_takes_an_example_that_names_a_snippet_superseded_since(tmp_path):
+    """A reader's example may read some arrays with a snippet that existed when it was written and tested. A
+    snippet that supersedes that one, merged meanwhile, hides it from new matches only: the tested example is
+    adopted as it is. A withdrawn snippet is wrong, and its example is refused."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    both = {**NEW, "raw": [BINDING["raw"][0], NEW["raw"][0]]}  # one array by the older snippet, one by the reader
+    _pr_binding(t, both)
+    snapshot = t.cfg.paths.work_root / "_snapshots" / SNIP_SHA
+    (snapshot / "snippets" / "tiff-zip-member-2").mkdir()
+    (snapshot / "snippets" / "tiff-zip-member-2" / "snippet.yaml").write_text(
+        "name: tiff-zip-member-2\nsupersedes: tiff-zip-member\n"
+    )
+    assert "tiff-zip-member" not in visible_snippets(snapshot)  # the match agent is not offered it
+    assert (await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA))["errors"] == []
+    (snapshot / "WITHDRAWN.yaml").write_text("- {name: tiff-zip-member, reason: transposes yx}\n")
+    assert "unknown snippet 'tiff-zip-member'" in " ".join((await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA))["errors"])
 
 
 @pytest.mark.parametrize(

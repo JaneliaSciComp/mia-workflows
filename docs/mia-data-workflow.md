@@ -127,7 +127,9 @@ the draft binding and what failed. A second autodev deployment, `snippets`, turn
 `snippets/<name>/` and an example binding. The dataset sits in `developing` and wakes up whenever the PR changes:
 `MiaDataPoll`, a Temporal schedule, looks at the snippets repo's pull requests and signals the dataset whose PR
 moved. Every new PR head gets the round's crops (step 4), made by an untrusted job with a private cache, and a
-required `mia-data/crops` commit status on that exact commit. A head whose crops pass goes to `review` like a
+required `mia-data/crops` commit status on that exact commit. The example may read some arrays with snippets
+that are already merged; one of those that another snippet superseded while the PR was open is still accepted
+(at a head and at the merge), a withdrawn one never. A head whose crops pass goes to `review` like a
 matched binding's; one whose crops fail gets the report as a `/revise` on the PR, and autodev fixes it. When
 autodev stops instead (a failed round, its revision limit, a merge that fails), the snippets issue is labelled
 `snippets:needs-human` and the round ends `blocked`, naming the PR and quoting autodev's last comment (a merge

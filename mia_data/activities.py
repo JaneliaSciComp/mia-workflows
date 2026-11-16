@@ -215,15 +215,24 @@ def withdrawn_snippets(snapshot_dir: Path) -> dict[str, str]:
     }
 
 
-def visible_snippets(snapshot_dir: Path) -> dict[str, str]:
-    """snippet name -> its snippet.yaml text, hiding withdrawn snippets and ones another snippet supersedes."""
+def usable_snippets(snapshot_dir: Path) -> dict[str, str]:
+    """snippet name -> its snippet.yaml text, for every snippet of the snapshot that is not withdrawn: what a
+    binding that was tested may name. One that another snippet supersedes is among them."""
     root = snapshot_dir / "snippets"
-    catalog_text = {
+    withdrawn = withdrawn_snippets(snapshot_dir)
+    return {
         entry.name: text
         for entry in sorted(root.iterdir() if root.is_dir() else [])
-        if (text := read_untrusted(snapshot_dir, f"snippets/{entry.name}/snippet.yaml", 1 << 20)) is not None
+        if entry.name not in withdrawn
+        and (text := read_untrusted(snapshot_dir, f"snippets/{entry.name}/snippet.yaml", 1 << 20)) is not None
     }
-    hidden = set(withdrawn_snippets(snapshot_dir))
+
+
+def visible_snippets(snapshot_dir: Path) -> dict[str, str]:
+    """snippet name -> its snippet.yaml text, hiding withdrawn snippets and ones another snippet supersedes: what
+    a new match is offered."""
+    catalog_text = usable_snippets(snapshot_dir)
+    hidden: set[str] = set()
     for text in catalog_text.values():
         parsed = yaml.safe_load(text)
         superseded = parsed and isinstance(parsed, dict) and parsed.get("supersedes")
@@ -1050,17 +1059,21 @@ class Activities:
             reasons=_texts(binding.get("reasons")),
         )
 
-    async def _check_binding(self, text: str | None, round_id: str, pins: Pins, sha: str) -> tuple[dict, list[str]]:
+    async def _check_binding(
+        self, text: str | None, round_id: str, pins: Pins, sha: str, tested: bool = False
+    ) -> tuple[dict, list[str]]:
         """Parse an agent-written binding and check it against the round's record and the snippets at `sha`.
         Returns (binding, errors); the binding is empty when there are errors, and otherwise names the round's
-        own `record_commit`, whatever the agent (or an earlier round's example) wrote there."""
+        own `record_commit`, whatever the agent (or an earlier round's example) wrote there. A new match names
+        only snippets a match is offered; a `tested` binding (a reader's example) may also name one that was
+        superseded since it was written."""
         if text is None:
             return {}, ["the binding is missing or unreadable"]
         try:
             binding = yaml.safe_load(text)
-            errors = check_binding(
-                binding, self._record(round_id), set(visible_snippets(await self._snapshot(sha))), pins=pins
-            )
+            snapshot_dir = await self._snapshot(sha)
+            names = set(usable_snippets(snapshot_dir) if tested else visible_snippets(snapshot_dir))
+            errors = check_binding(binding, self._record(round_id), names, pins=pins)
             if not errors:  # hosts() raises if a URL would grant a GitHub host
                 hosts(
                     [url for array in binding["raw"] + (binding.get("labels") or []) for url in array["urls"]], self.cfg
@@ -1540,7 +1553,8 @@ class Activities:
         """Take the PR's example binding, `snippets/<name>/examples/<record>.yaml` at `sha` (a head or the merge
         commit), where <name> is the one snippet directory the PR adds.
 
-        It is checked like the match agent's binding (this record, its hosts, the schema) and must use <name>,
+        It is checked like the match agent's binding (this record, its hosts, the schema; it may name a snippet
+        superseded since it was written, never a withdrawn one) and must use <name>,
         then stored with `snippets_commit: <sha>` as state_dir/rounds/<round>/binding-pr-<sha7>.yaml. Returns
         {"path", "hash", "name", "errors": []}, or {"errors": [...]}: a bad example fails that head's test."""
         if not SHA_RE.fullmatch(sha):
@@ -1556,7 +1570,7 @@ class Activities:
         rel = f"snippets/{name}/examples/{pins.record}.yaml"
         raw = await gh.get_file(rel, sha)
         text = raw.decode(errors="replace") if raw is not None and len(raw) <= 1 << 20 else None
-        binding, errors = await self._check_binding(text, round_id, pins, sha)
+        binding, errors = await self._check_binding(text, round_id, pins, sha, tested=True)
         if binding and name not in {array["snippet"] for array in binding["raw"] + (binding.get("labels") or [])}:
             errors = [f"{rel} does not use snippet {name!r}"]
         if errors:
