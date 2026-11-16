@@ -171,7 +171,7 @@ class Sampling(_Strict):
     patch: Patch
     # distinct crops in the whole buffer per split; a dataset stages its weight's share (mia_buffers.plan.crops_for)
     crops: dict[str, PositiveInt] = {"train": 100000, "val": 2000, "test": 2000}
-    max_crops_per_dataset: PositiveInt = 4096  # in one split; one artifact must stay under limits.stage_bytes
+    max_crops_per_dataset: PositiveInt = 1024  # in one split; one artifact must stay under limits.stage_bytes
     plan: SamplePlan | None = None  # ignored, see Spec.warnings
     levels: list[int] = [1]
     assume_voxel_size: bool = True  # fill missing voxel sizes from mia_buffers.assume (spec v0.5 §2)

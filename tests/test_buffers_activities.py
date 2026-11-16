@@ -227,6 +227,13 @@ async def test_plan_writes_files_and_summarises(acts):
     assert (workspace / "plan.md").read_text() == (round_dir / "plan.md").read_text()
 
 
+async def test_plan_warns_of_datasets_over_the_stage_cap(acts):
+    acts.cfg.limits.stage_bytes = 1
+    await acts.plan(7, ROUND, await admitted(acts))
+    plan = json.loads((acts.cfg.paths.state_dir / "rounds" / ROUND / "plan.json").read_text())
+    assert any("limits.stage_bytes (1 B)" in warning for warning in plan["warnings"])
+
+
 async def test_plan_without_tensorizer_is_invalid(acts):
     shutil.rmtree(acts.cfg.harness.dir / "tensorizers")
     result = await acts.plan(7, ROUND, await admitted(acts))

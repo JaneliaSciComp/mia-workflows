@@ -27,7 +27,7 @@ Decided with the user on 2026-11-15/16:
   ```yaml
   sampling:
     crops: {train: 100000, val: 2000, test: 2000}   # distinct crops in the whole buffer, shared out by weight
-    max_crops_per_dataset: 4096                     # no dataset stages more than this in one split
+    max_crops_per_dataset: 1024                     # no dataset stages more than this in one split
   ```
 - A dataset's count in a split is `weight × crops[split]`, at least 1, rounded up to a power of two, at most
   `max_crops_per_dataset`. The rounding keeps a record's count, and so its artifact id, the same when the pool
@@ -38,9 +38,11 @@ Decided with the user on 2026-11-15/16:
 
 Calls made while planning (not yet confirmed by the user):
 
-- **`max_crops_per_dataset`, default 4096.** One staged artifact is capped at `limits.stage_bytes` (5 GB by
+- **`max_crops_per_dataset`, default 1024.** One staged artifact is capped at `limits.stage_bytes` (5 GB by
   default); a crop touches up to 4 chunks per level, so a heavy dataset's full share would fail staging. The cap
-  leaves its weight alone: its crops are drawn more often.
+  leaves its weight alone: its crops are drawn more often. The round's plan warns of a dataset whose estimate is
+  over `limits.stage_bytes` (review, 2026-11-16: 4096 crops of 16-bit data with labels measured over the cap).
+- **A position drawn twice is one crop** (review, 2026-11-16), so a frozen val or test list never repeats a crop.
 - **`sampling.plan` is accepted and ignored, with a warning.** Activities of a live buffer re-read the round's
   stored `spec.yaml`, so refusing the key would break buffers that exist.
 - **A volume too small for the coarsest footprint gets no crops** and is not staged; the record fails only when no
@@ -214,7 +216,7 @@ def test_a_volume_exactly_one_footprint_wide_starts_every_crop_at_zero():
 
 **Interfaces:**
 - Produces: `Sampling.crops: dict[str, PositiveInt] = {"train": 100000, "val": 2000, "test": 2000}`,
-  `Sampling.max_crops_per_dataset: PositiveInt = 4096`, `Sampling.plan: SamplePlan | None = None` (ignored).
+  `Sampling.max_crops_per_dataset: PositiveInt = 1024`, `Sampling.plan: SamplePlan | None = None` (ignored).
 
 - [ ] **Step 1: Write the failing test** in place of `test_sample_plan_defaults_and_must_match_splits`:
 
@@ -224,7 +226,7 @@ def test_crops_default_and_must_match_splits():
     data["sampling"].pop("crops", None)
     spec = load_spec_text(yaml.safe_dump(data))
     assert spec.sampling.crops == {"train": 100000, "val": 2000, "test": 2000}
-    assert spec.sampling.max_crops_per_dataset == 4096
+    assert spec.sampling.max_crops_per_dataset == 1024
     data["splits"]["fractions"] = {"train": 0.8, "val": 0.1, "test": 0.0, "extra": 0.1}
     with pytest.raises(SpecError, match="sampling.crops must name exactly the splits"):
         load_spec_text(yaml.safe_dump(data))
@@ -374,8 +376,8 @@ def test_the_plan_table_shows_each_datasets_crops_and_coverage(plan_2d, spec_2d)
 
 ## Rollout (on the user's word, not part of the build)
 
-1. Merge the mia-snippets branch and update the checkout at `harness.dir`. From then on a stage job of any buffer
-   places crops at random; a buffer planned earlier reads its stored per-volume count as a per-record count.
+1. Merge the mia-snippets branch and update the checkout at `harness.dir`. A round admitted afterwards places
+   crops at random; a round admitted earlier keeps the harness snapshot it pinned.
 2. Merge the mia-workflows branch and restart the buffers worker and buffer-api.
 3. A buffer created afterwards stages every dataset anew (new harness commit, new counts) and draws new frozen
    val and test lists. Buffers that are already staged keep serving what they hold.

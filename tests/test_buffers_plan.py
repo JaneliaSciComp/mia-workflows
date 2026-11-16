@@ -425,3 +425,14 @@ def test_the_plan_table_shows_each_datasets_crops_and_coverage(plan_2d, spec_2d)
     assert f"planned {planned} of requested {sum(spec_2d.sampling.crops.values())} crops; ~" in md
     assert "expectation over each record's items" in md
     assert plan_2d.crops == spec_2d.sampling.crops
+
+
+def test_a_dataset_estimated_over_the_stage_cap_is_a_plan_warning(spec_2d, plan_2d):
+    assert not any("limits.stage_bytes" in warning for warning in plan_2d.warnings)  # no cap given: nothing to say
+    tight = build_plan(spec_2d, "h", None, records(), stage_bytes=1)
+    over = [warning for warning in tight.warnings if "limits.stage_bytes" in warning]
+    assert len(over) == 1 and over[0].startswith("2 datasets are estimated over limits.stage_bytes (1 B)")
+    assert BCSS in over[0] and U937 in over[0] and "sampling.max_crops_per_dataset" in over[0]
+    assert tight.valid  # a warning: the stage job measures the real bytes
+    roomy = build_plan(spec_2d, "h", None, records(), stage_bytes=1e15)
+    assert not any("limits.stage_bytes" in warning for warning in roomy.warnings)

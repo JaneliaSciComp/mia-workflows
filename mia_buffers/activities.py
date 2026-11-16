@@ -537,7 +537,8 @@ class Activities:
             await catalog_sync(self.cfg, self.gh_catalog, registry, ref)
         records = await asyncio.to_thread(registry.records, ref)
         prepared = {row["id"] for row in await asyncio.to_thread(registry.datasets, "prepared")}
-        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared)
+        stage_bytes = self.cfg.limits.stage_bytes or self.cfg.limits.job_bytes
+        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared, stage_bytes)
         tensorizer = self.cfg.sourcing.tensorizer
         if not (self.cfg.harness.dir / "tensorizers" / tensorizer / "tensorizer.yaml").is_file():
             plan.errors.append(f"no tensorizer {tensorizer} in the harness checkout")

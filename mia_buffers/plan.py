@@ -468,9 +468,11 @@ def build_plan(
     catalog_ref: str | None,
     records: list[tuple[str, dict]],
     prepared: set[str] | None = None,
+    stage_bytes: float | None = None,
 ) -> Plan:
     """Fit, weigh and split the records the spec admits. With `prepared` (the ids of prepared datasets), a row
-    that fits but is not prepared is out of the pool with the rule `not prepared`; None skips that rule."""
+    that fits but is not prepared is out of the pool with the rule `not prepared`; None skips that rule. With
+    `stage_bytes` (the deployment's cap on one staged artifact), rows estimated over it are a warning."""
     all_facts: list[Facts] = []
     rows: list[Row] = []
     for path, record in sorted(records, key=lambda item: item[0]):
@@ -550,5 +552,13 @@ def build_plan(
     warnings = list(spec.warnings)
     if "content_hash" in spec.select.dedup.by:
         warnings.append(CONTENT_HASH_WARNING)
+    over = sorted(row.id for row in pool if stage_bytes is not None and row.planned_bytes > stage_bytes)
+    if over and stage_bytes is not None:
+        # the estimate leaves label arrays out and the stage job measures the real chunks: a warning, not an error
+        warnings.append(
+            f"{len(over)} dataset{'s are' if len(over) > 1 else ' is'} estimated over limits.stage_bytes "
+            f"({_human_bytes(int(stage_bytes))}) and may fail to stage: {_some(over)}; "
+            "lower sampling.max_crops_per_dataset"
+        )
     crops = dict(spec.sampling.crops)
     return Plan(spec.name, spec_hash, catalog_ref, rows, errors, warnings, dict(excluded.most_common()), crops)

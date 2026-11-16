@@ -564,12 +564,16 @@ schemas. The stage job reads its byte cap from `MIA_HARNESS_STAGE_BYTES` (config
 
 **How many crops, and where.** The spec's `sampling.crops` is the buffer's distinct crops per split. A dataset's
 count in a split is its weight's share of that, at least 1, rounded up to a power of two and at most
-`sampling.max_crops_per_dataset`, which keeps one artifact under `limits.stage_bytes` (`plan.crops_for`; the count
-is the plan rule's `samples`). The stage job shares the record's count among its volumes in proportion to the
-planes each holds in the split, and places every crop at random: a plane of the split, then a position whose
-coarsest footprint lies inside the volume. Crops of a split may overlap; two splits never share a plane. A volume
+`sampling.max_crops_per_dataset` (`plan.crops_for`; the count is the plan rule's `samples`). One artifact must stay
+under `limits.stage_bytes`: the round's plan warns of a dataset whose estimate (raw arrays only) is over it, and a
+stage job over it fails with `plan exceeds stage cap`. The stage job shares the record's count among its volumes
+in proportion to the planes each holds in the split, and places every crop at random: a plane of the split, then
+a position whose coarsest footprint lies inside the volume. Crops of a split may overlap, but a position drawn
+twice is one crop, so a small volume gives fewer crops than its share; two splits never share a plane. A volume
 that drew no crop, or is smaller than the footprint, is not staged. The plan table shows each dataset's crops and
-its coverage (its crops over the crops it holds side by side: above 1× they overlap).
+its coverage (its crops over the crops it holds side by side: above 1× they overlap). Val and test crops are the
+candidates the frozen lists are drawn from: a list holds `sourcing.val_size` / `sourcing.test_size` of them
+(`mia.yaml`), or all of them when there are fewer.
 
 **An artifact id is a recipe hash** (`jobspec.artifact_id`): binding hash, levels key, voxel size, harness commit,
 env digest and plan digest. A pyramid on disk is reused only when all of them match. Changing how the harness
