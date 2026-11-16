@@ -437,24 +437,6 @@ export async function viewCleaner() {
   };
   root.replaceChildren(
     card(
-      "The cleaner",
-      "A background pass that looks every few minutes for datasets, buffers and requests that stopped or went quiet, and for jobs and snippet issues that rounds left behind. It works out why, fixes what it can by the same actions the page's buttons send, and hands the rest to a person.",
-      kv([
-        ["Case", "One problem with one subject. Click a row to read what was found, what was done and what is left."],
-        ["Subject", "The dataset, buffer, request, job or snippets issue the case is about."],
-        ["Problem", "The kind of problem, as the cleaner's rules name it. The opened row says what it means."],
-        [
-          "Status",
-          el(
-            "div",
-            {},
-            ...Object.values(CASE_STATUS).map(([words, , help]) => el("div", {}, el("b", {}, words), ": " + help)),
-          ),
-        ],
-        ["Steps", "How many steps of its remedy the cleaner has done, and how many are left."],
-      ]),
-    ),
-    card(
       "The installation",
       report
         ? `Last sweep ${ago(report.at)}. ${modes[report.mode] || ""} While something is listed here, the subjects behind it are left alone.`
