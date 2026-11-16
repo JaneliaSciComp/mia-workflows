@@ -169,6 +169,7 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
             "state": "needs-person",
             "updated": 5.0,
             "data": {"seen": "no open run", "steps": [{"do": "cancel"}], "plan": [{"do": "go"}], "needs": "look"},
+            "jobs": ["issue-224/i224-e1/match-1", "cleaner/case-1/diagnose-0"],
         },
         {
             "kind": "job",
@@ -182,6 +183,12 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
     stuck, job = run_js("print(caseRows(input));", {"operations.js": "caseRows"}, cases)
     assert (stuck["href"], stuck["done"], stuck["next"]) == ("#datasets/rec-a", "cancel the round", "look")
     assert (job["href"], job["next"]) == ("#job/issue-9/i9-e1/crops-1", "kill the job")
+    # each job record a case is about is linked, under the job's name
+    assert stuck["jobs"] == [
+        {"href": "#job/issue-224/i224-e1/match-1", "name": "match-1"},
+        {"href": "#job/cleaner/case-1/diagnose-0", "name": "diagnose-0"},
+    ]
+    assert job["jobs"] == []
 
 
 def test_page_has_a_decisions_tab() -> None:

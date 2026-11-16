@@ -1098,6 +1098,32 @@ def test_case_routes(tmp_path):
     assert [row["cleaner"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["approve the host"]
 
 
+def test_a_case_lists_the_records_of_its_rounds_jobs_and_of_its_own(tmp_path):
+    """`GET /cases` gives each case the addresses of the job records it is about: those of the round it saw, then
+    those of the cleaner's own jobs for it. A symlink or a name the page could not address is left out."""
+    work = tmp_path / "work"
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", work_root=work)
+    seen = {"kind": "dataset", "number": 223, "key": "rec-a", "rule": "diagnosis", "data": {"round": "i223-e1"}}
+    case = worker(s, "POST", "/cases", seen)[1]
+    worker(s, "POST", "/cases", {"kind": "snippets", "key": "issue-41", "rule": "left-over snippet work"})
+    assert [row["jobs"] for row in call(s, "GET", "/cases")[1]["cases"]] == [[], []]  # no record yet
+    for where in ("issue-223/i223-e1/match-1", "issue-223/i223-e1/crops-1", f"cleaner/case-{case['id']}/diagnose-0"):
+        path = record_path(work, where)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"record")
+    record_path(work, "issue-223/i223-e0/match-1").parent.mkdir()  # another round's
+    record_path(work, "issue-223/i223-e0/match-1").write_bytes(b"record")
+    record_path(work, "issue-223/i223-e1/linked").symlink_to(record_path(work, "issue-223/i223-e1/match-1"))
+    record_path(work, "issue-223/i223-e1/.hidden").write_bytes(b"record")
+    jobs = {row["key"]: row["jobs"] for row in call(s, "GET", "/cases")[1]["cases"]}
+    assert jobs == {
+        "rec-a": ["issue-223/i223-e1/crops-1", "issue-223/i223-e1/match-1", f"cleaner/case-{case['id']}/diagnose-0"],
+        "issue-41": [],
+    }
+    for address in jobs["rec-a"]:
+        assert s.handle("GET", f"/jobs/{address}", {}, b"")[0] == 200
+
+
 def test_the_cleaners_report_and_the_workers_commits(tmp_path):
     s, _ = _acting(tmp_path)
     assert call(s, "GET", "/cleaner")[:2] == (200, b"null")

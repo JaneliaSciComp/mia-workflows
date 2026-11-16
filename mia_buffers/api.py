@@ -1672,7 +1672,27 @@ class BufferService:
             since = time.time() - float(query["days"]) * 86400 if "days" in query else None
         except ValueError:
             raise HttpError(422, "days must be a number") from None
-        return 200, {"cases": self.ledger.cases(states, since)}, {}
+        cases = self.ledger.cases(states, since)
+        for case in cases:
+            case["jobs"] = self._case_jobs(case)
+        return 200, {"cases": cases}, {}
+
+    def _case_jobs(self, case: dict) -> list[str]:
+        """The addresses of the job records a case is about, as they are on disk now: the jobs of the round it
+        saw, then the cleaner's own jobs for it (its diagnoses). Only what `GET /jobs/<address>` serves."""
+        if self.work_root is None:
+            return []
+        under = [f"cleaner/case-{case['id']}"]
+        round_id = case["data"].get("round")
+        if case["number"] is not None and isinstance(round_id, str) and UI_NAME_RE.fullmatch(round_id):
+            under.insert(0, f"issue-{case['number']}/{round_id}")
+        found = []
+        for directory in under:
+            for path in sorted((self.work_root / RECORDS_DIR / directory).glob("*.json.gz")):
+                name = path.name.removesuffix(".json.gz")
+                if UI_NAME_RE.fullmatch(name) and path.is_file() and not path.is_symlink():
+                    found.append(f"{directory}/{name}")
+        return found
 
     def _put_cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
         return 200, self._put_report("cleaner", body), {}

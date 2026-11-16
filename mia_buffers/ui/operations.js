@@ -219,7 +219,8 @@ const stepsText = steps =>
     )
     .join(", then ");
 export function caseRows(cases) {
-  // a case as the table shows it: what it is about, what was seen, what was done and what is left or needed
+  // a case as the table shows it: what it is about, what was seen, what was done, what is left or needed, and
+  // the records (conversation and cluster logs) of the jobs it is about: its round's, then the cleaner's own
   return cases.map(c => ({
     href: CASE_HREF(c),
     about: c.key,
@@ -228,6 +229,7 @@ export function caseRows(cases) {
     seen: plain(c.data.seen),
     done: stepsText(c.data.steps),
     next: plain(c.state === "needs-person" ? c.data.needs : stepsText(c.data.plan) || c.data.note),
+    jobs: (c.jobs || []).map(where => ({ href: "#job/" + where, name: where.split("/").pop() })),
     updated: c.updated,
   }));
 }
@@ -237,7 +239,11 @@ function caseTable(cases, nextLabel, empty) {
   return el(
     "table",
     { class: "plain" },
-    el("thead", {}, el("tr", {}, ...["about", "rule", "seen", "done", nextLabel, "updated"].map(h => el("th", {}, h)))),
+    el(
+      "thead",
+      {},
+      el("tr", {}, ...["about", "rule", "seen", "done", nextLabel, "jobs", "updated"].map(h => el("th", {}, h))),
+    ),
     el(
       "tbody",
       {},
@@ -250,6 +256,9 @@ function caseTable(cases, nextLabel, empty) {
           cell(row.seen, true),
           cell(row.done, true),
           cell(row.next, true),
+          cell(
+            el("span", {}, ...row.jobs.flatMap((job, at) => [at ? ", " : "", el("a", { href: job.href }, job.name)])),
+          ),
           cell(when(row.updated)),
         ),
       ),
