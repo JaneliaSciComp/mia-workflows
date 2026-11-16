@@ -1410,7 +1410,6 @@ class Activities:
             json.loads(plan_text),
             spec,
             tensorizer=cfg.sourcing.tensorizer,
-            split_sizes={"val": cfg.sourcing.val_size, "test": cfg.sourcing.test_size},
             recipe=recipe_for(
                 spec,
                 tensorizer=cfg.sourcing.tensorizer,

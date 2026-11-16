@@ -146,8 +146,6 @@ class SourcingCfg(BaseModel):
     parallel: int = Field(default=4, ge=1)  # stage jobs in flight per buffer
     parallel_fetch: int = Field(default=2, ge=1)  # fetch jobs in flight per buffer
     tensorizer: str = "muvit-2d"  # must exist under <harness.dir>/tensorizers/
-    val_size: int = Field(default=256, ge=1)  # frozen list lengths
-    test_size: int = Field(default=256, ge=1)
 
 
 class CleanerCfg(BaseModel):

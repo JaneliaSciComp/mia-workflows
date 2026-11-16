@@ -46,11 +46,10 @@ def buffer_config(
     spec: Spec,
     *,
     tensorizer: str,
-    split_sizes: dict[str, int],
     recipe: dict,
     plan_hash: str,
 ) -> dict:
-    """The `PUT buffers/<id>` body from a plan and its spec."""
+    """The `PUT buffers/<id>` body from a plan and its spec; a frozen list is as long as the spec's crops of its split."""
     patch = spec.patch_for("2D") or {}
     if patch.get("y") != patch.get("x"):
         raise ValueError(f"MuViT crops are square; the 2D patch is {patch}")
@@ -65,7 +64,7 @@ def buffer_config(
         "tensorizer": tensorizer,
         "tensorizer_params": _tensorizer_params(spec),
         "splits": dict(spec.splits.fractions),
-        "split_sizes": dict(split_sizes),
+        "split_sizes": {split: total for split, total in spec.sampling.crops.items() if split != "train"},
         "recipe": recipe,
         "plan_hash": plan_hash,
         "idle_hours": spec.idle.hours,
@@ -283,7 +282,6 @@ def register(
     staged_root: Path,
     *,
     tensorizer: str,
-    split_sizes: dict[str, int],
     recipe: dict,
     plan_hash: str,
     token: str | None = None,
@@ -298,9 +296,7 @@ def register(
         registry.request(
             "PUT",
             address,
-            json=buffer_config(
-                plan, spec, tensorizer=tensorizer, split_sizes=split_sizes, recipe=recipe, plan_hash=plan_hash
-            ),
+            json=buffer_config(plan, spec, tensorizer=tensorizer, recipe=recipe, plan_hash=plan_hash),
         )
         for row in plan["rows"]:
             if not (row.get("admitted") and (row.get("fit") or {}).get("ok")):

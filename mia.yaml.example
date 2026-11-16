@@ -257,5 +257,3 @@ services:
       parallel: 4
       parallel_fetch: 2
       tensorizer: muvit-2d
-      val_size: 256
-      test_size: 256

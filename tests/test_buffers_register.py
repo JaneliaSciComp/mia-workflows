@@ -155,9 +155,9 @@ def test_split_planes_golden():
 
 def test_buffer_config_from_plan(spec_2d):  # noqa: F811
     plan = {"spec_name": "s", "spec_hash": "abc", "catalog_ref": "r", "rows": []}
-    cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={"val": 8, "test": 8}, **PINNED)
+    cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", **PINNED)
     assert cfg["levels"] == [1, 2, 4] and cfg["patch"] == 256 and cfg["channels"] == "all" and cfg["seed"] == 0
-    assert cfg["splits"] == {"train": 0.8, "val": 0.1, "test": 0.1} and cfg["split_sizes"] == {"val": 8, "test": 8}
+    assert cfg["splits"] == {"train": 0.8, "val": 0.1, "test": 0.1} and cfg["split_sizes"] == {"val": 20, "test": 20}
     assert cfg["tensorizer_params"] == {"normalize": "percentile", "range": [1, 99], "clip": True, "scope": "patch"}
 
 
@@ -221,7 +221,6 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
             {**ROW, "id": "unfit", "fit": {"ok": False}},
         ],
     }
-    sizes = {"val": 4, "test": 4}
     with pytest.raises(RegistryError) as refused:  # worker routes need the token
         register(
             token_server,
@@ -230,7 +229,6 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
             spec_2d,
             root,
             tensorizer="muvit-2d",
-            split_sizes=sizes,
             recipe=RECIPE,
             plan_hash="h",
         )
@@ -242,7 +240,6 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
         spec_2d,
         root,
         tensorizer="muvit-2d",
-        split_sizes=sizes,
         recipe=RECIPE,
         plan_hash="h",
         token="t",
@@ -251,8 +248,8 @@ def test_register_end_to_end(tmp_path, spec_2d, token_server):  # noqa: F811
     assert out["refused"] == {"tiny/v0.zarr": "footprint 1024 exceeds 512×512"}
     status = httpx.get(f"{token_server}/buffers/demo/status").json()
     assert status["servable"] == {"test": 1, "train": 1, "val": 1} and status["config"]["split_sizes"] == {
-        "val": 4,
-        "test": 4,
+        "val": 20,
+        "test": 20,
     }
     events = httpx.get(f"{token_server}/buffers/demo/events").json()["events"]
     assert [event["kind"] for event in events] == ["approved", "ready"] and out["events"] == ["approved", "ready"]
@@ -351,10 +348,9 @@ def test_malformed_sample_is_refused(tmp_path, spec_2d, sample):  # noqa: F811
 
 def test_buffer_config_carries_scope(spec_2d):  # noqa: F811
     plan = {"spec_name": "s", "spec_hash": "h", "catalog_ref": None}
-    sizes = {"val": 1, "test": 1}
-    params = buffer_config(plan, scoped(spec_2d, "dataset"), tensorizer="muvit-2d", split_sizes=sizes, **PINNED)
+    params = buffer_config(plan, scoped(spec_2d, "dataset"), tensorizer="muvit-2d", **PINNED)
     assert params["tensorizer_params"]["scope"] == "dataset"
-    patch_params = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes=sizes, **PINNED)
+    patch_params = buffer_config(plan, spec_2d, tensorizer="muvit-2d", **PINNED)
     assert patch_params["tensorizer_params"]["scope"] == "patch"
 
 
@@ -411,10 +407,10 @@ def test_a_row_without_a_split_policy_falls_back_to_the_spec_fractions(tmp_path,
 def test_buffer_config_carries_recipe_plan_hash_and_lifecycle(spec_2d):  # noqa: F811
     plan = {"spec_name": "s", "spec_hash": "abc", "catalog_ref": "r", "rows": []}
     recipe = recipe_for(spec_2d, tensorizer="muvit-2d", harness_commit="a" * 40, env_digest="d")
-    cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", split_sizes={}, recipe=recipe, plan_hash="ph")
+    cfg = buffer_config(plan, spec_2d, tensorizer="muvit-2d", recipe=recipe, plan_hash="ph")
     assert recipe["params"] == cfg["tensorizer_params"] and cfg["recipe"] == recipe and cfg["plan_hash"] == "ph"
     assert (cfg["idle_hours"], cfg["retire_after_days"], cfg["auto_approve"]) == (72, 14, False)
     assert cfg["max_empty_fraction"] == 0.05
     strict = spec_with(spec_2d, **{"health.max_empty_fraction": 0.2})
-    again = buffer_config(plan, strict, tensorizer="muvit-2d", split_sizes={}, recipe=recipe, plan_hash="ph")
+    again = buffer_config(plan, strict, tensorizer="muvit-2d", recipe=recipe, plan_hash="ph")
     assert again["max_empty_fraction"] == 0.2

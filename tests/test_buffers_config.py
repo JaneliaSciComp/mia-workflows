@@ -66,7 +66,6 @@ def test_roots_accept_path_and_url_form(tmp_path):
     assert cfg.paths.link(cfg.paths.raw_root / "r 1") == "https://b/raw/r%201"
     assert cfg.paths.link(cfg.paths.staged_root) is None
     assert cfg.sourcing.parallel == 4 and cfg.sourcing.tensorizer == "muvit-2d"
-    assert (cfg.sourcing.val_size, cfg.sourcing.test_size) == (256, 256)
     assert cfg.service.url == "http://127.0.0.1:8765"
 
 
@@ -77,7 +76,7 @@ def test_data_repo_key_is_refused(tmp_path):
         )
 
 
-@pytest.mark.parametrize("override", [{"sourcing": {"parallel": 0}}, {"sourcing": {"val_size": 0}}])
+@pytest.mark.parametrize("override", [{"sourcing": {"parallel": 0}}, {"sourcing": {"parallel_fetch": 0}}])
 def test_bad_sourcing_values_are_refused(tmp_path, override):
     with pytest.raises(ValidationError):
         make_cfg(tmp_path, **override)

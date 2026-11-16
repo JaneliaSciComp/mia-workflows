@@ -97,7 +97,6 @@ def _register(args: argparse.Namespace) -> int:
             spec,
             args.staged_root,
             tensorizer=args.tensorizer,
-            split_sizes={"val": args.val_size, "test": args.test_size},
             recipe=recipe_for(spec, tensorizer=args.tensorizer, harness_commit=commit, env_digest=digest),
             plan_hash=args.plan_hash or plan_hash(plan_text),
             token=token,
@@ -449,8 +448,6 @@ def main(argv: list[str] | None = None) -> int:
     reg.add_argument("--tensorizer", default="muvit-2d")
     reg.add_argument("--config", help="path to mia.yaml, for the harness pin (default: $MIA_CONFIG or ./mia.yaml)")
     reg.add_argument("--plan-hash", help="the plan's hash (default: sha256 of the plan file's text)")
-    reg.add_argument("--val-size", type=int, default=256, help="frozen val list length")
-    reg.add_argument("--test-size", type=int, default=256, help="frozen test list length")
     reg.set_defaults(func=_register)
     for name, help_text in (
         ("serve", "run buffer-api, the sampler and ledger for buffers (spec §5)"),

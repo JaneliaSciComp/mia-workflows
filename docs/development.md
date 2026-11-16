@@ -572,8 +572,8 @@ a position whose coarsest footprint lies inside the volume. Crops of a split may
 twice is one crop, so a small volume gives fewer crops than its share; two splits never share a plane. A volume
 that drew no crop, or is smaller than the footprint, is not staged. The plan table shows each dataset's crops and
 its coverage (its crops over the crops it holds side by side: above 1× they overlap). Val and test crops are the
-candidates the frozen lists are drawn from: a list holds `sourcing.val_size` / `sourcing.test_size` of them
-(`mia.yaml`), or all of them when there are fewer.
+candidates the frozen lists are drawn from: a list is as long as `sampling.crops` of its split, or holds every
+candidate when there are fewer.
 
 **An artifact id is a recipe hash** (`jobspec.artifact_id`): binding hash, levels key, voxel size, harness commit,
 env digest and plan digest. A pyramid on disk is reused only when all of them match. Changing how the harness
@@ -818,7 +818,7 @@ The `MiaBuffer` workflow runs these steps for a round; each can also be run by h
    and every worker write needs the token from `service.token_file`. It holds no GitHub credential and never
    reads pixels.
 4. **Register.** `mia-buffers register plan.json <spec> --staged-root <staged root> --url http://host:8765
-   --buffer <id> --config mia.yaml [--plan-hash <hash>] [--val-size 256 --test-size 256]` creates the buffer and
+   --buffer <id> --config mia.yaml [--plan-hash <hash>]` creates the buffer and
    registers every pooled, staged volume. Planes are split by each plan row's `split` policy (split key = volume
    plus plane). The buffer pins its recipe (tensorizer, params, the harness commit and env digest read from the
    configuration's harness pin) and the plan's hash (default: sha256 of the plan file's text). Unstaged records

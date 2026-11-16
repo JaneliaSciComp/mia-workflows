@@ -170,6 +170,7 @@ class SamplePlan(_Strict):
 class Sampling(_Strict):
     patch: Patch
     # distinct crops in the whole buffer per split; a dataset stages its weight's share (mia_buffers.plan.crops_for)
+    # and the val and test numbers are the lengths of the frozen lists
     crops: dict[str, PositiveInt] = {"train": 100000, "val": 2000, "test": 2000}
     max_crops_per_dataset: PositiveInt = 1024  # in one split; one artifact must stay under limits.stage_bytes
     plan: SamplePlan | None = None  # ignored, see Spec.warnings
