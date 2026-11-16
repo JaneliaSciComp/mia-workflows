@@ -1542,6 +1542,18 @@ def test_a_request_at_needs_human_is_told_when_a_dataset_it_names_settles(tmp_pa
     assert len(gateway.sent) == 5
 
 
+def test_a_start_tells_every_request_at_needs_human_to_look_again(tmp_path):
+    """At start each request resting at `needs-human` gets a `recheck`, whatever it names: one whose datasets
+    settled with nobody telling it (Temporal away, or settled before it rested) is found then. Best effort."""
+    s, gateway = _acting(tmp_path)
+    for number, stage in ((10, "needs-human"), (11, "requested"), (12, "needs-human")):
+        worker(s, "PUT", f"/subjects/prep/{number}", {"key": f"prep-{number}", "stage": stage, "data": {}})
+    s.recheck_resting()
+    assert gateway.sent == [("prep", 10, "recheck"), ("prep", 12, "recheck")]
+    gateway.fail = "Temporal is away"
+    s.recheck_resting()  # logged, not raised: the service starts
+
+
 def test_a_shelve_at_review_cancels_the_round_first(tmp_path):
     """A round that waits for a person's verdict is cancelled by the shelve that sets its subject aside: its
     workflow gets the cancel, then the hold is written. A cancel that is not delivered shelves nothing."""

@@ -793,20 +793,25 @@ class BufferService:
             self._recheck_requests(record)
         return 200, row, {}
 
-    def _recheck_requests(self, record: str) -> None:
+    def recheck_resting(self) -> None:
+        """Tell every request resting at `needs-human` to look at its datasets again: run at start, so one whose
+        datasets settled with nobody telling it (Temporal was away, or they settled before it rested) is found."""
+        self._recheck_requests(None)
+
+    def _recheck_requests(self, record: str | None) -> None:
         """A dataset was shelved or became prepared: tell each request resting at `needs-human` that names it to
         look at its datasets again (`MiaPrep.recheck`); the request moves itself to `done` when each is prepared
-        or shelved. One that selects by rule names no record here, so it is told too. Best effort: the write that
-        led here stands, and the next dataset to settle tells the request again."""
+        or shelved. One that selects by rule names no record here, so it is told too, and with no record every
+        resting request is. Best effort: the write that led here stands, and the next start tells them again."""
         if self.dispatcher is None:
             return
         for request in self.ledger.find_subjects(kind="prep"):  # ponytail: reads every request, as `_catalog_dataset`
-            if request["stage"] != "needs-human" or record not in (_prep_records(request) or [record]):
+            if request["stage"] != "needs-human" or (record and record not in (_prep_records(request) or [record])):
                 continue
             try:
                 self.dispatcher.signal_running("prep", request["number"], "recheck")
             except DispatchError as error:
-                log.warning("request %s not told that %s settled: %s", request["key"], record, error)
+                log.warning("request %s not told to look again (%s): %s", request["key"], record or "start", error)
 
     def _get_dataset(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
         row = self.ledger.dataset(record)
@@ -2195,6 +2200,8 @@ def serve(cfg: Config) -> None:
         hosts=check,
     )
     service.kick_unmirrored()  # what a crash, or Temporal being away, left unposted
+    # a request whose datasets settled with nobody telling it; beside the start, which Temporal being away must not hold
+    threading.Thread(target=service.recheck_resting, daemon=True).start()
     server = make_server(service, url.hostname or "127.0.0.1", url.port)
     backups = cfg.paths.state_dir / "backups"
     stop = threading.Event()

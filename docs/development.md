@@ -115,8 +115,9 @@ dataset's stored row. What reads the hold:
 - A preparation request sends a shelved dataset no `go` and follows it as `shelved` (`prep_nudge`,
   `_followed_state`): the request is `done` when each of its datasets is prepared or shelved. A request resting
   at `needs-human` gets a `recheck` from buffer-api when a dataset it names is shelved or written `prepared`
-  (`_recheck_requests`), reads its datasets again and moves itself to `done` if that now holds. The Designer's
-  *to prepare* list leaves a shelved dataset out.
+  (`_recheck_requests`), reads its datasets again and moves itself to `done` if that now holds; buffer-api
+  tells every resting request the same when it starts (`recheck_resting`), for one that was not told. The
+  Designer's *to prepare* list leaves a shelved dataset out.
 
 **Every stage write is awaited.** `set_stage` writes the subject's stage, its timeline entry and the dataset's
 registry row, and the workflow waits for it: the registry's stage is what buffer-api checks an action against and
