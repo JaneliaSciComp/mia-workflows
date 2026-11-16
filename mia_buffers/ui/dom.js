@@ -361,6 +361,7 @@ export const VERDICT_KIND = { approve: "pool", reject: "warn", escalate: "" };
 // ---- addresses: a subject's own page by kind, and the view and tab its address belongs to
 export const SUBJECT_VIEWS = { datasets: "dataset", specs: "buffer", requests: "prep" }; // #datasets/<record>, #specs/<key>, #requests/<key>
 export const SUBJECT_TAB = { datasets: "datasets", specs: "buffers", requests: "preparation" };
+export const KIND_WORDS = { dataset: "dataset", buffer: "buffer spec", prep: "request" };
 export const SUBJECT_HASH = {
   dataset: key => "#datasets/" + encodeURIComponent(key),
   buffer: key => "#specs/" + encodeURIComponent(key),
