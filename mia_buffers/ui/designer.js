@@ -82,6 +82,11 @@ const C = {
   patchZ: 32,
   dedup: true,
   T: 0.5,
+  cropsTrain: 100000,
+  cropsVal: 2000,
+  cropsTest: 2000,
+  maxCrops: 1024,
+  holdout: "",
   preparedOnly: false,
   rawCached: false,
   stagedGeom: false,
@@ -304,11 +309,13 @@ export function bindControls() {
     SHOW.push(show);
     n.addEventListener(n.type === "range" || n.type === "text" ? "input" : "change", () => {
       C[key] = n.type === "checkbox" ? n.checked : parse(n.value);
+      if (n.type === "number") show(); // a count that was not one reads as the count the spec gets
       after();
     });
   };
   const text = v => v,
-    int = v => +v;
+    int = v => +v,
+    count = v => Math.max(1, Math.floor(+v) || 1);
   bind("specName", "name", text, renderActions);
   bind("paths", "paths", text, replan);
   bind("allowUnknown", "allowUnknown", null, replan);
@@ -319,6 +326,14 @@ export function bindControls() {
   bind("patchZ", "patchZ", int, replan);
   bind("dedup", "dedup", null, replan);
   bind("temp", "T", int, replan);
+  for (const [id, key] of [
+    ["cropsTrain", "cropsTrain"],
+    ["cropsVal", "cropsVal"],
+    ["cropsTest", "cropsTest"],
+    ["maxCrops", "maxCrops"],
+  ])
+    bind(id, key, count, replan);
+  bind("holdout", "holdout", text, replan);
   for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, () => schedulePlan(0)); // registry state: the same plan, fewer rows
   $("download").addEventListener("click", () => {
     const blob = new Blob([toSpecYaml(C, S.ref, S.meta.catalog_repo)], { type: "application/yaml" });

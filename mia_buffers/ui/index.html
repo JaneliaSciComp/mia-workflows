@@ -56,6 +56,13 @@
       <label class="inline"><input type="checkbox" id="dedup"> one record per DOI</label></fieldset>
     <fieldset><legend>Weighting temperature <span id="tVal" class="footprint"></span></legend>
       <input type="range" id="temp" min="0" max="1" step="0.05" aria-label="temperature"><div class="small">0 = uniform over modalities, then over datasets · 1 = proportional to capacity</div></fieldset>
+    <fieldset><legend>Crops in the buffer</legend>
+      <label class="inline">train <input type="number" id="cropsTrain" min="1" step="1"></label>
+      <label class="inline">val <input type="number" id="cropsVal" min="1" step="1"></label>
+      <label class="inline">test <input type="number" id="cropsTest" min="1" step="1"></label>
+      <label class="inline">most per dataset <input type="number" id="maxCrops" min="1" step="1"></label>
+      <div class="small">shared among the datasets by weight · val and test are also the lengths of their lists</div></fieldset>
+    <fieldset><legend>Held out for test (dataset ids)</legend><input type="text" id="holdout" size="22" aria-label="dataset ids held out for test"></fieldset>
     <fieldset><legend>Registry (filters the view, not the spec)</legend>
       <label class="inline"><input type="checkbox" id="preparedOnly"> prepared only</label><br>
       <label class="inline"><input type="checkbox" id="rawCached"> raw cached</label><br>
