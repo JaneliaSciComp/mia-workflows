@@ -15,7 +15,7 @@ What the rounds so far show:
 
 - 20 of the 39 datasets tried in November needed a new snippet, and 5 of the last 9. The rate is not falling.
 - In the October bulk run, 31 of 37 snippet requests involved an annotation file (XML, JSON, CSV, ROI).
-- Of the 22 snippets in the catalog, these carry both halves:
+- Of the 25 snippets in the catalog, these carry both halves, or a label half alone:
 
 | Snippet | Image half | Label half |
 |---|---|---|
@@ -24,7 +24,7 @@ What the rounds so far show:
 | `czi-plane-tiff-grid` | one CZI plane | a TIFF mask repeated k x k onto the CZI's grid (it opens both files) |
 | `tiff-zip-member-class` | one TIFF | `array == class_id` |
 | `tiff-zip-member-channel` | one TIFF | one channel, or one-hot channels to ids |
-| `imod-model-mask` | none | IMOD contours rasterised on a grid the binding must state |
+| `imod-model-mask` | none | IMOD contours rasterised on the grid in the model's own header, which is checked against the raw only afterwards |
 
 **Goals**
 
