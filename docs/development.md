@@ -562,10 +562,21 @@ samples touch, with its derivation recorded in the Zarr's attributes; `check-sta
 schemas. The stage job reads its byte cap from `MIA_HARNESS_STAGE_BYTES` (config `limits.stage_bytes`, default
 `limits.job_bytes`).
 
+**How many crops, and where.** The spec's `sampling.crops` is the buffer's distinct crops per split. A dataset's
+count in a split is its weight's share of that, at least 1, rounded up to a power of two and at most
+`sampling.max_crops_per_dataset`, which keeps one artifact under `limits.stage_bytes` (`plan.crops_for`; the count
+is the plan rule's `samples`). The stage job shares the record's count among its volumes in proportion to the
+planes each holds in the split, and places every crop at random: a plane of the split, then a position whose
+coarsest footprint lies inside the volume. Crops of a split may overlap; two splits never share a plane. A volume
+that drew no crop, or is smaller than the footprint, is not staged. The plan table shows each dataset's crops and
+its coverage (its crops over the crops it holds side by side: above 1× they overlap).
+
 **An artifact id is a recipe hash** (`jobspec.artifact_id`): binding hash, levels key, voxel size, harness commit,
 env digest and plan digest. A pyramid on disk is reused only when all of them match. Changing how the harness
 derives samples changes plan digests, so every volume restages; a buffer that re-registers a volume under a new
-artifact loses its frozen eval lists by design.
+artifact loses its frozen eval lists by design. The plan digest holds the record's crop count, which follows its
+weight: the rounding to a power of two keeps it still while the pool changes a little, and a record whose share
+crosses a doubling restages.
 
 **Save by rename.** A stage job writes `<staged root>/<levels key>/<record>/.building-<artifact>-<job key>`,
 never the final directory. When `stage.json` says `ok`, the worker checks that its `artifact` block (written by

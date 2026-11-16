@@ -31,7 +31,7 @@
 </figure>
 
 <h2>Step 1. The spec</h2>
-<p><a href="#buffers/new">New buffer</a>, on the Buffers tab, builds a spec from its filters: dimensionality, licence, annotation source, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, and the weighting between datasets. Each change is planned against the catalog on the server, so the counts shown are the plan that spec produces.</p>
+<p><a href="#buffers/new">New buffer</a>, on the Buffers tab, builds a spec from its filters: dimensionality, licence, annotation source, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, and the weighting between datasets. The spec's <code>sampling.crops</code> is the buffer's size: how many distinct crops it holds per split, shared out among the datasets by weight and placed at random in each. Each change is planned against the catalog on the server, so the counts shown are the plan that spec produces.</p>
 <ul>
   <li><b>Where datasets leave</b> counts the datasets each rule removes. The last rule, <em>not prepared</em>, means a dataset fits the spec but no reader exists for its files yet; the other rules are the spec's own filters.</li>
   <li><b>Fitting datasets by modality</b> and <b>Weight share</b> show the composition of the pool and of the draws. The weighting temperature runs from uniform over modalities (0) to proportional to each dataset's capacity (1).</li>

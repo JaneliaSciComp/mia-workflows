@@ -96,7 +96,9 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `.building-<artifact>-<job key>`; a rebuild lands under the same id through the same rename.
 - **An artifact id is a recipe hash.** Binding, levels key, voxel size, harness commit, env digest and plan digest.
   Changing how the harness derives samples (`plan.py`) changes plan digests, so every volume restages; a buffer that
-  re-registers a volume under a new artifact loses its frozen eval lists by design.
+  re-registers a volume under a new artifact loses its frozen eval lists by design. The plan digest holds the
+  record's crop count, its weight's share of `sampling.crops` rounded up to a power of two (`plan.crops_for`):
+  change that rounding and every pool change restages every record.
 - **A buffer never asks mia-data for a dataset; a preparation request does.** `MiaBuffer` fails an unprepared
   record; `MiaPrep` sends each dataset a `go` through buffer-api (worker token, the request's root, a key per
   round and record) and follows it through the registry. Nothing opens or labels an issue in the datasets repo.

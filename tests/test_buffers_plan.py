@@ -289,7 +289,9 @@ def records_single_plane() -> list[tuple[str, dict]]:
 def _share(row, spec: Spec) -> dict[str, int]:
     """What `plan_rule` gives the row: its weight's share of each split's crops."""
     sampling = spec.sampling
-    return {name: crops_for(row.weight, total, sampling.max_crops_per_dataset) for name, total in sampling.crops.items()}
+    return {
+        name: crops_for(row.weight, total, sampling.max_crops_per_dataset) for name, total in sampling.crops.items()
+    }
 
 
 def test_crops_for_is_the_share_rounded_up_to_a_power_of_two():
@@ -410,7 +412,6 @@ def test_a_heavy_dataset_stops_at_the_cap(spec_2d, plan_2d):
     assert any(row.plan_rule["samples"]["train"] == 8 for row in pool)
     # the cap leaves the weights alone: a capped dataset's crops are drawn more often
     assert {row.id: row.weight for row in pool} == {row.id: row.weight for row in plan_2d.rows if row.in_pool}
-
 
 
 def test_the_plan_table_shows_each_datasets_crops_and_coverage(plan_2d, spec_2d):

@@ -71,6 +71,7 @@ export function toSpecYaml(c, ref, repo) {
     ...(c.dims.has("3D+t") ? [`    3D+t: {z: ${z}, y: ${p}, x: ${p}}`] : []),
     "    c: 1",
     `  levels: ${flow(levelsOf(c.level))}`,
+    "  crops: {train: 100000, val: 2000, test: 2000}",
     "  weighting:",
     "    scheme: temperature",
     "    over: [modality, dataset]",

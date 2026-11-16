@@ -47,7 +47,7 @@ step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/s
 ## mia-buffers
 
 mia-buffers is a buffer spec → plan → staged pyramids → served crops loop, with no agent in it. A spec (which
-datasets by catalog fields, patch size and pyramid levels, splits, weighting, how many samples per volume) is
+datasets by catalog fields, patch size and pyramid levels, splits, weighting, how many crops the buffer holds) is
 created and run on the buffers page (*Create buffer*, *Run*); its issue in
 [mia-buffers](https://github.com/JaneliaSciComp/mia-buffers) is a copy of its timeline. On *Run* the worker plans it
 against the catalog at a pinned commit and the registry's **prepared** datasets, then sources every dataset of the
