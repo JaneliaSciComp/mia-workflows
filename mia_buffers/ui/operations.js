@@ -272,6 +272,10 @@ const RULE_HELP = {
     "Cause not known",
     "No rule covers this stop, or the rule's remedy did not help. A read-only agent reads the subject's timeline and job records and proposes what to do. The cleaner carries out only what is on its own list of steps and leaves the rest to a person.",
   ],
+  "unrunnable run": [
+    "Run no worker can run",
+    "An open workflow run of a type no worker registers: it logs an error on every task and never ends. The cleaner terminates it.",
+  ],
   "left-over job": [
     "Left-over cluster job",
     "A cluster job is still alive though the round it belonged to has ended. The cleaner kills it.",
