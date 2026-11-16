@@ -255,6 +255,24 @@ def run_js(body: str, imports: dict[str, str], payload: object = None) -> Any:
     return json.loads(done.stdout)
 
 
+def test_the_catalog_in_use_is_named_on_the_datasets_view_with_a_link_to_that_commit() -> None:
+    """Which catalog the datasets come from is said where they are listed, top right of the Datasets view: the
+    commit links the catalog repo at that commit. The top bar does not carry it."""
+    assert "catref" not in FILES["index.html"] and "catref" not in FILES["app.js"]
+    catalog = {"ref": "2c55a495" + "0" * 32, "count": 2243, "synced_at": "2026-11-15T12:00:00+00:00"}
+    linked, bare = run_js(
+        "print(input.map(([catalog, repo]) => { const node = catalogLine(catalog, repo);"
+        " return [textOf(node), walk(node).filter(n => n.tag === 'a').map(a => a.attrs.href), node.attrs.class]; }));",
+        {"datasets.js": "catalogLine"},
+        [[catalog, "o/catalog"], [catalog, None]],
+    )
+    words = [" ".join(text.split()) for text in (linked[0], bare[0])]  # a GitHub link carries the mark and a space
+    assert words[0].startswith("catalog 2c55a495 · 2,243 datasets · synced ") and linked[2] == "catalog"
+    assert linked[1] == [f"https://github.com/o/catalog/tree/{catalog['ref']}"]
+    assert words[1] == words[0] and bare[1] == []  # no catalog repo configured: the commit is plain text
+    assert has('el("div", { class: "viewhead" }, el("h2", {}, "Datasets"), catalogLine(')
+
+
 def test_every_file_the_page_loads_is_one_of_its_own() -> None:
     """index.html links app.css and boots app.js; a module imports only modules beside it, and never in a circle:
     a module can be read, and imported by a test, without the modules above it."""

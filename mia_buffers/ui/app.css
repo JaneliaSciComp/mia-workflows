@@ -30,14 +30,13 @@ button,select,input{font:inherit;color:inherit}
 tr.superseded td{opacity:.55}
 .mono{font-family:var(--mono);font-size:12.5px}
 
-/* top bar: title, the tabs, the catalog ref, the theme toggle */
+/* top bar: title, the tabs, the lookup, the theme toggle */
 .topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--grid);
   position:sticky;top:0;z-index:6;background:var(--bg);margin-top:-16px;padding-top:16px}  /* covers the body's top padding; above the filter box */
 .tabs{display:flex;gap:4px;flex-wrap:wrap}
 .tabs a{padding:3px 10px;border-radius:6px;text-decoration:none;color:var(--fg2);border:1px solid transparent}
 .tabs a:hover{color:var(--fg)}
 .tabs a[aria-current="page"]{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
-.catref{font-family:var(--mono);font-size:12.5px;color:var(--fg2);margin-left:auto}
 .btn{display:inline-block;border:1px solid var(--axis);background:transparent;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px;text-decoration:none;color:var(--fg)}
 .btn:hover:not(:disabled){background:var(--accent-soft)}
 .btn:disabled{color:var(--muted);cursor:not-allowed}
@@ -52,7 +51,10 @@ tr.superseded td{opacity:.55}
 .notice{border-left:3px solid var(--warn);padding:4px 10px;margin:6px 0;font-size:13px;color:var(--fg2);max-width:80ch}
 pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;background:var(--surface);max-height:240px;overflow:auto}
 .empty{color:var(--muted);padding:10px 2px;font-size:13.5px}
-.lookup{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg);width:24ch}
+.lookup{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg);width:24ch;margin-left:auto}
+/* a view's heading, with what belongs beside it at the right: the catalog the Datasets list is read from */
+.viewhead{display:flex;flex-wrap:wrap;gap:2px 16px;align-items:baseline;justify-content:space-between}
+.catalog{font-size:12.5px;color:var(--fg2);white-space:nowrap}
 .subject h2{margin:0 0 6px;font-size:18px;overflow-wrap:anywhere}
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
 .btn.danger{border-color:var(--warn);color:var(--warn)}

@@ -1,7 +1,7 @@
 // The shell: the Docs view, health, the stream, hash routing, the top bar, the theme and boot.
 // The page holds no token. It reads with GETs (and with POST /plan and POST /hosts/missing, which write nothing)
 // and asks for things through the action routes, which take none. All hosts and repos come from GET /meta.
-import { $, el, hideTip, plural, short, SUBJECT_TAB, SUBJECT_VIEWS, toEpoch, when } from "./dom.js";
+import { $, el, hideTip, SUBJECT_TAB, SUBJECT_VIEWS, toEpoch } from "./dom.js";
 import { HttpError, load, S, send } from "./api.js";
 import { onScreen } from "./actions.js";
 import { bindControls, viewDesigner } from "./designer.js";
@@ -137,19 +137,6 @@ function route() {
   if (view === "datasets") return viewDatasetList(arg, new URLSearchParams(filters || ""));
   VIEWS[view](arg);
 }
-function renderTopbar() {
-  const c = S.catalogs[0];
-  $("catref").replaceChildren(
-    c
-      ? el(
-          "span",
-          { title: c.ref },
-          `catalog ${short(c.ref, 8)} · ${plural(c.count, "dataset")} · synced `,
-          when(c.synced_at),
-        )
-      : "no catalog synced",
-  );
-}
 function setupFilterBox() {
   // the fold is a per-viewer convenience, remembered in this browser
   const box = $("filterBox");
@@ -199,7 +186,6 @@ export async function boot() {
     .slice()
     .sort((a, b) => (toEpoch(b.synced_at) || 0) - (toEpoch(a.synced_at) || 0));
   S.ref = S.catalogs[0]?.ref || null;
-  renderTopbar();
   window.addEventListener("hashchange", route);
   // a click on the current tab changes no hash: reload the view by hand
   document.querySelectorAll("[data-tab]").forEach(a =>

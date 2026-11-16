@@ -38,6 +38,19 @@ const CHOSEN = new Set(),
   SETTLED = new Set(); // the ticked datasets, and those of them that are prepared or in a round
 export const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging", "debugging"]); // the stages of a round under way or at review
 const PREPARABLE = row => row.state !== "prepared" && !ROUND_OPEN.has(row.stage);
+// the catalog the list is read from: its commit (linked into the catalog repo at that commit), how many datasets
+// it holds and when it was synced
+export const catalogLine = (catalog, repo) => {
+  const commit = el("span", { class: "mono", title: catalog.ref }, short(catalog.ref, 8));
+  return el(
+    "div",
+    { class: "catalog" },
+    "catalog ",
+    repo ? link(`https://github.com/${repo}/tree/${catalog.ref}`, commit, "the catalog repo at this commit") : commit,
+    ` · ${plural(catalog.count, "dataset")} · synced `,
+    when(catalog.synced_at),
+  );
+};
 export function viewDatasetList(_arg, params) {
   const root = $("datasetsBody");
   if (!S.ref) {
@@ -200,7 +213,7 @@ export function viewDatasetList(_arg, params) {
     ],
   });
   root.replaceChildren(
-    el("h2", {}, "Datasets"),
+    el("div", { class: "viewhead" }, el("h2", {}, "Datasets"), catalogLine(S.catalogs[0], S.meta.catalog_repo)),
     el(
       "p",
       { class: "small" },
