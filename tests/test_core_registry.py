@@ -242,3 +242,22 @@ def test_the_code_digest_changes_with_the_packages_alone(tmp_path):
     docs = commit("docs/notes.md", "words")
     assert docs[0] != first[0] and docs[1] == first[1]  # a commit that touches no package: the same code
     assert commit("mia_data/code.py", "two")[1] != first[1]
+
+
+def test_a_worker_reports_its_code_until_the_registry_takes_it():
+    # buffer-api may come up after the worker (a restart of both): the report is sent again, with the code read
+    # when the worker started
+    import asyncio
+
+    from mia_core.registry import report_worker
+
+    calls = []
+
+    class Down:
+        def put_worker(self, service, commit, code):
+            calls.append((service, commit, code))
+            if len(calls) < 3:
+                raise RegistryError(None, "connection refused")
+
+    asyncio.run(report_worker(Down(), "mia-data", logging.getLogger("test"), retry_s=0))
+    assert len(calls) == 3 and len(set(calls)) == 1 and calls[0][0] == "mia-data"

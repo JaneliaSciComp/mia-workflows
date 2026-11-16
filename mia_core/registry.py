@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -11,6 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
+from mia_core.checkout import code_digest, head_commit
 from mia_core.config import ServiceCfg
 
 SYNC_TIMEOUT_S = 600.0  # a sync walks a whole root (du, stage.json reads): minutes, not the 30 s of a lookup
@@ -331,3 +333,11 @@ def best_effort(action: Callable[[], Any], what: str, log: logging.Logger) -> bo
         log.warning("%s: registry write skipped: %s", what, err)
         return False
     return True
+
+
+async def report_worker(registry: Registry, service: str, log: logging.Logger, retry_s: float = 30.0) -> None:
+    """Tell the registry what code this worker loaded (read now, when it starts), again until it is written:
+    buffer-api may come up after the worker does, and the cleaner compares the last report it has."""
+    started_on = (service, head_commit(), code_digest())
+    while not await asyncio.to_thread(best_effort, lambda: registry.put_worker(*started_on), "worker commit", log):
+        await asyncio.sleep(retry_s)

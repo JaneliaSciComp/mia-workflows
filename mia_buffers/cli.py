@@ -20,9 +20,8 @@ import httpx
 
 from autodev.auth import bot_login
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
-from mia_core.checkout import code_digest, head_commit
 from mia_core.fs import require_local_dir, require_secret_file
-from mia_core.registry import Registry, RegistryError, best_effort, read_token
+from mia_core.registry import Registry, RegistryError, read_token, report_worker
 from mia_data.cli import _gh, _github_clients
 from mia_data.jobspec import harness_env, harness_pin
 
@@ -154,14 +153,14 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
         f"worker up as {bot}: {cfg.temporal.address} ns={cfg.temporal.namespace} queues {cfg.task_queue}, {cfg.await_queue}"
     )
     # the code this worker's activities were loaded from: the cleaner says when a restart is owed
-    started_on = (cfg.task_queue, head_commit(), code_digest())
-    best_effort(lambda: activities.registry.put_worker(*started_on), "worker commit", log)
+    report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log))
     try:
         async with main_worker, await_worker:
             await asyncio.Event().wait()
     except asyncio.CancelledError:
         print("worker shutting down")
     finally:
+        report.cancel()
         for gh in clients:
             await gh.aclose()
     return 0
