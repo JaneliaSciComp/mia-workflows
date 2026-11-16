@@ -18,9 +18,11 @@ import {
   short,
   stagePill,
   SUBJECT_HASH,
+  tipOn,
   VERDICT_KIND,
   when,
 } from "./dom.js";
+import { mdInline } from "./markdown.js";
 import { load, S } from "./api.js";
 import { pagedTable, pageOf } from "./table.js";
 
@@ -211,60 +213,214 @@ const STEP_WORDS = {
   report_defect: "report the defect",
 };
 const plain = text => String(text || "").replaceAll("`", "");
-const stepsText = steps =>
-  (steps || [])
-    .filter(step => step.do !== "needs") // what a person must do is the case's `needs`
-    .map(
-      step => (STEP_WORDS[step.do] || step.do) + (String(step.result || "").startsWith("refused") ? " (refused)" : ""),
-    )
-    .join(", then ");
+// a rule (mia_buffers.cleaner) for someone who has not read the rules: the problem in a few words, then what it
+// means and what the cleaner does about it
+const RULE_HELP = {
+  "no run": [
+    "No workflow run",
+    "The registry says a round is in progress, but Temporal has no open run for it, so nothing will ever move it. The cleaner cancels the round, ends its cluster jobs and runs it again.",
+  ],
+  "frozen run": [
+    "Workflow run is frozen",
+    "The run's workflow task fails every time, so the run cannot take a step. The cleaner force-stops it, ends its cluster jobs and runs it again. A buffer's run is left to a person, because stopping it retires the spec's buffers.",
+  ],
+  "activity retrying": [
+    "A step keeps failing",
+    "One activity of the run has failed many times in a row. If its worker does not know the activity, the worker needs a restart. If a service looks away, the cleaner looks again in an hour. Otherwise it diagnoses.",
+  ],
+  "request behind": [
+    "Request has not noticed its datasets",
+    "A preparation request rests although each of its datasets is prepared or shelved. The cleaner tells it to look at them again.",
+  ],
+  "autodev's run failed": [
+    "Snippet agent's job failed",
+    "The dataset waited for a reader on a snippets issue, and autodev's agent job there failed before it opened a pull request. The cleaner asks autodev to try once more, waits until it has started, then runs the dataset again. A second failure on the same issue is diagnosed.",
+  ],
+  "merge conflict": [
+    "Snippet pull request cannot merge",
+    "The pull request the dataset waited for conflicts with main. The cleaner asks autodev to merge main into it, or closes it to start over when autodev has no revision left, then runs the dataset again.",
+  ],
+  "revision limit": [
+    "Revisions used up",
+    "The work stopped at its limit of revisions. No remedy is automatic: the cleaner diagnoses it.",
+  ],
+  "time limit": [
+    "Job ran out of time",
+    "A cluster job was ended at its time limit. No remedy is automatic: the cleaner diagnoses it.",
+  ],
+  "passing cause": [
+    "Passing failure",
+    "The round stopped on something that usually passes by itself: a dropped connection, a time-out, a busy service. The cleaner waits, then runs it again, at most twice, and diagnoses it after that.",
+  ],
+  "fixed since": [
+    "Worker restarted since",
+    "The round stopped on an error of the worker, and the worker has since started on newer code. The cleaner runs it again, once per commit.",
+  ],
+  "host not approved": [
+    "Host not approved",
+    "A job needs a host nobody has approved. Only a person approves hosts: Run again on the subject's page, and tick them.",
+  ],
+  "record gap": [
+    "Catalog record is incomplete",
+    "The round could not go on because the dataset's catalog record lacks something or needs a decision. The cleaner cannot change a record; it runs the dataset again once the record has changed.",
+  ],
+  "input changed": [
+    "Catalog record changed",
+    "The record a stopped dataset waited on has changed, so the cleaner runs the dataset again.",
+  ],
+  "diagnosis": [
+    "Cause not known",
+    "No rule covers this stop, or the rule's remedy did not help. A read-only agent reads the subject's timeline and job records and proposes what to do. The cleaner carries out only what is on its own list of steps and leaves the rest to a person.",
+  ],
+  "left-over job": [
+    "Left-over cluster job",
+    "A cluster job is still alive though the round it belonged to has ended. The cleaner kills it.",
+  ],
+  "left-over snippet work": [
+    "Left-over snippet issue",
+    "A snippets issue, with its pull request, is still open though no dataset waits for it. The cleaner closes them.",
+  ],
+};
+// a case's state as the row says it: [words, pill kind, what it means]
+const CASE_STATUS = {
+  "open": ["queued", "", "Found, and not started on. In report mode a case stays here."],
+  "working": ["working", "", "The cleaner is part-way through its steps."],
+  "waiting": ["waiting", "", "The steps are done; the cleaner is watching whether the subject moves on."],
+  "needs-person": ["needs you", "warn", "The cleaner cannot resolve it; the case says what it takes."],
+  "resolved": ["resolved", "pool", "The subject moved on, or the left-over thing is gone."],
+  "dropped": ["dropped", "", "Somebody acted on the subject, so the cleaner let go of it."],
+};
+const stepWords = step => STEP_WORDS[step.do] || step.do;
 // a job's record under its job's name; one of autodev's on a snippets issue (`<owner>__<repo>/issue-<n>/…`) says so
 const jobName = where => where.replace(/^[^/]+__[^/]+\/issue-(\d+)\/.*\//, "snippets #$1 ").replace(/^.*\//, "");
 export function caseRows(cases) {
-  // a case as the table shows it: what it is about, what was seen, what was done, what is left or needed, and
-  // the records (conversation and cluster logs) of the jobs it is about: its round's, then the cleaner's own
-  return cases.map(c => ({
-    href: CASE_HREF(c),
-    about: c.key,
-    rule: c.rule,
-    state: c.state,
-    seen: plain(c.data.seen),
-    done: stepsText(c.data.steps),
-    next: plain(c.state === "needs-person" ? c.data.needs : stepsText(c.data.plan) || c.data.note),
-    jobs: (c.jobs || []).map(where => ({ href: "#job/" + where, name: jobName(where) })),
-    updated: c.updated,
-  }));
+  // a case as the page shows it. The row: what it is about, the problem in a few words, a status and how far the
+  // cleaner got. The drill-down: what the problem means, what was found, each step with its result, the steps
+  // left, what a person must do, the diagnosis, and the records (conversation and cluster logs) of the jobs it is
+  // about: its round's, then the cleaner's own
+  return cases.map(c => {
+    const data = c.data || {},
+      [problem, meaning] = RULE_HELP[c.rule] || [c.rule, ""],
+      done = (data.steps || []).filter(step => step.do !== "needs"), // what a person must do is the case's `needs`
+      plan = data.plan || [],
+      found = data.diagnosis;
+    return {
+      href: CASE_HREF(c),
+      about: c.key,
+      rule: c.rule,
+      problem,
+      meaning,
+      state: c.state,
+      status: (CASE_STATUS[c.state] || [c.state])[0],
+      progress: [done.length ? `${done.length} done` : "", plan.length ? `${plan.length} to go` : ""]
+        .filter(Boolean)
+        .join(", "),
+      found: data.seen || "",
+      did: done.map(step => ({
+        what: stepWords(step),
+        result: step.result,
+        at: step.at,
+        title: step.title,
+        evidence: step.evidence,
+      })),
+      next: plan.map(stepWords),
+      needs: c.state === "needs-person" ? data.needs || null : null,
+      note: data.note || null,
+      diagnosis: found ? { cause: found.cause, text: found.diagnosis ?? String(found) } : null,
+      jobs: (c.jobs || []).map(where => ({ href: "#job/" + where, name: jobName(where) })),
+      opened: c.opened,
+      updated: c.updated,
+    };
+  });
 }
-function caseTable(cases, nextLabel, empty) {
-  if (!cases.length) return el("div", { class: "empty" }, empty);
-  const cell = (text, wrap) => el("td", wrap ? { class: "wrap" } : {}, text);
+// what a job or a record wrote, as inline markdown: text, never HTML
+const said = text => el("p", {}, ...mdInline(String(text)));
+function caseDetail(row) {
+  const part = (title, ...kids) => (kids.some(Boolean) ? el("section", {}, el("h4", {}, title), ...kids) : null);
   return el(
-    "table",
-    { class: "plain" },
-    el(
-      "thead",
-      {},
-      el("tr", {}, ...["about", "rule", "seen", "done", nextLabel, "jobs", "updated"].map(h => el("th", {}, h))),
-    ),
-    el(
-      "tbody",
-      {},
-      ...caseRows(cases).map(row =>
-        el(
-          "tr",
-          {},
-          cell(row.href ? el("a", { href: row.href }, row.about) : row.about),
-          cell(row.rule),
-          cell(row.seen, true),
-          cell(row.done, true),
-          cell(row.next, true),
-          cell(
-            el("span", {}, ...row.jobs.flatMap((job, at) => [at ? ", " : "", el("a", { href: job.href }, job.name)])),
-          ),
-          cell(when(row.updated)),
-        ),
+    "div",
+    { class: "casebody" },
+    part("What it needs from you", row.needs && said(row.needs)),
+    part(
+      "What this kind of problem is",
+      row.meaning ? el("p", {}, row.meaning) : null,
+      el(
+        "p",
+        { class: "small" },
+        `Rule “${row.rule}”. Opened `,
+        when(row.opened),
+        ", last change ",
+        when(row.updated),
+        ".",
       ),
     ),
+    part("What the cleaner found", row.found && said(row.found)),
+    part(
+      "Diagnosis",
+      row.diagnosis && said((row.diagnosis.cause ? `**${row.diagnosis.cause}:** ` : "") + row.diagnosis.text),
+    ),
+    part(
+      "What the cleaner did",
+      row.did.length
+        ? el(
+            "ol",
+            {},
+            ...row.did.map(step =>
+              el(
+                "li",
+                {},
+                el("b", {}, step.what),
+                step.at ? el("span", { class: "small" }, " · ", when(step.at)) : null,
+                step.title ? said(step.title) : null,
+                step.evidence ? said(step.evidence) : null,
+                step.result ? said("Result: " + step.result) : null,
+              ),
+            ),
+          )
+        : null,
+    ),
+    part(
+      row.state === "open" ? "What it would do" : "What it will do next",
+      row.next.length ? el("ol", {}, ...row.next.map(words => el("li", {}, words))) : null,
+    ),
+    part("Note", row.note && said(row.note)),
+    part(
+      "Job logs",
+      row.jobs.length
+        ? el("p", {}, ...row.jobs.flatMap((job, at) => [at ? ", " : "", el("a", { href: job.href }, job.name)]))
+        : null,
+    ),
+  );
+}
+// the cases of one card: a short row each, which opens into the case's full description
+function caseList(cases, empty) {
+  if (!cases.length) return el("div", { class: "empty" }, empty);
+  return el(
+    "div",
+    { class: "cases" },
+    el(
+      "div",
+      { class: "caserow casehead" },
+      ...["Subject", "Problem", "Status", "Steps", "Last change"].map(h => el("span", {}, h)),
+    ),
+    ...caseRows(cases).map(row => {
+      const [, kind, help] = CASE_STATUS[row.state] || [];
+      const status = el("span", { class: "pill" + (kind ? " " + kind : "") }, row.status);
+      return el(
+        "details",
+        { class: "case" },
+        el(
+          "summary",
+          { class: "caserow" },
+          el("span", { class: "subject" }, row.href ? el("a", { href: row.href }, row.about) : row.about),
+          el("span", {}, row.problem),
+          el("span", {}, help ? tipOn(status, [{ b: row.status, t: help }]) : status),
+          el("span", {}, row.progress || "—"),
+          el("span", {}, when(row.updated)),
+        ),
+        caseDetail(row),
+      );
+    }),
   );
 }
 export async function viewCleaner() {
@@ -281,6 +437,24 @@ export async function viewCleaner() {
   };
   root.replaceChildren(
     card(
+      "The cleaner",
+      "A background pass that looks every few minutes for datasets, buffers and requests that stopped or went quiet, and for jobs and snippet issues that rounds left behind. It works out why, fixes what it can by the same actions the page's buttons send, and hands the rest to a person.",
+      kv([
+        ["Case", "One problem with one subject. Click a row to read what was found, what was done and what is left."],
+        ["Subject", "The dataset, buffer, request, job or snippets issue the case is about."],
+        ["Problem", "The kind of problem, as the cleaner's rules name it. The opened row says what it means."],
+        [
+          "Status",
+          el(
+            "div",
+            {},
+            ...Object.values(CASE_STATUS).map(([words, , help]) => el("div", {}, el("b", {}, words), ": " + help)),
+          ),
+        ],
+        ["Steps", "How many steps of its remedy the cleaner has done, and how many are left."],
+      ]),
+    ),
+    card(
       "The installation",
       report
         ? `Last sweep ${ago(report.at)}. ${modes[report.mode] || ""} While something is listed here, the subjects behind it are left alone.`
@@ -291,19 +465,19 @@ export async function viewCleaner() {
       report?.errors?.length ? kv([["errors of the last sweep", list(report.errors)]]) : null,
     ),
     card(
-      "Needs a person",
-      "What the cleaner could not resolve, with what it takes.",
-      caseTable(inState("needs-person"), "needed", "Nothing."),
+      "Needs you",
+      "The cleaner could not resolve these. Each opens to what it takes: a decision, a correction to a record, a fix in the code.",
+      caseList(inState("needs-person"), "Nothing."),
     ),
     card(
       "In work",
-      "Stuck subjects, left-over jobs and runs the cleaner is carrying on, or would in act mode.",
-      caseTable(inState("open", "working", "waiting"), "next", "Nothing is stuck."),
+      "What the cleaner is resolving now, or would resolve in act mode.",
+      caseList(inState("open", "working", "waiting"), "Nothing is stuck."),
     ),
     card(
       "Closed in the last week",
       "Resolved, or dropped because somebody acted on the subject.",
-      caseTable(inState("resolved", "dropped"), "how it ended", "Nothing yet."),
+      caseList(inState("resolved", "dropped"), "Nothing yet."),
     ),
   );
 }

@@ -168,7 +168,18 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
             "rule": "no run",
             "state": "needs-person",
             "updated": 5.0,
-            "data": {"seen": "no open run", "steps": [{"do": "cancel"}], "plan": [{"do": "go"}], "needs": "look"},
+            "opened": 4.0,
+            "data": {
+                "seen": "no open run",
+                "steps": [
+                    {"do": "cancel", "result": "action 1", "at": 4.5},
+                    {"do": "report_defect", "title": "a defect", "evidence": "line 3", "result": "kept on the case"},
+                    {"do": "needs", "text": "look", "result": "left to a person"},
+                ],
+                "plan": [{"do": "go"}],
+                "needs": "look",
+                "diagnosis": {"cause": "defect", "diagnosis": "the worker dropped it", "needs": "look"},
+            },
             "jobs": ["issue-224/i224-e1/match-1", "o__s/issue-49/01a1/round-1", "cleaner/case-1/diagnose-0"],
         },
         {
@@ -181,8 +192,21 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
         },
     ]
     stuck, job = run_js("print(caseRows(input));", {"operations.js": "caseRows"}, cases)
-    assert (stuck["href"], stuck["done"], stuck["next"]) == ("#datasets/rec-a", "cancel the round", "look")
-    assert (job["href"], job["next"]) == ("#job/issue-9/i9-e1/crops-1", "kill the job")
+    # the row is short: the subject, the problem in a few words, a status and how far the cleaner got
+    assert (stuck["href"], stuck["about"], stuck["problem"]) == ("#datasets/rec-a", "rec-a", "No workflow run")
+    assert (stuck["status"], stuck["progress"]) == ("needs you", "2 done, 1 to go")
+    assert (job["href"], job["problem"]) == ("#job/issue-9/i9-e1/crops-1", "Left-over cluster job")
+    assert (job["status"], job["progress"]) == ("queued", "1 to go")
+    # the long words are the drill-down's: what the problem is, what was found, each step with its result, what is
+    # left, what a person must do (once: the `needs` step is not listed as done) and the diagnosis
+    assert "Temporal has no open run" in stuck["meaning"] and stuck["found"] == "no open run"
+    assert stuck["did"] == [
+        {"what": "cancel the round", "result": "action 1", "at": 4.5},
+        {"what": "report the defect", "result": "kept on the case", "title": "a defect", "evidence": "line 3"},
+    ]
+    assert (stuck["next"], stuck["needs"]) == (["run it again"], "look")
+    assert stuck["diagnosis"] == {"cause": "defect", "text": "the worker dropped it"}
+    assert (job["did"], job["next"], job["needs"], job["diagnosis"]) == ([], ["kill the job"], None, None)
     # each job record a case is about is linked, under the job's name
     assert stuck["jobs"] == [
         {"href": "#job/issue-224/i224-e1/match-1", "name": "match-1"},
