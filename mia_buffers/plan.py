@@ -70,13 +70,13 @@ class Row:
     assumed: list[str] = field(default_factory=list)  # axes whose voxel size is a guess (mia_buffers.assume)
     channel_recipe: dict | None = None  # how a crop gets the spec's channel count; None for `all`/first-c
     bytes: int | None = None  # the record's size_bytes: what fetching it adds to the raw cache
-    # The record-local rule the harness derives this record's samples from, and its sha256; pool rows only.
+    # The rule the harness derives this record's samples from (its crops per split), and its sha256; pool rows only.
     # Named plan_rule because `rule` is the selection rule above.
     plan_rule: dict | None = None
     plan_digest: str = ""
-    planned: dict[str, int] = field(default_factory=dict)  # estimated samples per split over the raw arrays
-    planned_bytes: int = 0  # upper bound on the staged chunk bytes the planned samples touch
-    volumes: int = 0  # items × raw arrays: the volumes the request applies to, each capped on its own; pool rows only
+    planned: dict[str, int] = field(default_factory=dict)  # expected crops per split, rounded
+    planned_bytes: int = 0  # upper bound on the staged chunk bytes the planned crops touch
+    volumes: int = 0  # items × raw arrays: the volumes the record's crops are shared among; pool rows only
 
     @property
     def in_pool(self) -> bool:
@@ -314,14 +314,25 @@ def split_counts(n: int, fractions: dict[str, float]) -> dict[str, int]:
     return counts
 
 
+def crops_for(weight: float, total: int, cap: int) -> int:
+    """A dataset's crops in one split: its share of the buffer's total, at least 1, rounded up to a power of two
+    (so a pool that changes a little leaves the count, and the artifact id, alone), at most `cap`."""
+    share = max(1, math.ceil(weight * total - 1e-9))
+    return min(1 << (share - 1).bit_length(), cap)
+
+
 def plan_rule(row: Row, spec: Spec) -> dict:
-    """The record-local rule the harness's `PlanRule` mirrors: same keys and value types, never a weight or total."""
+    """The rule the harness's `PlanRule` mirrors, same keys and value types: `samples` is the record's crops per
+    split, its weight's share of the buffer's (`crops_for`)."""
     patch = spec.patch_for("2D") or {}  # as the levels key and the served config.patch: the square 2D crop
+    sampling = spec.sampling
     return {
-        "seed": spec.sampling.seed,
+        "seed": sampling.seed,
         "patch": int(patch.get("y", 0)),
-        "levels": [int(level) for level in spec.sampling.levels],
-        "samples": dict(spec.sampling.plan.samples),
+        "levels": [int(level) for level in sampling.levels],
+        "samples": {
+            name: crops_for(row.weight, total, sampling.max_crops_per_dataset) for name, total in sampling.crops.items()
+        },
         "split": row.split,
         "channel_recipe": row.channel_recipe,
     }
@@ -332,47 +343,54 @@ def plan_digest(rule: dict) -> str:
     return hashlib.sha256(json.dumps(rule, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _planned(row: Row, f: Facts, rule: dict) -> tuple[dict[str, int], int, bool]:
-    """Expected samples per split over the record's items, each raw array of each item capped the way the harness
-    caps a staged volume (`min(samples[split], capacity)`); the byte figure is an upper bound given those counts;
-    the flag says an array had no shape (each of its items then counts the full request).
+def _planned(row: Row, f: Facts, rule: dict) -> tuple[dict[str, float], int, bool]:
+    """Expected crops per split, an upper bound on their staged bytes, and whether an array had no shape.
 
-    A volume with at least one plane per split gets exactly `split_counts(planes, fractions)` planes per split (the
-    harness's `split_planes`; only which planes is hashed), so 5 planes at .8/.1/.1 give test none; one with fewer
-    puts each plane in one split with probability `fraction` (the registry's and the harness's draw), so the cap
-    applies before the fraction. The planner counts t × z planes while the harness counts z only."""
+    The harness stages `samples[split]` crops when the record holds a plane of the split and none otherwise, so the
+    expectation is the count times the chance of holding one. On a holdout row that is certain for `test` and
+    impossible for the rest. Otherwise it is certain when an array has no shape (the flag), or when an item of an
+    array has at least one plane per split and `split_counts` gives the split one (the harness's `split_planes`:
+    5 planes at .8/.1/.1 give test none); failing both, each of the record's `n` planes picks its split by
+    fraction, a chance of `1 - (1 - fraction) ** n`. An array under the coarsest footprint holds no crop. The
+    planner counts t × z planes while the harness counts z only.
+
+    The bytes: up to 4 chunks per crop per level, each patch² × channels × itemsize, and never more than the whole
+    pyramids of the record when every array has a shape."""
     samples: dict[str, int] = rule["samples"]
     footprint = rule["patch"] * max(rule["levels"])
     split = row.split or {}
     fractions: dict[str, float] = split.get("fractions", {})
     held_out = split.get("policy") == "holdout"
-    planned = dict.fromkeys(samples, 0)
-    planned_bytes, unknown = 0, False
+    certain: set[str] = set()  # splits an array surely holds a plane of
+    loose = 0  # planes that pick their split one by one
+    whole, itemsize, unknown = 0.0, 0, False
     for array in f.raw_arrays:
-        if array.extent_y and array.extent_x:
-            tiles = (array.extent_y // footprint) * (array.extent_x // footprint)
-            planes = array.planes if (f.dims or "").startswith("3D") else _depth_2d(f, array)  # per item
-            per_item: dict[str, float] = {}
-            for name, wanted in samples.items():
-                fraction = fractions.get(name, 0.0)
-                if held_out:
-                    per_item[name] = min(wanted, tiles * planes) if name == "test" else 0
-                elif planes >= len(fractions):  # the harness's exact cut: split_counts planes go to this split
-                    per_item[name] = min(wanted, tiles * split_counts(planes, fractions).get(name, 0))
-                else:
-                    per_item[name] = fraction * min(wanted, tiles * planes)
+        array_itemsize = ITEMSIZE.get(array.dtype or "", DEFAULT_ITEMSIZE)
+        itemsize = max(itemsize, array_itemsize)
+        if not (array.extent_y and array.extent_x):
+            unknown = True
+            continue
+        planes = array.planes if (f.dims or "").startswith("3D") else _depth_2d(f, array)  # per item
+        pixels = f.n_items * planes * array.extent_y * array.extent_x * array.channels * array_itemsize
+        whole += pixels * sum(1 / factor**2 for factor in rule["levels"])
+        if array.extent_y < footprint or array.extent_x < footprint:
+            continue
+        if planes >= len(fractions):
+            certain |= {name for name, count in split_counts(planes, fractions).items() if count}
         else:
-            per_item, unknown = dict(samples), True
-        # 1e-9: 0.7 × 10 is 6.999…, an expectation of 7
-        counts = {name: math.floor(f.n_items * value + 1e-9) for name, value in per_item.items()}
-        itemsize = ITEMSIZE.get(array.dtype or "", DEFAULT_ITEMSIZE)
-        # up to 4 chunks per sample per level, each patch² × channels × itemsize
-        planned_bytes += (
-            len(rule["levels"]) * sum(counts.values()) * 4 * rule["patch"] ** 2 * (row.channels or 1) * itemsize
-        )
-        for name, count in counts.items():
-            planned[name] += count
-    return planned, planned_bytes, unknown
+            loose += f.n_items * planes
+    expected: dict[str, float] = {}
+    for name, count in samples.items():
+        if held_out:
+            chance = 1.0 if name == "test" else 0.0
+        elif unknown or name in certain:
+            chance = 1.0
+        else:
+            chance = 1 - (1 - fractions.get(name, 0.0)) ** loose
+        expected[name] = count * chance
+    crops = sum(round(value) for value in expected.values())
+    planned_bytes = len(rule["levels"]) * crops * 4 * rule["patch"] ** 2 * (row.channels or 1) * (itemsize or 1)
+    return expected, planned_bytes if unknown else min(planned_bytes, int(whole)), unknown
 
 
 def _some(ids: list[str], limit: int = 5) -> list[str]:
@@ -380,7 +398,8 @@ def _some(ids: list[str], limit: int = 5) -> list[str]:
     return ids if len(ids) <= limit else [*ids[:limit], f"… {len(ids) - limit} more"]
 
 
-def _policy_errors(pool: list[Row], spec: Spec) -> list[str]:
+def _policy_errors(pool: list[Row], spec: Spec, expected: dict[str, float]) -> list[str]:
+    """What makes the pool unservable under the spec; `expected` is the pool's summed expected crops per split."""
     errors: list[str] = []
     if not pool:
         return ["no dataset admitted"]
@@ -402,7 +421,7 @@ def _policy_errors(pool: list[Row], spec: Spec) -> list[str]:
                 f"patch.c: {channel_policy} needs at least {channel_policy} channels; {_some(short)} have fewer"
             )
     for name in spec.splits.fractions:
-        if all(row.planned.get(name, 0) == 0 for row in pool):
+        if expected.get(name, 0.0) < 1 - 1e-9:  # single images land whole in one split: the pool's sum counts
             errors.append(
                 f"split {name!r}: no record can supply it (planes); the buffer would serve an empty {name} set"
             )
@@ -490,6 +509,7 @@ def build_plan(
         rows.append(row)
     rows.sort(key=lambda row: row.path)
     pool = [row for row in rows if row.in_pool]
+    pool_expected: dict[str, float] = {}  # the pool's expected crops per split
     if pool:
         weighting = spec.sampling.weighting
         temperature = {"uniform_over": 0.0, "proportional": 1.0}.get(weighting.scheme, weighting.temperature)
@@ -509,11 +529,14 @@ def build_plan(
                 row.splits = split_counts(row.n_items, spec.splits.fractions)
             row.plan_rule = plan_rule(row, spec)
             row.plan_digest = plan_digest(row.plan_rule)
-            row.planned, row.planned_bytes, unknown = _planned(row, facts_by_id[row.id], row.plan_rule)
+            expected, row.planned_bytes, unknown = _planned(row, facts_by_id[row.id], row.plan_rule)
+            row.planned = {name: round(value) for name, value in expected.items()}
+            for name, value in expected.items():
+                pool_expected[name] = pool_expected.get(name, 0.0) + value
             row.volumes = row.n_items * len(facts_by_id[row.id].raw_arrays)
             if unknown:
                 row.notes.append(UNKNOWN_SHAPE_NOTE)
-    errors = _policy_errors(pool, spec)
+    errors = _policy_errors(pool, spec, pool_expected)
     if spec.splits.stratify_by:
         errors.append("splits.stratify_by is not implemented; remove it")
     warnings = list(spec.warnings)
