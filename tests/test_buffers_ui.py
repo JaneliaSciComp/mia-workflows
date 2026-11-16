@@ -267,7 +267,7 @@ def test_the_catalog_in_use_is_named_on_the_datasets_view_with_a_link_to_that_co
         [[catalog, "o/catalog"], [catalog, None]],
     )
     words = [" ".join(text.split()) for text in (linked[0], bare[0])]  # a GitHub link carries the mark and a space
-    assert words[0].startswith("catalog 2c55a495 · 2,243 datasets · synced ") and linked[2] == "catalog"
+    assert words[0].startswith("Sourced from catalog: 2c55a495 · 2,243 datasets · synced ") and linked[2] == "catalog"
     assert linked[1] == [f"https://github.com/o/catalog/tree/{catalog['ref']}"]
     assert words[1] == words[0] and bare[1] == []  # no catalog repo configured: the commit is plain text
     assert has('el("div", { class: "viewhead" }, el("h2", {}, "Datasets"), catalogLine(')

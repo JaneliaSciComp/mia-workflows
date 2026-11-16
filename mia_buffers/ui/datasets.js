@@ -45,7 +45,7 @@ export const catalogLine = (catalog, repo) => {
   return el(
     "div",
     { class: "catalog" },
-    "catalog ",
+    "Sourced from catalog: ",
     repo ? link(`https://github.com/${repo}/tree/${catalog.ref}`, commit, "the catalog repo at this commit") : commit,
     ` · ${plural(catalog.count, "dataset")} · synced `,
     when(catalog.synced_at),
