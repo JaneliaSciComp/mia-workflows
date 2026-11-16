@@ -720,7 +720,8 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
 
 1. **The installation first.** `service_findings` reads `GET /health` (Temporal, a worker per task queue),
    `GET /workers` (what each worker said it started on: `mia_core.checkout.code_digest`, a digest of the
-   packages' git trees, against the checkout's now; a commit that touches only docs or tests changes nothing),
+   packages as committed, against the checkout's now; a commit that touches only docs, tests or the page's
+   files changes nothing),
    `GET /schedules` and `autonomy.pause`. Each finding names the subject kinds behind it, and those are left
    alone for the pass: a worker that is down or runs old code is said once, never "fixed" by cancelling what waits
    on it. Findings that only show across subjects (`evidence_findings`: workflow tasks failing on more than one

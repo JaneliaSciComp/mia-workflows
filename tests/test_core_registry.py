@@ -241,6 +241,7 @@ def test_the_code_digest_changes_with_the_packages_alone(tmp_path):
     assert first[0] is not None and len(first[0]) == 40 and first[1] is not None
     docs = commit("docs/notes.md", "words")
     assert docs[0] != first[0] and docs[1] == first[1]  # a commit that touches no package: the same code
+    assert commit("mia_buffers/ui/app.js", "page")[1] == first[1]  # the page is served from disk: no worker loads it
     assert commit("mia_data/code.py", "two")[1] != first[1]
 
 
