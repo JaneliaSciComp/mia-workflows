@@ -216,12 +216,31 @@ async def test_a_failed_probe_on_a_first_submission_submits_nothing(tmp_path):
     assert fake.submitted == []
 
 
-async def test_past_the_cap_the_configured_hosts_stay_and_the_last_named_are_dropped(tmp_path):
-    named = [f"h{n}.example.org" for n in range(70)]
-    fake = FakeCsub(policy_hosts=["*.example.org"])
-    j = _jobs(tmp_path, fake, allow_hosts=["pypi.org", "files.pythonhosted.org"])
-    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"), named)
-    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "files.pythonhosted.org"] + named[:62]
+async def test_a_job_that_needs_more_hosts_than_csub_takes_is_not_started(tmp_path):
+    """Past the cap nothing is dropped to fit: a job without a host it needs fails later and says less."""
+
+    class Issues:
+        def __init__(self, named):
+            self.body = hosts_marker(named)
+
+        async def get_issue(self, number):
+            return {"number": number, "user": {"login": "mia-bot[bot]"}, "body": self.body}
+
+    configured = ["pypi.org", "files.pythonhosted.org"]
+    for count in (62, 63):
+        named = [f"h{n}.example.org" for n in range(count)]
+        fake = FakeCsub(policy_hosts=["*.example.org"])
+        cfg = make_cfg(tmp_path / str(count), agent={"allow_hosts": configured}, github={"trusted_bots": ["mia-bot"]})
+        activities = Activities(cfg, Issues(named), None, AgentJobs(cfg, client_factory=lambda fake=fake: fake), "bot")
+        request = SubmitInput(7, K, 1, Workspace(str(cfg.paths.work_root / "r1"), "abc", "b"))
+        if count == 62:
+            await activities.submit_agent(request)
+            assert fake.submitted[0]["allow_hosts"] == configured + named
+            continue
+        with pytest.raises(ApplicationError) as refused:
+            await activities.submit_agent(request)
+        assert refused.value.non_retryable and fake.submitted == []
+        assert "65 hosts" in str(refused.value) and "at most 64" in str(refused.value)
 
 
 async def test_submit_reuses_job_found_by_name(tmp_path):

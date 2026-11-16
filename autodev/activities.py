@@ -35,7 +35,7 @@ from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import issue_hosts, judge_dir, log_tail, read_result, render_prompt
+from .agent import TooManyHostsError, issue_hosts, judge_dir, log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
@@ -273,6 +273,8 @@ class Activities:
                 named = issue_hosts(issue.get("body"))
         try:
             return await self.jobs.submit(request.issue, request.key, request.round, request.workspace, named)
+        except TooManyHostsError as error:
+            raise ApplicationError(str(error), non_retryable=True) from error
         except CsubError as error:
             if error.code in PERMANENT_CSUB:
                 raise ApplicationError(str(error), non_retryable=True) from error

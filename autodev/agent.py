@@ -163,6 +163,10 @@ MAX_JOB_HOSTS = 64  # csub refuses more hosts than this on one job
 HOSTS_RE = re.compile(r"<!-- autodev: hosts([^>]*?)-->")
 
 
+class TooManyHostsError(ValueError):
+    """An agent's job needs more hosts than csub takes on one job."""
+
+
 def hosts_marker(hosts: Sequence[str]) -> str:
     """The marker with which an issue names the hosts its agent's job may reach beyond the configured ones."""
     return f"<!-- autodev: hosts {' '.join(hosts)} -->"
@@ -177,8 +181,8 @@ def issue_hosts(body: str | None) -> list[str]:
 def agent_hosts(configured: list[str], named: Sequence[str], policy: list[str]) -> list[str]:
     """What an agent's job may reach: the configured hosts, then those its issue names that the broker's policy
     allows (`policy`: its allowed_hosts patterns). The policy is the ceiling, never the list: a host no issue
-    names is not granted. Never a name csub refuses as a job host, an IP address or a GitHub host; without repeats; past
-    MAX_JOB_HOSTS the last named are dropped and configured hosts stay."""
+    names is not granted. Never a name csub refuses as a job host, an IP address or a GitHub host; without repeats.
+    More than MAX_JOB_HOSTS is a TooManyHostsError: none is dropped to fit."""
     usable = [
         host
         for host in named
@@ -187,7 +191,13 @@ def agent_hosts(configured: list[str], named: Sequence[str], policy: list[str]) 
         and not is_github_host(host)
         and not missing_hosts([host], policy)
     ]
-    return list(dict.fromkeys([*configured, *usable]))[:MAX_JOB_HOSTS]
+    hosts = list(dict.fromkeys([*configured, *usable]))
+    if len(hosts) > MAX_JOB_HOSTS:
+        raise TooManyHostsError(
+            f"the agent's job needs {len(hosts)} hosts ({len(configured)} configured, the rest named by its issue) "
+            f"and one job takes at most {MAX_JOB_HOSTS}"
+        )
+    return hosts
 
 
 class AgentJobs:
