@@ -257,12 +257,15 @@ async def test_revision_limit_escalates_and_the_requesters_approval_merges(env):
 
 
 async def test_escalation_is_raised_once_then_waits(env):
+    """The issue is labelled needs-human with the comment: whoever follows it by its label (a dataset's round
+    waiting for a new head) learns that none is coming."""
     f1, f2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
     stuck = snap(feedback=[f1, f2])
     m = Mocks([snap(feedback=[f1]), stuck, stuck, stuck, snap(approved=True)])
     assert await run(env, m, IssueInput(7, max_revisions=1)) == "merged"
     assert m.names().count("observe") == 5
     assert sum("revision limit" in c.body for c in m.of("comment")) == 1
+    assert m.of("set_stage")[-2:] == ["needs-human", "done"] and m.of("set_stage").count("needs-human") == 1
 
 
 async def test_an_outsiders_pending_request_blocks_the_merge_at_the_limit(env):
@@ -280,9 +283,11 @@ async def test_closed_pr_stops(env):
 
 
 async def test_merge_failure_comments_then_external_merge_finishes(env):
-    m = Mocks([snap(approved=True), snap(state="merged")], merge_ok=False)
+    """A merge that fails (conflicts) is retried at every look, and the issue is labelled needs-human once."""
+    m = Mocks([snap(approved=True), snap(approved=True), snap(state="merged")], merge_ok=False)
     assert await run(env, m) == "merged"
-    assert any("merging failed" in c.body for c in m.of("comment"))
+    assert any("merging failed" in c.body for c in m.of("comment")) and len(m.of("merge")) == 2
+    assert m.of("set_stage").count("needs-human") == 1
 
 
 async def test_continue_as_new_keeps_handled_feedback(env, monkeypatch):

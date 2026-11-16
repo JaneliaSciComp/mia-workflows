@@ -2,7 +2,8 @@
 plus the registry: what exists on disk (`assets`, by kind and key: a staged directory, a record's raw cache) and
 which buffers reference it (`refs`), so a buffer can reuse what an earlier round staged and a retire can count
 what is still in use. The registry is an index over the on-disk manifests (stage.json, files.json), rebuildable
-from them; the files stay the source of truth.
+from them; the files stay the source of truth. The subjects (datasets, buffer specs, preparation requests)
+with their timelines and actions, the shelved table, the assessments and the budgets are recorded here alone.
 
 Spec v0.5 §5 and §9.5: the ledger is the record of a run; replaying a run means replaying its descriptors.
 """
@@ -13,6 +14,7 @@ import dataclasses
 import gzip
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -50,6 +52,18 @@ EVENT_KINDS = (  # a buffer's lifecycle
     "needs-human",
 )
 
+HEAD_RE = re.compile(r"[0-9a-f]{12}")
+
+
+def head_of(subject: dict) -> str | None:
+    """The snippets commit a verdict is about, as its first 12 hex digits: a crop set's ref ends with it, a snippet
+    PR head's ref begins with it. A person's verdict on the crops of a PR head is recorded on the head, the crop
+    judge's on the crop set, and this joins the two."""
+    kind, ref = subject.get("kind"), str(subject.get("ref") or "")
+    head = ref.rsplit("-", 1)[-1] if kind == "crop_set" else ref[:12] if kind == "pr_head" else ""
+    return head if HEAD_RE.fullmatch(head) else None
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS buffers (id TEXT PRIMARY KEY, config TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS volumes (buffer TEXT, id TEXT, data TEXT NOT NULL, PRIMARY KEY (buffer, id));
@@ -84,7 +98,14 @@ CREATE TABLE IF NOT EXISTS timeline (kind TEXT, number INTEGER, seq INTEGER, at 
 CREATE TABLE IF NOT EXISTS actions (id INTEGER PRIMARY KEY, kind TEXT, number INTEGER, action TEXT, actor TEXT,
     at TEXT, key TEXT UNIQUE, payload TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS actions_subject ON actions (kind, number);
+CREATE TABLE IF NOT EXISTS shelved (kind TEXT, number INTEGER, by TEXT, at TEXT, reason TEXT NOT NULL,
+    PRIMARY KEY (kind, number));
+CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, number INTEGER, key TEXT NOT NULL,
+    rule TEXT NOT NULL, state TEXT NOT NULL, opened REAL, updated REAL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS cases_state ON cases (state);
 """
+
+CASE_COLUMNS = ("id", "kind", "number", "key", "rule", "state", "opened", "updated", "data")
 
 ACTION_COLUMNS = ("id", "kind", "number", "action", "actor", "at", "key", "payload", "state", "detail")
 NUMBER_EPOCH = 1767225600  # 2026-01-01T00:00:00Z: a new subject's number is the whole seconds since then
@@ -451,40 +472,63 @@ class Ledger:
         with self._transaction() as db:
             return self._merge_dataset(db, record, fields, time.time())
 
+    @staticmethod
+    def _shelved_datasets(db: sqlite3.Connection) -> dict[str, dict]:
+        """Record id -> the hold of each shelved dataset."""
+        rows = db.execute(
+            "SELECT s.key, h.by, h.at, h.reason FROM shelved h JOIN subjects s ON s.kind = h.kind AND "
+            "s.number = h.number WHERE h.kind = 'dataset'"
+        )
+        return {key: {"by": by, "at": at, "reason": reason} for key, by, at, reason in rows}
+
+    @staticmethod
+    def _dataset_read(record: str, stored: tuple | None, hold: dict | None) -> dict | None:
+        """A dataset's row as it reads: the stored (data, updated_at), and over it `shelved` with the hold's
+        reason for a shelved dataset (one without a row gets one made up). None: no row and no hold."""
+        row = {**json.loads(stored[0]), "id": record, "updated_at": stored[1]} if stored else None
+        if hold is None:
+            return row
+        made_up = {"id": record, "updated_at": datetime.fromisoformat(hold["at"]).timestamp()}
+        return {**(row or made_up), "state": "shelved", "reason": hold["reason"]}
+
     def dataset(self, record: str) -> dict | None:
+        """The record's row as it reads (`_dataset_read`): the stored row is what a shelved dataset reads again
+        once it is unshelved."""
         with self._lock:
-            row = self._db.execute("SELECT data, updated_at FROM datasets WHERE id = ?", (record,)).fetchone()
-        return {**json.loads(row[0]), "id": record, "updated_at": row[1]} if row else None
+            stored = self._db.execute("SELECT data, updated_at FROM datasets WHERE id = ?", (record,)).fetchone()
+            hold = self._shelved_datasets(self._db).get(record)
+        return self._dataset_read(record, stored, hold)
 
     def datasets(self, state: str | None = None) -> list[dict]:
-        query = "SELECT id, data, updated_at FROM datasets"
+        """Every dataset's row as it reads (`_dataset_read`), or those that read `state`."""
         with self._lock:
-            if state is None:
-                rows = self._db.execute(query + " ORDER BY id").fetchall()
-            else:
-                rows = self._db.execute(
-                    query + " WHERE json_extract(data, '$.state') = ? ORDER BY id", (state,)
-                ).fetchall()
-        return [{**json.loads(data), "id": record, "updated_at": updated} for record, data, updated in rows]
-
-    def in_progress_records(self) -> set[str]:
-        """Dataset ids whose state is in-progress: a prep job may be reading their raw cache."""
-        return {row["id"] for row in self.datasets("in-progress")}
+            stored = {record: rest for record, *rest in self._db.execute("SELECT id, data, updated_at FROM datasets")}
+            held = self._shelved_datasets(self._db)
+        rows = [self._dataset_read(record, stored.get(record), held.get(record)) for record in sorted({*stored, *held})]
+        return [row for row in rows if row is not None and (state is None or row.get("state") == state)]
 
     def sync_datasets(self, prepared: dict[str, dict], *, older_than: float | None = None) -> dict:
-        """Mark each given record prepared and drop prepared rows no longer given; other states are untouched,
-        and a `revoked` row is never merged over (the folder may still look prepared: a revocation deletes
-        nothing). With `older_than`, only rows last written before it are dropped: one written during the scan
-        stays."""
+        """Mark each given record prepared and drop prepared rows no longer given. A record whose last round did
+        not end `done` (one in a round, at review, stopped or cancelled) keeps its state and takes the folder's
+        facts only: its folder still holds the crops an earlier round saved. A `revoked` row is never merged over
+        (a revocation deletes nothing). With `older_than`, only rows last written before it are dropped: one
+        written during the scan stays."""
         now = time.time()
         kept = 0
         with self._transaction() as db:
             for record, fields in prepared.items():
-                state = db.execute("SELECT json_extract(data, '$.state') FROM datasets WHERE id = ?", (record,))
-                if (state.fetchone() or (None,))[0] == "revoked":
+                found = db.execute(
+                    "SELECT json_extract(data, '$.state'), json_extract(data, '$.data_stage') FROM datasets WHERE id = ?",
+                    (record,),
+                ).fetchone()
+                state, stage = found or (None, None)
+                if state == "revoked":
                     kept += 1
                     continue
-                self._merge_dataset(db, record, {**fields, "state": "prepared"}, now)
+                facts = {name: value for name, value in fields.items() if name != "state"}
+                if stage in (None, "done"):  # no round reported here, or its last one ended done: the folder decides
+                    facts |= {"state": "prepared", "reason": None}
+                self._merge_dataset(db, record, facts, now)
             rows = db.execute("SELECT id, updated_at FROM datasets WHERE json_extract(data, '$.state') = 'prepared'")
             stale = [
                 record
@@ -503,7 +547,7 @@ class Ledger:
 
     def adopt_subject(self, kind: str, number: int, key: str, *, stage: str = "new", data: dict | None = None) -> dict:
         """Create the subject, or refresh its stage and data while no workflow has written a stage (revision 0):
-        after that the registry's stage is the truth and an issue's label is not. ValueError: the key is taken."""
+        after that the registry's stage is the truth. ValueError: the key is taken."""
         with self._transaction() as db:
             try:
                 db.execute(
@@ -685,18 +729,46 @@ class Ledger:
         there is no such action."""
         with self._transaction() as db:
             found = self._actions(db, "WHERE id = ?", (action_id,))
+            return self._settle(db, found[0], state, detail, entry) if found else None
+
+    def _settle(
+        self, db: sqlite3.Connection, action: dict, state: str, detail: str, entry: tuple[str, str] | None
+    ) -> dict:
+        """settle_action's writes, inside the caller's transaction."""
+        db.execute("UPDATE actions SET state = ?, detail = ? WHERE id = ?", (state, detail, action["id"]))
+        if entry is not None:
+            key = (action["kind"], action["number"])
+            seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM timeline WHERE kind = ? AND number = ?", key)
+            db.execute(
+                "INSERT OR IGNORE INTO timeline (kind, number, seq, at, round, stage, body, marker) "
+                "VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
+                (*key, seq.fetchone()[0], datetime.now(UTC).isoformat(), *entry),
+            )
+        return self._actions(db, "WHERE id = ?", (action["id"],))[0]
+
+    def shelved(self) -> dict[tuple[str, int], dict]:
+        """(kind, number) -> {by, at, reason} of every shelved subject."""
+        with self._lock:
+            rows = self._db.execute("SELECT kind, number, by, at, reason FROM shelved").fetchall()
+        return {(kind, number): {"by": by, "at": at, "reason": reason} for kind, number, by, at, reason in rows}
+
+    def settle_hold(self, action_id: int, reason: str | None, entry: tuple[str, str]) -> dict | None:
+        """Carry out a `shelve` (`reason`) or an `unshelve` (None) in one transaction: the subject's hold is
+        written or deleted, the action is `sent` and its entry is on the timeline. None without such an action."""
+        with self._transaction() as db:
+            found = self._actions(db, "WHERE id = ?", (action_id,))
             if not found:
                 return None
-            db.execute("UPDATE actions SET state = ?, detail = ? WHERE id = ?", (state, detail, action_id))
-            if entry is not None:
-                key = (found[0]["kind"], found[0]["number"])
-                seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM timeline WHERE kind = ? AND number = ?", key)
+            action = found[0]
+            key = (action["kind"], action["number"])
+            if reason is None:
+                db.execute("DELETE FROM shelved WHERE kind = ? AND number = ?", key)
+            else:
                 db.execute(
-                    "INSERT OR IGNORE INTO timeline (kind, number, seq, at, round, stage, body, marker) "
-                    "VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
-                    (*key, seq.fetchone()[0], datetime.now(UTC).isoformat(), *entry),
+                    "INSERT OR REPLACE INTO shelved VALUES (?, ?, ?, ?, ?)",
+                    (*key, action["actor"], action["at"], reason),
                 )
-            return self._actions(db, "WHERE id = ?", (action_id,))[0]
+            return self._settle(db, action, "sent", "", entry)
 
     def action(self, action_id: int) -> dict | None:
         with self._lock:
@@ -717,6 +789,56 @@ class Ledger:
     def actions(self, kind: str, number: int) -> list[dict]:
         with self._lock:
             return self._actions(self._db, "WHERE kind = ? AND number = ?", (kind, number))
+
+    # --- cases: what the cleaner found stuck, what it did and whether that helped (spec cleaner §4.8) ----
+
+    @staticmethod
+    def _cases(db: sqlite3.Connection, where: str, values: tuple) -> list[dict]:
+        rows = db.execute(f"SELECT {', '.join(CASE_COLUMNS)} FROM cases {where} ORDER BY id DESC", values)
+        return [{**dict(zip(CASE_COLUMNS, row, strict=True)), "data": json.loads(row[8])} for row in rows]
+
+    def open_case(self, kind: str, number: int | None, key: str, rule: str, state: str, data: dict) -> dict:
+        """A new case about a subject (`kind`, `number`, `key`) or something left behind (no number)."""
+        now = time.time()
+        with self._transaction() as db:
+            added = db.execute(
+                "INSERT INTO cases (kind, number, key, rule, state, opened, updated, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (kind, number, key, rule, state, now, now, json.dumps(data)),
+            )
+            return self._cases(db, "WHERE id = ?", (added.lastrowid,))[0]
+
+    def update_case(
+        self, case_id: int, *, state: str | None = None, rule: str | None = None, data: dict | None = None
+    ) -> dict | None:
+        """Set a case's state, rule or data (each only when given; `data` whole). None when there is no such case."""
+        with self._transaction() as db:
+            found = self._cases(db, "WHERE id = ?", (case_id,))
+            if not found:
+                return None
+            case = found[0]
+            db.execute(
+                "UPDATE cases SET state = ?, rule = ?, data = ?, updated = ? WHERE id = ?",
+                (
+                    state or case["state"],
+                    rule or case["rule"],
+                    json.dumps(case["data"] if data is None else data),
+                    time.time(),
+                    case_id,
+                ),
+            )
+            return self._cases(db, "WHERE id = ?", (case_id,))[0]
+
+    def cases(self, states: Iterable[str] = (), since: float | None = None) -> list[dict]:
+        """The cases, newest first: those in one of `states` (all when none is given) and, with `since`, also
+        every case updated after it."""
+        states = tuple(states)
+        marks = ", ".join("?" * len(states))
+        with self._lock:
+            if not states:
+                return self._cases(self._db, "WHERE updated > ?", (since or 0.0,))
+            if since is None:
+                return self._cases(self._db, f"WHERE state IN ({marks})", states)
+            return self._cases(self._db, f"WHERE state IN ({marks}) OR updated > ?", (*states, since))
 
     # --- assessments: the append-only record every gate decision leaves (spec autonomous-gates §5) ----
 
@@ -769,9 +891,11 @@ class Ledger:
     def agreement(self, gate: str, limit: int = 5000) -> dict:
         """How the judge and the humans agree at a gate (spec autonomous-gates §9): per subject with a judge
         assessment, its newest judge verdict against the newest human verdict; no human verdict yet is `pending`.
+        A person's verdict on a snippet PR head counts for the crop set made from that head (`head_of`).
         Returns {"judged", "agree", "disagree", "pending", "pairs": [{subject, judge, human, agree}]}."""
         newest_judge: dict[str, dict] = {}
         newest_human: dict[str, dict] = {}
+        on_head: dict[str, dict] = {}  # snippet PR head -> the newest human verdict recorded on it
         for row in self.assessments(gate=gate, limit=limit):  # newest first: the first seen per subject wins
             subject = row.get("subject") or {}
             key = f"{subject.get('kind')}:{subject.get('ref')}"
@@ -780,9 +904,13 @@ class Ledger:
                 newest_judge.setdefault(key, row)
             elif by.startswith("human:"):
                 newest_human.setdefault(key, row)
+                if subject.get("kind") == "pr_head" and (head := head_of(subject)):
+                    on_head.setdefault(head, row)
         pairs = []
         for key, judge in newest_judge.items():
             human = newest_human.get(key)
+            if human is None and key.startswith("crop_set:"):
+                human = on_head.get(head_of(judge["subject"]) or "")
             abstained = judge.get("verdict") == "escalate"  # the judge did not decide: neither agreement nor not
             pairs.append(
                 {

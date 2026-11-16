@@ -288,6 +288,14 @@ class BufferState:
     staged_at: str | None = None
     accepted: dict[str, float] = field(default_factory=dict)
     approved_by: str = ""  # `human:<login>` of the accepted gate approve; "" for plan.auto_approve
+    # the stage pass whose result entry is still to be written, and what the round has gathered for it; each
+    # stage write carries it out (spec job-records §3.6)
+    passes: dict[str, int] = field(default_factory=dict)  # stage -> passes begun this round
+    pass_stage: str = ""  # the open pass; "" when no result is due
+    # ponytail: one workspace path per job, in a state every stage write carries (a few hundred kB at the 2,000
+    # datasets a sourcing pass is good for); the upgrade is paths relative to the work root
+    pass_jobs: list[str] = field(default_factory=list)  # workspaces of the jobs the open pass submitted
+    result: str = ""  # what the open pass found
 
 
 @dataclass
@@ -347,6 +355,11 @@ class PrepState:
     pins: PrepPins | None = None
     outcomes: list[PrepOutcome] = field(default_factory=list)
     settled: dict[str, str] = field(default_factory=dict)  # record -> the state it settled in
+    # the stage pass whose result entry is still to be written (as `BufferState`; spec job-records §3.6)
+    passes: dict[str, int] = field(default_factory=dict)  # stage -> passes begun this round
+    pass_stage: str = ""  # the open pass; "" when no result is due
+    pass_jobs: list[str] = field(default_factory=list)  # workspaces of the jobs the open pass submitted
+    result: str = ""  # what the open pass found
 
 
 def job_key(issue: int, round_id: str, record: str, rebuild: int = 0) -> str:

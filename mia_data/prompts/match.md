@@ -2,7 +2,7 @@ You are matching dataset `${record}` (catalog record at commit ${record_commit})
 read it. A snippet is a small reader for one file format; a binding is the data that says which snippet reads
 which file, with which params. You write the binding, test it with the harness, and report the outcome. You
 write no code.
-
+${advised}
 # What is here
 
 All in the current directory:
@@ -60,10 +60,25 @@ All in the current directory:
           "what_fails": "<what a new snippet must handle, with the smoke errors>",
           "tried": [{"snippet": "<name>", "params": {}, "error": "<smoke error>"}]}
 
-   - You can't decide, or something outside your control stops you (an undecidable label class, a dependency
-     missing from the allowlist, a host the job may not reach):
+   - A person has to decide or change something before any run can bind this dataset (an undecidable label
+     class, a record that names no data file, a dependency missing from the allowlist, a host the job may not
+     reach). Running the match again unchanged would stop at the same place:
 
          {"outcome": "blocked", "reason": "<what is missing, and what a human must decide or change>"}
+
+   - Something did not work, and running the match again later may pass (a host that did not answer or answered
+     with a server error, a read that timed out, a harness or tool error that is not about this dataset, time
+     or turns running out):
+
+         {"outcome": "failed", "reason": "<what failed, with the error text, and how far you got>"}
+
+   Choose between these two by what a person would have to do: something to decide or fix is `blocked`, nothing
+   but running it again is `failed`.
+
+   A person reads a `reason` on the dataset's page, as markdown. Start with one sentence that says what they
+   have to decide or change (for `failed`: what failed). Then a blank line (`\n\n` in the JSON string) and the
+   evidence as at most six `- ` items, one sentence each, one per line (`\n`). Leave out what worked and what
+   you tried unless the decision depends on it. Keep the whole reason under 1200 characters.
 
 # Rules
 
@@ -78,4 +93,4 @@ All in the current directory:
   work around it.
 - Your only network access is the harness (`harness smoke`, `harness list`), on the record's hosts; you have no
   GitHub access. Don't try to download files yourself; the harness reads the data.
-- A missing or partial `outcome.json` counts as a failure.
+- A missing or partial `outcome.json` counts as `failed`.

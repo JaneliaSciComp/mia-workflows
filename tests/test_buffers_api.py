@@ -18,6 +18,7 @@ from mia_buffers.hosts import HostCheck
 from mia_buffers.ledger import Ledger
 from mia_buffers.plan import load_records
 from mia_core.hosts import generate_policy
+from mia_core.jobrecord import record_path
 from mia_core.locks import LockDir
 from mia_data.config import NetworkCfg
 from mia_data.models import LabelEvent
@@ -440,6 +441,37 @@ def test_sync_datasets_route(tmp_path):
     assert worker.handle("POST", "/sync/datasets", {}, b"")[0] == 401
 
 
+def test_gallery_png_route_serves_a_rounds_crops_from_its_workspace(tmp_path):
+    """A round at review has published nothing: its crops are in its crop job's workspace, their overlays in its
+    verify job's, and the newest attempt that has the file is the one served."""
+    sha, round_id = "c" * 40, "i7-e99"
+    round_dir = tmp_path / "work" / "issue-7" / round_id
+    for attempt, raw in ((1, b"old"), (2, b"new")):
+        (round_dir / f"crop-{sha}-{attempt}" / "crops" / "c1").mkdir(parents=True)
+        (round_dir / f"crop-{sha}-{attempt}" / "crops" / "c1" / "raw.png").write_bytes(raw)
+    (round_dir / f"verify-{sha}-1" / "preview" / "c1").mkdir(parents=True)
+    (round_dir / f"verify-{sha}-1" / "preview" / "c1" / "overlay.png").write_bytes(b"overlay")
+    (round_dir / f"verify-{sha}-2" / "preview").mkdir(parents=True)  # the second attempt drew nothing for c1
+    (round_dir / f"crop-{sha}-2" / "crops" / "c2").symlink_to(round_dir / f"crop-{sha}-1" / "crops" / "c1")
+    (round_dir / f"crop-{sha}-3").symlink_to(round_dir / f"crop-{sha}-1")  # no workspace of the round's
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), work_root=tmp_path / "work")
+    status, body, headers = s.handle("GET", f"/gallery/{round_id}/{sha}/c1/raw.png", {}, b"")
+    assert (status, body, headers["Content-Type"]) == (200, b"new", "image/png")
+    assert s.handle("GET", f"/gallery/{round_id}/{sha}/c1/overlay.png", {}, b"")[1] == b"overlay"
+    for missing in (
+        f"/gallery/{round_id}/{sha}/c2/raw.png",  # a symlink
+        f"/gallery/{round_id}/{'d' * 40}/c1/raw.png",  # another snippets commit
+        f"/gallery/i8-e99/{sha}/c1/raw.png",  # another dataset
+        f"/gallery/{round_id}/{sha}/..%2F..%2Fc1/raw.png",
+        f"/gallery/{round_id}/{sha}/.hidden/raw.png",
+        f"/gallery/{round_id}/{sha}/c1/crop.json",
+        f"/gallery/..%2Fissue-7/{sha}/c1/raw.png",
+    ):
+        assert s.handle("GET", missing, {}, b"")[0] == 404, missing
+    without = BufferService(Ledger(tmp_path / "l2.sqlite"))
+    assert without.handle("GET", f"/gallery/{round_id}/{sha}/c1/raw.png", {}, b"")[0] == 503
+
+
 def test_crop_png_route_serves_storage_root_only(tmp_path):
     root = tmp_path / "crops"
     (root / "confocal-human-u937" / "c1").mkdir(parents=True)
@@ -454,6 +486,52 @@ def test_crop_png_route_serves_storage_root_only(tmp_path):
     assert s.handle("GET", "/crops/.hidden/c1/overlay.png", {}, b"")[0] == 404
     assert s.handle("GET", "/crops/confocal-human-u937/c1/labels.png", {}, b"")[0] == 404
     assert BufferService(Ledger(tmp_path / "l2.sqlite")).handle("GET", "/crops/a/b/raw.png", {}, b"")[0] == 503
+
+
+def test_job_record_route_serves_the_file_as_it_is_and_nothing_outside_the_records(tmp_path, monkeypatch):
+    """A job's record goes out as the gzip on disk, under the address of its workspace; an address that leaves the
+    records directory, names a symlink or names nothing is a 404."""
+    work, where = tmp_path / "work", "issue-12/i12-e345/match-1"
+    record = {"schema": 1, "request": {"name": "match", "command": "claude -p …"}, "outcome": {"state": "DONE"}}
+    path = record_path(work, where)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(gzip.compress(json.dumps(record).encode()))
+    path.with_name("linked.json.gz").symlink_to(path)
+    (work / "secret.json.gz").write_bytes(path.read_bytes())  # beside the records, not among them
+    (work / "_jobs" / "out").symlink_to(work)  # a directory that leads out of the records
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), work_root=work)
+    status, body, headers = s.handle("GET", f"/jobs/{where}", {}, b"")
+    assert status == 200 and body == path.read_bytes() and json.loads(gzip.decompress(body)) == record
+    assert headers == {"Content-Type": "application/json", "Content-Encoding": "gzip", "Cache-Control": "no-cache"}
+    for missing in (
+        "/jobs/../secret",
+        "/jobs/%2E%2E/secret",
+        "/jobs/issue-12/..%2F..%2Fsecret",
+        f"/jobs/issue-12/../{where}",
+        f"/jobs/{path.with_suffix('').with_suffix('')}",  # an absolute path
+        f"/jobs//{where}",
+        f"/jobs/{where}/",
+        "/jobs/issue-12/i12-e345/.match-1",
+        "/jobs/issue-12/i12-e345/match-1%0A",
+        "/jobs/issue-12/i12-e345/linked",  # a symlink
+        "/jobs/out/secret",
+        "/jobs/issue-12/i12-e345/match-2",  # a job that left no record
+        "/jobs/issue-12/i12-e345",  # a directory
+        "/jobs/",
+    ):
+        assert s.handle("GET", missing, {}, b"")[0] == 404, missing
+    assert BufferService(Ledger(tmp_path / "l2.sqlite")).handle("GET", f"/jobs/{where}", {}, b"")[0] == 503
+
+    server = make_server(s, "127.0.0.1", 0)  # over a socket the gzip goes out untouched and a client inflates it
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with httpx.stream("GET", f"http://127.0.0.1:{server.server_address[1]}/jobs/{where}") as answer:
+            assert answer.headers["content-encoding"] == "gzip" and b"".join(answer.iter_raw()) == path.read_bytes()
+        assert httpx.get(f"http://127.0.0.1:{server.server_address[1]}/jobs/{where}").json() == record
+    finally:
+        server.shutdown()
+    monkeypatch.setattr(api_module, "JOB_RECORD_LIMIT", len(body) - 1)  # a record over the cap is never sent cut
+    assert s.handle("GET", f"/jobs/{where}", {}, b"")[0] == 500
 
 
 def test_sync_keeps_a_row_prepared_during_the_scan(tmp_path, monkeypatch):
@@ -811,9 +889,14 @@ def test_root_serves_the_page_and_ui_files(tmp_path):
     assert call(s, "GET", "/") == (
         200,
         b"<!doctype html><title>t</title>",
-        {"Content-Type": "text/html; charset=utf-8"},
+        {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache"},
     )
-    assert call(s, "GET", "/ui/app.js") == (200, b"let a = 1;", {"Content-Type": "text/javascript"})
+    # a module is asked for again on every load: the page never runs files of two deployments together
+    assert call(s, "GET", "/ui/app.js") == (
+        200,
+        b"let a = 1;",
+        {"Content-Type": "text/javascript", "Cache-Control": "no-cache"},
+    )
     assert call(s, "GET", "/ui/notes.txt")[0] == 404  # not one of the served suffixes
     assert call(s, "GET", "/ui/missing.css")[0] == 404
     assert call(svc(tmp_path), "GET", "/")[0] == 404  # no ui_dir: no page
@@ -940,6 +1023,168 @@ def test_keeper_kv_routes(tmp_path):
     assert worker(s, "PUT", "/keeper", {"at": 5.0})[1] == {"at": 5.0}  # replaced whole; a given `at` kept
 
 
+def test_any_action_that_names_a_revision_is_refused_once_the_subject_moved(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    revision = _stage(s, "dataset", number, "matching")
+    stale = {"action": "cancel", "revision": revision - 1, "actor": "cleaner"}
+    status, out, _ = act(s, "/datasets/rec-a/actions", stale, AUTH)
+    assert status == 409 and "changed since it was shown" in out["error"]
+    assert [sent[2] for sent in gateway.sent] == ["restart"]  # the go alone: no cancel reached the workflow
+    sent = act(s, "/datasets/rec-a/actions", {**stale, "revision": revision}, AUTH)
+    assert sent[0] == 202 and sent[1]["actor"] == "cleaner" and gateway.sent[-1][2] == "cancel"
+
+
+def test_a_dataset_is_stopped_by_the_run_it_names_and_rests_cancelled(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    _stage(s, "dataset", number, "developing")
+    assert act(s, "/datasets/rec-a/actions", {"action": "stop", "run": "run-1"})[0] == 202
+    assert gateway.terminated == [("dataset", number, "run-1")]
+    out = call(s, "GET", f"/timeline/dataset/{number}")[1]
+    assert out["subject"]["stage"] == "cancelled" and "go" in out["subject"]["actions"]
+    assert (
+        "stopped: workflow stopped. A cluster job that was already running is not killed." in out["entries"][-1]["body"]
+    )
+
+
+def test_a_stop_that_names_a_run_which_is_over_leaves_a_later_run_alone(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    _stage(s, "dataset", number, "matching")
+    gateway.terminate = lambda kind, number, reason, run_id=None: False  # run-0 is over; a later run is open
+    status, out, _ = act(s, "/datasets/rec-a/actions", {"action": "stop", "run": "run-0"})
+    assert status == 409 and "run run-0 is over and a later run is open" in out["error"]
+    assert out["action"]["state"] == "refused"
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["stage"] == "matching"  # its round is not ended
+    gateway.running = False  # no run at all: the round is ended, as for a cancel that finds none
+    assert act(s, "/datasets/rec-a/actions", {"action": "stop", "run": "run-0"})[0] == 202
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["stage"] == "cancelled"
+
+
+def test_a_request_at_needs_human_is_told_to_look_again(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/prep", {"spec": PREP_TEXT})[1]["number"]
+    _stage(s, "prep", number, "requested")
+    assert act(s, f"/prep/{number}/actions", {"action": "recheck"})[0] == 409  # a round in progress: cancel or stop
+    _stage(s, "prep", number, "needs-human")
+    assert act(s, f"/prep/{number}/actions", {"action": "recheck"})[0] == 202
+    assert gateway.sent[-1] == ("prep", number, "recheck")
+    gateway.running = False
+    status, out, _ = act(s, f"/prep/{number}/actions", {"action": "recheck"})
+    assert status == 503 and "no workflow is running" in out["error"]
+    assert call(s, "GET", f"/subjects/prep/prep-{number}")[1]["stage"] == "needs-human"  # nothing was written
+
+
+def test_case_routes(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    opened = {"kind": "dataset", "number": 224, "key": "rec-a", "rule": "no run", "data": {"seen": "no run"}}
+    assert call(s, "POST", "/cases", payload=opened)[0] == 401
+    assert worker(s, "POST", "/cases", {**opened, "state": "gone"})[0] == 422
+    status, case, _ = worker(s, "POST", "/cases", opened)
+    assert status == 201 and case["state"] == "open" and case["data"] == {"seen": "no run"}
+    left = worker(s, "POST", "/cases", {"kind": "job", "key": "issue-9/i9-e1/crops-1", "rule": "left-over job"})[1]
+    assert worker(s, "PUT", "/cases/999", {"state": "resolved"})[0] == 404
+    done = worker(s, "PUT", f"/cases/{case['id']}", {"state": "resolved", "data": {"seen": "no run", "steps": []}})[1]
+    assert done["state"] == "resolved" and done["data"]["steps"] == [] and done["rule"] == "no run"
+    assert [row["id"] for row in call(s, "GET", "/cases")[1]["cases"]] == [left["id"]]  # what is not over
+    assert [row["id"] for row in call(s, "GET", "/cases", {"days": "7"})[1]["cases"]] == [left["id"], case["id"]]
+    assert [row["id"] for row in call(s, "GET", "/cases", {"state": "resolved"})[1]["cases"]] == [case["id"]]
+    assert call(s, "GET", "/cases", {"state": "gone"})[0] == 422
+    # what the cleaner could not resolve is on the subject's row in Needs you
+    worker(s, "PUT", "/subjects/dataset/224", {"key": "rec-a"})
+    worker(s, "POST", "/timeline/dataset/224", {"stage": "blocked"})
+    worker(s, "POST", "/cases", {**opened, "state": "needs-person", "data": {"needs": "approve the host"}})
+    assert [row["cleaner"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["approve the host"]
+
+
+def test_a_case_lists_the_records_of_its_rounds_jobs_and_of_its_own(tmp_path):
+    """`GET /cases` gives each case the addresses of the job records it is about: those of the round it saw, then
+    those of the cleaner's own jobs for it. A symlink or a name the page could not address is left out."""
+    work = tmp_path / "work"
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", work_root=work)
+    seen = {"kind": "dataset", "number": 223, "key": "rec-a", "rule": "diagnosis", "data": {"round": "i223-e1"}}
+    case = worker(s, "POST", "/cases", seen)[1]
+    worker(s, "POST", "/cases", {"kind": "snippets", "key": "issue-41", "rule": "left-over snippet work"})
+    assert [row["jobs"] for row in call(s, "GET", "/cases")[1]["cases"]] == [[], []]  # no record yet
+    for where in ("issue-223/i223-e1/match-1", "issue-223/i223-e1/crops-1", f"cleaner/case-{case['id']}/diagnose-0"):
+        path = record_path(work, where)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"record")
+    record_path(work, "issue-223/i223-e0/match-1").parent.mkdir()  # another round's
+    record_path(work, "issue-223/i223-e0/match-1").write_bytes(b"record")
+    record_path(work, "issue-223/i223-e1/linked").symlink_to(record_path(work, "issue-223/i223-e1/match-1"))
+    record_path(work, "issue-223/i223-e1/.hidden").write_bytes(b"record")
+    jobs = {row["key"]: row["jobs"] for row in call(s, "GET", "/cases")[1]["cases"]}
+    assert jobs == {
+        "rec-a": ["issue-223/i223-e1/crops-1", "issue-223/i223-e1/match-1", f"cleaner/case-{case['id']}/diagnose-0"],
+        "issue-41": [],
+    }
+    for address in jobs["rec-a"]:
+        assert s.handle("GET", f"/jobs/{address}", {}, b"")[0] == 200
+
+
+def test_the_snippets_services_job_records_are_served_and_listed_on_the_cases_that_wait_on_its_issues(tmp_path):
+    """autodev's jobs on the snippets repo leave their records under that service's work root, at
+    `<owner>__<repo>/issue-<n>/<key>/<job>`: `GET /jobs/<address>` reads them too, and a case lists those of the
+    snippets issue it is about (a dataset's `party`, a left-over issue's key) after its round's."""
+    work, snips = tmp_path / "work", tmp_path / "snips"
+    s = BufferService(
+        Ledger(tmp_path / "l.sqlite"), token="t", work_root=work, snippets_work_root=snips, snippets_repo="o/s"
+    )
+    for root, where in (
+        (work, "issue-223/i223-e1/match-1"),
+        (snips, "o__s/issue-49/01a1/round-1"),
+        (snips, "o__s/issue-49/01a1/judge-r1"),
+        (snips, "o__s/issue-41/01a0/round-2"),
+        (snips, "o__s/issue-50/01a2/round-1"),  # no case is about it
+    ):
+        path = record_path(root, where)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(where.encode())
+    data = {"round": "i223-e1", "party": {"issue": 49, "pr": None}}
+    worker(s, "POST", "/cases", {"kind": "dataset", "number": 223, "key": "rec-a", "rule": "diagnosis", "data": data})
+    worker(s, "POST", "/cases", {"kind": "snippets", "key": "issue-41", "rule": "left-over snippet work"})
+    worker(s, "POST", "/cases", {"kind": "dataset", "number": 9, "key": "rec-b", "rule": "x", "data": {"party": {}}})
+    jobs = {row["key"]: row["jobs"] for row in call(s, "GET", "/cases")[1]["cases"]}
+    assert jobs == {
+        "rec-a": ["issue-223/i223-e1/match-1", "o__s/issue-49/01a1/judge-r1", "o__s/issue-49/01a1/round-1"],
+        "issue-41": ["o__s/issue-41/01a0/round-2"],
+        "rec-b": [],
+    }
+    for address in (*jobs["rec-a"], *jobs["issue-41"]):
+        assert s.handle("GET", f"/jobs/{address}", {}, b"")[:2] == (200, address.encode())
+    assert s.handle("GET", "/jobs/o__s/issue-49/01a1/round-9", {}, b"")[0] == 404
+    assert s.handle("GET", "/jobs/o__s/issue-49/../../../secret", {}, b"")[0] == 404
+    only = BufferService(Ledger(tmp_path / "m.sqlite"), work_root=work)  # no snippets service: the rounds' alone
+    assert only.handle("GET", "/jobs/o__s/issue-49/01a1/round-1", {}, b"")[0] == 404
+
+
+def test_the_cleaners_report_and_the_workers_commits(tmp_path):
+    s, _ = _acting(tmp_path)
+    assert call(s, "GET", "/cleaner")[:2] == (200, b"null")
+    assert call(s, "PUT", "/cleaner", payload={"findings": []})[0] == 401
+    stored = worker(s, "PUT", "/cleaner", {"findings": [{"id": "restart mia-data", "text": "a restart is owed"}]})[1]
+    assert call(s, "GET", "/cleaner")[1] == stored and isinstance(stored["at"], float)
+    assert call(s, "GET", "/workers")[1] == {"workers": {}}
+    assert call(s, "PUT", "/workers/mia-data", payload={"commit": "abc"})[0] == 401
+    assert worker(s, "PUT", "/workers/mia-data", {"commit": "abc", "code": "d1"})[1]["commit"] == "abc"
+    assert worker(s, "PUT", "/workers/mia-buffers", {"commit": None})[0] == 200
+    first = call(s, "GET", "/workers")[1]["workers"]["mia-data"]
+    again = worker(s, "PUT", "/workers/mia-data", {"commit": "abd", "code": "d1"})[1]  # a commit of docs: same code
+    assert again["since"] == first["since"] and again["at"] >= first["at"]
+    assert worker(s, "PUT", "/workers/mia-data", {"commit": "abe", "code": "d2"})[1]["since"] > first["since"]
+    worker(s, "PUT", "/workers/mia-data", {"commit": "abc", "code": "d1"})
+    commits = call(s, "GET", "/workers")[1]["workers"]
+    assert {name: row["commit"] for name, row in commits.items()} == {"mia-data": "abc", "mia-buffers": None}
+    number = act(s, "/datasets/rec-a/actions", {"action": "go"})[1]["number"]
+    assert call(s, "GET", f"/run/dataset/{number}", {"detail": "1"})[1]["run_id"] == "run-1"
+    assert call(s, "GET", "/runs")[1]["runs"][0]["type"] == "MiaBufferPoll"
+    assert call(s, "GET", "/schedules")[1]["schedules"][0]["id"] == "mia-buffers-keeper"
+    bare = svc(tmp_path / "bare")
+    assert call(bare, "GET", "/schedules")[1] == {"schedules": []} and call(bare, "GET", "/runs")[0] == 503
+
+
 # --- assessments, budgets, volumes routes, revoked datasets -------------------------
 
 
@@ -986,6 +1231,46 @@ def test_decisions_route_is_open_and_returns_agreement(tmp_path):
     assert only["assessments"] == [judge] and list(only["agreement"]) == ["crops"]
     assert call(s, "GET", "/decisions", {"offset": "1"})[1]["assessments"] == [human]  # older ones: the next page
     assert call(s, "GET", "/decisions", {"gate": "vibes"})[0] == 422
+
+
+def test_a_persons_verdict_on_a_pr_heads_crops_names_its_dataset_and_meets_the_judges(tmp_path):
+    """A person's verdict on crops made from a snippet PR head is recorded on the head, the crop judge's on the crop
+    set: the table names the dataset on both, and the agreement pairs them."""
+    from mia_core.judge.policy import new_assessment
+
+    head = "16fe7340f499cbc4d8d70e8af069520fe7711d7e"
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    crop_set = f"i7-e11:i7-e11-{head[:12]}"
+    rows = [
+        new_assessment(
+            gate="crops", subject_kind="crop_set", subject_ref=crop_set, verdict="approve", by="judge", at=10.0
+        ),
+        new_assessment(gate="review", subject_kind="pr_head", subject_ref=head, verdict="approve", by="judge", at=11.0),
+        new_assessment(
+            gate="crops", subject_kind="pr_head", subject_ref=head, verdict="approve", by="human:page", at=12.0
+        ),
+    ]
+    for row in rows:
+        worker(s, "PUT", f"/assessments/{row['id']}", row)
+    out = call(s, "GET", "/decisions")[1]
+    assert [(row["by"], row["record"]) for row in out["assessments"]] == [
+        ("human:page", "rec-a"),
+        ("judge", "rec-a"),
+        ("judge", "rec-a"),
+    ]
+    crops = out["agreement"]["crops"]
+    assert (crops["judged"], crops["agree"], crops["pending"]) == (1, 1, 0) and crops["pairs"][0]["human"] == "approve"
+    only = call(s, "GET", "/decisions", {"gate": "review"})[1]["assessments"]  # one gate's rows still name the dataset
+    assert [row["record"] for row in only] == ["rec-a"]
+    mine = call(s, "GET", "/decisions", {"record": "rec-a"})[1]["assessments"]  # the dataset page's own list
+    assert len(mine) == 3
+    # a head no crop set was made from, with nothing to say whose it is, stays unnamed
+    other = new_assessment(
+        gate="crops", subject_kind="pr_head", subject_ref="ab" * 20, verdict="reject", by="human:page", at=13.0
+    )
+    worker(s, "PUT", f"/assessments/{other['id']}", other)
+    assert "record" not in call(s, "GET", "/decisions")[1]["assessments"][0]
 
 
 def test_budget_routes(tmp_path):
@@ -1062,7 +1347,7 @@ def test_adopt_then_read_a_subject(tmp_path):
     status, row, _ = call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "stage": "review"})
     assert status == 200 and row["issue"] == 234
     status, row, _ = call(s, "GET", "/subjects/dataset/rec-a")
-    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "go", "reject"])
+    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "go", "reject", "shelve"])
     assert call(s, "GET", "/subjects/dataset/nope")[0] == 404
     assert call(s, "GET", "/subjects/widget/x")[0] == 404
     assert call(s, "PUT", "/subjects/dataset/235", payload={"key": "rec-b", "stage": "bogus"})[0] == 422
@@ -1087,6 +1372,14 @@ def test_needs_lists_what_waits_on_a_person(tmp_path):
         ("buffer", "pool", "stuck"),
         ("dataset", "rec-a", "waiting"),
     ]
+    # one kind at a time, with every kind's count for the page's toggle buttons
+    call(s, "PUT", "/subjects/dataset/3", payload={"key": "rec-c", "stage": "failed"})
+    only = call(s, "GET", "/needs", {"kind": "dataset", "limit": "1"})[1]
+    assert len(only["needs"]) == 1 and only["needs"][0]["kind"] == "dataset" and only["total"] == 2
+    assert sorted(row["key"] for row in call(s, "GET", "/needs", {"kind": "dataset"})[1]["needs"]) == ["rec-a", "rec-c"]
+    assert only["kinds"] == {"dataset": 2, "buffer": 1, "prep": 0}
+    assert call(s, "GET", "/needs", {"kind": "prep"})[1]["needs"] == []
+    assert call(s, "GET", "/needs", {"kind": "issue"})[0] == 422
 
 
 def test_lookup_by_number_url_and_key(tmp_path):
@@ -1204,8 +1497,12 @@ class Gateway(Kicks):
         super().__init__()
         self.sent, self.fail, self.running, self.terminated = [], None, running, []
 
-    def terminate(self, kind, number, reason):
-        self.terminated.append((kind, number))
+    def terminate(self, kind, number, reason, run_id=None):
+        self.terminated.append((kind, number, run_id) if run_id else (kind, number))
+        return self.running
+
+    def terminate_run(self, namespace, workflow_id, run_id, reason):
+        self.terminated.append((namespace, workflow_id, run_id))
         return self.running
 
     def send(self, kind, number, signal, event):
@@ -1213,11 +1510,11 @@ class Gateway(Kicks):
             raise DispatchError(self.fail)
         self.sent.append((kind, number, signal, event))
 
-    def signal_running(self, kind, number, signal, event):
+    def signal_running(self, kind, number, signal, *args):
         if self.fail:
             raise DispatchError(self.fail)
         if self.running:
-            self.sent.append((kind, number, signal, event))
+            self.sent.append((kind, number, signal, *args))
         return self.running
 
     def health(self):
@@ -1226,14 +1523,59 @@ class Gateway(Kicks):
     def run_status(self, kind, number):
         return "RUNNING" if self.running else None
 
+    def run(self, kind, number):
+        return {"status": "RUNNING", "run_id": "run-1", "task": None, "activities": []} if self.running else None
+
+    def open_runs(self):
+        return [{"namespace": "mia-buffers", "id": "old/1", "run_id": "run-0", "type": "MiaBufferPoll"}]
+
+    def schedules(self):
+        return [{"namespace": "mia-buffers", "id": "mia-buffers-keeper", "every_s": 1800.0, "last": 5.0}]
+
 
 def _acting(tmp_path, **gateway_kwargs):
     """A service with a worker token, a gateway stand-in and a synced catalog holding rec-a and rec-b."""
     gateway = Gateway(**gateway_kwargs)
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", dispatcher=gateway)
-    records = [{"path": f"{name}.yaml", "record": {"id": name}} for name in ("rec-a", "rec-b")]
+    records = [
+        {
+            "path": f"{name}.yaml",
+            "record": {"id": name, "data": {"download_url": f"https://data.example.org/{name}.zip"}},
+        }
+        for name in ("rec-a", "rec-b")
+    ]
     assert worker(s, "PUT", f"/records/{REF_A}", {"records": records})[0] == 200
     return s, gateway
+
+
+def test_a_dataset_whose_record_names_no_data_url_cannot_be_started(tmp_path):
+    """The record is read from the newest synced catalog on every request: while it names no data URL the dataset
+    has no Start and its go is refused, and a sync that brings a record with one makes it startable again."""
+    s, gateway = _acting(tmp_path)
+
+    def sync(ref, record):
+        assert worker(s, "PUT", f"/records/{ref}", {"records": [{"path": "rec-a.yaml", "record": record}]})[0] == 200
+
+    assert act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-1"})[0] == 202
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["gaps"] == []
+    sync("b" * 40, {"id": "rec-a", "landing_url": "https://data.example.org/rec-a"})
+    status, refused, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-2"})
+    assert status == 409 and "the record cannot be run: it names no data URL" in refused["error"]
+    subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert "go" not in subject["actions"] and subject["gaps"] and len(gateway.sent) == 1
+    assert call(s, "GET", "/catalog/datasets/rec-a")[1]["row"]["gaps"] == subject["gaps"]
+    sync("c" * 40, {"id": "rec-a", "data": {"download_url": "https://data.example.org/rec-a.zip"}})
+    subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert "go" in subject["actions"] and subject["gaps"] == []
+    assert call(s, "GET", "/catalog/datasets/rec-a")[1]["row"]["gaps"] == []
+
+
+def test_a_record_with_a_gap_gets_no_subject(tmp_path):
+    s, gateway = _acting(tmp_path)
+    bare = [{"path": "rec-c.yaml", "record": {"id": "rec-c"}}]
+    assert worker(s, "PUT", f"/records/{'b' * 40}", {"records": bare})[0] == 200
+    assert act(s, "/datasets/rec-c/actions", {"action": "go", "key": "click-1"})[0] == 409
+    assert call(s, "GET", "/subjects/dataset/rec-c")[0] == 404 and not gateway.sent
 
 
 def test_a_first_go_creates_the_dataset_subject_and_starts_its_workflow(tmp_path):
@@ -1244,7 +1586,8 @@ def test_a_first_go_creates_the_dataset_subject_and_starts_its_workflow(tmp_path
     assert subject["issue"] is None and subject["number"] == action["number"] > 20_000_000  # from the clock
     (sent,) = gateway.sent
     event = LabelEvent("go", str(action["id"]), "page", action["at"])
-    assert sent == ("dataset", subject["number"], "go", event)
+    assert sent == ("dataset", subject["number"], "restart", event)  # a dataset's go: its round starts in a new run
+    assert event.kind == "go"
     timeline = call(s, "GET", f"/timeline/dataset/{subject['number']}")[1]
     assert [entry["body"] for entry in timeline["entries"]] == ["**Action:** `go` by `page`"]
     assert timeline["entries"][0]["marker"] == f"<!-- mia: action {action['id']} -->"
@@ -1263,6 +1606,21 @@ def test_a_go_for_a_dataset_with_a_known_issue_keeps_that_issues_number(tmp_path
     assert (subject["number"], subject["issue"]) == (234, 234) and gateway.sent[0][1] == 234
 
 
+def test_a_dataset_whose_row_holds_an_open_rounds_stage_gets_its_subject_at_that_stage(tmp_path):
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/datasets/rec-b", {"state": "in-progress", "data_stage": "developing", "issue": 234})
+    status, out, _ = act(s, "/datasets/rec-b/actions", {"action": "go"})
+    assert status == 409 and "`developing`" in out["error"] and "cancel" in out["error"] and gateway.sent == []
+    subject = call(s, "GET", "/subjects/dataset/rec-b")[1]
+    assert (subject["number"], subject["stage"], subject["actions"]) == (234, "developing", ["cancel", "stop"])
+    assert act(s, "/datasets/rec-b/actions", {"action": "cancel"})[0] == 202  # the round can be cancelled
+    # a subject already made at `new`, which no workflow has written, is corrected by the next click
+    worker(s, "PUT", "/datasets/rec-a", {"state": "in-progress", "data_stage": "testing", "issue": 7})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "new"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "go"})[0] == 409
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["stage"] == "testing"
+
+
 def test_an_action_for_something_that_is_not_there_is_refused(tmp_path):
     s, gateway = _acting(tmp_path)
     assert act(s, "/datasets/nope/actions", {"action": "go"})[0] == 404  # not a record of the synced catalog
@@ -1279,6 +1637,190 @@ def test_only_the_actions_the_stage_accepts_are_taken(tmp_path):
     assert act(s, "/datasets/rec-a/actions", {"action": "revoke"})[0] == 409
     assert gateway.sent == [] and call(s, "GET", "/timeline/dataset/7")[1]["actions"] == []  # nothing recorded
     assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent[0][2] == "cancel"
+
+
+def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(tmp_path):
+    """Shelving is a person's decision beside the stage (spec shelved-subjects): no workflow hears of it, the
+    stage stays, and the dataset reads `shelved` to whatever asks which datasets are prepared."""
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "failed"})
+    worker(s, "PUT", "/subjects/dataset/8", {"key": "rec-b", "stage": "testing"})
+    worker(s, "PUT", "/datasets/rec-a", {"state": "prepared", "data_stage": "failed", "folder": "f"})
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"] == ["go", "revoke", "shelve"]
+    assert act(s, "/datasets/rec-b/actions", {"action": "shelve", "note": "later"})[0] == 409  # a round is open
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "  "})[0] == 422  # it says why
+    assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 409  # nothing to take back
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "x", "approve_hosts": ["a.org"]})[0] == 422
+
+    status, action, _ = act(
+        s, "/datasets/rec-a/actions", {"action": "shelve", "note": "the masks @need work", "key": "k"}
+    )
+    assert (status, action["state"], action["actor"]) == (202, "sent", "page") and gateway.sent == []
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "again", "key": "k"})[1]["id"] == action["id"]
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["status"], view["actions"]) == ("failed", "shelved", ["unshelve"])
+    assert view["shelved"]["reason"] == "the masks @need work" and view["shelved"]["by"] == "page"
+    entries = call(s, "GET", "/timeline/dataset/7")[1]["entries"]
+    assert len(entries) == 1 and entries[0]["body"].startswith(
+        "**Action:** `shelve` by `page`\n\n> the masks @\u200bneed"
+    )
+    # nobody starts it, a worker included; it is not in Needs you, and no plan or request finds it prepared
+    assert act(s, "/datasets/rec-a/actions", {"action": "go"})[0] == 409
+    assert act(s, "/datasets/rec-a/actions", {"action": "go", "actor": "prep:9", "root": "prep:9"}, AUTH)[0] == 409
+    needs = call(s, "GET", "/needs")[1]
+    assert needs["needs"] == [] and needs["shelved"] == 1
+    held = call(s, "GET", "/needs", {"shelved": "1"})[1]
+    assert [row["key"] for row in held["needs"]] == ["rec-a"] and held["kinds"]["dataset"] == 1
+    row = call(s, "GET", "/datasets/rec-a")[1]
+    assert (row["state"], row["reason"], row["folder"]) == ("shelved", "the masks @need work", "f")
+    assert call(s, "GET", "/datasets", {"state": "prepared"})[1]["datasets"] == []
+    assert [d["id"] for d in call(s, "GET", "/datasets", {"state": "shelved"})[1]["datasets"]] == ["rec-a"]
+    assert worker(s, "PUT", "/datasets/rec-a", {"state": "shelved"})[0] == 422  # no worker writes it
+    # a folder scan does not bring it back: the stored row is read again only once it is unshelved
+    worker(s, "PUT", "/datasets/rec-a", {"crops": 4})
+    assert call(s, "GET", "/datasets/rec-a")[1]["state"] == "shelved"
+
+    assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["status"], view["actions"], view["shelved"]) == ("stuck", ["go", "revoke", "shelve"], None)
+    assert [row["key"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["rec-a"]
+    assert call(s, "GET", "/datasets/rec-a")[1]["state"] == "prepared"
+    assert [e["body"].split("\n")[0] for e in call(s, "GET", "/timeline/dataset/7")[1]["entries"]] == [
+        "**Action:** `shelve` by `page`",
+        "**Action:** `unshelve` by `page`",
+    ]
+
+
+def test_a_request_at_needs_human_is_told_when_a_dataset_it_names_settles(tmp_path):
+    """Shelving a dataset, or a worker writing it `prepared`, sends `recheck` to each request resting at
+    `needs-human` that names it (one that selects by rule too); the request's workflow decides whether it is done."""
+    s, gateway = _acting(tmp_path)
+    spec = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/catalog", "ref": REF_A}}
+    texts = [
+        yaml.safe_dump({**spec, "records": ["rec-a", "rec-b"]}),  # 10: names both
+        yaml.safe_dump({**spec, "records": ["rec-b"]}),  # 11: names the other one
+        yaml.safe_dump({**spec, "select": {"modality": ["em"]}}),  # 12: by rule, so its records are not known here
+        yaml.safe_dump({**spec, "records": ["rec-a"]}),  # 13: names it, and is not at needs-human
+    ]
+    for number, text in enumerate(texts, start=10):
+        stage = "requested" if number == 13 else "needs-human"
+        worker(s, "PUT", f"/subjects/prep/{number}", {"key": f"prep-{number}", "stage": stage, "data": {"spec": text}})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "blocked"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "needs a data engineer"})[0] == 202
+    assert gateway.sent == [("prep", 10, "recheck"), ("prep", 12, "recheck")]
+    assert worker(s, "PUT", "/datasets/rec-b", {"state": "in-progress"})[0] == 200  # not settled: nobody is told
+    assert worker(s, "PUT", "/datasets/rec-b", {"state": "prepared"})[0] == 200
+    assert gateway.sent[2:] == [("prep", 10, "recheck"), ("prep", 11, "recheck"), ("prep", 12, "recheck")]
+    gateway.fail = "Temporal is away"  # best effort: the dataset's write stands
+    assert worker(s, "PUT", "/datasets/rec-b", {"state": "prepared"})[0] == 200
+    assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202  # an unshelve tells nobody
+    assert len(gateway.sent) == 5
+
+
+def test_a_start_tells_every_request_at_needs_human_to_look_again(tmp_path):
+    """At start each request resting at `needs-human` gets a `recheck`, whatever it names: one whose datasets
+    settled with nobody telling it (Temporal away, or settled before it rested) is found then. Best effort."""
+    s, gateway = _acting(tmp_path)
+    for number, stage in ((10, "needs-human"), (11, "requested"), (12, "needs-human")):
+        worker(s, "PUT", f"/subjects/prep/{number}", {"key": f"prep-{number}", "stage": stage, "data": {}})
+    s.recheck_resting()
+    assert gateway.sent == [("prep", 10, "recheck"), ("prep", 12, "recheck")]
+    gateway.fail = "Temporal is away"
+    s.recheck_resting()  # logged, not raised: the service starts
+
+
+def test_a_shelve_at_review_cancels_the_round_first(tmp_path):
+    """A round that waits for a person's verdict is cancelled by the shelve that sets its subject aside: its
+    workflow gets the cancel, then the hold is written. A cancel that is not delivered shelves nothing."""
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    assert "shelve" in call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"]
+    shelve = {"action": "shelve", "note": "later", "key": "k"}
+    gateway.fail = "temporal is away"
+    assert act(s, "/datasets/rec-a/actions", shelve)[0] == 503
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["shelved"] is None
+    gateway.fail = None
+    status, action, _ = act(s, "/datasets/rec-a/actions", shelve)
+    assert (status, action["action"], action["state"]) == (202, "shelve", "sent")
+    assert [sent[:3] for sent in gateway.sent] == [("dataset", 7, "cancel")]
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["status"], view["actions"]) == ("review", "shelved", ["unshelve"])
+    assert view["asked"]["action"] == "cancel"  # the round has not answered yet
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "cancelled"})  # the workflow's answer
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["status"], view["asked"]) == ("cancelled", "shelved", None)
+    said = [entry["body"].split("\n")[0] for entry in call(s, "GET", "/timeline/dataset/7")[1]["entries"]]
+    assert said[:2] == ["**Action:** `cancel` by `page`", "**Action:** `shelve` by `page`"]
+    # a click that shelved with no round open, sent again once the subject was taken back and started, cancels nothing
+    worker(s, "PUT", "/subjects/dataset/8", {"key": "rec-b", "stage": "failed"})
+    early = {"action": "shelve", "note": "later", "key": "b"}
+    first = act(s, "/datasets/rec-b/actions", early)[1]
+    assert act(s, "/datasets/rec-b/actions", {"action": "unshelve"})[0] == 202
+    worker(s, "POST", "/timeline/dataset/8", {"stage": "matching"})
+    assert act(s, "/datasets/rec-b/actions", early)[1]["id"] == first["id"] and len(gateway.sent) == 1
+
+
+def test_a_shelve_at_review_ends_a_round_no_workflow_runs(tmp_path):
+    s, gateway = _acting(tmp_path, running=False)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "later"})[0] == 202
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["stage"], view["status"], gateway.sent) == ("cancelled", "shelved", [])
+
+
+def test_shelving_covers_specs_requests_and_a_dataset_that_never_ran(tmp_path):
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/buffer/8", {"key": "pool", "stage": "needs-human"})
+    worker(s, "PUT", "/subjects/buffer/9", {"key": "wait", "stage": "staged"})
+    worker(s, "PUT", "/subjects/prep/10", {"key": "prep-10", "stage": "done"})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})  # `new`, with no row in the datasets table
+    assert act(s, "/specs/pool/actions", {"action": "shelve", "note": "n"})[0] == 202
+    assert act(s, "/prep/10/actions", {"action": "shelve", "note": "n"})[0] == 202
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "no reader yet"})[0] == 202
+    assert gateway.sent == [] and call(s, "GET", "/needs")[1]["shelved"] == 3
+    assert act(s, "/specs/wait/actions", {"action": "shelve", "note": "n"})[0] == 202  # at its review: cancelled
+    assert [sent[:3] for sent in gateway.sent] == [("buffer", 9, "cancel")]
+    assert [v["status"] for v in call(s, "GET", "/subjects/buffer")[1]["subjects"]] == ["shelved", "shelved"]
+    row = call(s, "GET", "/datasets/rec-a")[1]
+    assert (row["state"], row["reason"]) == ("shelved", "no reader yet") and row["updated_at"] > 0
+    assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202
+    assert call(s, "GET", "/datasets/rec-a")[0] == 404  # the made-up row goes with the hold
+
+
+def test_decisions_show_what_the_person_wrote_with_their_verdict(tmp_path):
+    """An assessment names the action it came from, and the note is read from that action, whatever else the
+    person did before or after."""
+    from mia_core.judge.policy import new_assessment
+
+    s, _ = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "review"})
+    for note in ("the masks are empty", "and the axes are swapped"):  # two rejects by one person, moments apart
+        assert act(s, "/datasets/rec-a/actions", {"action": "reject", "revision": 1, "note": note})[0] == 202
+    first, second = s.ledger.actions("dataset", 7)
+
+    def verdict(by, at, action=None):
+        row = new_assessment(
+            gate="crops",
+            subject_kind="crop_set",
+            subject_ref="i7-e11:i7-e11-abc",
+            verdict="reject",
+            by=by,
+            at=at,
+            action=action,
+        )
+        worker(s, "PUT", f"/assessments/{row['id']}", row)
+
+    verdict("judge", 10.0)
+    verdict("human:page", 11.0)  # one that names no action shows no note
+    verdict("human:page", 12.0, first["id"])  # written after both actions, and still the first one's
+    rows = call(s, "GET", "/decisions", {"record": "rec-a"})[1]["assessments"]
+    assert [(row["by"], row.get("note")) for row in rows] == [
+        ("human:page", "the masks are empty"),
+        ("human:page", None),
+        ("judge", None),
+    ]
+    assert second["payload"]["note"] == "and the axes are swapped"
 
 
 def test_a_verdict_names_the_revision_the_person_saw(tmp_path):
@@ -1316,7 +1858,7 @@ def test_a_cancel_with_no_workflow_running_settles_the_subject_itself(tmp_path):
     worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "matching"})  # its run was terminated by hand
     assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent == []
     subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
-    assert (subject["stage"], subject["actions"]) == ("cancelled", ["go", "revoke"])
+    assert (subject["stage"], subject["actions"]) == ("cancelled", ["go", "revoke", "shelve"])
     assert "no workflow was running" in call(s, "GET", "/timeline/dataset/7")[1]["entries"][-1]["body"]
 
 
@@ -1343,6 +1885,7 @@ def test_a_sent_action_is_asked_until_its_workflow_answers(tmp_path):
     number = action["number"]
     view = call(s, "GET", "/subjects/dataset/rec-a")[1]
     assert (view["stage"], view["actions"]) == ("new", ["go"])  # the stage table is not bent
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "n"})[0] == 409  # nor shelved under a go
     assert (view["asked"]["id"], view["asked"]["action"]) == (action["id"], "go") and 0 < view["asked"]["wait_s"] <= 60
     assert call(s, "GET", f"/timeline/dataset/{number}")[1]["subject"]["asked"]["id"] == action["id"]
     assert call(s, "GET", "/subjects/dataset", {"limit": "5"})[1]["subjects"][0]["asked"]["id"] == action["id"]
@@ -1353,12 +1896,12 @@ def test_a_sent_action_is_asked_until_its_workflow_answers(tmp_path):
     # a stage the workflow writes is
     worker(s, "POST", f"/timeline/dataset/{number}", {"stage": "matching"})
     view = call(s, "GET", "/subjects/dataset/rec-a")[1]
-    assert view["asked"] is None and view["actions"] == ["cancel"]
+    assert view["asked"] is None and view["actions"] == ["cancel", "stop"]
 
 
 def test_what_ends_an_asked_action(tmp_path, monkeypatch):
     s, gateway = _acting(tmp_path)
-    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "review"})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "needs-human"})
     asked = lambda: call(s, "GET", "/subjects/dataset/rec-a")[1]["asked"]  # noqa: E731
     assert asked() is None  # nothing was clicked
     # an entry of the workflow's, with no stage
@@ -1500,6 +2043,8 @@ def test_files_are_in_place_is_refused_while_a_copy_is_still_writing(tmp_path):
     os.utime(incoming / "a.tif", (old, old))
     assert act(s, SPEC_ACTIONS, dropped)[0] == 202 and gateway.sent == [("buffer", number, "dropped", "rec-a")]
     assert act(s, SPEC_ACTIONS, {"action": "dropped"})[0] == 422  # which record?
+    _stage(s, "buffer", number, "ready")  # approved while the dataset waited: it joins when its files land
+    assert act(s, SPEC_ACTIONS, dropped)[0] == 202
     assert act(s, SPEC_ACTIONS, {"action": "dropped", "record": "../x"})[0] == 422
 
 
@@ -1616,7 +2161,10 @@ def test_needs_lists_a_buffer_whose_dataset_waits_for_its_files(tmp_path):
     worker(s, "PUT", f"/buffers/{buffer}/datasets/rec-b", {"status": "staging", "reason": "", "job": None})
     (waiting,) = call(s, "GET", "/needs")[1]["needs"]
     assert (waiting["key"], waiting["status"], waiting["drops"]) == (SPEC_NAME, "working", ["rec-a"])
-    _stage(s, "buffer", number, "ready")
+    _stage(s, "buffer", number, "ready")  # approved as it is: the waiting dataset joins when its files land
+    (waiting,) = call(s, "GET", "/needs")[1]["needs"]
+    assert (waiting["status"], waiting["drops"]) == ("done", ["rec-a"])
+    _stage(s, "buffer", number, "retired")
     assert call(s, "GET", "/needs")[1]["needs"] == []  # the round is over: a waiting row of it asks for nothing
 
 

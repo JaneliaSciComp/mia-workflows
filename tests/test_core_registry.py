@@ -119,8 +119,6 @@ def test_assets_sync_assets_and_locks():
     assert seen[3].url.path == "/sync/datasets" and seen[3].extensions["timeout"]["read"] == 600
     reg.assets("raw")
     assert seen[4].extensions["timeout"]["read"] == 30  # every other call keeps the client's
-    holder = {"kind": "raw", "key": "rec", "owner": "o"}
-    assert Registry("http://svc", "t", transport=transport([], body={"locks": [holder]})).locks() == [holder]
 
 
 def test_buffer_lifecycle_calls():
@@ -156,7 +154,6 @@ def test_assessment_budget_and_volume_paths():
     reg.put_assessment({"id": "a1", "gate": "crops"})
     reg.assessments(subject_kind="artifact", subject_ref="art1")
     reg.assessments(by="judge", before="a0", limit=5)
-    reg.decisions("crops", offset=50)
     reg.reserve("o/r#7", "job-1", "match", 5.0, {"max_usd": 10})
     reg.settle("o/r#7", "job-1", usd=1.0, fetched_bytes=3)
     reg.delete_volume("b", "rec/v0.zarr")
@@ -165,13 +162,12 @@ def test_assessment_budget_and_volume_paths():
         ("PUT", "/assessments/a1"),
         ("GET", "/assessments?subject_kind=artifact&subject_ref=art1"),
         ("GET", "/assessments?by=judge&before=a0&limit=5"),
-        ("GET", "/decisions?gate=crops&offset=50"),
         ("POST", "/budgets/o%2Fr%237/reserve"),
         ("POST", "/budgets/o%2Fr%237/settle"),
         ("DELETE", "/buffers/b/volumes/rec%2Fv0.zarr"),
         ("GET", "/buffers/b/volumes"),
     ]
-    assert json.loads(seen[5].content) == {"reservation_id": "job-1", "usd": 1.0, "fetched_bytes": 3, "staged_bytes": 0}
+    assert json.loads(seen[4].content) == {"reservation_id": "job-1", "usd": 1.0, "fetched_bytes": 3, "staged_bytes": 0}
 
 
 def test_subject_calls():
@@ -222,3 +218,47 @@ def test_action_calls():
     assert json.loads(seen[3].content) == {"action": "go", "key": "p9-e1/rec a", "actor": "prep:9", "root": "o/b#9"}
     assert seen[3].headers["content-type"] == "application/json"
     assert Registry("http://svc", "t", transport=transport([], 404, {"error": "no"})).action(1) is None
+
+
+def test_the_code_digest_changes_with_the_packages_alone(tmp_path):
+    import subprocess
+
+    from mia_core.checkout import PACKAGES, code_digest, head_commit
+
+    assert head_commit(tmp_path) is None and code_digest(tmp_path) is None  # no checkout
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    git = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.org"]
+
+    def commit(file, text):
+        (tmp_path / file).parent.mkdir(exist_ok=True)
+        (tmp_path / file).write_text(text)
+        subprocess.run([*git, "add", file], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", file], check=True)
+        return head_commit(tmp_path), code_digest(tmp_path)
+
+    for package in PACKAGES:
+        first = commit(f"{package}/code.py", "one")
+    assert first[0] is not None and len(first[0]) == 40 and first[1] is not None
+    docs = commit("docs/notes.md", "words")
+    assert docs[0] != first[0] and docs[1] == first[1]  # a commit that touches no package: the same code
+    assert commit("mia_buffers/ui/app.js", "page")[1] == first[1]  # the page is served from disk: no worker loads it
+    assert commit("mia_data/code.py", "two")[1] != first[1]
+
+
+def test_a_worker_reports_its_code_until_the_registry_takes_it():
+    # buffer-api may come up after the worker (a restart of both): the report is sent again, with the code read
+    # when the worker started
+    import asyncio
+
+    from mia_core.registry import report_worker
+
+    calls = []
+
+    class Down:
+        def put_worker(self, service, commit, code):
+            calls.append((service, commit, code))
+            if len(calls) < 3:
+                raise RegistryError(None, "connection refused")
+
+    asyncio.run(report_worker(Down(), "mia-data", logging.getLogger("test"), retry_s=0))
+    assert len(calls) == 3 and len(set(calls)) == 1 and calls[0][0] == "mia-data"

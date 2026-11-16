@@ -12,7 +12,6 @@ import re
 from .status import safe_text
 
 MARKER = "<!-- mia-data:record={} -->"
-MARKER_RE = re.compile(r"<!-- mia-data:record=(\S+) -->")  # matched only at the start of a body
 
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")
 

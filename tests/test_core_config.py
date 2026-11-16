@@ -46,6 +46,16 @@ def test_a_buffers_service_learns_where_the_datasets_pipeline_runs():
     cfg = service_config(manifest, "buffers")
     assert cfg["datasets_pipeline"] == {"namespace": "data-ns", "task_queue": "mia-data"}  # the queue is the name
     assert "datasets_pipeline" not in service_config(manifest, "mia-data")
+    # every service's queue (its name) and namespace, for /health: a block's own, else the shared section's, else
+    # its application's (the shared section here names none, and the buffers worker then works in `mia-buffers`)
+    assert cfg["workers"] == {"mia-data": "data-ns", "snippets": "default", "buffers": "mia-buffers"}
+    manifest["temporal"]["namespace"] = "shared-ns"
+    assert service_config(manifest, "buffers")["workers"]["buffers"] == "shared-ns"
+    del manifest["temporal"]["namespace"]
+    del manifest["services"]["mia-data"]["temporal"]  # the datasets pipeline under a shared section with no namespace
+    assert service_config(manifest, "buffers")["datasets_pipeline"]["namespace"] == "mia-data"
+    bare = {"services": {"buffers": {"app": "mia-buffers"}, "dev": {"app": "autodev"}}}  # no temporal section at all
+    assert service_config(bare, "buffers")["workers"] == {"buffers": "mia-buffers", "dev": "default"}
     del manifest["services"]["mia-data"]
     assert "datasets_pipeline" not in service_config(manifest, "buffers")  # no such service: the model's default
 
@@ -119,6 +129,11 @@ def test_service_token_file_is_absolute(tmp_path):
 
     cfg = make_cfg(tmp_path, service={"url": "http://svc.example.org:8765", "token_file": "~/x"})
     assert cfg.service.token_file.is_absolute()
+    # every application reads the token through the shared model: `~` is expanded for all of them (autodev too)
+    from mia_core.config import ServiceCfg
+
+    shared = ServiceCfg(url="http://svc.example.org:8765", token_file="~/.config/mia/service-token")
+    assert shared.token_file == Path.home() / ".config/mia/service-token"
 
 
 def test_service_url_needs_an_explicit_port():
@@ -220,3 +235,16 @@ def test_every_service_receives_the_csub_block():
     manifest = {**SHARED, "csub": {"policy_dir": "/h/p"}}
     assert service_config(manifest, "mia-data")["csub"] == service_config(manifest, "snippets")["csub"]
     assert service_config(manifest, "snippets")["csub"]["policy_dir"] == "/h/p"
+
+
+def test_a_buffers_service_learns_where_the_snippets_service_keeps_its_job_records():
+    # the service that runs autodev on the snippets repo, when it works under a root of its own
+    manifest = copy.deepcopy(SHARED)
+    manifest["services"]["buffers"] = {"app": "mia-buffers"}
+    manifest["services"]["dev"] = {"app": "autodev", "github": {"repo": "o/code"}, "paths": {"work_root": "/dev"}}
+    assert "snippets_work_root" not in service_config(manifest, "buffers")  # no service on the snippets repo
+    manifest["services"]["snippets"] = {"app": "autodev", "github": {"repo": "o/s"}}
+    assert "snippets_work_root" not in service_config(manifest, "buffers")  # it works under the shared root
+    manifest["services"]["snippets"]["paths"] = {"work_root": "/snips"}
+    assert service_config(manifest, "buffers")["snippets_work_root"] == "/snips"
+    assert "snippets_work_root" not in service_config(manifest, "mia-data")

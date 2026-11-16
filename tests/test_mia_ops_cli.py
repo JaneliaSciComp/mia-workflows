@@ -75,6 +75,10 @@ def test_ps(stack, fake, capsys):  # noqa: F811
     assert cli.main(["ps"]) == 0
     out = capsys.readouterr().out
     assert "temporal: running" in out and "autodev: running" in out and "worker: alive" in out
+    fake.windows = "  broker: alive\n  worker: dead\n"
+    assert cli.main(["ps"]) == 1  # a service whose worker has exited is not running
+    assert "autodev: BROKEN, its worker has exited (mia restart autodev)" in capsys.readouterr().out
+    assert cli.main(["up", "autodev"]) == 1
 
 
 def test_logs(stack, fake, tmp_path):  # noqa: F811

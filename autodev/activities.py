@@ -22,19 +22,20 @@ from typing import TYPE_CHECKING, cast
 
 from temporalio import activity
 from temporalio.common import WorkflowIDConflictPolicy
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
 
+from mia_core import autonomy
+from mia_core.config import manifest_path
 from mia_core.judge.comment import render_judge_comment
 from mia_core.judge.evidence import build as build_evidence
 from mia_core.judge.evidence import evidence_digest, fenced_text, read_claude_json
 from mia_core.judge.policy import POLICY_VERSION, new_assessment
 from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
 from mia_core.registry import Registry, best_effort
-from mia_core.untrusted import SECRET_RE as SECRET_RE
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import judge_dir, log_tail, read_result, render_prompt
+from .agent import TooManyHostsError, issue_hosts, judge_dir, log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
@@ -78,6 +79,16 @@ log = logging.getLogger(__name__)
 # carry invalid_request. transport_error, lsf_error etc. may pass on retry, so they are left retryable.
 PERMANENT_CSUB = {"policy_violation", "invalid_request"}
 PERMANENT_HTTP = {400, 403, 404, 410, 422}  # rate-limit 403s are retried inside the GitHub client
+
+
+PAUSED = "paused by the operator (autonomy.pause); no job starts until `mia resume`"
+
+
+async def refuse_while_paused() -> None:
+    """The operator's pause (`mia pause` sets `autonomy.pause` in mia.yaml, re-read here): no job is submitted
+    while it is set. The round that asked ends with this as its failure; a review judge is skipped."""
+    if await asyncio.to_thread(autonomy.paused, manifest_path()):
+        raise ApplicationError(PAUSED, non_retryable=True)
 
 
 def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
@@ -253,8 +264,17 @@ class Activities:
     async def submit_agent(self, request: SubmitInput) -> JobRef:
         from csub import CsubError  # pixi-only dependency, imported where used (as in agent.csub_client)
 
+        await refuse_while_paused()
+        # an issue names its job's hosts only when a bot this deployment trusts opened it
+        named: list[str] = []
+        if self.cfg.github.trusted_bots:
+            issue = await self.gh.get_issue(request.issue)
+            if (issue.get("user") or {}).get("login") in self.cfg.github.trusted_bots:
+                named = issue_hosts(issue.get("body"))
         try:
-            return await self.jobs.submit(request.issue, request.key, request.round, request.workspace)
+            return await self.jobs.submit(request.issue, request.key, request.round, request.workspace, named)
+        except TooManyHostsError as error:
+            raise ApplicationError(str(error), non_retryable=True) from error
         except CsubError as error:
             if error.code in PERMANENT_CSUB:
                 raise ApplicationError(str(error), non_retryable=True) from error
@@ -368,6 +388,7 @@ class Activities:
     async def submit_judge(self, request: SubmitInput) -> JobRef:
         from csub import CsubError  # pixi-only dependency, imported where used (as in agent.csub_client)
 
+        await refuse_while_paused()
         try:
             return await self.jobs.submit_judge(
                 request.issue, request.key, request.round, str(judge_dir(Path(request.workspace.dir)))
@@ -445,10 +466,12 @@ class Activities:
         """Read the PR's state, approvals, pending change requests and CI status into one snapshot.
 
         Raises a retryable error while there is nothing for the workflow to act on, so Temporal's retry
-        policy (not a workflow timer) spaces the polls and the history stays flat."""
+        policy (not a workflow timer) spaces the polls and the history stays flat. The error is benign: a wait is
+        one log line, not a failure with a traceback."""
         snapshot = await self._snapshot(request.pr)
         if decide(snapshot, request.handled, request.revisions, request.max_revisions, request.escalated)[0] == WAIT:
-            raise ApplicationError(f"PR #{request.pr}: nothing to do yet")
+            log.info("PR #%s: nothing to do yet", request.pr)
+            raise ApplicationError(f"PR #{request.pr}: nothing to do yet", category=ApplicationErrorCategory.BENIGN)
         return snapshot
 
     async def _snapshot(self, number: int) -> PrSnapshot:

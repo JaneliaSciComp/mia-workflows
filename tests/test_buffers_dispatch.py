@@ -3,9 +3,12 @@ failure reaches the caller."""
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from temporalio.api.workflow.v1 import PendingActivityInfo
+from temporalio.api.workflowservice.v1 import DescribeWorkflowExecutionResponse
 from temporalio.service import RPCError, RPCStatusCode
 
 from mia_buffers.dispatch import Dispatcher, DispatchError, Target, dispatcher_for
@@ -27,17 +30,35 @@ class FakeClient:
     def __init__(self, namespace, calls, open_runs=(), pollers=("worker",)):
         self.namespace, self.calls, self.open, self.pollers = namespace, calls, set(open_runs), pollers
         self.workflow_service = SimpleNamespace(describe_task_queue=self._describe_task_queue)
+        self.pending, self.task_attempt = [], 0
 
     async def start_workflow(self, workflow, *one, args=(), id, task_queue, start_signal, start_signal_args=()):
         started = (workflow, [*one, *args], id, task_queue, start_signal, list(start_signal_args))
         self.calls.append((self.namespace, *started))
 
-    def get_workflow_handle(self, workflow_id):
+    def get_workflow_handle(self, workflow_id, run_id=None):
         return SimpleNamespace(
             signal=lambda name, *args: self._signal(workflow_id, name, args),
-            terminate=lambda reason: self._signal(workflow_id, "terminate", (reason,)),
+            terminate=lambda reason: self._signal(workflow_id, "terminate", (reason, *([run_id] if run_id else []))),
             describe=lambda: self._describe(workflow_id),
         )
+
+    def list_workflows(self, query, limit):
+        async def runs():
+            for workflow_id in sorted(self.open):
+                yield SimpleNamespace(id=workflow_id, run_id="run-1", workflow_type="MiaBuffer")
+
+        return runs()
+
+    async def list_schedules(self):
+        async def listed():
+            spec = SimpleNamespace(intervals=[SimpleNamespace(every=timedelta(minutes=10))])
+            started = SimpleNamespace(started_at=datetime.fromtimestamp(1800000000, UTC))
+            yield SimpleNamespace(
+                id="keeper", schedule=SimpleNamespace(spec=spec), info=SimpleNamespace(recent_actions=[started])
+            )
+
+        return listed()
 
     def _missing(self):
         return RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b"")
@@ -50,10 +71,14 @@ class FakeClient:
     async def _describe(self, workflow_id):
         if workflow_id not in self.open:
             raise self._missing()
-        return SimpleNamespace(status=SimpleNamespace(name="RUNNING"))
+        raw = DescribeWorkflowExecutionResponse(pending_activities=self.pending)
+        if self.task_attempt:
+            raw.pending_workflow_task.attempt = self.task_attempt
+        return SimpleNamespace(status=SimpleNamespace(name="RUNNING"), run_id="run-1", raw_description=raw)
 
     async def _describe_task_queue(self, request):
-        return SimpleNamespace(pollers=list(self.pollers))
+        polled = SimpleNamespace(seconds=1800000000, nanos=0)
+        return SimpleNamespace(pollers=[SimpleNamespace(last_access_time=polled) for _ in self.pollers])
 
 
 def gateway(calls, **client_kwargs):
@@ -136,6 +161,51 @@ def test_terminate_ends_a_running_workflow_and_says_when_there_is_none():
     assert calls == [("buf-ns", "signal", "buffer/8", "terminate", ["stopped from the page"])]
 
 
+def test_a_stop_can_name_the_run_it_ends():
+    calls = []
+    dispatcher, _ = gateway(calls, open_runs={"data/234"})
+    assert dispatcher.terminate("dataset", 234, "stopped", run_id="run-1") is True
+    assert dispatcher.terminate_run("buf-ns", "old/1", "run-0", "no worker runs it") is False
+    assert calls == [("data-ns", "signal", "data/234", "terminate", ["stopped", "run-1"])]
+
+
+def test_run_says_what_the_cleaner_reads_of_a_run():
+    clients = {}
+
+    async def connect(namespace):
+        clients[namespace] = FakeClient(namespace, [], open_runs={"data/234"})
+        return clients[namespace]
+
+    dispatcher = Dispatcher(connect, TARGETS)
+    assert dispatcher.run("dataset", 235) is None
+    assert dispatcher.run("dataset", 234) == {"status": "RUNNING", "run_id": "run-1", "task": None, "activities": []}
+    pending = PendingActivityInfo(attempt=412)
+    pending.activity_type.name, pending.last_failure.message = "read_feedback", "not registered on this worker"
+    clients["data-ns"].pending, clients["data-ns"].task_attempt = [pending], 7
+    found = dispatcher.run("dataset", 234)
+    assert found["task"] == 7
+    assert found["activities"] == [
+        {"type": "read_feedback", "attempt": 412, "failure": "not registered on this worker"}
+    ]
+
+
+def test_open_runs_and_schedules_cover_every_namespace():
+    dispatcher, _ = gateway([], open_runs={"buffer/8"})
+    assert dispatcher.open_runs() == [
+        {"namespace": namespace, "id": "buffer/8", "run_id": "run-1", "type": "MiaBuffer"}
+        for namespace in ("buf-ns", "data-ns")
+    ]
+    assert dispatcher.schedules() == [
+        {"namespace": namespace, "id": "keeper", "every_s": 600.0, "last": 1800000000.0}
+        for namespace in ("buf-ns", "data-ns")
+    ]
+
+    async def away(namespace):
+        raise OSError("temporal is away")
+
+    assert Dispatcher(away, TARGETS).schedules() == []
+
+
 def test_health_names_each_queue_and_whether_a_worker_polls_it():
     dispatcher, _ = gateway([])
     assert dispatcher.health() == {"temporal": True, "queues": {"data-q": True, "buf-q": True}}
@@ -146,6 +216,14 @@ def test_health_names_each_queue_and_whether_a_worker_polls_it():
         raise OSError("temporal is away")
 
     assert Dispatcher(away, TARGETS).health() == {"temporal": False, "queues": {}}
+
+
+def test_health_watches_the_worker_of_every_service_it_is_told_of():
+    async def connect(namespace):
+        return FakeClient(namespace, [], pollers=("worker",) if namespace == "buf-ns" else ())
+
+    watched = Dispatcher(connect, TARGETS, {"snippets": "snip-ns", "buf-q": "buf-ns"}).health()["queues"]
+    assert watched == {"data-q": False, "buf-q": True, "snippets": False}  # a queue no workflow of ours runs on, too
 
 
 def test_targets_come_from_the_config(tmp_path):
@@ -159,3 +237,4 @@ def test_targets_come_from_the_config(tmp_path):
     assert targets["dataset"].workflow_id(7) == "mia-data/o/data/issue-7"  # mia-data's own id for the dataset
     assert targets["buffer"].workflow_id(7) == cfg.workflow_id(7) and targets["prep"].make_state(7) == PrepState(7)
     assert make_cfg(tmp_path).datasets_pipeline.task_queue == "mia-data"  # the default: mia-data's own names
+    assert dispatcher_for(make_cfg(tmp_path, workers={"snippets": "snip-ns"})).queues["snippets"] == "snip-ns"

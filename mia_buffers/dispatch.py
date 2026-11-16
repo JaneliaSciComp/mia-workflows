@@ -13,6 +13,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from typing import Any
 
+from mia_core.temporal import last_poll
 from mia_data.models import DatasetState, LabelEvent
 
 from .config import Config
@@ -44,10 +45,17 @@ def mirror_id(kind: str, number: int) -> str:
 
 class Dispatcher:
     """Starts and signals workflows for the service. `targets` maps a subject kind to its `Target`;
-    `connect(namespace)` returns a Temporal client."""
+    `connect(namespace)` returns a Temporal client; `workers` maps each further task queue whose worker
+    `health` watches to its namespace."""
 
-    def __init__(self, connect: Callable[[str], Awaitable[Any]], targets: dict[str, Target]) -> None:
+    def __init__(
+        self,
+        connect: Callable[[str], Awaitable[Any]],
+        targets: dict[str, Target],
+        workers: dict[str, str] | None = None,
+    ) -> None:
         self._connect, self.targets = connect, targets
+        self.queues = {**{target.task_queue: target.namespace for target in targets.values()}, **(workers or {})}
         self._clients: dict[str, Any] = {}
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True, name="temporal-dispatcher").start()
@@ -96,7 +104,7 @@ class Dispatcher:
 
     def send(self, kind: str, number: int, signal: str, event: LabelEvent) -> None:
         """Deliver an action as the workflow's signal of that name, starting the subject's workflow if it is not
-        running: what the poller's label delivery did. Blocks until Temporal has it; DispatchError if not."""
+        running. Blocks until Temporal has it; DispatchError if not."""
         self._wait(self._send(kind, number, signal, event))
 
     async def _send(self, kind: str, number: int, signal: str, event: LabelEvent) -> None:
@@ -128,20 +136,33 @@ class Dispatcher:
             raise
         return True
 
-    def terminate(self, kind: str, number: int, reason: str) -> bool:
+    def terminate(self, kind: str, number: int, reason: str, run_id: str | None = None) -> bool:
         """Terminate the subject's running workflow (a terminate needs no replay, so it also ends a run that
-        nondeterminism froze); False when no run is open."""
-        return self._wait(self._terminate(kind, number, reason))
+        nondeterminism froze); False when no run is open. With `run_id`, that run and no later one: False when
+        it is over."""
+        return self._wait(self._terminate(self.targets[kind].namespace, self._id(kind, number), reason, run_id))
 
-    async def _terminate(self, kind: str, number: int, reason: str) -> bool:
+    def _id(self, kind: str, number: int) -> str:
+        return self.targets[kind].workflow_id(number)
+
+    def terminate_run(self, namespace: str, workflow_id: str, run_id: str, reason: str) -> bool:
+        """Terminate one run by its ids, whatever its workflow type; False when it is over."""
+        return self._wait(self._terminate(namespace, workflow_id, reason, run_id))
+
+    async def _terminate(self, namespace: str, workflow_id: str, reason: str, run_id: str | None) -> bool:
         from temporalio.service import RPCError, RPCStatusCode
 
-        target = self.targets[kind]
-        client = await self._client(target.namespace)
+        client = await self._client(namespace)
+        # a handle made without a run id ends the workflow's current run
+        handle = (
+            client.get_workflow_handle(workflow_id, run_id=run_id)
+            if run_id
+            else client.get_workflow_handle(workflow_id)
+        )
         try:
-            await client.get_workflow_handle(target.workflow_id(number)).terminate(reason=reason)
+            await handle.terminate(reason=reason)
         except RPCError as error:
-            if error.status == RPCStatusCode.NOT_FOUND:
+            if error.status in (RPCStatusCode.NOT_FOUND, RPCStatusCode.FAILED_PRECONDITION):  # none, or over
                 return False
             raise
         return True
@@ -164,6 +185,78 @@ class Dispatcher:
             raise
         return description.status.name if description.status else None
 
+    def run(self, kind: str, number: int) -> dict | None:
+        """The subject's latest run as the cleaner reads it: {status, run_id, task, activities}. `task` is the
+        attempt of a workflow task that keeps failing (None while tasks complete); `activities` are the pending
+        ones, each {type, attempt, failure}. None when it never ran."""
+        return self._wait(self._run(kind, number))
+
+    async def _run(self, kind: str, number: int) -> dict | None:
+        from temporalio.service import RPCError, RPCStatusCode
+
+        target = self.targets[kind]
+        client = await self._client(target.namespace)
+        try:
+            description = await client.get_workflow_handle(target.workflow_id(number)).describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                return None
+            raise
+        raw = getattr(description, "raw_description", None)
+        attempt = raw.pending_workflow_task.attempt if raw is not None and raw.HasField("pending_workflow_task") else 0
+        return {
+            "status": description.status.name if description.status else None,
+            "run_id": getattr(description, "run_id", None),
+            "task": attempt if attempt > 1 else None,
+            "activities": [
+                {
+                    "type": pending.activity_type.name,
+                    "attempt": pending.attempt,
+                    "failure": pending.last_failure.message,
+                }
+                for pending in (raw.pending_activities if raw is not None else ())
+            ],
+        }
+
+    def open_runs(self) -> list[dict]:
+        """Every open run of the namespaces this service knows: {namespace, id, run_id, type}."""
+        return self._wait(self._open_runs())
+
+    async def _open_runs(self) -> list[dict]:
+        runs: list[dict] = []
+        for namespace in sorted(set(self.queues.values())):
+            client = await self._client(namespace)
+            # ponytail: the first 5000 open runs per namespace; a query per workflow type when there are more
+            async for run in client.list_workflows('ExecutionStatus="Running"', limit=5000):
+                runs.append({"namespace": namespace, "id": run.id, "run_id": run.run_id, "type": run.workflow_type})
+        return runs
+
+    def schedules(self) -> list[dict]:
+        """Every schedule of those namespaces: {namespace, id, every_s, last} (`last`: when it last started its
+        workflow, Unix seconds; None when it never did). Empty when Temporal cannot be asked."""
+        try:
+            return self._wait(self._schedules())
+        except DispatchError as error:
+            log.warning("schedules: %s", error)
+            return []
+
+    async def _schedules(self) -> list[dict]:
+        found: list[dict] = []
+        for namespace in sorted(set(self.queues.values())):
+            client = await self._client(namespace)
+            async for listed in await client.list_schedules():
+                intervals = listed.schedule.spec.intervals if listed.schedule else ()
+                recent = listed.info.recent_actions if listed.info else ()
+                found.append(
+                    {
+                        "namespace": namespace,
+                        "id": listed.id,
+                        "every_s": intervals[0].every.total_seconds() if intervals else None,
+                        "last": recent[-1].started_at.timestamp() if recent else None,
+                    }
+                )
+        return found
+
     def health(self) -> dict:
         """{temporal: whether it answers, queues: {task queue: whether a worker polls it}} for the page's banner."""
         try:
@@ -173,29 +266,15 @@ class Dispatcher:
             return {"temporal": False, "queues": {}}
 
     async def _polled(self) -> dict[str, bool]:
-        from temporalio.api.enums.v1 import TaskQueueType
-        from temporalio.api.taskqueue.v1 import TaskQueue
-        from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
-
         polled: dict[str, bool] = {}
-        for target in self.targets.values():
-            if target.task_queue in polled:
-                continue
-            client = await self._client(target.namespace)
-            answer = await client.workflow_service.describe_task_queue(
-                DescribeTaskQueueRequest(
-                    namespace=target.namespace,
-                    task_queue=TaskQueue(name=target.task_queue),
-                    task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-                )
-            )
-            polled[target.task_queue] = bool(answer.pollers)
+        for task_queue, namespace in self.queues.items():
+            polled[task_queue] = await last_poll(await self._client(namespace), namespace, task_queue) is not None
         return polled
 
 
 def dispatcher_for(cfg: Config) -> Dispatcher:
     """The gateway of a configured service: datasets on mia-data's namespace and queue under mia-data's own
-    workflow ids, buffers and requests on this service's."""
+    workflow ids, buffers and requests on this service's; its health watches every service's worker."""
     from autodev.cli import _client
 
     async def connect(namespace: str) -> Any:
@@ -217,4 +296,5 @@ def dispatcher_for(cfg: Config) -> Dispatcher:
             "buffer": Target(*own, "MiaBuffer", cfg.workflow_id, BufferState),
             "prep": Target(*own, "MiaPrep", cfg.prep_workflow_id, PrepState),
         },
+        cfg.workers,
     )

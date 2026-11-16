@@ -3,7 +3,7 @@ from pathlib import Path
 
 import yaml
 from test_autodev_agent import FakeCsub
-from test_mia_activities import BINDING, REC_SHA, SNIP_SHA, _crop, _setup
+from test_mia_activities import BINDING, SNIP_SHA, _crop, _setup
 
 from mia_data.cli import run_test_pr
 
@@ -104,7 +104,7 @@ async def test_test_pr_head_moved(tmp_path, capsys):
 
 
 async def test_test_pr_bad_binding_runs_nothing(tmp_path, capsys):
-    t, log, b = _run(tmp_path, binding={**BINDING, "record_commit": "d" * 40})
+    t, log, b = _run(tmp_path, binding={**BINDING, "record": "rec-2"})
     assert await run_test_pr(t.a, PR, b, "rec-1") == 1
     assert _events(log) == [(SNIP_SHA, "pending"), (SNIP_SHA, "failure")] and t.csub.submitted == []
-    assert REC_SHA in capsys.readouterr().out
+    assert "record 'rec-2' is not 'rec-1'" in capsys.readouterr().out

@@ -271,7 +271,7 @@ def test_retire_prints_the_result_and_fails_on_a_registry_error(tmp_path, monkey
     assert len(events) == 1  # no event for a retire that failed
 
 
-def test_schedule_applies_the_keeper_and_deletes_the_old_poll_schedule(tmp_path, monkeypatch, capsys):
+def test_schedule_applies_the_keeper_and_the_cleaner_and_deletes_the_old_poll_schedule(tmp_path, monkeypatch, capsys):
     _sync_cfg(tmp_path, monkeypatch)
     applied, deleted = [], []
 
@@ -292,11 +292,13 @@ def test_schedule_applies_the_keeper_and_deletes_the_old_poll_schedule(tmp_path,
     assert cli.main(["schedule", "apply"]) == 0
     assert [(name, every.total_seconds(), overlap) for name, every, overlap in applied] == [
         ("mia-buffers-keeper", 1800.0, "SKIP"),
+        ("mia-buffers-cleaner", 600.0, "SKIP"),  # the default mode is `report`; `off` deletes it
     ]
     assert deleted == ["mia-buffers-poll"]  # nothing polls GitHub for a command: a poll schedule must not linger
     assert capsys.readouterr().out.splitlines() == [
         "deleted schedule mia-buffers-poll",
         "created schedule mia-buffers-keeper",
+        "created schedule mia-buffers-cleaner",
     ]
 
 

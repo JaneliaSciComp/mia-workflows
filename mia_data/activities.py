@@ -28,10 +28,12 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from autodev.activities import PERMANENT_CSUB, permanent_errors
+from autodev.agent import hosts_marker
 from autodev.jobs import JobSpec
 from mia_core import autonomy
 from mia_core.assets import raw_asset
 from mia_core.config import manifest_path
+from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge.evidence import build as build_evidence
 from mia_core.judge.evidence import evidence_digest, read_claude_json
 from mia_core.judge.policy import POLICY_VERSION, authorized, new_assessment
@@ -46,15 +48,18 @@ from mia_core.untrusted import write_atomic as write_atomic
 
 from . import catalog
 from . import publish as crop_publish
-from .binding import check_binding, hosts, record_urls
-from .config import HUMAN_LABELS, STAGES
+from .binding import check_binding, hosts, record_gaps, record_urls
+from .config import HUMAN_LABELS, STAGE_SENTENCES, STAGES, dataset_state, round_open
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
+    ADVICE_FILE,
     SHA_RE,
     HostsNotAllowed,
     PinMoved,
     check_hosts_allowed,
     crop_job,
+    debug_job,
+    debug_prompt,
     harness_pin,
     harness_snapshot,
     judge_job,
@@ -66,8 +71,12 @@ from .jobspec import (
     verify_job,
 )
 from .models import (
+    ADVISERS,
+    DEBUGGER,
     AssessmentWritten,
+    AutodevLook,
     DatasetState,
+    DebugResult,
     GalleryResult,
     JobArgs,
     JobDone,
@@ -85,7 +94,16 @@ from .models import (
 from .poll import run_poll
 from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
 from .seed import ID_RE
-from .status import render_binding, render_crops_table, render_judge_comment, render_links, render_stage
+from .status import (
+    PLACED,
+    render_binding,
+    render_crops_table,
+    render_jobs,
+    render_judge_comment,
+    render_links,
+    render_result,
+    stage_entries,
+)
 
 if TYPE_CHECKING:
     from temporalio.client import Client
@@ -99,6 +117,19 @@ log = logging.getLogger(__name__)
 
 TEST_PR_RE = re.compile(r"i0-e(\d+)-[0-9a-f]{7}")  # `mia-data test-pr`'s round id: PR <n> at a head, no data issue
 ROUND_RE = re.compile(rf"i\d+-e\d+|{TEST_PR_RE.pattern}")
+# what a job leaves in its workspace that says how it went: copied for the debugging agent, each cut at this size
+ROUND_FILES = (
+    "binding.yaml",
+    "outcome.json",
+    "smoke.json",
+    "crops/report.json",
+    "verify.json",
+    "claude.json",
+    "claude.err",
+    "exit_code",
+)
+EVIDENCE_BYTES = 1 << 20
+LOG_BYTES = 64 << 10  # the end of a job's stdout and stderr
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
@@ -122,17 +153,15 @@ def mia_permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
     """Decorator: autodev's permanent_errors, plus mia-data's own permanent failures.
 
     A moved pin, a host outside the policy, a publication conflict, a bad input (malformed YAML too) or a
-    missing state file send the round to needs-human instead of burning retries."""
+    missing state file stop the round instead of burning retries."""
     inner = permanent_errors(fn)
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         try:
             return await inner(*args, **kwargs)
-        except PERMANENT as error:
-            raise ApplicationError(
-                f"{type(error).__name__}: {error}", type=type(error).__name__, non_retryable=True
-            ) from error
+        except PERMANENT as error:  # the type names the exception: an ApplicationError's text begins with it
+            raise ApplicationError(str(error), type=type(error).__name__, non_retryable=True) from error
 
     return cast(Fn, wrapper)
 
@@ -148,6 +177,18 @@ def _small_dict(value: Any, limit: int = 16384) -> dict | None:
 def _job_json(workspace: str | Path, rel: str) -> Any:
     """A JSON file a job wrote, or None if missing, unreadable or malformed."""
     return _loads(read_untrusted(Path(workspace), rel, 1 << 20))
+
+
+def _bytes_fetched(workspace: str) -> int:
+    """What the crop job of `workspace` says it downloaded (`crops/report.json`); 0 when there is no such report."""
+    report = _job_json(workspace, "crops/report.json")
+    fetched = report.get("bytes_fetched") if isinstance(report, dict) else None
+    return fetched if type(fetched) is int and fetched >= 0 else 0
+
+
+def _action(event_id: str | None) -> int | None:
+    """The action id an event id is (buffer-api sends an action as an event with its id); None for no event."""
+    return int(event_id) if event_id and event_id.isdecimal() else None
 
 
 def _when(iso: str | None) -> datetime | None:
@@ -175,15 +216,24 @@ def withdrawn_snippets(snapshot_dir: Path) -> dict[str, str]:
     }
 
 
-def visible_snippets(snapshot_dir: Path) -> dict[str, str]:
-    """snippet name -> its snippet.yaml text, hiding withdrawn snippets and ones another snippet supersedes."""
+def usable_snippets(snapshot_dir: Path) -> dict[str, str]:
+    """snippet name -> its snippet.yaml text, for every snippet of the snapshot that is not withdrawn: what a
+    binding that was tested may name. One that another snippet supersedes is among them."""
     root = snapshot_dir / "snippets"
-    catalog_text = {
+    withdrawn = withdrawn_snippets(snapshot_dir)
+    return {
         entry.name: text
         for entry in sorted(root.iterdir() if root.is_dir() else [])
-        if (text := read_untrusted(snapshot_dir, f"snippets/{entry.name}/snippet.yaml", 1 << 20)) is not None
+        if entry.name not in withdrawn
+        and (text := read_untrusted(snapshot_dir, f"snippets/{entry.name}/snippet.yaml", 1 << 20)) is not None
     }
-    hidden = set(withdrawn_snippets(snapshot_dir))
+
+
+def visible_snippets(snapshot_dir: Path) -> dict[str, str]:
+    """snippet name -> its snippet.yaml text, hiding withdrawn snippets and ones another snippet supersedes: what
+    a new match is offered."""
+    catalog_text = usable_snippets(snapshot_dir)
+    hidden: set[str] = set()
     for text in catalog_text.values():
         parsed = yaml.safe_load(text)
         superseded = parsed and isinstance(parsed, dict) and parsed.get("supersedes")
@@ -236,10 +286,13 @@ class Activities:
             self.limits,
             self.poll,
             self.set_stage,
+            self.stage_result,
             self.comment,
             self.prepare_match,
+            self.prepare_debug,
+            self.read_debug,
+            self.debug_go,
             self.prepare_job,
-            self.probe_hosts,
             self.submit,
             self.read_match,
             self.read_smoke,
@@ -249,8 +302,10 @@ class Activities:
             self.publish_gallery,
             self.publish_crops,
             self.refuse_label,
+            self.read_feedback,
             self.open_snippet_issue,
             self.pr_state,
+            self.autodev_look,
             self.set_crop_status,
             self.tree_sha,
             self.adopt_pr_binding,
@@ -357,23 +412,26 @@ class Activities:
         return self.cfg.paths.storage_root / catalog.dataset_folder(self._record(round_id), pins.record)
 
     def dataset_fields(self, issue: int, round_id: str, stage: str) -> dict:
-        """The registry row for the dataset at `stage`: prepared (with the manifest's facts) when its folder holds a
-        binding and a manifest that matches it, else in-progress, or needs-human at that stage."""
+        """The registry row for the dataset at `stage`: its state (`dataset_state`: the stage decides, and `done`
+        counts as prepared only when the folder holds a binding and a manifest that matches it), the manifest's
+        facts when the folder has them, and the reason when a `done` round saved nothing."""
         try:
-            dataset_dir = self._dataset_dir(round_id, self._pins(round_id))
-            if (dataset_dir / REVOKED_FILE).is_file():  # revoked stays revoked until a new publication
+            pins = self._pins(round_id)
+            dataset_dir = self._dataset_dir(round_id, pins)
+            crop_publish.check_owner(dataset_dir, pins.record)
+            if (dataset_dir / REVOKED_FILE).is_file():  # revoked stays revoked until a new round saves its crops
                 return {"state": "revoked", "data_stage": stage, "issue": issue}
             row = crop_publish.prepared_row(dataset_dir)
-        except (ValueError, OSError) as err:  # no derivable folder (unclear record) or unreadable: a state row only
+            why = f"`{dataset_dir.name}` holds no binding.yaml with a matching manifest.json"
+        except (ValueError, OSError, Conflict) as err:
+            # no derivable folder (unclear record), unreadable, or another record's folder: a state row only
             log.warning("round %s: no prepared lookup: %s", round_id, err)
-            row = None
-        if row:
-            row.pop("record")
-            fields = row
-        else:
-            # a cancelled round did not prepare the dataset: whatever follows it reads that as it reads a stop
-            fields = {"state": "needs-human" if stage in ("needs-human", "cancelled") else "in-progress"}
-        return {**fields, "data_stage": stage, "issue": issue}
+            row, why = None, str(err)
+        facts = {name: value for name, value in (row or {}).items() if name not in ("record", "state")}
+        unsaved = stage == "done" and row is None
+        reason = f"the round is `done` but its crops are not saved: {why}. Run it again." if unsaved else None
+        state = dataset_state(stage, saved=row is not None)
+        return {**facts, "state": state, "reason": reason, "data_stage": stage, "issue": issue}
 
     def _report_dataset(self, registry: Registry, issue: int, round_id: str, stage: str) -> None:
         """Put the dataset's row to the registry; never raises: a missing pins file, a catalog record of the wrong
@@ -399,7 +457,9 @@ class Activities:
         """Pin the round: the record is the subject's key, record_commit comes from the downloads state (or the
         catalog's main when the record was never downloaded: its jobs fetch on demand), then snippets main and the
         harness checkout. The round is charged to whoever asked for it: the root its `go` carries, else the
-        dataset itself. Written once to state_dir/rounds/<round_id>/; a retry returns the same pins."""
+        dataset itself. A record that lacks what a round needs (`record_gaps`), or whose dataset folder is another
+        record's, is refused here, before any job runs. Written once to state_dir/rounds/<round_id>/; a retry
+        returns the same pins."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"i{int(issue)}-e{event_id}")
@@ -421,6 +481,9 @@ class Activities:
         if path is None:
             raise ValueError(f"{record_id}: no record on main")
         record = await catalog.record(self.gh_catalog, path, entry["record_commit"])
+        if gaps := record_gaps(record):
+            raise ValueError(f"{record_id}: the record cannot be run: {'; '.join(gaps)}")
+        crop_publish.check_owner(self.cfg.paths.storage_root / catalog.dataset_folder(record, record_id), record_id)
         pins = Pins(
             record_id,
             entry["record_commit"],
@@ -447,6 +510,9 @@ class Activities:
             cfg.limits.agent_max_budget_usd,
             cfg.judge.crops.mode,
             cfg.judge.max_budget_usd,
+            cfg.limits.debug_cycles,
+            cfg.limits.debug_wait_min,
+            cfg.limits.autodev_quiet_hours,
         )
 
     # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
@@ -463,9 +529,11 @@ class Activities:
         by: str,
         summary: str = "",
         supersedes: str | None = None,
+        action_id: str | None = None,
     ) -> AssessmentWritten:
         """Write the verdict as an assessment in the registry, then ask `authorized()` over everything written about
-        the subject; an approve also names its assessment on the dataset row."""
+        the subject; an approve also names its assessment on the dataset row. `action_id` is the event id of the
+        person's action, written on the assessment so that what they wrote with it can be shown beside it."""
         registry = self.registry
         row = new_assessment(
             gate=gate,
@@ -476,6 +544,7 @@ class Activities:
             at=time.time(),
             summary=summary,
             supersedes=supersedes,
+            action=_action(action_id),
         )
         await asyncio.to_thread(registry.put_assessment, row)
         rows = await asyncio.to_thread(lambda: registry.assessments(subject_kind=subject_kind, subject_ref=subject_ref))
@@ -584,6 +653,8 @@ class Activities:
             cost,
             mode,
         )
+        if jobs := render_jobs(self._job_links([str(path)])):  # the entry that reports a job links its record
+            comment += f"\n\n{jobs}"
         return JudgeResult(
             verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings
         )
@@ -624,11 +695,15 @@ class Activities:
     async def set_stage(
         self, issue: int, stage: str, state: DatasetState | None = None, detail: str = "", extra: str = ""
     ) -> None:
-        """Write the dataset's stage: its registry row, the subject's stage and, within a round, the stage's
-        timeline entry, once.
+        """Write the dataset's stage: its registry row, the subject's stage and, within a round, the timeline
+        entries of the stage passes involved (`stage_entries`), each once.
 
-        The entry has the stage line, `detail` (neutralized), the caller's `extra` (crops table, totals, PR
-        link) and links to the folders to look at. Entries are never edited: each stage and result is a new one."""
+        A stage a round works or waits at starts a pass: its entry has the stage line, what the stage is doing
+        (`detail`, or the stage's sentence), the caller's `extra` and links to the folders to look at. A pass
+        still open in `state` gets its result entry first: what it found (`state.result`), its binding and the
+        records of its jobs. A stage the dataset rests at is written by the open pass's result itself, which
+        says how the pass ended and where the dataset rests; with no pass open it has an entry of its own.
+        Entries are never edited: each start and each result is a new one."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         round_id = state.round_id if state else None
@@ -646,10 +721,54 @@ class Activities:
             links["Gallery"] = (
                 f"https://github.com/{gh.repo}/tree/{self.cfg.gallery.branch}/galleries/{pins.record}/{round_id}"
             )
-        marker = self.cfg.marker(f"stage {round_id} {stage}")
-        parts = [render_stage(stage, self._clean(detail)), self._clean(extra) if extra else "", render_links(links)]
-        body = "\n".join(part for part in parts if part) + f"\n{marker}"
-        await self._post(issue, body, marker, round_id=round_id, stage=stage)
+        assert state is not None
+        entries = stage_entries(
+            "data",
+            round_id,
+            stage,
+            is_pass=round_open(stage),
+            start_n=state.passes.get(stage, 0) + 1 if round_open(stage) else 1,
+            sentence=STAGE_SENTENCES.get(stage, ""),
+            detail=self._clean(detail),
+            extra=self._clean(extra) if extra else "",
+            links=render_links(links),
+            open_stage=state.pass_stage,
+            open_n=state.passes.get(state.pass_stage, 1),
+            result=self._clean(state.result),
+            shown=self._shown(state) if state.pass_stage else "",
+        )
+        for body, marker_text, sets in entries:
+            marker = self.cfg.marker(marker_text)
+            await self._post(issue, f"{body}\n{marker}", marker, round_id=round_id, stage=sets)
+
+    def _shown(self, state: DatasetState) -> str:
+        """What goes under the result of the pass open in `state`: the round's binding when the result is about
+        it, and a link to the record of each job the pass submitted."""
+        binding = render_binding(state.binding, state.binding_hash) if state.result_binding else ""
+        return "\n".join(part for part in (binding, render_jobs(self._job_links(state.pass_jobs))) if part)
+
+    def _job_links(self, workspaces: list[str]) -> dict[str, str]:
+        """Each job's name and the page's link to its record; a job that left no record is not listed."""
+        links = {}
+        for workspace in workspaces:
+            where = address(self.cfg.paths.work_root, workspace)
+            if where and record_path(self.cfg.paths.work_root, where).is_file():
+                links[Path(workspace).name] = job_link(self.page_url, where)
+        return links
+
+    @activity.defn(name="stage_result")
+    @mia_permanent_errors
+    async def stage_result(self, issue: int, state: DatasetState) -> None:
+        """Write the result entry of the pass open in `state`, once: for a pass that ended where no stage write
+        follows (a PR head whose crops failed waits for the next head)."""
+        if not (state.round_id and state.pass_stage):
+            return
+        body = render_result(state.pass_stage, self._clean(state.result))
+        shown = self._shown(state)
+        count = state.passes.get(state.pass_stage, 1)
+        marker = self.cfg.marker(f"result {state.round_id} {state.pass_stage} {count}")
+        text = "\n".join(part for part in (body, shown) if part)
+        await self._post(issue, f"{text}\n{marker}", marker, round_id=state.round_id)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
@@ -691,9 +810,20 @@ class Activities:
     @activity.defn(name="prepare_match")
     @mia_permanent_errors
     async def prepare_match(self, issue: int, round_id: str, pins: Pins, attempt: int = 1) -> str:
-        """Make the match agent's workspace: prompt.md, record.yaml, downloads.json, the downloader's
-        conversion.json / manifest.json, catalog/<name>.yaml (visible snippets only) and SPEC.md. Returns its path."""
-        workspace, round_dir = self._make_workspace(issue, round_id, "match", attempt), self._round_dir(round_id)
+        """Make the match agent's workspace: prompt.md, what `_agent_inputs` writes and, in a round the debugger
+        asked for, its advice as advice.md. Returns its path."""
+        workspace = self._make_workspace(issue, round_id, "match", attempt)
+        await self._agent_inputs(workspace, round_id, pins)
+        advice = await self._advice(issue, round_id)
+        if advice:
+            (workspace / ADVICE_FILE).write_text(advice + "\n")
+        (workspace / "prompt.md").write_text(match_prompt(pins, advised=bool(advice)))
+        return str(workspace)
+
+    async def _agent_inputs(self, workspace: Path, round_id: str, pins: Pins) -> None:
+        """What an agent reads about the round's dataset, written into its workspace: record.yaml, downloads.json,
+        the downloader's conversion.json / manifest.json, catalog/<name>.yaml (visible snippets only) and SPEC.md."""
+        round_dir = self._round_dir(round_id)
         snapshot_dir = await self._snapshot(pins.snippets_commit)
         shutil.rmtree(workspace / "catalog", ignore_errors=True)
         (workspace / "catalog").mkdir()
@@ -706,8 +836,91 @@ class Activities:
             if isinstance(dataset_dir, str) and (data := read_untrusted(Path(dataset_dir), name, 16 << 20)) is not None:
                 (workspace / name).write_text(data)
         (workspace / "SPEC.md").write_text(read_untrusted(snapshot_dir, "SPEC.md", 1 << 20) or "")
-        (workspace / "prompt.md").write_text(match_prompt(pins))
+
+    async def _advice(self, issue: int, round_id: str) -> str:
+        """The advice for this round: the note of the go that started it, when that go is the debugger's or the
+        cleaner's with its diagnosis (ADVISERS). "" for any other round."""
+        if TEST_PR_RE.fullmatch(round_id):
+            return ""
+        action = await self._action(issue, round_id.split("-e", 1)[1])
+        if action is None or action["actor"] not in ADVISERS:
+            return ""
+        return self._clean(_text(action["payload"].get("note"), 16000))
+
+    # --- debugging a failed round ------------------------------------------------------------
+
+    @activity.defn(name="prepare_debug")
+    @mia_permanent_errors
+    async def prepare_debug(self, issue: int, round_id: str, pins: Pins, failure: str, binding: str | None) -> str:
+        """Make the debugging agent's workspace: what the match agent reads, `failure.md` (what stopped the round
+        and the limits its jobs ran under), the round's checked binding when it got that far, and `round/<job>/`
+        with what each job of the round left (ROUND_FILES and the end of its stdout and stderr), read as untrusted,
+        cut to size and cleaned of anything that looks like a credential. Returns its path.
+
+        It takes exactly the arguments the workflow sends: Temporal converts an argument to its annotated type
+        only when their number matches the parameters', and `pins` must arrive as `Pins`."""
+        workspace = self._make_workspace(issue, round_id, "debug", 1)
+        await self._agent_inputs(workspace, round_id, pins)
+        (workspace / "binding.yaml").unlink(missing_ok=True)
+        if binding:
+            if not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
+                raise ValueError(f"binding {binding} is not one of round {round_id}'s")
+            shutil.copyfile(binding, workspace / "binding.yaml")
+        shutil.rmtree(workspace / "round", ignore_errors=True)
+        for job_dir in sorted(self._round_workspace(issue, round_id).iterdir()):
+            if job_dir == workspace or job_dir.is_symlink() or not job_dir.is_dir():
+                continue
+            left = {rel: read_untrusted(job_dir, rel, EVIDENCE_BYTES) for rel in ROUND_FILES}
+            jobs = job_dir / ".csub" / "jobs"
+            runs = sorted(entry.name for entry in jobs.iterdir() if entry.name.isdecimal()) if jobs.is_dir() else []
+            for log in ("stdout", "stderr") if runs else ():
+                left[log] = read_untrusted(job_dir, f".csub/jobs/{runs[-1]}/{log}", LOG_BYTES, tail=True)
+            for rel, data in left.items():
+                if data:
+                    (workspace / "round" / job_dir.name / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (workspace / "round" / job_dir.name / rel).write_text(self._clean(data))  # no credential
+        limits = self.cfg.limits
+        (workspace / "failure.md").write_text(
+            f"# What stopped the round\n\n{self._clean(_text(failure, 8000))}\n\n"
+            "# The limits its jobs ran under\n\n"
+            f"- Time: {limits.job_walltime_min} minutes per job. A job the cluster kills at this limit ends with exit "
+            "code 140 and writes no report.\n"
+            f"- Data: {int(limits.job_bytes)} bytes fetched per job.\n"
+            "- Your own job runs under the same two limits.\n"
+        )
+        (workspace / "prompt.md").write_text(debug_prompt(pins))
         return str(workspace)
+
+    @activity.defn(name="read_debug")
+    @mia_permanent_errors
+    async def read_debug(self, issue: int, round_id: str, workspace: str) -> DebugResult:
+        """Read the debugging agent's outcome.json into a DebugResult; anything else it left is `failed`."""
+        outcome = _job_json(self._job_workspace(issue, round_id, workspace), "outcome.json")
+        if not isinstance(outcome, dict) or outcome.get("outcome") not in ("rerun", "blocked"):
+            return DebugResult("failed", "the debugging agent left no readable outcome.json")
+        return DebugResult(
+            outcome["outcome"],
+            self._clean(_text(outcome.get("diagnosis"), 6000)) or "(the debugging agent gave no diagnosis)",
+            self._clean(_text(outcome.get("advice"), 6000)),
+        )
+
+    @activity.defn(name="debug_go")
+    @mia_permanent_errors
+    async def debug_go(self, issue: int, round_id: str, advice: str) -> None:
+        """Ask for the dataset's next round as the debugger: a `go` through buffer-api like any other, charged to the
+        root the debugged round was, carrying the advice as its note. One go per debugged round, however often this
+        is retried."""
+        pins = self._pins(round_id)
+        go = functools.partial(
+            self.registry.send_action,
+            f"/datasets/{pins.record}/actions",
+            "go",
+            key=f"debug {round_id}",
+            actor=DEBUGGER,
+            **({"root": pins.root} if pins.root else {}),
+            **({"note": advice} if advice else {}),
+        )
+        await asyncio.to_thread(go)
 
     @activity.defn(name="prepare_job")
     @mia_permanent_errors
@@ -722,12 +935,6 @@ class Activities:
             shutil.copyfile(binding, workspace / "binding.yaml")
         return str(workspace)
 
-    @activity.defn(name="probe_hosts")
-    @mia_permanent_errors
-    async def probe_hosts(self) -> list[str]:
-        """`csub probe`: the policy's allowed_hosts patterns."""
-        return list(await asyncio.to_thread(self.probe))
-
     def _spec(self, kind: str, args: JobArgs, snapshot_dir: Path | None) -> JobSpec:
         """Build the JobSpec for one job kind from its arguments."""
         cfg = self.cfg
@@ -735,6 +942,8 @@ class Activities:
             return match_job(cfg, args)
         if kind == "judge":
             return judge_job(cfg, args)
+        if kind == "debug":
+            return debug_job(cfg, args)
         existing = self._dataset_dir(args.round_id, args.pins) / "manifest.json" if args.existing else None
         existing = existing if existing and existing.is_file() else None
         if kind in ("smoke", "crop"):
@@ -779,13 +988,15 @@ class Activities:
     @activity.defn(name="await_job")
     async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
         """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock.
-        A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3)."""
+        A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3). The answer
+        carries what a crop job downloaded, which its reservation is settled with."""
         heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
         try:
             outcome = await self.jobs.wait(job_id, workspace, heartbeat)
         except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
             raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
-        return JobDone(outcome.job_id, outcome.state, outcome.exit_code)
+        fetched = await asyncio.to_thread(_bytes_fetched, workspace)
+        return JobDone(outcome.job_id, outcome.state, outcome.exit_code, fetched)
 
     @activity.defn(name="kill_job")
     async def kill_job(self, job_id: str) -> None:
@@ -815,7 +1026,9 @@ class Activities:
         """Read the match agent's outcome.json and, for matched, check its binding.yaml.
 
         A checked binding is stored (with the round's snippets_commit) as
-        state_dir/rounds/<round>/binding-<attempt>.yaml. Anything we can't trust is `blocked` with the reason."""
+        state_dir/rounds/<round>/binding-<attempt>.yaml. The agent says whether it stopped `blocked` (a person has
+        to decide or change something) or `failed` (running again may pass); anything we can't trust is `failed`
+        with the reason."""
         path = Path(workspace)
         if not (match := re.fullmatch(r"match-(\d+)", path.name)):
             raise ValueError(f"{workspace} is not a match workspace")
@@ -823,22 +1036,20 @@ class Activities:
         round_dir, pins = self._round_dir(round_id), self._pins(round_id)
         outcome = _job_json(workspace, "outcome.json")
         if not isinstance(outcome, dict):
-            return MatchResult("blocked", "outcome.json is missing, unreadable or not a JSON object")
+            return MatchResult("failed", "outcome.json is missing, unreadable or not a JSON object")
         kind = outcome.get("outcome")
-        if kind == "blocked":
-            return MatchResult(
-                "blocked", _text(outcome.get("reason")) or "the match agent reported blocked, with no reason"
-            )
+        if kind in ("blocked", "failed"):
+            return MatchResult(kind, _text(outcome.get("reason")) or f"the match agent reported {kind}, with no reason")
         if kind == "needs_snippet":
             draft = _small_dict({key: outcome.get(key) for key in ("draft_binding", "what_fails", "tried")}, 32768)
             return MatchResult("needs_snippet", draft=draft or {"what_fails": "(the agent's draft was too large)"})
         if kind != "matched":  # size is the buffer plan's call, not ours: no outcome says a dataset is too small
-            return MatchResult("blocked", f"unknown match outcome {_text(kind, 100)!r}")
+            return MatchResult("failed", f"unknown match outcome {_text(kind, 100)!r}")
         binding, errors = await self._check_binding(
             read_untrusted(path, "binding.yaml", 1 << 20), round_id, pins, pins.snippets_commit
         )
         if errors:
-            return MatchResult("blocked", _text("binding check failed: " + "; ".join(errors)))
+            return MatchResult("failed", _text("binding check failed: " + "; ".join(errors)))
         binding_path, digest = self._store_binding(
             round_dir / f"binding-{match.group(1)}.yaml", {**binding, "snippets_commit": pins.snippets_commit}
         )
@@ -849,23 +1060,28 @@ class Activities:
             reasons=_texts(binding.get("reasons")),
         )
 
-    async def _check_binding(self, text: str | None, round_id: str, pins: Pins, sha: str) -> tuple[dict, list[str]]:
+    async def _check_binding(
+        self, text: str | None, round_id: str, pins: Pins, sha: str, tested: bool = False
+    ) -> tuple[dict, list[str]]:
         """Parse an agent-written binding and check it against the round's record and the snippets at `sha`.
-        Returns (binding, errors); the binding is empty when there are errors."""
+        Returns (binding, errors); the binding is empty when there are errors, and otherwise names the round's
+        own `record_commit`, whatever the agent (or an earlier round's example) wrote there. A new match names
+        only snippets a match is offered; a `tested` binding (a reader's example) may also name one that was
+        superseded since it was written."""
         if text is None:
             return {}, ["the binding is missing or unreadable"]
         try:
             binding = yaml.safe_load(text)
-            errors = check_binding(
-                binding, self._record(round_id), set(visible_snippets(await self._snapshot(sha))), pins=pins
-            )
+            snapshot_dir = await self._snapshot(sha)
+            names = set(usable_snippets(snapshot_dir) if tested else visible_snippets(snapshot_dir))
+            errors = check_binding(binding, self._record(round_id), names, pins=pins)
             if not errors:  # hosts() raises if a URL would grant a GitHub host
                 hosts(
                     [url for array in binding["raw"] + (binding.get("labels") or []) for url in array["urls"]], self.cfg
                 )
         except (yaml.YAMLError, ValueError, RecursionError) as error:  # a malformed URL raises in urlsplit
             errors = [f"{type(error).__name__}: {error}"]
-        return binding if not errors else {}, errors
+        return {**binding, "record_commit": pins.record_commit} if not errors else {}, errors
 
     @staticmethod
     def _store_binding(path: Path, binding: dict) -> tuple[str, str]:
@@ -922,8 +1138,8 @@ class Activities:
     ) -> VerifyResult:
         """Read verify.json: only crops with ok, a valid id and sha256s for crop.json and raw.png count.
 
-        Top-level errors or n == 0 mean nothing was verified. With `crop_workspace`, n_effective and
-        bytes_fetched come from the crop job's report.json. With `record` (a trusted crop job that held the raw-cache
+        Top-level errors or n == 0 mean nothing was verified. With `crop_workspace`, n_effective, bytes_fetched,
+        crop_errors and host_not_allowed come from the crop job's report.json. With `record` (a trusted crop job that held the raw-cache
         lock), the record's raw asset row is put to the registry first, with the urls of the crop job's binding."""
         if record is not None:
             await asyncio.to_thread(self._put_raw_asset, record, crop_workspace or workspace)
@@ -974,6 +1190,7 @@ class Activities:
             count("n"),
             count("bytes_fetched") or 0,
             _texts(crop_report.get("errors"))[:10],
+            _text(crop_report.get("host_not_allowed"), 300) or None,
         )
 
     # --- publication -------------------------------------------------------------------------
@@ -1005,11 +1222,13 @@ class Activities:
             if raw is None or hashlib.sha256(raw).hexdigest() != crop["files"]["crop.json"]:
                 raise ValueError(f"{crop_id}/crop.json is missing or differs from the verified checksum")
             crop_json = parsed if isinstance(parsed := _loads(raw), dict) else {}
+            placement = crop_json.get("placement")  # a job's word: only the harness's two reach the table
             rows.append(
                 {
                     "crop_id": crop_id,
                     "plane": crop_json.get("plane") if isinstance(crop_json.get("plane"), dict) else {},
                     "box": crop_json.get("box") if isinstance(crop_json.get("box"), dict) else {},
+                    "placement": placement if isinstance(placement, str) and placement in PLACED else "",
                     "raw_url": urls[f"{crop_id}/raw.png"],
                     "overlay_url": urls[f"{crop_id}/overlay.png"],
                 }
@@ -1040,6 +1259,7 @@ class Activities:
         timeout = activity.info().start_to_close_timeout if activity.in_activity() else None
         pins = self._pins(round_id)
         dataset_dir = self._dataset_dir(round_id, pins)
+        crop_publish.check_owner(dataset_dir, pins.record)
         revoked = (dataset_dir / REVOKED_FILE).is_file()
         published = await asyncio.to_thread(
             crop_publish.publish,
@@ -1074,7 +1294,7 @@ class Activities:
                     verdict="approve",
                     by="policy:repair",
                     at=now,
-                    summary=f"repaired by {round_id}: {record} was published again",
+                    summary=f"repaired by {round_id}: {record} was saved again",
                 )
                 await asyncio.to_thread(registry.put_assessment, approve)
                 release = {"quarantined": False, "repaired_at": now, "repaired_by": round_id}
@@ -1112,6 +1332,7 @@ class Activities:
             at=at,
             summary=summary,
             supersedes=approve_id,
+            action=_action(event_id),
         )
         await asyncio.to_thread(registry.put_assessment, reject)
         assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
@@ -1121,7 +1342,14 @@ class Activities:
                 continue
             key = str(asset["key"])
             artifact_reject = new_assessment(
-                gate="staged", subject_kind="artifact", subject_ref=key, verdict="reject", by=by, at=at, summary=summary
+                gate="staged",
+                subject_kind="artifact",
+                subject_ref=key,
+                verdict="reject",
+                by=by,
+                at=at,
+                summary=summary,
+                action=_action(event_id),
             )
             await asyncio.to_thread(registry.put_assessment, artifact_reject)
             quarantine = {"quarantined": True, "quarantined_at": at, "quarantined_by": by}
@@ -1214,6 +1442,9 @@ class Activities:
         # number (spec webapp-actions §4.1, §9)
         data_link = f"[{pins.record}]({self.page_url}/#datasets/{quote(pins.record, safe='')})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
+        # the hosts the dataset's files are on: autodev grants its agent's job these and no other approved host
+        reach = [host for host in hosts(urls, self.cfg) if host not in self.cfg.network.package_hosts]
+        reach_line = f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}
             names = sorted(
@@ -1234,6 +1465,7 @@ class Activities:
                 f"Read {spec_link} first. A merged snippet is never edited: add a new one that **supersedes** the "
                 f"one at fault (`supersedes: <name>` in its `snippet.yaml`, SPEC §1), and add the binding you test, "
                 f"using the new snippet, as `examples/{pins.record}.yaml`.",
+                reach_line,
                 "**Record** (at `{pins.record_commit}`):".replace("{pins.record_commit}", pins.record_commit),
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
                 "**The rejected binding:**",
@@ -1245,6 +1477,7 @@ class Activities:
                 marker,
                 f"For {data_link}: dataset `{pins.record}` has no snippet that reads it.",
                 f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`.",
+                reach_line,
                 f"**Record** (at `{pins.record_commit}`):",
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
                 "**What fails** (the match agent's report):",
@@ -1277,6 +1510,33 @@ class Activities:
             pr_data.get("html_url"),
         )
 
+    @activity.defn(name="autodev_look")
+    @mia_permanent_errors
+    async def autodev_look(self, snippet_issue: int, pr: int | None) -> AutodevLook:
+        """What a round that waits for autodev finds when it looks itself, whatever the poller told it: the PR
+        (`pr`, the one the round follows, else the open one on the issue's branch), whether an agent round is
+        running or autodev has stopped, and the last comment autodev left on the issue or the PR."""
+        gh = self.gh_snippets
+        issue = await gh.get_issue(int(snippet_issue))
+        labels = {label["name"] for label in issue.get("labels", [])}
+        if pr is None:
+            found = await gh.find_pr(f"snippets/issue-{int(snippet_issue)}")
+            pr = found["number"] if found else None
+        ours = self.cfg.marker("").removesuffix(" -->")  # the worker comments under the same login as autodev
+        comments = await gh.issue_comments(int(snippet_issue)) + (await gh.issue_comments(pr) if pr else [])
+        said = [
+            comment
+            for comment in comments
+            if (comment.get("user") or {}).get("login") == self.bot and ours not in (comment.get("body") or "")
+        ]
+        last = max(said, key=lambda comment: comment.get("created_at") or "", default=None)
+        return AutodevLook(
+            pr,
+            "snippets:working" in labels,
+            issue.get("state") == "closed" or "snippets:needs-human" in labels,
+            _text(self._clean(" ".join((last.get("body") or "").split())), 400) if last else "",
+        )
+
     @activity.defn(name="set_crop_status")
     @mia_permanent_errors
     async def set_crop_status(self, sha: str, state: str, url: str | None, description: str = "") -> None:
@@ -1299,7 +1559,8 @@ class Activities:
         """Take the PR's example binding, `snippets/<name>/examples/<record>.yaml` at `sha` (a head or the merge
         commit), where <name> is the one snippet directory the PR adds.
 
-        It is checked like the match agent's binding (this record, its hosts, the schema) and must use <name>,
+        It is checked like the match agent's binding (this record, its hosts, the schema; it may name a snippet
+        superseded since it was written, never a withdrawn one) and must use <name>,
         then stored with `snippets_commit: <sha>` as state_dir/rounds/<round>/binding-pr-<sha7>.yaml. Returns
         {"path", "hash", "name", "errors": []}, or {"errors": [...]}: a bad example fails that head's test."""
         if not SHA_RE.fullmatch(sha):
@@ -1315,7 +1576,7 @@ class Activities:
         rel = f"snippets/{name}/examples/{pins.record}.yaml"
         raw = await gh.get_file(rel, sha)
         text = raw.decode(errors="replace") if raw is not None and len(raw) <= 1 << 20 else None
-        binding, errors = await self._check_binding(text, round_id, pins, sha)
+        binding, errors = await self._check_binding(text, round_id, pins, sha, tested=True)
         if binding and name not in {array["snippet"] for array in binding["raw"] + (binding.get("labels") or [])}:
             errors = [f"{rel} does not use snippet {name!r}"]
         if errors:
@@ -1330,6 +1591,6 @@ class Activities:
     @activity.defn(name="poll")
     @mia_permanent_errors
     async def poll(self) -> list[str]:
-        """One scheduled pass over GitHub: labels become signals, changed snippet PRs wake their workflows
-        (see poll.py). Returns a log of what was done."""
+        """One scheduled pass over the snippets repo: changed snippet PRs wake their workflows (see poll.py).
+        Returns a log of what was done."""
         return await run_poll(self)

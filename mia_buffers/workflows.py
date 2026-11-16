@@ -11,6 +11,10 @@ is deprecated and kept so that a history carrying it replays.
 
 Workflow code does no I/O: every registry, GitHub, filesystem, cluster and service interaction is an activity
 called by name (see activities.py). The durable state is a `BufferState`, handed to continue_as_new at quiet points.
+
+A round is a series of stage passes, and a pass writes a start entry and a result entry (spec job-records §3.6).
+The state keeps the open pass (its stage, its jobs, what it found); the stage write that ends it carries its
+result out, and where no stage write follows (a new round started at a gate) `_flush` writes it.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
     from mia_data.models import JobDone, LabelEvent, LockTaken, Reservation
 
+    from .config import CANCELLABLE, PREP_STAGE_ACTIONS, stage_pass
     from .models import (
         MAX_POLL_MINUTES,
         BindingInfo,
@@ -74,12 +79,10 @@ GATE_WAITING = WAITING + ("waiting-lock",)  # no job of its own: the staged gate
 SETTLED = ("servable", "failed", "dropped")
 ABANDONED = "abandoned: a new buffer:go started another round"
 CANCELLED = "abandoned: the round was cancelled"
-CANCEL, PREP_CANCEL = "buffer:cancel", "prep:cancel"  # actions only: there never were such labels
+CANCEL, PREP_CANCEL = "buffer:cancel", "prep:cancel"
 NO_ROUND = "there is no round in progress to cancel"
 ROUND_ENDED = "the round ended before the cancel reached it"
 CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the activities in flight to answer
-# the stages a `cancel` ends a round at (mia_buffers.config.CANCELLABLE; a ready or idle buffer keeps serving)
-CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")
 RETIRED_WHILE = "abandoned: the buffer was retired"
 NO_BUFFER = "this spec has no ready or idle buffer"
 SOURCING = "{count} datasets still sourcing; ask for `{label}` again once they settle"
@@ -96,9 +99,13 @@ REFUSED_ARTIFACT = "staged artifact {artifact} is refused: {why}"
 REVOKE_LABEL = "buffer:revoke"
 NO_REVOKE_LINES = "name the records to revoke: tick them on the spec's page"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then run it again"
-PREP_SETTLED = ("prepared", "needs-human")  # registry states a preparation request stops following (spec §12)
+# registry states a preparation request stops following (spec §12); a request is done when each record is one of
+# PREP_DONE: prepared, or set aside by a person
+PREP_SETTLED = ("prepared", "shelved", "needs-human")
+PREP_DONE = ("prepared", "shelved")
 # nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
 PREP_HUMAN = ("done-unpublished", "unknown")
+NEW_ROUND = "Ended: a new round was started."  # the result of a pass a new round found still open
 
 
 class RoundFailed(Exception):
@@ -145,6 +152,38 @@ def _parse_time(iso: str | None) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _results() -> bool:
+    """Whether this run writes a result entry for each stage pass (`stage-results`; spec job-records §3.6): the
+    state carries the open pass, and the stage write carries its result out."""
+    return workflow.patched("stage-results")
+
+
+def _prep_count(records: list[str], settled: dict[str, str]) -> str:
+    """How many of a request's records are prepared, and how many shelved if any, as a sentence."""
+    prepared, shelved = (sum(settled.get(record) == state for record in records) for state in PREP_DONE)
+    set_aside = f", {shelved} shelved" if shelved else ""
+    return f"{prepared} of {len(records)} requested datasets are prepared{set_aside}."
+
+
+def _prep_done(records: list[str], settled: dict[str, str]) -> str:
+    """The detail of a request's `done`: its prepared records, then its shelved ones if any."""
+    named = {
+        state: ", ".join(f"`{record}`" for record in records if settled.get(record) == state) for state in PREP_DONE
+    }
+    return f"prepared: {named['prepared'] or 'none'}" + (f"; shelved: {named['shelved']}" if named["shelved"] else "")
+
+
+def _pass_begun(state: BufferState | PrepState, stage: str, opened: bool, carried: int = 0) -> None:
+    """The stage was written, and with it the result of the pass that was open and the first `carried` of its
+    jobs. A stage the round works or waits at (`opened`) opens the next pass, which takes the jobs submitted while
+    the write ran; a stage the subject rests at leaves none open."""
+    if opened:
+        state.passes = {**state.passes, stage: state.passes.get(stage, 0) + 1}
+    state.pass_stage = stage if opened else ""
+    state.pass_jobs = state.pass_jobs[carried:] if opened else []
+    state.result = ""
 
 
 @workflow.defn(name="MiaBuffer")
@@ -430,8 +469,49 @@ class MiaBuffer:
     async def _stage(
         self, stage: str, detail: str = "", budget: timedelta = timedelta(hours=6), extra: str = ""
     ) -> None:
+        """Write the spec's stage. The write carries the result of the pass open in the state (what `_found` and
+        `_ran` gathered); the stage written is then the open pass, or none where the spec rests."""
         self.state.stage = stage
+        carried = len(self.state.pass_jobs)  # sourcing tasks may submit jobs while the write runs
         await self._act("set_stage", self.state.issue, stage, self.state, detail, extra, budget=budget)
+        if _results():
+            _pass_begun(self.state, stage, stage_pass(stage), carried)
+
+    def _found(self, text: str) -> None:
+        """What the open pass found, for its result entry; the next stage write, or `_flush`, writes it."""
+        if _results():
+            self.state.result = text
+
+    def _ran(self, workspace: str) -> None:
+        """A job was submitted in `workspace`: the open pass's result links its record. A job submitted while the
+        buffer rests (a straggler or a rebuild at `ready`) belongs to no pass."""
+        state = self.state
+        if _results() and state.pass_stage and workspace not in state.pass_jobs:
+            state.pass_jobs.append(workspace)
+
+    async def _flush(self) -> None:
+        """Write the open pass's result now, where no stage write follows that would carry it. A result that
+        could not be written is logged, never the round's end."""
+        state = self.state
+        if not state.pass_stage:
+            return
+        try:
+            await self._act("stage_result", state.issue, state, budget=timedelta(minutes=30))
+        except ActivityError as error:
+            if isinstance(error.cause, CancelledError):  # the workflow is being cancelled: not a write that failed
+                raise
+            workflow.logger.warning(
+                "issue #%d: the result of %s was not written: %s", state.issue, state.pass_stage, error_message(error)
+            )
+        state.pass_stage, state.pass_jobs, state.result = "", [], ""
+
+    def _sourced(self) -> str:
+        """What a sourcing pass came to, for its result: how many datasets of the pool are in each status."""
+        counts: dict[str, int] = {}
+        for dataset in self.state.datasets:
+            counts[dataset.status] = counts.get(dataset.status, 0) + 1
+        said = ", ".join(f"{count} {status}" for status, count in sorted(counts.items()))
+        return f"Datasets of the pool: {said}."
 
     async def _refuse_queued(self, gos: bool = True, approves: bool = True) -> None:
         queued = []
@@ -462,7 +542,7 @@ class MiaBuffer:
         await self._refuse_lifecycle()
 
     def _lifecycle(self) -> bool:
-        """Lifecycle signals are queued and this run acts on them (an old run ignores them, as it always did)."""
+        """Lifecycle signals are queued and this run acts on them (a run from before `d-lifecycle` ignores them)."""
         return self.lifecycle_on and bool(self.lifecycle)
 
     async def _refuse_lifecycle(self, reason: str = NO_BUFFER, count: int = 0) -> None:
@@ -531,12 +611,16 @@ class MiaBuffer:
         # a staged round a go supersedes is retired like a failed one (a cancelled round retired its own already)
         over = state.stage in ("needs-human", "staged")
         failed = state.buffer_id if over and state.buffer_id and not state.retired else None
+        if _results() and state.pass_stage:  # left open by the round before: a go at plan-review, staged or idle
+            self._found(state.result or NEW_ROUND)
+            await self._flush()
         state.round_id = f"i{state.issue}-e{event.event_id}"
         state.pins = state.buffer_id = state.planned_at = None
         state.datasets, state.ready = [], False
         state.idle_since, state.retired = None, False
         state.accepted, state.staged_at = {}, None
         state.approved_by = ""
+        state.passes, state.pass_stage, state.pass_jobs, state.result = {}, "", [], ""
         self.paused_round = False
         if failed and workflow.patched("retire-failed-round"):
             await self._retire_failed(failed)
@@ -562,6 +646,7 @@ class MiaBuffer:
         state.levels, state.patch = list(plan.levels), plan.patch
         state.idle_hours, state.retire_after_days = plan.idle_hours, plan.retire_after_days
         state.planned_at, state.auto_approve = workflow.now().isoformat(), plan.auto_approve
+        self._found(f"Planned: {len(plan.pool)} dataset(s) in the pool; the plan is in the timeline.")
         if self.gate_on:  # spec §15: a `plan` round waits at the plan; a `go` round stages first and asks at the gate
             if event.kind == "plan":
                 await self._stage(
@@ -617,6 +702,7 @@ class MiaBuffer:
                 if self._seen(event):
                     continue
                 if (approved_at := _parse_time(event.at)) and approved_at > planned_at:
+                    self._found(f"Approved by {event.actor}: sourcing starts.")
                     return True
                 await self._refuse(APPROVE, "it is older than the plan under review; approve again", event)
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
@@ -773,6 +859,7 @@ class MiaBuffer:
                     break
                 await self._refuse_queued()  # while jobs run: an approve has no gate, a go is busy
                 await self._refuse_lifecycle(SOURCING, sum(not task.done() for task in tasks))
+            self._found(self._sourced())  # nothing runs: what the stage write that follows says of this pass
             if self.paused_round:  # the operator's pause: the round stops here, nothing is marked failed
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise RoundFailed(PAUSED)
@@ -880,6 +967,7 @@ class MiaBuffer:
         event is written, the buffer is ready. No job runs from here to `ready`."""
         state = self.state
         assert state.round_id and state.buffer_id
+        self._found(f"Approved by {state.approved_by or 'plan.auto_approve'}: the buffer serves what is staged.")
         if workflow.patched("l-assess") and state.approved_by:  # the human's approve, per artifact, on record
             board = await self._act(
                 "assess_board",
@@ -960,8 +1048,12 @@ class MiaBuffer:
                 await self._refuse("buffer:keep", NOT_IDLE, payload)
                 return True
             state.idle_since = None
+            carried = _results() and state.pass_stage == "idle"  # the keep is the result of the idle pass
+            if carried:
+                self._found(f"Kept by {payload.actor}.")
             await self._stage("ready")
-            await self._comment("kept", f"keep {state.round_id} {payload.event_id}")
+            if not carried:
+                await self._comment("kept", f"keep {state.round_id} {payload.event_id}")
         elif kind == "retire":
             if payload is None and state.stage != "idle":  # the keeper's, sent before a keep made it ready again
                 workflow.logger.info("issue #%d: the keeper's retire ignored: the buffer is ready", state.issue)
@@ -1212,6 +1304,8 @@ class MiaBuffer:
         state.ready = True
         servable = [dataset.record for dataset in state.datasets if dataset.status == "servable"]
         detail = "approved below ready.min_fraction" if short else ""
+        if state.pass_stage == "sourcing":  # a run without the staged gate: ready ends the sourcing pass
+            self._found(self._sourced())
         extra = render_ready(state.buffer_id or "", limits.service_url, servable, short or [], state.min_fraction)
         await self._stage("ready", detail, extra=extra)
 
@@ -1245,7 +1339,7 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
-            workflow.deprecate_patch("e-prep")  # a `prep:go` issue prepares it; the buffer never waits on mia-data
+            workflow.deprecate_patch("e-prep")  # a preparation request prepares it; the buffer never waits on mia-data
             return await self._fail(dataset, NOT_PREPARED)
         dataset.artifact = binding.artifact
         if binding.refused and workflow.patched("l-assess"):
@@ -1294,7 +1388,7 @@ class MiaBuffer:
         round_id, record = state.round_id, dataset.record
         binding = await self._act("read_binding", round_id, record, seconds=300, result_type=BindingInfo)
         if not binding.found:
-            workflow.deprecate_patch("e-prep")  # a `prep:go` issue prepares it; the buffer never waits on mia-data
+            workflow.deprecate_patch("e-prep")  # a preparation request prepares it; the buffer never waits on mia-data
             return await self._fail(dataset, NOT_PREPARED)
         dataset.artifact = binding.artifact
         if binding.refused and workflow.patched("l-assess"):  # revoked: never reused, never served again
@@ -1463,7 +1557,7 @@ class MiaBuffer:
             workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
     async def _quota(self, dataset: DatasetStatus, owner: str) -> bool:
-        """Wait until the raw cache has room for the record (`blocked` meanwhile, said once on the issue), with the
+        """Wait until the raw cache has room for the record (`blocked` meanwhile, said once on the timeline), with the
         record's lock released while blocked (spec §5.2) and taken again after. False: the dataset was dropped
         (the round's day limit had fired, so the block dropped it) or abandoned while blocked."""
         state = self.state
@@ -1531,6 +1625,7 @@ class MiaBuffer:
             budgeted = await self._charge(key, "fetch")
             try:
                 job_id = await self._act("submit_fetch", key, args, seconds=600, result_type=str)
+                self._ran(workspace)
                 job = await self._await_job(job_id, workspace, limits.fetch_walltime_min, ["raw", record, owner])
                 fetched = await self._act(
                     "read_fetch", round_id, record, workspace, seconds=300, result_type=FetchResult
@@ -1590,7 +1685,7 @@ class MiaBuffer:
         )
 
     async def _await_drop(self, dataset: DatasetStatus, mark: bool = False) -> None:
-        """Ask for the files and wait for the poller's `dropped` signal until the drop verifies. `mark` (c-cache):
+        """Ask for the files and wait for the `dropped` signal (*Files are in place*) until the drop verifies. `mark` (c-cache):
         the raw asset row says `waiting-drop` first."""
         state = self.state
         assert state.round_id
@@ -1598,7 +1693,6 @@ class MiaBuffer:
         if mark:
             await self._act("mark_asset", "raw", dataset.record, {"state": "waiting-drop"})
         await self._act("comment_drop", state.issue, state.round_id, dataset.record, [], seconds=300)
-        attempt = 0
         while True:
             await workflow.wait_condition(lambda: dataset.record in self.drops)
             self.drops.discard(dataset.record)
@@ -1607,7 +1701,6 @@ class MiaBuffer:
             )
             if result.ok:
                 return
-            attempt += 1
             await self._act("comment_drop", state.issue, state.round_id, dataset.record, result.missing, seconds=300)
 
     async def _fail(self, dataset: DatasetStatus, reason: str) -> None:
@@ -1652,6 +1745,7 @@ class MiaBuffer:
         budgeted = await self._charge(key, "stage")
         try:
             job_id = await self._act("submit", key, args, seconds=600, result_type=str)
+            self._ran(workspace)
             done = await self._await_job(job_id, workspace, (await self._limits()).walltime_min, lock)
         except (ActivityError, asyncio.CancelledError):
             if budgeted:
@@ -1723,7 +1817,9 @@ class MiaBuffer:
 @workflow.defn(name="MiaPrep")
 class MiaPrep:
     """One preparation request issue: each `prep:go` hands the records it names to mia-data and follows them in
-    the registry to `prep:done` (each prepared) or `prep:needs-human`. One round at a time."""
+    the registry to `prep:done` (each prepared or shelved) or `prep:needs-human`. One round at a time. A request
+    resting at `needs-human` is told (`recheck`) when one of its datasets settles, and moves to `done` once each
+    has."""
 
     @workflow.init
     def __init__(self, state: PrepState) -> None:
@@ -1734,10 +1830,17 @@ class MiaPrep:
         self.unwinding = False  # the round's task has been told to stop
         self.in_flight = 0  # the round's activities in flight
         self.round_task: asyncio.Future[None] | None = None
+        self.look_again = False  # a `recheck` not yet acted on
 
     @workflow.signal
     def go(self, event: LabelEvent) -> None:
         self.go_events.append(event)
+
+    @workflow.signal
+    def recheck(self) -> None:
+        """A dataset this request names was shelved or became prepared (buffer-api sends this to a request at
+        `needs-human`): look at its datasets again."""
+        self.look_again = True
 
     @workflow.signal
     def cancel(self, event: LabelEvent) -> None:
@@ -1754,12 +1857,18 @@ class MiaPrep:
         rounds = 0
         while True:
             await workflow.wait_condition(
-                lambda: bool(self.go_events or self.cancel_events) or (_rollover_due() and not self.cancel_events)
+                lambda: (
+                    bool(self.go_events or self.cancel_events or self.look_again)
+                    or (_rollover_due() and not self.cancel_events)
+                )
             )
-            if not (self.go_events or self.cancel_events):
+            if not (self.go_events or self.cancel_events or self.look_again):
                 workflow.continue_as_new(self.state)  # idle, nothing queued
             await self._refuse_cancels()  # idle: no round to cancel
+            look_again, self.look_again = self.look_again, False
             if not self.go_events:
+                if look_again:
+                    await self._recheck()
                 continue
             event = self.go_events.pop(0)
             if self._seen(event):  # redelivery
@@ -1818,7 +1927,7 @@ class MiaPrep:
         return False
 
     async def _stage(self, stage: str, detail: str = "") -> None:
-        """Swap the `prep:<stage>` label; the round's last one is best effort (the state says it either way)."""
+        """Write the request's stage; the round's last one is best effort (the state says it either way)."""
         self.state.stage = stage
         try:
             await self._act("set_prep_stage", self.state.issue, stage, self.state, detail)
@@ -1826,6 +1935,30 @@ class MiaPrep:
             if stage == "requested":
                 raise
             workflow.logger.error("issue #%d: could not set %s: %s", self.state.issue, stage, error_message(error))
+            return  # the pass stays open: the next round writes its result
+        if _results():  # the write carried the open pass's result: `requested` opens a pass, an ending none
+            _pass_begun(self.state, stage, stage_pass(stage, PREP_STAGE_ACTIONS))
+
+    def _found(self, text: str) -> None:
+        """What the open pass found, for its result entry; the next stage write, or `_flush`, writes it."""
+        if _results():
+            self.state.result = text
+
+    async def _flush(self) -> None:
+        """Write the open pass's result now, where no stage write follows that would carry it. A result that
+        could not be written is logged, never the round's end."""
+        state = self.state
+        if not state.pass_stage:
+            return
+        try:
+            await self._act("prep_stage_result", state.issue, state)
+        except ActivityError as error:
+            if isinstance(error.cause, CancelledError):  # the workflow is being cancelled: not a write that failed
+                raise
+            workflow.logger.warning(
+                "issue #%d: the result of %s was not written: %s", state.issue, state.pass_stage, error_message(error)
+            )
+        state.pass_stage, state.pass_jobs, state.result = "", [], ""
 
     async def _cancel_round(self, round_task: asyncio.Future[None]) -> None:
         """End the round a `cancel` was sent for: stop following, cancel the dataset rounds this request started
@@ -1862,6 +1995,23 @@ class MiaPrep:
                 )
         await self._stage("cancelled", f"cancelled by {events[-1].actor}")
 
+    async def _recheck(self) -> None:
+        """The request rests at `needs-human` and one of its datasets settled since: when each is now prepared or
+        shelved, the request is done. Anything else leaves it where it is."""
+        state = self.state
+        if state.stage != "needs-human" or state.pins is None:
+            return
+        records = state.pins.records
+        try:
+            found = await self._act("prep_status", records, result_type=dict[str, str])
+        except ActivityError as error:  # best effort: the next dataset to settle asks again
+            if isinstance(error.cause, CancelledError):
+                raise
+            return workflow.logger.warning("issue #%d: recheck failed: %s", state.issue, error_message(error))
+        if all(found.get(record) in PREP_DONE for record in records):
+            state.settled = {record: found[record] for record in records}
+            await self._stage("done", f"{_prep_count(records, found)} {_prep_done(records, found)}")
+
     async def _refuse_cancels(self, reason: str = NO_ROUND) -> None:
         """A cancel with no round in progress: refused."""
         events, self.cancel_events = self.cancel_events, []
@@ -1891,8 +2041,12 @@ class MiaPrep:
     async def _round(self, event: LabelEvent) -> None:
         """Admit, nudge each record, then poll the registry until every record settles or the request times out."""
         state = self.state
+        if _results() and state.pass_stage:  # left open by a round whose last stage could not be written
+            self._found(state.result or NEW_ROUND)
+            await self._flush()
         state.round_id = f"p{state.issue}-e{event.event_id}"
         state.pins, state.outcomes, state.settled = None, [], {}
+        state.passes, state.pass_stage, state.pass_jobs, state.result = {}, "", [], ""
         started = workflow.now()
         # a history without the patch (the replay fixture is one) treats `ineligible` as a settled state
         legacy = () if workflow.patched("h-no-ineligible") else ("ineligible",)
@@ -1902,12 +2056,11 @@ class MiaPrep:
             "prep_admit", state.issue, event.event_id, seconds=600, result_type=PrepPins
         )
         await self._stage("requested")
-        why: dict[str, str] = {}  # records settled as needs-human at the nudge -> what the nudge said
-        for record in pins.records:  # one at a time: each may open an issue in the datasets repo
+        for record in pins.records:  # one at a time: each may send a dataset its go
             try:
                 outcome = await self._act("prep_nudge", state.round_id, record, result_type=PrepOutcome)
-            except ActivityError as error:  # this record alone: an unclear catalog record, a refused issue
-                if isinstance(error.cause, CancelledError):  # the request was cancelled: stop opening issues
+            except ActivityError as error:  # this record alone: an unclear catalog record, a refused go
+                if isinstance(error.cause, CancelledError):  # the request was cancelled: stop sending gos
                     raise
                 outcome = PrepOutcome(record, "unknown", note=error_message(error))
             state.outcomes.append(outcome)
@@ -1915,8 +2068,7 @@ class MiaPrep:
                 state.settled[record] = outcome.outcome
             elif outcome.outcome in PREP_HUMAN:  # mia-data will not get to it without a human
                 state.settled[record] = "needs-human"
-                why[record] = outcome.outcome + (f": {outcome.note}" if outcome.note else "")
-        try:  # best effort: the outcomes stay in the state, and the final stage names what needs a human
+        try:  # best effort: the outcomes stay in the state, and the final stage names the records that need a human
             await self._act("comment_prep", state.issue, state.round_id, state.outcomes)
         except ActivityError as error:
             workflow.logger.error("issue #%d: could not post the outcomes: %s", state.issue, error_message(error))
@@ -1931,21 +2083,33 @@ class MiaPrep:
             await self._refuse_queued()  # ponytail: a busy go waits for the next poll (MAX_POLL_MINUTES at most)
             last = await self._act("prep_status", unsettled, result_type=dict[str, str])
             state.settled |= {record: value for record, value in last.items() if value in (*PREP_SETTLED, *legacy)}
-        prepared = [record for record in pins.records if state.settled.get(record) == "prepared"]
-        stuck = [record for record in pins.records if state.settled.get(record) not in ("prepared", *legacy)]
+        stuck = [record for record in pins.records if state.settled.get(record) not in (*PREP_DONE, *legacy)]
+        self._found(_prep_count(pins.records, state.settled))
         if not stuck:
-            return await self._stage("done", "prepared: " + (", ".join(f"`{r}`" for r in prepared) or "none"))
-        humans = [
-            f"`{record}`" + (f" ({why[record]})" if record in why else "")
-            for record in stuck
-            if state.settled.get(record) == "needs-human"
-        ]
+            return await self._stage("done", _prep_done(pins.records, state.settled))
+        humans = [f"`{record}`" for record in stuck if state.settled.get(record) == "needs-human"]
         waiting = [f"`{record}` ({last.get(record, 'unprepared')})" for record in stuck if record not in state.settled]
+        why = "the outcomes table or its dataset's page says why"
         detail = "; ".join(
-            ([f"needs a human on its dataset's page: {', '.join(humans)}"] if humans else [])
+            ([f"needs a human, {why}: {', '.join(humans)}"] if humans else [])
             + ([f"not prepared after {pins.timeout_days:g} days: {', '.join(waiting)}"] if waiting else [])
         )
         await self._stage("needs-human", detail)
+
+
+@workflow.defn(name="MiaCleaner")
+class MiaCleaner:
+    """Run on a schedule: one pass of the cleaner (the `sweep` activity), which finds what is stuck, opens a
+    case for each and carries every open case on (spec cleaner §4)."""
+
+    @workflow.run
+    async def run(self) -> dict:
+        return await workflow.execute_activity(
+            "sweep",
+            start_to_close_timeout=timedelta(minutes=20),
+            heartbeat_timeout=timedelta(minutes=5),
+            retry_policy=RetryPolicy(maximum_attempts=1),  # the next scheduled pass is the retry
+        )
 
 
 @workflow.defn(name="MiaCacheKeeper")

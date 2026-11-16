@@ -2,16 +2,47 @@
 itself, and calls no stray host."""
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from importlib import resources
-
-import pytest
+from pathlib import Path
+from typing import Any
 
 from mia_buffers.api import ROUTES
 
-PAGE = (resources.files("mia_buffers") / "ui" / "index.html").read_text()
+# every file the browser is given, by name, and all of them as one text: what the page is, for a rule about it
+UI_DIR = Path(str(resources.files("mia_buffers") / "ui")).resolve()
+FILES = {
+    entry.name: entry.read_text() for entry in sorted(UI_DIR.iterdir()) if entry.suffix in (".html", ".js", ".css")
+}
+PAGE = "\n".join(FILES.values())
+
+
+def squeezed(text: str) -> str:
+    """`text` as it reads whatever its layout: without whitespace, and without the comma a formatter puts before a
+    closing bracket. Source is compared this way, so a rule about the page's code does not break when it is laid
+    out differently."""
+    return re.sub(r",(?=[)\]}])", "", re.sub(r"\s+", "", text))
+
+
+SQUEEZED = squeezed(PAGE)
+
+
+def has(code: str, text: str = SQUEEZED) -> bool:
+    """Whether the page's source (or `text`, already squeezed) holds `code`, whatever the layout of either."""
+    return squeezed(code) in text
+
+
+def count(code: str, text: str = SQUEEZED) -> int:
+    """How many times the page's source (or `text`, already squeezed) holds `code`, whatever the layout."""
+    return text.count(squeezed(code))
+
+
+# node of the environment that runs the tests (pixi provides it), before any other on the PATH
+NODE = shutil.which("node", path=os.pathsep.join([str(Path(sys.executable).parent), os.environ.get("PATH", "")]))
 
 
 def resolve(method: str, path: str) -> str | None:
@@ -65,6 +96,7 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
     }
     assert ("POST", "/plan") in requested
     assert resolve("GET", "/crops/folder/crop/overlay.png") == "read"  # the thumbnails' <img src>, not an api() call
+    assert resolve("GET", f"/gallery/i1-e2/{'a' * 40}/crop/raw.png") == "read"  # a round's crops in its timeline
     for method, path in requested:
         assert resolve(method, path) in {"read", "consumer", "action"}, (method, path)
 
@@ -76,14 +108,14 @@ def test_the_pages_buttons_call_action_routes_and_it_follows_the_stream() -> Non
         assert ("POST", path) in requested and resolve("POST", path) == "action", path
     for path in ("/needs", "/subjects/buffer", "/subjects/prep"):
         assert ("GET", path) in requested, path
-    assert "issues/new" not in PAGE  # nothing is started by opening a GitHub issue
+    assert not has("issues/new")  # nothing is started by opening a GitHub issue
     for path in ("/subjects/x/x", "/timeline/x/x", "/run/x/x", "/lookup?q=x", "/health"):
         assert ("GET", path) in requested, path
-    assert 'new EventSource("/stream")' in PAGE and resolve("GET", "/stream") == "read"
+    assert has('new EventSource("/stream")') and resolve("GET", "/stream") == "read"
     # a click is one key (Retry sends it again) and a verdict names the revision the page is showing
-    assert "key: newKey()" in PAGE and "revision: subject.revision" in PAGE and "key: a.key" in PAGE
-    assert '"Content-Type": "application/json"' in PAGE  # the action routes take nothing else
-    assert "innerHTML" not in PAGE  # timeline text is inserted as text, never parsed
+    assert has("key: newKey()") and has("revision: subject.revision") and has("key: a.key")
+    assert has('"Content-Type": "application/json"')  # the action routes take nothing else
+    assert not has("innerHTML")  # timeline text is inserted as text, never parsed
 
 
 def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
@@ -102,57 +134,252 @@ def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
 
 def test_page_names_the_revoked_states_and_the_pause() -> None:
     for needle in ('"revoked":', '"quarantined":', "Revoke the ticked", "paused by the operator"):
-        assert needle in PAGE, needle
+        assert has(needle), needle
 
 
 def test_the_docs_describe_the_system_as_it_is() -> None:
     """The Docs tab names buttons, never label commands, and explains nothing by what it replaced."""
-    docs = PAGE[PAGE.index('<section data-view="docs"') : PAGE.index("</main>")]
+    docs = FILES["guide.html"] + FILES["architecture.html"]
+    assert has("send(`/ui/${doc}.html`)") and resolve("GET", "/ui/guide.html") == "read"
     assert not re.search(r"\b(buffer|data|prep|autodev):[a-z]", docs)
     assert not re.search(r"\b(no longer|any more|anymore|used to|as before|previously|read-only log)\b", docs, re.I)
     for needle in ("Needs you", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):
         assert needle in docs, needle
 
 
+def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
+    assert has('data-tab="cleaner"') and has('data-view="cleaner"') and has("cleaner: viewCleaner")
+    assert resolve("GET", "/cleaner") == "read" and resolve("GET", "/cases") == "read"
+    findings = [
+        {"id": "worker snippets", "text": "no worker polls `snippets`"},  # the health check says this itself
+        {"id": "restart mia-data", "text": "the `mia-data` worker runs commit `aaaaaaa`: a restart is owed"},
+    ]
+    health = {"temporal": True, "queues": {"mia-data": True}}
+    lines = run_js(
+        "print(downLines(input.health, input.findings));",
+        {"app.js": "downLines"},
+        {"health": health, "findings": findings},
+    )
+    assert lines == ["the mia-data worker runs commit aaaaaaa: a restart is owed"]
+    cases = [
+        {
+            "kind": "dataset",
+            "key": "rec-a",
+            "rule": "no run",
+            "state": "needs-person",
+            "updated": 5.0,
+            "opened": 4.0,
+            "data": {
+                "seen": "no open run",
+                "steps": [
+                    {"do": "cancel", "result": "action 1", "at": 4.5},
+                    {"do": "report_defect", "title": "a defect", "evidence": "line 3", "result": "kept on the case"},
+                    {"do": "needs", "text": "look", "result": "left to a person"},
+                ],
+                "plan": [{"do": "go"}],
+                "needs": "look",
+                "diagnosis": {"cause": "defect", "diagnosis": "the worker dropped it", "needs": "look"},
+            },
+            "jobs": ["issue-224/i224-e1/match-1", "o__s/issue-49/01a1/round-1", "cleaner/case-1/diagnose-0"],
+        },
+        {
+            "kind": "job",
+            "key": "issue-9/i9-e1/crops-1",
+            "rule": "left-over job",
+            "state": "open",
+            "updated": 6.0,
+            "data": {"plan": [{"do": "kill_job"}]},
+        },
+    ]
+    stuck, job = run_js("print(caseRows(input));", {"operations.js": "caseRows"}, cases)
+    # the row is short: the subject, the problem in a few words, a status and how far the cleaner got
+    assert (stuck["href"], stuck["about"], stuck["problem"]) == ("#datasets/rec-a", "rec-a", "No workflow run")
+    assert (stuck["status"], stuck["progress"]) == ("needs you", "2 done, 1 to go")
+    assert (job["href"], job["problem"]) == ("#job/issue-9/i9-e1/crops-1", "Left-over cluster job")
+    assert (job["status"], job["progress"]) == ("queued", "1 to go")
+    # the long words are the drill-down's: what the problem is, what was found, each step with its result, what is
+    # left, what a person must do (once: the `needs` step is not listed as done) and the diagnosis
+    assert "Temporal has no open run" in stuck["meaning"] and stuck["found"] == "no open run"
+    assert stuck["did"] == [
+        {"what": "cancel the round", "result": "action 1", "at": 4.5},
+        {"what": "report the defect", "result": "kept on the case", "title": "a defect", "evidence": "line 3"},
+    ]
+    assert (stuck["next"], stuck["needs"]) == (["run it again"], "look")
+    assert stuck["diagnosis"] == {"cause": "defect", "text": "the worker dropped it"}
+    assert (job["did"], job["next"], job["needs"], job["diagnosis"]) == ([], ["kill the job"], None, None)
+    # each job record a case is about is linked, under the job's name
+    assert stuck["jobs"] == [
+        {"href": "#job/issue-224/i224-e1/match-1", "name": "match-1"},
+        {"href": "#job/o__s/issue-49/01a1/round-1", "name": "snippets #49 round-1"},
+        {"href": "#job/cleaner/case-1/diagnose-0", "name": "diagnose-0"},
+    ]
+    assert job["jobs"] == []
+
+
 def test_page_has_a_decisions_tab() -> None:
-    assert 'data-tab="decisions"' in PAGE and 'data-view="decisions"' in PAGE
-    assert "decisions: viewDecisions" in PAGE
+    assert has('data-tab="decisions"') and has('data-view="decisions"')
+    assert has("decisions: viewDecisions")
     for needle in ("Shadow", "agree", "awaiting a human", "overruled", 'pageOf("/decisions"'):
-        assert needle in PAGE, needle
+        assert has(needle), needle
 
 
+# A DOM small enough to read. The page's modules build nodes with `el()`, so a test sees what they built: `html`
+# writes a node as text, `walk`, `textOf` and `byText` look into one, and `fire` and `close` stand for a person.
 FAKE_DOM = """
 class FakeNode {
-  constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; }
-  setAttribute(name, value) { this.attrs[name] = value; }
+  constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; this.listeners = {}; this.dataset = {}; this.checked = false; this.disabled = false; }
+  setAttribute(name, value) { this.attrs[name] = value; if (name.startsWith("data-")) this.dataset[name.slice(5)] = value; }
   set className(value) { this.attrs.class = value; }
-  addEventListener() {}
-  append(...kids) { this.kids.push(...kids); }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  fire(type) { (this.listeners[type] || []).forEach(fn => fn({ target: this })); }
+  append(...kids) { for (const kid of kids) { if (kid instanceof FakeNode) kid.parent = this; this.kids.push(kid); } }
+  prepend(...kids) { const rest = this.kids; this.kids = []; this.append(...kids, ...rest); }
+  replaceChildren(...kids) { this.kids = []; this.append(...kids); }
+  remove() { if (this.parent) this.parent.kids = this.parent.kids.filter(kid => kid !== this); }
+  get children() { return this.kids.filter(kid => kid instanceof FakeNode); }
+  get firstChild() { return this.kids[0]; }
+  querySelector(selector) { return walk(this).slice(1).find(node => (node.attrs.class || "").split(" ").includes(selector.slice(1))) || null; }
+  showModal() {}
+  close(value) { this.returnValue = value; this.fire("close"); }
 }
-const document = { createElement: tag => new FakeNode(tag), createElementNS: (space, tag) => new FakeNode(tag) };
+const nodes = {};
+globalThis.document = {
+  body: new FakeNode("body"), createElement: tag => new FakeNode(tag), createElementNS: (space, tag) => new FakeNode(tag),
+  getElementById: id => (nodes[id] ||= new FakeNode("#" + id)),
+};
+const walk = (node, found = []) => { if (typeof node === "string") return found; found.push(node); node.kids.forEach(kid => walk(kid, found)); return found; };
+const textOf = node => typeof node === "string" ? node : node.kids.map(textOf).join("");
+const byText = (root, text) => walk(root).find(node => node.tag === "button" && textOf(node) === text);
 const escaped = text => text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 const html = node => typeof node === "string" ? escaped(node)
   : `<${node.tag}${Object.entries(node.attrs).map(([k, v]) => ` ${k}="${v}"`).join("")}>${node.kids.map(html).join("")}</${node.tag}>`;
 """
 
 
+def run_js(body: str, imports: dict[str, str], payload: object = None) -> Any:
+    """Run `body` under node as the browser would run it: the page's own modules, imported by file name (`imports`
+    maps a file to the names taken from it), over the fake DOM. The body reads `input` (the payload) and calls
+    `print(value)` once; that value is returned."""
+    assert NODE, "node is a test dependency: pixi provides it (pyproject.toml)"
+    loads = "".join(
+        f'const {{ {names} }} = await import("{(UI_DIR / file).as_uri()}");\n' for file, names in imports.items()
+    )
+    script = (
+        'import { readFileSync } from "node:fs";\n'
+        f"{FAKE_DOM}\n"
+        'const input = JSON.parse(readFileSync(0, "utf8"));\n'
+        "const print = value => console.log(JSON.stringify(value));\n"
+        f"{loads}{body}\n"
+        "process.exit(0);\n"  # a module may leave a timer running (a banner fades after 20 s)
+    )
+    done = subprocess.run(
+        [NODE, "--input-type=module", "-e", script], input=json.dumps(payload), capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_the_catalog_in_use_is_named_on_the_datasets_view_with_a_link_to_that_commit() -> None:
+    """Which catalog the datasets come from is said where they are listed, top right of the Datasets view: the
+    commit links the catalog repo at that commit. The top bar does not carry it."""
+    assert "catref" not in FILES["index.html"] and "catref" not in FILES["app.js"]
+    catalog = {"ref": "2c55a495" + "0" * 32, "count": 2243, "synced_at": "2026-11-15T12:00:00+00:00"}
+    linked, bare = run_js(
+        "print(input.map(([catalog, repo]) => { const node = catalogLine(catalog, repo);"
+        " return [textOf(node), walk(node).filter(n => n.tag === 'a').map(a => a.attrs.href), node.attrs.class]; }));",
+        {"datasets.js": "catalogLine"},
+        [[catalog, "o/catalog"], [catalog, None]],
+    )
+    words = [" ".join(text.split()) for text in (linked[0], bare[0])]  # a GitHub link carries the mark and a space
+    assert words[0].startswith("Sourced from catalog: 2c55a495 · 2,243 datasets · synced ") and linked[2] == "catalog"
+    assert linked[1] == [f"https://github.com/o/catalog/tree/{catalog['ref']}"]
+    assert words[1] == words[0] and bare[1] == []  # no catalog repo configured: the commit is plain text
+    assert has('el("div", { class: "viewhead" }, el("h2", {}, "Datasets"), catalogLine(')
+
+
+def test_every_file_the_page_loads_is_one_of_its_own() -> None:
+    """index.html links app.css and boots app.js; a module imports only modules beside it, and never in a circle:
+    a module can be read, and imported by a test, without the modules above it."""
+    index = FILES["index.html"]
+    assert '<link rel="stylesheet" href="/ui/app.css">' in index and 'import { boot } from "/ui/app.js"' in index
+    assert index.count("<script") == 1 and "<style" not in index
+    modules = {name: text for name, text in FILES.items() if name.endswith(".js")}
+    needs = {
+        name: set(re.findall(r'^(?:import|\} from) .*"\./([\w.]+)";$', text, re.M)) for name, text in modules.items()
+    }
+    assert not re.search(r'\bimport\(|from "(?!\./)', "\n".join(modules.values())), "an import from somewhere else"
+    for name, wanted in needs.items():
+        assert wanted <= set(modules), (name, wanted - set(modules))
+        assert resolve("GET", f"/ui/{name}") == "read"
+    ordered: list[str] = []
+    while len(ordered) < len(modules):  # each pass places the modules whose imports are all placed
+        ready = [name for name in modules if name not in ordered and needs[name] <= set(ordered)]
+        assert ready, f"modules import each other in a circle: {sorted(set(modules) - set(ordered))}"
+        ordered += ready
+    assert ordered[0] in ("dom.js", "spec.js") and ordered[-1] == "app.js"
+
+
 def rendered(*bodies: str) -> list[str]:
     """What the page's `markdown()` builds for each timeline body, as HTML text (a string child is a text node)."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    names = ("el", "svgEl", "GH_MARK", "ghMark", "link")
-    helpers = "\n".join(
-        line for line in PAGE.splitlines() if line.startswith(tuple(f"const {name} = " for name in names))
+    return run_js("print(input.map(body => markdown(body).map(html).join('')));", {"markdown.js": "markdown"}, bodies)
+
+
+def test_a_bare_url_ends_before_the_punctuation_that_follows_it() -> None:
+    (said,) = rendered(
+        "snippet PR https://github.com/o/r/pull/44: closed. See https://a.org/x?y=1, then (https://b.org)."
     )
-    renderer = PAGE[PAGE.index("// ---- a timeline entry's markdown") : PAGE.index("function actionBar(")]
-    script = (
-        f"{FAKE_DOM}\n{helpers}\n{renderer}\n"
-        'const bodies = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
-        'console.log(JSON.stringify(bodies.map(body => markdown(body).map(html).join(""))));\n'
+    assert 'href="https://github.com/o/r/pull/44"' in said and "</a>: closed" in said
+    assert 'href="https://a.org/x?y=1"' in said and 'href="https://b.org"' in said
+
+
+def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
+    healths = [
+        {"temporal": True, "queues": {"mia-data": True, "snippets": False, "autodev": False}},
+        {"temporal": True, "queues": {"mia-data": True, "snippets": False}},
+        {"temporal": True, "queues": {"mia-data": True}},
+        {"temporal": False, "queues": {}},
+    ]
+    both, one, none, no_temporal = run_js("print(input.map(downLines));", {"app.js": "downLines"}, healths)
+    assert len(both) == 1 and both[0].startswith(
+        "No worker is running for snippets, autodev: nothing that waits on them"
     )
-    done = subprocess.run([node, "-e", script], input=json.dumps(bodies), capture_output=True, text=True, check=True)
-    return json.loads(done.stdout)
+    assert both[0].endswith("pixi run mia restart snippets autodev") and "waits on it is" in one[0]
+    assert none == [] and len(no_temporal) == 1 and no_temporal[0].startswith("Temporal does not answer")
+    # the lines are replaced by each check, never faded, and the check repeats
+    assert has('$("down").replaceChildren(') and has("setInterval(checkHealth, HEALTH_MS)")
+
+
+def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
+    from mia_data.config import STAGES, round_open
+
+    stages = run_js("print([...ROUND_OPEN]);", {"datasets.js": "ROUND_OPEN"})
+    assert stages == [stage for stage in STAGES if round_open(stage)]
+    assert has('row.state !== "prepared" && !ROUND_OPEN.has(row.stage)')
+
+
+def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
+    view = squeezed(FILES["subjects.js"][FILES["subjects.js"].index("function viewNeeds(") :])
+    assert (
+        has('"aria-pressed": String(kind === needsKind)', view)
+        and not has("<select", view)
+        and not has('"select"', view)
+    )
+    assert has(
+        'pageOf("/needs", "needs", () => ({ ...(needsKind ? { kind: needsKind } : {}),'
+        " ...(needsShelved ? { shelved: 1 } : {}) }))",
+        view,
+    )
+    assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]')
+    assert has('.toggles .btn[aria-pressed="true"]')
+
+
+def test_a_dataset_at_review_offers_a_restart_beside_its_verdicts() -> None:
+    from mia_data.config import STAGE_ACTIONS
+
+    assert "go" in STAGE_ACTIONS["review"][1]
+    assert has('action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"')
+    order = run_js("print(ACTION_ORDER);", {"actions.js": "ACTION_ORDER"})
+    assert order.index("approve") < order.index("reject") < order.index("go") < order.index("cancel")
 
 
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
@@ -197,10 +424,99 @@ def test_a_link_to_github_carries_the_github_mark() -> None:
     assert '<a href="https://github.com.evil.example/x" target="_blank" rel="noopener">https://github.com.evil' in body
 
 
+def test_a_rounds_crops_are_pictures_served_by_this_origin() -> None:
+    """A round's crops table names images in the gallery repo, which a browser cannot read: each one is shown from
+    buffer-api's own copy. Any other image is a link, never a picture loaded from somewhere else."""
+    sha = "c" * 40
+    gallery = f"https://github.com/o/data/blob/galleries/galleries/rec-1/i7-e99/{sha}/i7-e99-b0-000"
+    table, other = rendered(
+        "<details><summary>2 crops</summary>\n\n| raw | overlay | caption |\n|---|---|---|\n"
+        f"| ![raw]({gallery}/raw.png?raw=true) | ![overlay]({gallery}/overlay.png?raw=true) | i7-e99-b0-000 · z=3 |\n"
+        "\n</details>\n\nafter the fold",
+        "![logo](https://tracker.example/pixel.png) and ![raw](https://github.com/o/data/blob/galleries/x/raw.png?raw=true)",
+    )
+    local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
+    assert table.startswith("<details><summary>2 crops</summary><div") and "<p>after the fold</p>" in table
+    assert "&lt;" not in table and "!" not in table and "github.com" not in table
+    for name in ("raw", "overlay"):
+        assert f'<a href="{local}/{name}.png" target="_blank" rel="noopener"' in table
+        assert f'<img class="crop" src="{local}/{name}.png" loading="lazy" alt="{name} of crop i7-e99-b0-000">' in table
+    assert "<img" not in other and "!" not in other
+    assert '<a href="https://tracker.example/pixel.png" target="_blank" rel="noopener">logo</a>' in other
+
+
+def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
+    """A findings table names crops by id: the timeline gives `markdown` where each crop's pictures are, read from
+    the crops tables before it, and the findings are folded like a crops table. Only the newest fold starts open."""
+    sha = "c" * 40
+    gallery = f"https://github.com/o/data/blob/galleries/galleries/rec-1/i7-e99/{sha}/i7-e99-b0-000"
+    crops = (
+        "| raw | overlay | caption |\n|---|---|---|\n"
+        f"| ![raw]({gallery}/raw.png?raw=true) | ![overlay]({gallery}/overlay.png?raw=true) | i7-e99-b0-000 |\n"
+    )
+    judge = (
+        "**Crop judge:** `approve`\n\n| item | severity | note |\n|---|---|---|\n"
+        "| i7-e99-b0-000 | ok | sharp membranes |\n| binding | suspect | no crop of this name |\n"
+        "| i7-e99-b0-000 | bad | labels shifted |\n"
+    )
+    pictured, plain = run_js(
+        "const [crops, judge] = input, show = nodes => nodes.map(html).join('');\n"
+        "print([show(markdown(judge, cropsOf(crops, {}))), show(markdown(judge))]);",
+        {"markdown.js": "markdown, cropsOf"},
+        [crops, judge],
+    )
+    local = f"/gallery/i7-e99/{sha}/i7-e99-b0-000"
+    assert pictured.startswith(
+        "<p><strong>Crop judge:</strong> <code>approve</code></p><details><summary>3 findings</summary>"
+    )
+    assert "<th>overlay</th><th>item</th><th>severity</th><th>note</th>" in pictured and "raw.png" not in pictured
+    # `ok` is plain; `suspect` and `bad` colour the word, and the picture's border with it
+    picture = f'src="{local}/overlay.png" loading="lazy" alt="overlay of crop i7-e99-b0-000">'
+    assert f'<img class="crop" {picture}' in pictured and "<td>ok</td>" in pictured
+    assert f'<img class="crop sev-bad" {picture}' in pictured
+    assert '<td><span class="sev-bad">bad</span></td><td class="wrap">labels shifted</td>' in pictured  # a note wraps
+    # a finding about something that is no crop has no picture, and a timeline with no crops table adds no column
+    assert '<tr><td></td><td>binding</td><td><span class="sev-suspect">suspect</span></td>' in pictured
+    assert "<img" not in plain and "<details><summary>3 findings</summary>" in plain and "<th>overlay</th>" not in plain
+    assert has("markdown(e.body, cropsOf(e.body, crops))") and has("log.append(...shown.reverse())")
+    assert has('log.querySelectorAll("details").forEach((fold, n) => { fold.open = n === 0; });')
+
+
 def test_a_github_issue_is_the_mark_with_a_tooltip() -> None:
     """No link to GitHub is spelled out in words ("log on GitHub"): it is the mark, and the tooltip says what it is."""
-    assert "log on GitHub" not in PAGE and "ghIssue" not in PAGE
-    assert "a read-only copy of the timeline" in PAGE
+    assert not has("log on GitHub") and not has("ghIssue")
+    assert has("a read-only copy of the timeline")
+
+
+def test_the_gist_of_an_entry_is_its_sentence_cut_between_words() -> None:
+    """The line under the lifecycle says what the newest entry says: the sentence under a stage's or a result's
+    heading (the diagram shows the stage), the heading too for any other entry, never the folders or a table. A
+    long one is cut between two words and never inside a link or a code span."""
+    long_url = "https://github.com/o/r/pull/44"
+    bodies = [
+        "**Stage:** `data:developing`\n\nautodev is writing the snippet in issue #84\n\n**Folders:** [W](https://x.org/w)\n\n<!-- m -->",
+        "**Stage:** `data:review`\n\n**Snippet PR:** https://x.org/pull/1\n\n**Folders:** [W](https://x.org/w)",
+        "**Crop judge:** `reject`\n\nThe labels are empty.\n\n| item | severity | note |\n|---|---|---|\n| a | bad | b |",
+        "**Action:** `reject` by `page`\n\n> the masks are empty",
+        "**Result:** `data:matching`\n\nMatched: a reader fits. The agent's reasons:\n- raw: the sample\n\n**Jobs:** [m](https://x.org/#job/m)",
+        f"**Result:** `data:developing`\n\n**blocked**: one two three snippet PR {long_url}: closed",
+        "Refused `data:go`: busy, ignored: a round is already running.",
+        "",
+    ]
+    stage, bare, judge, action, listed, cut, plain, empty = run_js(
+        "print(input.map(body => gist(body, 40)));", {"markdown.js": "gist"}, bodies
+    )
+    assert stage == {"text": "autodev is writing the snippet in issue…", "cut": True}
+    assert bare == {"text": "**Stage:** `data:review`", "cut": False}
+    assert judge == {"text": "**Crop judge:** `reject` · The labels…", "cut": True}
+    assert action == {"text": "**Action:** `reject` by `page` · the…", "cut": True}
+    assert listed == {"text": "Matched: a reader fits. The agent's…", "cut": True}
+    assert cut == {"text": "**blocked**: one two three snippet PR…", "cut": True}  # the link is not cut in two
+    assert plain["text"].startswith("Refused `data:go`: busy,") and empty == {"text": "", "cut": False}
+    (whole,) = run_js("print(input.map(body => gist(body)));", {"markdown.js": "gist"}, bodies[:1])
+    assert whole == {"text": "autodev is writing the snippet in issue #84", "cut": False}
+    # the subject's page shows it under the lifecycle, and a cut one links down to the timeline
+    assert has("const said = gist(entries.at(-1)?.body") and has("log.scrollIntoView(")
 
 
 def test_markdown_never_becomes_html_or_a_script_link() -> None:
@@ -211,20 +527,22 @@ def test_markdown_never_becomes_html_or_a_script_link() -> None:
     )
 
 
+def test_a_job_link_in_a_timeline_opens_in_this_page() -> None:
+    """A result entry links its jobs' records as `<service url>/#job/<address>`: on the page that address is this
+    page's own, so the link opens here; a link to anywhere else opens a new tab."""
+    here, away = run_js(
+        "globalThis.location = { origin: 'https://page.example', hash: '' };\n"
+        "print(input.map(text => html(markdown(text)[0])));",
+        {"markdown.js": "markdown"},
+        ["**Jobs:** [match-1](https://page.example/#job/issue-1/i1-e2/match-1)", "[x](https://other.example/#job/y)"],
+    )
+    assert '<a href="https://page.example/#job/issue-1/i1-e2/match-1">match-1</a>' in here
+    assert 'target="_blank"' not in here and 'target="_blank"' in away
+
+
 def lifecycle(*calls: list) -> list[str]:
     """What the page's `lifecycle()` builds for each (line, stage, history), as HTML text."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith(("const el = ", "const BAD = ")))
-    drawer = PAGE[PAGE.index("// ---- a lifecycle as boxes and arrows") : PAGE.index("// ---- buffers")]
-    script = (
-        f"{FAKE_DOM}\n{helpers}\n{drawer}\n"
-        'const calls = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
-        "console.log(JSON.stringify(calls.map(call => html(lifecycle(...call)))));\n"
-    )
-    done = subprocess.run([node, "-e", script], input=json.dumps(calls), capture_output=True, text=True, check=True)
-    return json.loads(done.stdout)
+    return run_js("print(input.map(call => html(lifecycle(...call))));", {"dom.js": "lifecycle"}, calls)
 
 
 def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
@@ -251,35 +569,66 @@ def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
         + "".join(f"<li>{step(name)}</li>" for name in line)
         + '<li class="apart"><span class="step off" aria-current="step">cancelled</span></li></ol>'
     )
-    assert PAGE.count("lifecycle(") == 4  # the function, a subject's page (twice: one never asked of) and a buffer's
+    assert count("lifecycle(") == 4  # the function, a subject's page (twice: one never asked of) and a buffer's
 
 
 def test_a_buffer_is_always_planned_first() -> None:
     """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
-    assert "Show me the plan first" not in PAGE and "first.checked" not in PAGE
-    assert PAGE.count("plan_first: true") == 2  # New buffer, and a spec's own page
-    assert 'subject.stage === "plan-review" ? "Run"' in PAGE
+    assert not has("Show me the plan first") and not has("first.checked")
+    assert count("plan_first: true") == 2  # New buffer, and a spec's own page
+    assert has('subject.stage === "plan-review" ? "Run"')
 
 
 def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     """A click is not shown as the old stage's buttons again: while the subject says an action is `asked`, every
     button that would send an action is disabled, and a reload that started earlier never paints over a later one."""
-    assert PAGE.count("disabled: !!subject.asked") == 4 and "disabled: !!x.asked" in PAGE
-    assert "waiting for its workflow to answer" in PAGE
-    assert "turn !== subjectTurn" in PAGE
+    assert count("disabled: !!subject.asked") == 4 and has("disabled: !!x.asked")
+    assert has("waiting for its workflow to answer")
+    assert has("turn !== subjectTurn")
+
+
+def test_what_is_typed_while_a_subjects_page_loads_is_kept() -> None:
+    """A redraw the stream asked for leaves a view someone is typing into alone. So does a load that ends after
+    someone typed into the view: it is not painted over them, one notice offers the change, and taking the offer
+    draws the page."""
+    kept, shown = run_js(
+        """
+        const root = document.getElementById("subjectBody"), was = el("p", {}, "what was there");
+        root.append(was);
+        let answer;  // the service answers when the test says so: no request named k
+        globalThis.fetch = () => new Promise(settle => { answer = () => settle({ ok: false, status: 404, statusText: "Not Found", text: async () => "" }); });
+        globalThis.location = { hash: "#requests/k" };
+        const typing = [];
+        for (let turn = 0; turn < 2; turn++) {  // typed during the load, then before a later stream redraw
+            const drawn = viewSubject("prep", "k", "stream");
+            root.dataset.dirty = "1";
+            if (answer) answer();
+            answer = null;
+            await drawn;
+            typing.push(root.kids.map(kid => kid.attrs.class || textOf(kid)));
+        }
+        const offered = viewSubject("prep", "k", true);  // Show the change
+        answer();
+        await offered;
+        print([typing, root.kids.map(textOf)]);
+        """,
+        {"dom.js": "el", "subjects.js": "viewSubject"},
+    )
+    assert kept == [["notice stale", "what was there"], ["notice stale", "what was there"]]
+    assert shown == ["k", "No such request."]
 
 
 def test_the_page_asks_which_hosts_a_run_lacks_before_it_starts() -> None:
     """A start action first asks the service which hosts the run needs that the policy lacks."""
     assert ("POST", "/hosts/missing") in requested_paths() and resolve("POST", "/hosts/missing") == "read"
-    assert PAGE.count("askHosts(") >= 3
+    assert count("askHosts(") >= 3
     for body in (
         "{ records: [subject.key] }",
         "{ prep: subject.number }",
         "{ spec: subject.key }",
         "{ records: todo }",
     ):
-        assert body in PAGE
+        assert has(body)
 
 
 def test_the_hosts_dialog_offers_approve_start_anyway_and_cancel() -> None:
@@ -291,14 +640,14 @@ def test_the_hosts_dialog_offers_approve_start_anyway_and_cancel() -> None:
         "Hosts to approve",
         "approveButton.disabled = ",
     ):
-        assert text in PAGE
+        assert has(text)
     for key in ("approveHosts:", "startUnapproved:", "cancelHosts:"):
-        assert key in PAGE
+        assert has(key)
 
 
 def test_an_approval_travels_with_the_start_action() -> None:
     """The approved hosts ride on the start action itself; the page has no route of its own to approve them."""
-    assert "approve_hosts" in PAGE and '"/hosts/approve"' not in PAGE
+    assert has("approve_hosts") and not has('"/hosts/approve"')
 
 
 HOSTS_DOM = """
@@ -322,37 +671,39 @@ const byText = (root, text) => walk(root).find(node => node.tag === "button" && 
 
 
 def hosts_dialog(scenarios: list[dict]) -> list[dict]:
-    """Run the page's `askHosts` under node with a fake DOM, `api` and `banner`: for each scenario (`hosts`, or
+    """Run the page's `askHosts` over the fake DOM and a fake service: for each scenario (`hosts`, or
     `fail: [status, message]`, then `steps` on the dialog) report what `send` got, the banner, the dialog and settling."""
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    helpers = "\n".join(line for line in PAGE.splitlines() if line.startswith("const el = "))
-    start = PAGE.index("async function askHosts(")
-    asking = PAGE[start : PAGE.index("// what the service is asked about", start)]
-    help_texts = PAGE[PAGE.index("const BUTTON_HELP = {") : PAGE.index("const ACTION_HELP = {")]
-    script = (
-        f"{HOSTS_DOM}\n{helpers}\n{help_texts}\nconst JSON_HEADERS = {{}};\nlet fake, banners = [];\n"
-        "const api = async () => { if (fake.fail) { const e = new Error(fake.fail[1]); e.status = fake.fail[0]; throw e; } return { hosts: fake.hosts || [] }; };\n"
-        "const banner = message => banners.push(message);\n"
-        f"{asking}\n"
-        'const scenarios = JSON.parse(require("fs").readFileSync(0, "utf8"));\n'
-        "(async () => { const out = [];\n"
-        "for (fake of scenarios) { banners = []; body.kids = []; const sent = []; let settled = false;\n"
-        "  const done = askHosts({ records: [] }, hosts => sent.push(hosts)).then(() => { settled = true; });\n"
-        "  await new Promise(r => setImmediate(r));\n"
-        "  const box = body.kids[0], seen = { shown: !!box };\n"
-        "  if (box) { const approve = byText(box, 'Approve and start'), ticks = walk(box).filter(n => n.attrs.type === 'checkbox');\n"
-        "    seen.rows = ticks.slice(1).length; seen.disabledAtStart = approve.disabled;\n"
-        "    for (const step of fake.steps) { if (step === 'all') { ticks[0].checked = true; ticks[0].fire('change'); }\n"
-        "      else if (typeof step === 'number') { ticks[step + 1].checked = true; ticks[step + 1].fire('change'); } else box.close(step); }\n"
-        "    seen.enabledAfterTicks = !approve.disabled; seen.allChecked = ticks[0].checked; seen.text = textOf(box); }\n"
-        "  await done;\n"
-        "  out.push({ ...seen, sent, banners, settled, removed: body.kids.length === 0 }); }\n"
-        "console.log(JSON.stringify(out)); })();\n"
+    return run_js(
+        """
+        let fake;
+        globalThis.fetch = async () => fake.fail
+            ? { ok: false, status: fake.fail[0], statusText: "", text: async () => JSON.stringify({ error: fake.fail[1] }) }
+            : { ok: true, status: 200, text: async () => JSON.stringify({ hosts: fake.hosts || [] }) };
+        const body = document.body, banner = document.getElementById("banner"), out = [];
+        for (fake of input) {
+            banner.kids = []; body.kids = [];
+            const sent = []; let settled = false;
+            const done = askHosts({ records: [] }, hosts => sent.push(hosts)).then(() => { settled = true; });
+            await new Promise(r => setImmediate(r));
+            const box = body.kids[0], seen = { shown: !!box };
+            if (box) {
+                const approve = byText(box, "Approve and start"), ticks = walk(box).filter(n => n.attrs.type === "checkbox");
+                seen.rows = ticks.slice(1).length; seen.disabledAtStart = approve.disabled;
+                for (const step of fake.steps) {
+                    if (step === "all") { ticks[0].checked = true; ticks[0].fire("change"); }
+                    else if (typeof step === "number") { ticks[step + 1].checked = true; ticks[step + 1].fire("change"); }
+                    else box.close(step);
+                }
+                seen.enabledAfterTicks = !approve.disabled; seen.allChecked = ticks[0].checked; seen.text = textOf(box);
+            }
+            await done;
+            out.push({ ...seen, sent, banners: banner.kids.map(line => textOf(line.kids[0])), settled, removed: body.kids.length === 0 });
+        }
+        print(out);
+        """,
+        {"actions.js": "askHosts"},
+        scenarios,
     )
-    done = subprocess.run([node, "-e", script], input=json.dumps(scenarios), capture_output=True, text=True, check=True)
-    return json.loads(done.stdout)
 
 
 def test_the_hosts_dialog_works_as_it_runs() -> None:
@@ -385,34 +736,93 @@ def test_the_hosts_dialog_works_as_it_runs() -> None:
 
 def test_a_second_click_during_the_host_check_starts_nothing() -> None:
     """Both start buttons hold a flag from the click until `askHosts` settles."""
-    assert PAGE.count("if (checking) return;") == 2 and PAGE.count("checking = true;") == 2
-    assert PAGE.count("checking = false; })") == 2
+    assert count("if (checking) return;") == 2 and count("checking = true;") == 2
+    assert count("checking = false; })") == 2
 
 
 def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
     """Reject has more to enter: its button ends in an ellipsis and opens a dialog for the feedback. No feedback box
     sits beside the buttons, and a rejection with nothing typed cannot be sent."""
-    assert 'reject: "Reject…"' in PAGE and "showModal()" in PAGE
-    assert "bar.append(note)" not in PAGE
-    assert "Send rejection" in PAGE and "sendButton.disabled = !note.value.trim()" in PAGE
+    assert has('reject: "Reject…"') and has("showModal()")
+    assert not has("bar.append(note)")
+    assert has("Send rejection") and has("sendButton.disabled = !note.value.trim()")
+
+
+def test_shelving_is_offered_for_every_kind_and_asks_for_its_reason() -> None:
+    """Shelve is a button of the action bar like any other the service offers; it opens a dialog for the reason,
+    which cannot be sent empty. A shelved subject says who, when and why, and Needs you has a toggle for them."""
+    covered, order = run_js(
+        "print([Object.entries(ACTION_HELP).map(([kind, help]) => [kind, !!help.shelve && !!help.unshelve]),"
+        " ACTION_ORDER]);",
+        {"actions.js": "ACTION_HELP, ACTION_ORDER"},
+    )
+    assert covered == [["dataset", True], ["buffer", True], ["prep", True]]
+    assert {"shelve", "unshelve"} <= set(order)
+    assert has('shelve: "Shelve…"') and has("if (dialog) return askNote(subject, dialog, note => send({ note }))")
+    assert has("if (subject.shelved) parts.push(shelvedNotice(subject.shelved))")
+    assert has('"aria-pressed": String(needsShelved)') and has('"shelved": "Set aside by a person')
+    assert has('dialog.cancels && subject.actions.includes("cancel")')  # a round at review is said to be cancelled
+
+
+def test_shelve_sends_its_reason_once_one_is_typed() -> None:
+    calls, words, blocked = run_js(
+        """
+        const calls = [];
+        globalThis.fetch = async (url, init) => {
+            calls.push([url, JSON.parse(init.body)]);
+            return { ok: true, status: 202, text: async () => "{}" };
+        };
+        const subject = { kind: "dataset", key: "rec-a", number: 7, stage: "failed", status: "stuck", revision: 3,
+                          actions: ["go", "revoke", "shelve"], asked: null };
+        const bar = actionBar(subject, () => {});
+        bar.querySelectorAll = () => walk(bar).filter(node => node.tag === "button");  // the fake DOM has none
+        const words = walk(bar).filter(node => node.tag === "button").map(textOf);
+        const typed = text => {
+            byText(bar, "Shelve…").fire("click");
+            const box = document.body.kids.at(-1), note = walk(box).find(node => node.tag === "textarea");
+            note.value = text; note.fire("input");
+            const blocked = byText(box, "Shelve").disabled;
+            box.close("send");
+            return blocked;
+        };
+        const blocked = [typed("  "), typed(" it needs a reader of its own ")];
+        await new Promise(r => setImmediate(r));
+        print([calls.map(([url, body]) => [url, body.action, body.note, "revision" in body]), words, blocked]);
+        """,
+        {"actions.js": "actionBar"},
+    )
+    assert words == ["Run again", "Revoke", "Shelve…"] and blocked == [True, False]
+    assert calls == [
+        ["/datasets/rec-a/actions", "shelve", "it needs a reader of its own", False]
+    ]  # the empty one: none
 
 
 def test_a_datasets_page_leads_with_its_links_then_its_preparation_workflow() -> None:
     """Under the name come the dataset's links, then the lifecycle labelled as the preparation workflow, then the
     buttons; the button that starts the workflow says Start, and no state pill stands between them."""
-    assert 'dataset: "Preparation workflow:"' in PAGE and "flowRow(kind, " in PAGE
-    assert '(subject.again ? "Start again" : "Start")' in PAGE and '"Prepare again"' not in PAGE
-    assert "statePill(detail ? detail.row.state" not in PAGE
-    assert "const [links = null, ...cards] = " in PAGE
+    assert has('dataset: "Preparation workflow:"') and has("flowRow(kind, ")
+    assert has('subject.again ? "Start again" : "Start"') and not has('"Prepare again"')
+    assert not has("statePill(detail ? detail.row.state")
+    assert has("const [links = null, ...cards] = ")
+
+
+def test_a_dataset_whose_record_has_a_gap_offers_no_start_and_says_why() -> None:
+    """The page reads `gaps` from the dataset's subject or row: a never-started one stands blocked at `new` with no
+    Start, a notice says what the record lacks, and the Datasets list marks it."""
+    assert has("const gaps = (subject || detail?.row)?.gaps || [];")
+    assert has('actions: kind === "dataset" && !gaps.length ? ["go"] : []')
+    assert has('gaps.length ? "blocked" : detail?.row.stage || "new", ["new"]')
+    assert count("gapsNotice(gaps)") == 2 and has('"cannot start":')
+    assert has('pill("cannot start", "warn", x.gaps.map(t => ({ t })))')
 
 
 def test_a_subjects_page_says_where_it_stands_with_its_lifecycle_alone() -> None:
     """No status pill, no "waiting on you", no "workflow running" under the line: every link of a subject stands
     in the row under its name, and a table names a subject's stage, not a status word."""
-    assert "subjectFacts" not in PAGE and "waiting on you" not in PAGE and '"workflow " +' not in PAGE
-    assert "statePill(subject.status)" not in PAGE and 'statePill(x.status), " ", x.stage' not in PAGE
-    assert PAGE.count("stagePill(x.stage)") == 3  # the specs, the requests and Needs you
-    assert "subjectLinks(subject, entries)" in PAGE
+    assert not has("subjectFacts") and not has("waiting on you") and not has('"workflow " +')
+    assert not has("statePill(subject.status)") and not has('statePill(x.status), " ", x.stage')
+    assert count("stagePill(x.stage)") == 3  # the specs, the requests and Needs you
+    assert has("subjectLinks(subject, entries)")
 
 
 def test_a_lifecycle_marks_the_step_a_round_is_working_at() -> None:
@@ -432,38 +842,33 @@ def test_every_button_that_asks_for_something_says_what_it_does() -> None:
     from mia_buffers.config import STAGE_ACTIONS as BUFFER_ACTIONS
     from mia_data.config import STAGE_ACTIONS as DATASET_ACTIONS
 
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    block = PAGE[PAGE.index("const ACTION_HELP = {") : PAGE.index("const actionHelp = ")]
-    names = "Object.fromEntries(Object.entries(ACTION_HELP).map(([kind, help]) => [kind, Object.keys(help)]))"
-    done = subprocess.run(
-        [node, "-e", f"{block}\nconsole.log(JSON.stringify({names}));"], capture_output=True, text=True, check=True
+    covered, keys = run_js(
+        "print([Object.fromEntries(Object.entries(ACTION_HELP).map(([kind, help]) => [kind, Object.keys(help)])),"
+        " Object.keys(BUTTON_HELP)]);",
+        {"actions.js": "ACTION_HELP, BUTTON_HELP"},
     )
-    covered = json.loads(done.stdout)
     own_control = {"buffer": {"go", "revoke", "dropped"}}
     for kind, table in (("dataset", DATASET_ACTIONS), ("buffer", BUFFER_ACTIONS), ("prep", PREP_STAGE_ACTIONS)):
         offered = set().union(*(actions for _, actions in table.values())) - own_control.get(kind, set())
         assert offered <= set(covered[kind]), (kind, offered - set(covered[kind]))
-    assert "title: actionHelp(subject, action)" in PAGE
-    keys = re.findall(
-        r"^  (\w+): \"", PAGE[PAGE.index("const BUTTON_HELP = {") : PAGE.index("const ACTION_HELP = {")], re.M
-    )
+    assert has("title: actionHelp(subject, action)")
     assert {"plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
     for key in keys:
-        assert f"title: BUTTON_HELP.{key}" in PAGE, key
+        assert has(f"title: BUTTON_HELP.{key}"), key
 
 
 def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
     """A buffer's page reads like a dataset's: its id, a row of links (its spec, the spec's GitHub issue with its
     number, the round's workspace and its staged pyramids), then the labelled workflow. No pill beside the id, no
     row of bare root folders."""
-    body = PAGE[PAGE.index("async function viewBuffer(root, id, refresh) {") : PAGE.index("// ---- cache")]
-    name, links, flow = body.index('el("h2", {}, id)'), body.index('class: "links"'), body.index('flowRow("buffer", ')
+    body = squeezed(FILES["buffers.js"][FILES["buffers.js"].index("async function viewBuffer(root, id, refresh) {") :])
+    name, links, flow = (
+        body.index(squeezed(code)) for code in ('el("h2", {}, id)', 'class: "links"', 'flowRow("buffer", ')
+    )
     assert name < links < flow
-    assert "ghIcon(meta.buffers_repo, spec.issue, true)" in body and "SUBJECT_HASH.buffer(spec.key)" in body
-    assert "Object.entries(roots)" not in body and "all buffers" not in body
-    assert 'buffer: "Buffer workflow:"' in PAGE
+    assert has("ghIcon(meta.buffers_repo, spec.issue, true)", body) and has("SUBJECT_HASH.buffer(spec.key)", body)
+    assert not has("Object.entries(roots)", body) and not has("all buffers", body)
+    assert has('buffer: "Buffer workflow:"')
 
 
 def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> None:
@@ -472,9 +877,9 @@ def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> N
     its record's file name, which no other record's path matches."""
     from mia_buffers.select import _glob
 
-    assert "select: { chosen: CHOSEN, id: row => row.id, onchange: " in PAGE and "can: PREPARABLE" not in PAGE
-    assert "function specFromDatasets(ids)" in PAGE and "ids.map(id => `*/${id}.yaml`)" in PAGE
-    assert "title: BUTTON_HELP.specFrom" in PAGE
+    assert has("select: { chosen: CHOSEN, id: row => row.id, onchange: ") and not has("can: PREPARABLE")
+    assert has("function specFromDatasets(ids)") and has("ids.map(id => `*/${id}.yaml`)")
+    assert has("title: BUTTON_HELP.specFrom")
     patterns = ["*/u937.yaml", "*/bcss.yaml"]
     assert _glob(patterns, "datasets/2D/confocal/u937.yaml") and _glob(patterns, "datasets/bcss.yaml")
     assert not _glob(patterns, "datasets/2D/confocal/not-u937.yaml") and not _glob(patterns, "datasets/u937.yaml.bak")
@@ -483,9 +888,238 @@ def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> N
 def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked() -> None:
     """With nothing ticked the list offers Select all and Clear selection and says nothing more. With a tick, a
     box of its own colour says how many datasets are selected and offers Prepare and Create buffer."""
-    assert '"Select all")' in PAGE and "Select all matching" not in PAGE
-    assert "tick the datasets to prepare first" not in PAGE
-    assert 'class: "chosen", hidden: true' in PAGE and ".chosen[hidden]{display:none}" in PAGE
-    assert "box.hidden = !CHOSEN.size" in PAGE and '"Create buffer")' in PAGE
+    assert has('"Select all")') and not has("Select all matching")
+    assert not has("tick the datasets to prepare first")
+    assert has('class: "chosen", hidden: true') and has(".chosen[hidden]{display:none}")
+    assert has("box.hidden = !CHOSEN.size") and has('"Create buffer")')
     # Select all takes the rows of the page that is showing, and asks the server for nothing
-    assert "datasets match; the first" not in PAGE and 'ids: "1"' not in PAGE
+    assert not has("datasets match; the first") and not has('ids: "1"')
+
+
+# strings a person can type into a spec's name or paths, or that a record's id can be: each reads as something
+# else, or as nothing, when YAML is handed it bare
+AWKWARD = [
+    "plain", "with space", "a: b", "#hash", "- dash", "-", "? q", "*star", "&anchor", "!tag", "|", ">", "@at", "`tick",
+    "%pct", "it's", 'say "hi"', "a,b", "[x]", "{y}", "é ü", "", " lead", "trail ", "tab\there", "two\nlines",
+    "yes", "No", "ON", "true", "null", "~", "12", "+12", "-1.5", ".5", "1e3", "1_000", "017", "0x1f", "0b11", "0o17",
+    ".inf", "-.INF", ".NaN", "1:30", "2026-11-14", "2026-11-14 10:00:00", "<<", "=",
+]  # fmt: skip
+
+
+def test_the_yaml_the_page_writes_is_what_the_service_reads() -> None:
+    """The page writes a buffer spec and a preparation request as YAML by hand (spec.js). The service's own parsers
+    read them back: the controls land in the fields they name, and every string arrives as it was typed."""
+    from mia_buffers.spec import load_prep_text, load_spec_text
+
+    ref, controls = "a" * 40, {
+        "name": "em pool", "paths": "datasets/2D/** */u937.yaml", "dims": ["2D", "3D"], "lic": ["CC0-1.0", "MIT"],
+        "allowUnknown": True, "annRequired": True, "sources": ["manual", "proofread"], "minVox": 1000000,
+        "patch": 256, "level": 4, "patchZ": 32, "dedup": True, "T": 0.25,
+        "cropsTrain": 5000, "cropsVal": 300, "cropsTest": 200, "maxCrops": 64, "holdout": "u937, a: b\nbcss",
+    }  # fmt: skip
+    spec_text, named, prep_text = run_js(
+        "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources) });\n"
+        "print([toSpecYaml(filled(input.controls), input.ref, 'o/catalog'),\n"
+        "  input.awkward.map(text => toSpecYaml(filled({ ...input.controls, name: 'n ' + text + ' n', paths: 'p' }), input.ref, text)),\n"
+        "  toPrepYaml(input.awkward.filter(Boolean), input.ref, 'o/catalog')]);",
+        {"spec.js": "toSpecYaml, toPrepYaml"},
+        {"controls": controls, "ref": ref, "awkward": AWKWARD},
+    )
+    spec = load_spec_text(spec_text)
+    assert (spec.name, spec.catalog.repo, spec.catalog.ref) == ("em pool", "o/catalog", ref)
+    assert spec.select.paths == ["datasets/2D/**", "*/u937.yaml"] and spec.select.dedup.by == ["doi"]
+    where = spec.select.where.model_dump(by_alias=True)
+    assert where["dims"] == {"in": ["2D", "3D"]} and where["min_size_voxels"] == 1000000
+    assert where["license"] == {"in": ["CC0-1.0", "MIT"], "allow_unknown": True}
+    assert (where["annotations"]["required"], where["annotations"]["source"]) == (True, {"in": ["manual", "proofread"]})
+    patch = spec.sampling.patch.model_dump(by_alias=True, exclude_none=True)
+    assert patch == {"2D": {"y": 256, "x": 256}, "3D": {"z": 32, "y": 256, "x": 256}, "c": 1}
+    assert spec.sampling.levels == [1, 2, 4] and spec.sampling.weighting.temperature == 0.25
+    assert spec.sampling.crops == {"train": 5000, "val": 300, "test": 200}
+    assert spec.sampling.max_crops_per_dataset == 64 and spec.splits.holdout_ids == ["u937", "a:", "b", "bcss"]
+    assert spec.plan.auto_approve is False  # a person approves, unless the spec's author edits the line
+    # a catalog repo is any string, and a name is trimmed: what was typed between the n's comes back
+    for text, written in zip(AWKWARD, named, strict=True):
+        read = load_spec_text(written)
+        assert (read.catalog.repo, read.name) == (text, f"n {text} n"), text
+    assert load_prep_text(prep_text).records == [text for text in AWKWARD if text]
+
+
+def test_a_datasets_page_lists_every_address_of_its_catalog_record_in_its_links_card() -> None:
+    """Under the name stand only the links to what the workflows made (the issue, the saved crops). The Links card
+    has every address of the catalog record: the dataset's own page, its DOI, each paper, the download, the code,
+    the record and its pull request in the catalog repository, then the longer lists, each address once. A record
+    is untrusted: only an http(s) address is a link, and any other is shown as text."""
+    record = {
+        "landing_url": "https://zenodo.org/records/1",
+        "doi": "10.5281/zenodo.1",
+        "publications": [
+            {"title": "First <b>paper</b>", "doi": "10.1/a", "url": "https://journal.example/a"},
+            {"title": None, "doi": "10.1/b", "url": None},
+            {"title": "No address"},
+        ],
+        "data": {"download_url": "s3://bucket/data", "download_method": "aws-cli", "access": "open"},
+        "ml": {"baseline_code_url": "javascript:alert(1)"},
+        "provenance": {"evidence_urls": ["https://zenodo.org/records/1", "https://zenodo.org/api/records/1"]},
+        "technical": {
+            "sample": {"urls": ["https://zenodo.org/api/records/1/files/a.tif/content"]},
+            "inspected_urls": ["https://zenodo.org/api/records/1", "ftp://old.example/x"],
+        },
+    }
+    detail = {
+        "row": {"id": "rec 1", "in_catalog": True, "state": "prepared", "issue": 9},
+        "record": record,
+        "dataset": {"folder": "rec 1"},
+        "path": "datasets/2D/confocal/rec 1.yaml",
+        "ref": "a" * 40,
+        "requests": [],
+    }
+    row, links, bare = run_js(
+        """
+        globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => "{}" });
+        S.meta = { catalog_repo: "o/catalog", datasets_repo: "o/data", roots: { storage_root: "https://files.example/s" } };
+        const titled = cards => cards.find(card => card.kids[0] && textOf(card.kids[0]) === "Links");
+        const [links, ...cards] = datasetCards(input.detail);
+        const more = titled(cards).kids.at(-1).kids;  // the card's dl: dt, dd, dt, dd, …
+        const listed = more.map(node => node.tag === "dt" ? textOf(node) : node.kids[0].kids.map(line => line.kids.map(html).join("")));
+        const unlinked = datasetCards({ row: { id: "x" }, record: { title: "x" }, path: null, requests: [] });
+        print([html(links), listed, [unlinked[0].kids.length, !!titled(unlinked.slice(1))]]);
+        """,
+        {"api.js": "S", "datasets.js": "datasetCards"},
+        {"detail": detail},
+    )
+    # the row: the issue and the saved crops, and no address of the record
+    assert "https://github.com/o/data/issues/9" in row and "saved crops" in row
+    assert "zenodo" not in row and "o/catalog" not in row
+
+    def link_to(href: str, text: str = "", title: str = "") -> str:
+        mark = "" if "github.com" not in href else row[row.index("<svg") : row.index("</svg>") + 6] + " "
+        said = f' title="{title}"' if title else ""
+        return f'<a href="{href}" target="_blank" rel="noopener"{said}>{mark}{text or href}</a>'
+
+    catalog = "https://github.com/o/catalog"
+    assert links == [
+        "dataset page", [link_to("https://zenodo.org/records/1")],
+        "doi", [link_to("https://doi.org/10.5281/zenodo.1", "10.5281/zenodo.1")],
+        "paper", [
+            link_to("https://journal.example/a", "First &lt;b>paper&lt;/b>"),  # a title is text
+            link_to("https://doi.org/10.1/b"),
+        ],
+        "download", ["s3://bucket/data · aws-cli · open"],  # no address a browser opens: text
+        "code", ["javascript:alert(1)"],
+        "catalog record", [
+            link_to(f"{catalog}/blob/{'a' * 40}/datasets/2D/confocal/rec%201.yaml", "datasets/2D/confocal/rec 1.yaml")
+        ],
+        "catalog PR", [
+            link_to(
+                f"{catalog}/pulls?q=is%3Apr%20head%3Aclaude%2Fdataset%2Frec%201",
+                "pull requests from claude/dataset/rec 1",
+                "the pull request that brought this record into the catalog: the ones opened from its branch",
+            )
+        ],
+        "sample files", [link_to("https://zenodo.org/api/records/1/files/a.tif/content")],
+        "evidence", [link_to("https://zenodo.org/api/records/1")],  # the dataset's page is not listed again
+        "inspected", ["ftp://old.example/x"],
+    ]  # fmt: skip
+    assert 'href="javascript:' not in json.dumps(links)
+    assert bare == [0, False]  # a record with no address and no place in the catalog: an empty row, and no card
+
+
+PLANTED = "<script>alert(1)</script>"
+JOB_ADDRESS = "issue-12/i12-e345/match-1"
+JOB_RECORD = {
+    "schema": 1,
+    "job_id": "777",
+    "workspace": JOB_ADDRESS,
+    "submitted_at": "2026-11-14T10:00:00+00:00",
+    "finished_at": "2026-11-14T10:05:00+00:00",
+    "request": {"name": "match", "command": "claude -p … > claude.jsonl", "cpus": 2, "env": ["ANTHROPIC_API_KEY"]},
+    "submit": {"queue": "local", "estimated_max_cost_usd": 0.1, "job_group": None},
+    "outcome": {"state": "EXIT", "exit_code": 1, "exec_host": "node-1", "queue": "local"},
+    "usage": {"max_mem": "2 Gbytes", "run_time": "61 second(s)"},
+    "logs": {"stdout": "out-tail", "stderr": ""},
+    "agent": {
+        "prompt": "Match this dataset.",
+        "model": "claude-opus",
+        "cost_usd": 0.25,
+        "num_turns": 3,
+        "duration_ms": 1200,
+        "turns": [
+            {"role": "thinking", "text": "look at the record first"},
+            {"role": "tool", "name": "Read", "input": {"file_path": "record.yaml"}, "error": False},
+            {"role": "tool", "name": "Write", "input": {"content": PLANTED + "x" * 200}, "error": True},
+            {"role": "assistant", "text": f"done\n{PLANTED}", "sub": True},
+            "not a turn",
+            {"role": "unheard-of"},
+        ],
+    },
+}
+# a record's page as a test reads it: its HTML text, the tags it is built of, its text, and each fold
+JOB_SHOWN = (
+    "const shownOf = root => ({ html: html(root), tags: [...new Set(walk(root).map(node => node.tag))],"
+    " text: textOf(root), folds: walk(root).filter(node => node.tag === 'details').map(fold =>"
+    " ({ open: 'open' in fold.attrs, cls: fold.attrs.class, summary: textOf(fold.children[0]),"
+    " body: textOf(fold.children[1]) })) });\n"
+)
+
+
+def test_a_jobs_record_is_shown_as_text_never_as_markup() -> None:
+    """What a job printed stays text: a tag in a turn or in a tool's input makes no element. An agent's prompt, its
+    thinking and each tool call are closed folds; a failed call says so and a sub-agent's turn is indented."""
+    full, bare = run_js(
+        JOB_SHOWN
+        + "print(input.map(record => shownOf(el('div', {}, ...jobView(record, 'issue-12/i12-e345/match-1')))));",
+        {"dom.js": "el", "job.js": "jobView"},
+        [JOB_RECORD, {"schema": 1, "request": {"command": "sleep 1"}, "submit": {"queue": "local"}}],
+    )
+    assert "script" not in full["tags"] and "<script" not in full["html"] and full["text"].count(PLANTED) == 3
+    assert f'<div class="turn said subagent">done\n{PLANTED.replace("<", "&lt;")}</div>' in full["html"]
+    assert full["html"].startswith(f'<div><h2>match</h2><div class="small mono">{JOB_ADDRESS}</div><dl class="kv">')
+    assert '<dt>state</dt><dd><span class="pill warn">EXIT</span></dd><dt>exit code</dt><dd>1</dd>' in full["html"]
+    for shown in ("<dd>local</dd>", "<dd>node-1</dd>", "<dd>777</dd>", "<dd>2026-11-14T10:00:00+00:00 (", "<dd>3</dd>"):
+        assert shown in full["html"], shown
+    for shown in ("<dt>peak memory</dt><dd>2 Gbytes</dd>", "<dt>run time</dt><dd>61 second(s)</dd>", "<dd>$0.25</dd>"):
+        assert shown in full["html"], shown
+    assert "average memory" not in full["text"] and "still running" not in full["text"]  # only what the record has
+    prompt, thinking, read, write = full["folds"]
+    assert not any(fold["open"] for fold in full["folds"])
+    assert (prompt["summary"], prompt["body"]) == ("Prompt", "Match this dataset.")
+    assert (thinking["summary"], thinking["body"]) == ("Thinking", "look at the record first")
+    assert (read["summary"], read["body"]) == ('Read {"file_path":"record.yaml"}', '{\n  "file_path": "record.yaml"\n}')
+    whole = json.dumps({"content": PLANTED + "x" * 200}, separators=(",", ":"))
+    assert write["summary"] == f"Write {whole[:120]}… failed" and write["body"].count("x") == 200
+    assert "unheard-of" not in full["text"] and "not a turn" not in full["text"]
+    assert "<h2>Script</h2><pre>claude -p … > claude.jsonl</pre>" in full["html"]
+    assert '<dt>cpus</dt><dd>2</dd><dt>env</dt><dd>["ANTHROPIC_API_KEY"]</dd>' in full["html"]
+    assert "<dt>estimated_max_cost_usd</dt><dd>0.1</dd>" in full["html"] and "job_group" not in full["text"]
+    assert '<div class="sub">stdout</div><pre>out-tail</pre>' in full["html"] and "stderr" not in full["text"]
+    # a record with its first half alone: the job's name is its workspace's, and nothing is said about an agent
+    assert bare["html"].startswith("<div><h2>match-1</h2>")
+    assert "This job is still running, or its end was not recorded." in bare["text"]
+    assert "Conversation" not in bare["text"] and "Output" not in bare["text"] and bare["folds"] == []
+    assert '"./markdown.js"' not in FILES["job.js"]  # nothing of a record is read as markdown
+
+
+def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() -> None:
+    """`#job/<address>` is the whole remainder after `#job/`, slashes and all, and the page reads `/jobs/<address>`
+    (a read route); a 404 is a job that left no record."""
+    assert has("job: viewJob") and has('let arg = rest.join("/")') and has('data-view="job"') and has('id="jobBody"')
+    assert ("GET", "/jobs/x") in requested_paths() and resolve("GET", f"/jobs/{JOB_ADDRESS}") == "read"
+    found, missing = run_js(
+        "globalThis.location = { hash: '#job/issue-12/i12-e345/match-1' };\n"
+        "const asked = [], out = [];\n"
+        "for (const answer of input) {\n"
+        "  globalThis.fetch = async path => { asked.push(path); return { ...answer, text: async () => answer.body }; };\n"
+        "  await viewJob('issue-12/i12-e345/match-1');\n"
+        "  out.push({ asked: asked.pop(), text: textOf(document.getElementById('jobBody')) });\n"
+        "}\n"
+        "print(out);",
+        {"job.js": "viewJob"},
+        [
+            {"ok": True, "status": 200, "body": json.dumps({"request": {"name": "match"}})},
+            {"ok": False, "status": 404, "statusText": "Not Found", "body": '{"error": "no record for this job"}'},
+        ],
+    )
+    assert found["asked"] == missing["asked"] == f"/jobs/{JOB_ADDRESS}"
+    assert found["text"].startswith("match" + JOB_ADDRESS + "This job is still running")
+    assert missing["text"] == "match-1No record for this job."

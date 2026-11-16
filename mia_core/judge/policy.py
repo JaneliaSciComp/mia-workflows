@@ -42,8 +42,11 @@ def new_assessment(
     model: str = "",
     prompt_version: str = "",
     coverage: Mapping[str, Any] | None = None,
+    action: int | None = None,
 ) -> dict[str, Any]:
-    """The spec §5 record. Raises ValueError for a gate, kind, verdict or author outside the policy's vocabulary."""
+    """The spec §5 record. `action` is the id of the action a person's verdict came from (their button press, which
+    holds what they wrote with it). Raises ValueError for a gate, kind, verdict or author outside the policy's
+    vocabulary."""
     if gate not in GATES:
         raise ValueError(f"unknown gate {gate!r}")
     if subject_kind not in SUBJECT_KINDS:
@@ -69,6 +72,7 @@ def new_assessment(
         "model": model,
         "prompt_version": prompt_version,
         "coverage": dict(coverage) if coverage is not None else None,
+        "action": action,
     }
 
 

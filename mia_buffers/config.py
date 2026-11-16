@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -52,16 +52,18 @@ PREP_STAGES = {
 PREP_HUMAN_LABELS = {"go": ("0e8a16", "Prepare the datasets this request names")}
 # stage -> (status word, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
 # A round in progress (`working`) accepts `cancel`, what feeds it (`dropped`) and the force stop; a new go, a
-# revoke or a retire waits until it has ended or been cancelled. The workflow stays the code that carries a round
-# out, and two things a stage does not say stay its refusal: a `staged` buffer whose late datasets still have a
-# job running refuses a go, and a `ready` buffer rebuilding a lost volume abandons the rebuild on a go or retire.
+# revoke or a retire waits until it has ended or been cancelled. `ready` takes `dropped` too: a dataset that
+# waited for its files at the approve keeps its place and joins when they land. The workflow stays the code that
+# carries a round out, and two things a stage does not say stay its refusal: a `staged` buffer whose late
+# datasets still have a job running refuses a go, and a `ready` buffer rebuilding a lost volume abandons the
+# rebuild on a go or retire.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
     "planning": ("working", frozenset({"cancel", "stop"})),
     "plan-review": ("waiting", frozenset({"approve", "go", "cancel", "stop"})),
     "sourcing": ("working", frozenset({"cancel", "dropped", "stop"})),
     "staged": ("waiting", frozenset({"approve", "go", "dropped", "cancel", "stop"})),
-    "ready": ("done", frozenset({"go", "revoke", "retire", "stop"})),
+    "ready": ("done", frozenset({"go", "revoke", "retire", "dropped", "stop"})),
     "idle": ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"})),
     "retired": ("done", frozenset({"go"})),
     "needs-human": ("stuck", frozenset({"go"})),
@@ -72,9 +74,30 @@ PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),  # a request has no `new` label: a subject before its first stage
     "requested": ("working", frozenset({"cancel", "stop"})),
     "done": ("done", frozenset({"go"})),
-    "needs-human": ("stuck", frozenset({"go"})),
+    "needs-human": ("stuck", frozenset({"go", "recheck"})),  # recheck: look at its datasets again
     "cancelled": ("done", frozenset({"go"})),
 }
+# What a round is doing at each stage it works or waits at: the sentence of the stage's start entry when the round
+# has nothing more specific to say.
+STAGE_SENTENCES = {
+    "planning": "The spec is resolved against the catalog into a plan: the pool of datasets and their weights.",
+    "plan-review": "The plan is in the timeline; the round waits here for an approve, and no job has run yet.",
+    "sourcing": "The pool's datasets are fetched, staged and registered with the buffer, several at a time.",
+    "staged": "No job is left to run and the board is in the timeline; the round waits for an approve.",
+    "idle": "No consumer has drawn for a while; a keep returns the buffer to ready, otherwise the keeper retires it.",
+}
+PREP_STAGE_SENTENCES = {
+    "requested": "The request's datasets are handed to mia-data; the request follows them until each has settled.",
+}
+
+
+def stage_pass(stage: str | None, table: dict[str, tuple[str, frozenset[str]]] = STAGE_ACTIONS) -> bool:
+    """Whether `stage` is one a round works or waits at, by `table` (a buffer spec's stages; a request's with
+    `PREP_STAGE_ACTIONS`). Such a stage is a pass: it writes a start entry and a result entry. Any other stage is
+    where the subject rests, written by the result of the pass that ended there (spec job-records §3.6)."""
+    return table.get(stage or "", ("",))[0] in ("working", "waiting")
+
+
 _ENV_OVERRIDES = {
     "TEMPORAL_ADDRESS": ("temporal", "address"),
     "MIA_BUFFERS_TEMPORAL_VIA_PROXY": ("temporal", "via_https_proxy"),
@@ -123,8 +146,23 @@ class SourcingCfg(BaseModel):
     parallel: int = Field(default=4, ge=1)  # stage jobs in flight per buffer
     parallel_fetch: int = Field(default=2, ge=1)  # fetch jobs in flight per buffer
     tensorizer: str = "muvit-2d"  # must exist under <harness.dir>/tensorizers/
-    val_size: int = Field(default=256, ge=1)  # frozen list lengths
-    test_size: int = Field(default=256, ge=1)
+
+
+class CleanerCfg(BaseModel):
+    """The cleaner (spec cleaner §4.10): what counts as stuck, how long it waits, and how much it may do."""
+
+    mode: Literal["off", "report", "act"] = "report"  # report: cases say what would be done; nothing is done
+    minutes: int = Field(default=10, ge=1)  # how often MiaCleaner runs
+    quiet_minutes: int = Field(default=30, ge=1)  # a working subject with nothing going on for this long
+    stopped_minutes: int = Field(default=30, ge=0)  # a stopped subject is looked at after this long
+    retry_hours: float = Field(default=2, gt=0)  # before a stop with a passing cause is run again
+    leftover_days: float = Field(default=3, gt=0)  # a resting dataset's open snippet work is closed after this
+    pend_hours: float = Field(default=6, gt=0)  # a job pending in the cluster queue this long is a finding
+    hands_off_hours: float = Field(default=2, ge=0)  # after a person acted on a subject
+    max_remedies: int = Field(default=3, ge=0)  # remedies that start work, per subject in seven days
+    max_parallel: int = Field(default=3, ge=1)  # cases in work at once
+    max_usd_per_day: float = Field(default=20, ge=0)  # the diagnosis jobs' budget
+    defects_repo: str | None = None  # owner/name: where a defect the diagnosis finds is filed (unset: on its case)
 
 
 class PipelineCfg(BaseModel):
@@ -142,10 +180,16 @@ class Config(mia_data_config.Config):
     temporal: TemporalCfg = TemporalCfg(namespace="mia-buffers")
     # mia-data's namespace and task queue; the mia.yaml loader fills it from the service whose app is mia-data
     datasets_pipeline: PipelineCfg = PipelineCfg(namespace="mia-data", task_queue="mia-data")
+    # every service of mia.yaml, task queue (the service's name) -> namespace: the workers /health watches
+    workers: dict[str, str] = {}
+    # the work root of the service that runs autodev on the snippets repo (the mia.yaml loader fills it when that
+    # service has a root of its own): buffer-api serves its job records beside the rounds'
+    snippets_work_root: Path | None = None
     paths: PathsCfg
     service: ServiceCfg
     quota: QuotaCfg = QuotaCfg()
     keeper: KeeperCfg = KeeperCfg()
+    cleaner: CleanerCfg = CleanerCfg()
     csub: CsubCfg = CsubCfg()
     sourcing: SourcingCfg = SourcingCfg()
 

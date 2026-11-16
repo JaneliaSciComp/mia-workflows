@@ -1,9 +1,12 @@
+import gzip
+import json
 from types import SimpleNamespace
 
 import pytest
 from test_autodev_agent import FakeCsub
 
 from autodev.jobs import CsubJobs, JobSpec
+from mia_core import jobrecord
 
 
 def _jobs(tmp_path, fake):
@@ -139,3 +142,70 @@ async def test_wait_kills_even_when_the_lock_is_lost_on_the_terminal_poll(tmp_pa
     with pytest.raises(LockLost):
         await _jobs(tmp_path, fake).wait("777", str(tmp_path), heartbeat)
     assert fake.killed == ["777"]  # harmless on a finished job; the wait still fails, so nothing is read from it
+
+
+def _record(root, where):
+    return json.loads(gzip.decompress((root / "_jobs" / f"{where}.json.gz").read_bytes()))
+
+
+async def test_a_job_leaves_its_record_in_two_halves(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobrecord, "lsf_usage", lambda job_id: {"max_mem": "1 Gbytes"})
+    root, ws = tmp_path / "work", tmp_path / "work" / "issue-1" / "r1" / "match-1"
+    ws.mkdir(parents=True)
+    (ws / "prompt.md").write_text("the prompt")
+    (ws / "claude.jsonl").write_text('{"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}}')
+    jobs = CsubJobs("dep", tmp_path / "ids", client_factory=lambda: FakeCsub(), work_root=root)
+    spec = JobSpec(
+        "j",
+        "claude -p …",
+        str(ws),
+        10,
+        env={"KEY": "v-secret"},
+        prompt_file="prompt.md",
+        transcript_file="claude.jsonl",
+    )
+    job_id = await jobs.submit("k1", spec)
+    first = _record(root, "issue-1/r1/match-1")
+    assert (first["service"], first["key"], first["job_id"]) == ("dep", "k1", "777")
+    assert first["request"]["command"] == "claude -p …" and first["request"]["env"] == ["KEY"]
+    assert first["submit"]["job_id"] == "777" and "outcome" not in first
+    done = await jobs.wait(job_id, str(ws), lambda state: None)
+    record = _record(root, "issue-1/r1/match-1")
+    assert record["outcome"]["state"] == done.state == "DONE" and record["usage"] == {"max_mem": "1 Gbytes"}
+    assert record["agent"]["prompt"] == "the prompt" and record["agent"]["turns"] == [
+        {"role": "assistant", "text": "hi"}
+    ]
+    assert b"v-secret" not in gzip.decompress((root / "_jobs" / "issue-1/r1/match-1.json.gz").read_bytes())
+
+
+async def test_a_job_found_by_its_workspace_records_the_request_alone(tmp_path):
+    root, ws = tmp_path / "work", tmp_path / "work" / "ws"
+    fake = FakeCsub(existing=[SimpleNamespace(job_id="556", cwd=str(ws))])
+    jobs = CsubJobs("dep", tmp_path / "ids", client_factory=lambda: fake, work_root=root)
+    assert await jobs.submit("k1", JobSpec("j", "true", str(ws), 10)) == "556"
+    record = _record(root, "ws")
+    assert record["job_id"] == "556" and record["submit"] is None and record["request"]["command"] == "true"
+
+
+async def test_a_record_that_cannot_be_written_harms_neither_submit_nor_wait(tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(jobrecord, "write_atomic", broken)
+    monkeypatch.setattr(jobrecord, "lsf_usage", lambda job_id: None)
+    root, ws = tmp_path / "work", tmp_path / "work" / "ws"
+    ws.mkdir(parents=True)
+    jobs = CsubJobs("dep", tmp_path / "ids", client_factory=lambda: FakeCsub(), work_root=root)
+    job_id = await jobs.submit("k1", JobSpec("j", "true", str(ws), 10))
+    assert job_id == "777" and (await jobs.wait(job_id, str(ws), lambda state: None)).state == "DONE"
+    assert not (root / "_jobs").exists()
+
+
+@pytest.mark.parametrize("writable", ["work", "work/_jobs", "work/_jobs/issue-1"])
+async def test_no_job_gets_the_records_writable(tmp_path, writable):
+    root = tmp_path / "work"
+    jobs = CsubJobs("dep", tmp_path / "ids", client_factory=lambda: pytest.fail("client used"), work_root=root)
+    with pytest.raises(ValueError, match="holds the job records"):
+        await jobs.submit("k1", JobSpec("j", "true", str(root / "ws"), 10, rw_mounts=[str(tmp_path / writable)]))
+    with pytest.raises(ValueError, match="holds the job records"):
+        await jobs.submit("k2", JobSpec("j", "true", str(tmp_path / writable), 10))

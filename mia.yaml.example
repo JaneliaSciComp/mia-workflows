@@ -45,7 +45,7 @@ github:
 # fs is fine. `local_root` must be host-local disk (refused on a network fs): locks/ and buffer-api's service/
 # state. The other roots are a path, or {path, url} with the Fileglancer (or other browser) URL of that folder, so
 # timeline entries can link the round's workspace and the dataset's crops. `work_root`: job workspaces and
-# snapshots, inside the csub policy's allowed_roots. `storage_root`: published crops; mia-buffers reads each
+# snapshots, inside the csub policy's allowed_roots. `storage_root`: saved crops; mia-buffers reads each
 # dataset's binding.yaml there. `raw_root`: the shared raw cache, raw_root/<record id>/, where humans drop files
 # under incoming/; defaults to <work_root>/_cache. `staged_root`: one NGFF pyramid per volume,
 # staged_root/<levels key>/<record id>/.
@@ -70,9 +70,14 @@ harness:
   dir: /path/to/mia-snippets-checkout
 
 # Per job: what one csub job may read, write and run for. `job_bytes` caps a crop or stage job's input;
-# `stage_bytes` caps one staged artifact's uncompressed planned bytes and defaults to job_bytes. The fetch_* values
+# `stage_bytes` caps one staged artifact's uncompressed planned bytes and defaults to job_bytes; a spec's
+# `sampling.max_crops_per_dataset` crops must fit under it. The fetch_* values
 # bound one fetch job and how many fetch attempts a dataset gets. Also here, outside the per-job rule:
 # `agent_max_budget_usd` (one match-agent run, default 5) and `max_pr_revisions` (one round, default 5).
+# `debug_cycles` (default 1): how often a failed dataset round is handed to a debugging agent and run again before
+# it stops as `failed`; 0 turns that off. `debug_wait_min` (default 5): the wait before the debugging agent starts.
+# `autodev_quiet_hours` (default 2): a dataset round that waits for autodev (a snippet PR, a new head, a merge) ends
+# `blocked` when this long passes with no change and no agent round running.
 limits:
   job_bytes: 5e9
   # stage_bytes: 2e9
@@ -118,6 +123,28 @@ quota:
 keeper:
   minutes: 30
   catalog_sync_hours: 24
+
+# The cleaner (`MiaCleaner`, on the buffers worker; `mia-buffers schedule` creates its schedule): every `minutes`
+# it looks for subjects that read "in progress" with nothing running (`quiet_minutes`), that stopped
+# (`stopped_minutes` ago) for a reason with a known remedy, and for jobs, snippet issues and pull requests a
+# round left behind. `mode`: `off`, `report` (cases say what would be done; the default) or `act`.
+# A stop with a passing cause is run again after `retry_hours`; a subject a person acted on is left alone for
+# `hands_off_hours`; at most `max_remedies` remedies start work on one subject in seven days, `max_parallel`
+# cases are in work at once, and diagnosis jobs spend at most `max_usd_per_day`. `defects_repo` (owner/name,
+# optional): where a defect a diagnosis finds in this installation's own code is filed as an issue; unset, it is
+# kept on its case.
+cleaner:
+  mode: act
+  minutes: 10
+  quiet_minutes: 30
+  stopped_minutes: 30
+  retry_hours: 2
+  leftover_days: 3
+  pend_hours: 6
+  hands_off_hours: 2
+  max_remedies: 3
+  max_parallel: 3
+  max_usd_per_day: 20
 
 # The judge (autonomous-gates spec §4, §9): a read-only Claude Code job that looks at the evidence of a gate (crop
 # galleries, a PR diff) and answers approve / reject / escalate. A `model` other than the authors' agent.model is a
@@ -173,7 +200,7 @@ services:
       walltime_min: 60
       cpus: 1
       mem_mb: 4000
-      # package hosts only: the exact hosts the broker's policy allows are added to each job
+      # package hosts only: each job also gets the hosts its issue names (a dataset's own), where the policy allows them
       allow_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, prefix.dev, repo.prefix.dev]
       extra_mounts: []
       path_prepend: []
@@ -191,9 +218,9 @@ services:
       base_branch: main
       protected_paths: [".github/"]
 
-  # mia-data: dataset to published crops. `data_repo` receives one issue per dataset, a copy of its timeline that the
+  # mia-data: dataset to saved crops. `data_repo` receives one issue per dataset, a copy of its timeline that the
   # system writes and nothing reads (datasets are started and steered from the buffers page). `crops`: the round's set
-  # (`per_round`, reviewed and, approved, published), the hand-run `test-pr` command's `test_per_round`, and how
+  # (`per_round`, reviewed and, approved, saved), the hand-run `test-pr` command's `test_per_round`, and how
   # many crops per plane and per file. `gallery.branch` receives the crop galleries. `agent` is the match agent:
   # its walltime is limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not
   # accepted here. `evaluate` is a switch for the evaluate job after cropping; nothing runs behind it yet.
@@ -230,5 +257,3 @@ services:
       parallel: 4
       parallel_fetch: 2
       tensorizer: muvit-2d
-      val_size: 256
-      test_size: 256

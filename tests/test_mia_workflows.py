@@ -21,7 +21,9 @@ from mia_data import workflows
 from mia_data.activities import Activities
 from mia_data.models import (
     AssessmentWritten,
+    AutodevLook,
     DatasetState,
+    DebugResult,
     GalleryResult,
     JobArgs,
     JobDone,
@@ -34,7 +36,7 @@ from mia_data.models import (
     Reservation,
     Revocation,
     RoundLimits,
-    SmokeResult,
+    Test,
     VerifyResult,
 )
 from mia_data.workflows import MiaDataDataset
@@ -51,8 +53,8 @@ async def env():
     await e.shutdown()
 
 
-def ev(kind, eid, at="2026-01-01T00:00:00Z"):
-    return LabelEvent(kind, eid, "alice", at)
+def ev(kind, eid, at="2026-01-01T00:00:00Z", actor="alice"):
+    return LabelEvent(kind, eid, actor, at)
 
 
 def turn(answers, key, default):
@@ -71,7 +73,7 @@ class Mocks:
     def __init__(
         self,
         outcome="matched",
-        smoke=None,
+        host_not_allowed=None,
         states=None,
         test_ok=16,
         set_ok=16,
@@ -94,12 +96,21 @@ class Mocks:
         judge_result=None,
         submit_gate=None,
         kill_error=None,
+        admit_error=None,
+        debug_cycles=0,
+        debug_result=None,
+        look=None,
     ):
+        self.look = look or AutodevLook(None, True, False, "")  # what autodev_look finds (a list: one per look)
+        self.debug_cycles = debug_cycles  # limits.debug_cycles the limits activity reports
+        self.debug_result = debug_result or DebugResult("rerun", "the host sent 30 KB/s", "bind the first volume only")
+        self.admit_error = admit_error  # a message: admit refuses the record with it, non-retryable
         self.submit_gate = submit_gate  # an asyncio.Event: every submit waits for it, as a slow bsub would
         self.kill_error = kill_error  # a message: kill_job fails with it
         self.slow_stages, self.stage_gate = set(slow_stages), asyncio.Event()  # set_stage waits for the gate there
         self.calls: list[tuple[str, tuple]] = []
-        self.outcome, self.smoke, self.states = outcome, smoke or SmokeResult(True, True), states or {}
+        self.outcome, self.states = outcome, states or {}
+        self.host_not_allowed = host_not_allowed  # the host a trusted crop job was refused, in its report
         self.test_ok, self.set_ok, self.n_effective = test_ok, set_ok, n_effective
         self.crop_jobs: dict[str, JobArgs] = {}  # crop workspace -> its args (trusted = the dataset's set)
         self.await_failures, self.gate, self.gate_on = await_failures, gate, gate_on
@@ -120,12 +131,22 @@ class Mocks:
         @activity.defn(name="admit")
         async def admit(issue: int, event_id: str) -> Pins:
             rec("admit", event_id)
+            if self.admit_error:
+                raise ApplicationError(self.admit_error, type="ValueError", non_retryable=True)
             return PINS
 
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
             rec("limits")
-            return RoundLimits(4, 16, 120, self.revisions, crop_judge=self.crop_judge, judge_max_budget_usd=3.5)
+            return RoundLimits(
+                4,
+                16,
+                120,
+                self.revisions,
+                crop_judge=self.crop_judge,
+                judge_max_budget_usd=3.5,
+                debug_cycles=self.debug_cycles,
+            )
 
         @activity.defn(name="set_stage")
         async def set_stage(
@@ -134,7 +155,13 @@ class Mocks:
             if stage in self.slow_stages:
                 rec("stage_waits", stage)
                 await self.stage_gate.wait()
+            if state and state.pass_stage:  # the write carries the open pass's result (spec job-records §3.6)
+                rec("result", state.pass_stage, state.result, stage, list(state.pass_jobs), state.result_binding)
             rec("set_stage", stage, detail, extra)
+
+        @activity.defn(name="stage_result")
+        async def stage_result(issue: int, state: DatasetState) -> None:
+            rec("result", state.pass_stage, state.result, None, list(state.pass_jobs), state.result_binding)
 
         @activity.defn(name="comment")
         async def comment(
@@ -156,6 +183,20 @@ class Mocks:
         async def prepare_match(issue: int, round_id: str, pins: Pins, attempt: int = 1) -> str:
             rec("prepare_match", round_id)
             return f"/w/{round_id}/match-{attempt}"
+
+        @activity.defn(name="prepare_debug")
+        async def prepare_debug(issue: int, round_id: str, pins: Pins, failure: str, binding: str | None) -> str:
+            rec("prepare_debug", round_id, failure, binding)
+            return f"/w/{round_id}/debug-1"
+
+        @activity.defn(name="read_debug")
+        async def read_debug(issue: int, round_id: str, ws: str) -> DebugResult:
+            rec("read_debug", ws)
+            return self.debug_result
+
+        @activity.defn(name="debug_go")
+        async def debug_go(issue: int, round_id: str, advice: str) -> None:
+            rec("debug_go", round_id, advice)  # buffer-api's part, the go as a signal, is the test's to send
 
         @activity.defn(name="prepare_job")
         async def prepare_job(issue: int, round_id: str, kind: str, attempt: int, binding: str | None) -> str:
@@ -184,11 +225,6 @@ class Mocks:
                 reasons=["axes from conversion.json"],
             )
 
-        @activity.defn(name="read_smoke")
-        async def read_smoke(ws: str, record: str | None = None) -> SmokeResult:
-            rec("read_smoke", ws, record)
-            return self.smoke
-
         @activity.defn(name="take_lock")
         async def take_lock(kind: str, key: str, owner: str, ttl_s: int) -> LockTaken:
             rec("take_lock", kind, key, owner, ttl_s)
@@ -216,6 +252,7 @@ class Mocks:
                 [{"crop_id": f"c{i}", "files": {}} for i in range(k)],
                 self.n_effective if trusted else n,
                 bytes_fetched=1234,
+                host_not_allowed=self.host_not_allowed if trusted else None,
             )
 
         @activity.defn(name="publish_gallery")
@@ -255,6 +292,13 @@ class Mocks:
             rec("pr_state", pr)
             return self.pr_now
 
+        @activity.defn(name="autodev_look")
+        async def autodev_look(snippet_issue: int, pr: int | None) -> AutodevLook:
+            rec("autodev_look", snippet_issue, pr)
+            if isinstance(self.look, list):
+                return self.look.pop(0) if len(self.look) > 1 else self.look[0]
+            return self.look
+
         @activity.defn(name="set_crop_status")
         async def set_crop_status(sha: str, state: str, url: str | None, description: str = "") -> None:
             rec("set_crop_status", sha, state, url)
@@ -289,8 +333,9 @@ class Mocks:
             by: str,
             summary: str = "",
             supersedes: str | None = None,
+            action_id: str | None = None,
         ) -> AssessmentWritten:
-            rec("assess", gate, subject_kind, subject_ref, verdict, by, summary)
+            rec("assess", gate, subject_kind, subject_ref, verdict, by, summary, action_id)
             refused = "rejected by human:bob at t: wrong channel"
             return AssessmentWritten("as-1", self.assess_authorized, "" if self.assess_authorized else refused)
 
@@ -318,6 +363,8 @@ class Mocks:
             issue: int, round_id: str, ws: str, gate: str, subject_kind: str, subject_ref: str, mode: str
         ) -> JudgeResult:
             rec("read_judge", ws, gate, subject_kind, subject_ref, mode)
+            if isinstance(self.judge_result, Exception):
+                raise self.judge_result
             return self.judge_result
 
         @activity.defn(name="adopt_pr_binding")
@@ -329,13 +376,16 @@ class Mocks:
             admit,
             limits,
             set_stage,
+            stage_result,
             comment,
             refuse_label,
             prepare_match,
             prepare_job,
+            prepare_debug,
+            read_debug,
+            debug_go,
             submit,
             read_match,
-            read_smoke,
             take_lock,
             release_lock,
             read_verify,
@@ -344,6 +394,7 @@ class Mocks:
             open_snippet_issue,
             read_feedback,
             pr_state,
+            autodev_look,
             set_crop_status,
             tree_sha,
             adopt_pr_binding,
@@ -366,8 +417,8 @@ class Mocks:
             if self.await_failures:
                 self.await_failures -= 1
                 raise ApplicationError("worker died mid-await")
-            state, code = self.states.get(ws.rsplit("/", 1)[1].rsplit("-", 1)[0], ("DONE", 0))  # by kind
-            return JobDone(job_id, state, code)
+            state, code = turn(self.states, ws.rsplit("/", 1)[1].rsplit("-", 1)[0], ("DONE", 0))  # by kind
+            return JobDone(job_id, state, code, 4096)  # every job claims a download; only the crop job's counts
 
         return [await_job]
 
@@ -395,9 +446,14 @@ async def until(cond, timeout=10.0):
 
 async def idle(h, m, stage):
     """Wait until set_stage(stage) ran and the workflow is blocked again (its last history event is a completed
-    workflow task, not a scheduled activity), so the next signal finds it waiting rather than busy."""
+    workflow task, not a scheduled activity), so the next signal finds it waiting rather than busy. A wait for
+    autodev is timed, so a started timer may follow the task."""
     await until(lambda: m.stages[-1:] == [stage])
-    trailing = {EventType.EVENT_TYPE_MARKER_RECORDED, EventType.EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES}
+    trailing = {
+        EventType.EVENT_TYPE_MARKER_RECORDED,
+        EventType.EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES,
+        EventType.EVENT_TYPE_TIMER_STARTED,
+    }
     for _ in range(500):
         events = [e for e in (await h.fetch_history()).events if e.event_type not in trailing]  # a patch marker
         if events[-1].event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
@@ -407,7 +463,7 @@ async def idle(h, m, stage):
 
 
 @contextlib.asynccontextmanager
-async def started(env, m, first=None, runner=None):
+async def started(env, m, first=None, runner=None, signal="go", state=None):
     tq = f"tq-{uuid.uuid4()}"
     kw = {"workflow_runner": runner} if runner else {}
     async with (
@@ -416,14 +472,14 @@ async def started(env, m, first=None, runner=None):
     ):
         h0 = await env.client.start_workflow(
             MiaDataDataset.run,
-            DatasetState(7),
+            state or DatasetState(7),
             id=f"wf-{uuid.uuid4()}",
             task_queue=tq,
-            start_signal="go",
+            start_signal=signal,
             start_signal_args=[first or ev("go", "11")],
         )
         h = env.client.get_workflow_handle(h0.id)  # follows continue-as-new
-        h.first_run_id = h0.run_id
+        h.first_run_id = h0.result_run_id  # the run this call started; `run_id` is unset on such a handle
         try:
             yield h
         finally:
@@ -448,8 +504,8 @@ async def test_a_round_waits_for_its_stage_write(env):
         await until(lambda: ("matching",) in m.of("stage_waits"))
         assert "submit" not in m.names() and m.stages == []
         m.stage_gate.set()
-        await idle(h, m, "needs-human")
-    assert m.stages == ["matching", "needs-human"] and m.of("submit")[0][1] == "match"
+        await idle(h, m, "blocked")
+    assert m.stages == ["matching", "blocked"] and m.of("submit")[0][1] == "match"
 
 
 async def test_match_crops_review_approve_publishes_that_set(env):
@@ -461,28 +517,51 @@ async def test_match_crops_review_approve_publishes_that_set(env):
         await approve_review(h, m)
         await idle(h, m, "done")
     assert m.stages == ["matching", "testing", "review", "done"]
-    assert [a[1] for a in m.of("submit")] == ["match", "smoke", "crop", "verify"]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify"]  # no job between the match and the crops
     (the_set,) = [a for a in m.jobs() if a.n_crops]
     assert (the_set.n_crops, the_set.batch, the_set.trusted, the_set.sha, the_set.existing) == (16, 0, True, SHA, True)
     assert [a[0] for a in m.of("publish_gallery")] == [SHA]
     assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
     seq = [n for n in m.names() if n in ("read_verify", "publish_gallery", "publish_crops", "comment")]
-    assert seq == ["read_verify", "publish_gallery", "comment", "read_verify", "publish_crops"]
+    assert seq == ["read_verify", "publish_gallery", "read_verify", "publish_crops"]  # no report as a comment
+    # each pass's result is carried by the stage write that ends it, with the jobs the pass ran
+    matched, tested, reviewed = m.of("result")
+    assert [(r[0], r[2]) for r in m.of("result")] == [
+        ("matching", "testing"),
+        ("testing", "review"),
+        ("review", "done"),
+    ]
+    assert matched[1].startswith("Matched") and "axes from conversion.json" in matched[1]
+    assert matched[3] == ["/w/i7-e11/match-1"] and not matched[4]
+    assert "16 of 16 verified" in tested[1] and tested[4]  # the crops report, shown with the binding
+    assert tested[3] == [f"/w/i7-e11/crop-{SHA}-1", f"/w/i7-e11/verify-{SHA}-1"]
+    assert reviewed[1] == "Approved by alice." and reviewed[3] == []  # `done` and its totals end the review's result
     assert m.of("read_verify")[1] == (
         f"/w/i7-e11/verify-{SHA}-1",
         f"/w/i7-e11/crop-{SHA}-1",
     )  # read back for publishing
-    assert "16 crops published" in m.of("set_stage")[-1][2]
-    owners = ["mia-data i7-e11 smoke", "mia-data i7-e11 crop"]
+    assert "16 crops saved" in m.of("set_stage")[-1][2]
+    owners = ["mia-data i7-e11 crop"]
     assert [a[2] for a in m.of("take_lock")] == owners and [a[2] for a in m.of("release_lock")] == owners
-    smoke_lock, crop_lock = ["raw", "rec-1", owners[0]], ["raw", "rec-1", owners[1]]
-    assert [a[2] for a in m.of("await")] == [None, smoke_lock, *[crop_lock] * 2]  # match: none; crop and verify jobs
-    report = m.of("comment")[0][0]
+    crop_lock = ["raw", "rec-1", owners[0]]
+    assert [a[2] for a in m.of("await")] == [None, crop_lock, crop_lock]  # match: none; crop and verify jobs
+    report = tested[1]
     assert "table" in report and "axes from conversion.json" in report and "1234 bytes" in report
     done = m.of("set_stage")[-1]
-    assert done[0] == "done" and "**Totals:** 16 crops published" in done[2]  # the gallery table went up at review
-    assert m.of("comment")[0][3] == "/s/binding-1.yaml"  # the test report carries the matched binding
-    assert not m.of("refuse_label")
+    assert done[0] == "done" and "**Totals:** 16 crops saved" in done[2]  # the gallery table went up at review
+    assert not m.of("comment") and not m.of("refuse_label")
+
+
+async def test_a_round_that_rolled_over_before_it_kept_passes_ends_as_it_began(env):
+    """A run that takes over a round at `review` from a state with no pass open (it rolled over before rounds
+    kept their passes) writes its stages as before: no result is due, so none is written."""
+    tested = "2026-01-01T00:00:00+00:00"
+    test = Test(SHA, f"i7-e11-{SHA[:12]}", True, tested, crop_workspace="/w/i7-e11/crop", verify_workspace="/w/v")
+    state = DatasetState(7, round_id="i7-e11", seed="1", stage="review", pins=PINS, binding="/s/b.yaml", tests=[test])
+    m = Mocks()
+    async with started(env, m, first=ev("approve", "12", shift(tested, 5)), signal="approve", state=state) as h:
+        await idle(h, m, "done")
+    assert m.stages == ["done"] and not m.of("result") and len(m.of("publish_crops")) == 1
 
 
 async def test_seed_is_recorded(env):
@@ -498,7 +577,7 @@ async def test_seed_is_recorded(env):
 async def test_approve_outside_review_is_refused(env):
     m = Mocks(outcome="blocked")
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
         await h.signal(MiaDataDataset.approve, ev("approve", "12", "2030-01-01T00:00:00Z"))
         await until(lambda: m.of("refuse_label"))
     assert m.of("refuse_label")[0][0] == "data:approve" and m.of("refuse_label")[0][2] == "12"
@@ -520,11 +599,11 @@ async def test_stale_approve_is_refused(env):
 async def test_redelivered_go_is_ignored(env):
     m = Mocks(outcome="blocked")
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
         await h.signal(MiaDataDataset.go, ev("go", "11"))
         await h.signal(MiaDataDataset.go, ev("go", "12"))
         await until(lambda: len(m.stages) == 4)
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert m.of("admit") == [("11",), ("12",)] and not m.of("refuse_label")
 
 
@@ -535,11 +614,11 @@ async def test_go_while_busy_is_rejected_with_comment(env):
         await h.signal(MiaDataDataset.go, ev("go", "12"))  # in history before the job ends
         m.gate.set()
         await until(lambda: m.of("refuse_label"))
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
         await h.signal(MiaDataDataset.go, ev("go", "13"))  # arrives while idle: a new round
         await until(lambda: len(m.of("admit")) == 2)
-        await until(lambda: m.stages.count("needs-human") == 2)  # no activity in flight at shutdown: one would hold
-        await idle(h, m, "needs-human")  # up the test server's time skipping (env.sleep) in later tests
+        await until(lambda: m.stages.count("blocked") == 2)  # no activity in flight at shutdown: one would hold
+        await idle(h, m, "blocked")  # up the test server's time skipping (env.sleep) in later tests
     ((label, reason, eid),) = m.of("refuse_label")
     assert (label, eid) == ("data:go", "12") and "busy" in reason
     assert m.of("admit") == [("11",), ("13",)]
@@ -548,9 +627,11 @@ async def test_go_while_busy_is_rejected_with_comment(env):
 async def test_a_set_with_fewer_than_half_verified_never_reaches_review(env):
     m = Mocks(set_ok=5)
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
-    assert m.stages == ["matching", "testing", "needs-human"] and "publish_crops" not in m.names()
-    assert "5 of 16 verified (at least 8 needed)" in m.of("comment")[0][0]
+        await idle(h, m, "failed")
+    assert m.stages == ["matching", "testing", "failed"] and "publish_crops" not in m.names()
+    stage, report, rests_at, jobs, _ = m.of("result")[-1]  # the failed pass says so itself, with its jobs
+    assert (stage, rests_at, len(jobs)) == ("testing", "failed", 2)
+    assert "5 of 16 verified (at least 8 needed)" in report and not m.of("comment")
 
 
 async def test_a_set_with_at_least_half_verified_is_reviewed_and_published(env):
@@ -559,45 +640,63 @@ async def test_a_set_with_at_least_half_verified_is_reviewed_and_published(env):
     async with started(env, m) as h:
         await approve_review(h, m)
         await idle(h, m, "done")
-    assert m.of("publish_crops")[0][1] == 12 and "12 crops published" in m.of("set_stage")[-1][2]
-
-
-async def test_a_small_raw_is_cropped_not_judged(env):
-    """Size is the buffer plan's decision (spec §12): smoke's old `eligible` flag changes nothing in the round."""
-    m = Mocks(smoke=SmokeResult(True, False, shapes={"raw": [[10, 10]]}))
-    async with started(env, m) as h:
-        await idle(h, m, "review")
-    assert "ineligible" not in m.stages and [a for a in m.jobs() if a.n_crops]
+    assert m.of("publish_crops")[0][1] == 12 and "12 crops saved" in m.of("set_stage")[-1][2]
 
 
 async def test_an_ineligible_outcome_is_an_unknown_one_now(env):
-    m = Mocks(outcome="ineligible", smoke=SmokeResult(True, False))
+    m = Mocks(outcome="ineligible")
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
-    assert m.stages == ["matching", "needs-human"] and not [a for a in m.jobs() if a.n_crops]
+        await idle(h, m, "blocked")
+    assert m.stages == ["matching", "blocked"] and not [a for a in m.jobs() if a.n_crops]
+
+
+@pytest.mark.parametrize(
+    "mocks, stages, said",
+    [
+        # the match agent says another run may pass
+        ({"outcome": "failed"}, ["matching", "failed"], "match failed: label class undecidable"),
+        # a host waits for a person's approval
+        (
+            {"set_ok": 0, "host_not_allowed": "h.example.org"},
+            ["matching", "testing", "blocked"],
+            "host not allowed: h.example.org",
+        ),
+        # admission refuses the record: it will again until someone changes it
+        (
+            {"admit_error": "rec-1: its dataset folder f belongs to record rec-2"},
+            ["blocked"],
+            "belongs to record rec-2",
+        ),
+    ],
+)
+async def test_a_stop_says_whether_it_failed_or_is_blocked(env, mocks, stages, said):
+    """`failed`: running it again may pass. `blocked`: a person has to decide or change something first."""
+    m = Mocks(**mocks)
+    async with started(env, m) as h:
+        await idle(h, m, stages[-1])
+    assert m.stages == stages and said in m.of("set_stage")[-1][1]
 
 
 async def test_blocked_goes_needs_human(env):
     m = Mocks(outcome="blocked")
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
-    assert m.stages == ["matching", "needs-human"] and "label class undecidable" in m.of("set_stage")[-1][1]
+        await idle(h, m, "blocked")
+    assert m.stages == ["matching", "blocked"] and "label class undecidable" in m.of("set_stage")[-1][1]
     assert [a[1] for a in m.of("submit")] == ["match"]
 
 
 @pytest.mark.parametrize(
     "states, stages, published",
     [
-        ({"match": ("EXIT", 1)}, ["matching", "needs-human"], []),
-        ({"smoke": ("EXIT", 1)}, ["matching", "needs-human"], []),  # even though smoke.json says ok
-        ({f"crop-{SHA}": ("EXIT", 1)}, ["matching", "testing", "needs-human"], []),
-        ({f"verify-{SHA}": ("UNKNOWN", None)}, ["matching", "testing", "needs-human"], []),
+        ({"match": ("EXIT", 1)}, ["matching", "failed"], []),
+        ({f"crop-{SHA}": ("EXIT", 1)}, ["matching", "testing", "failed"], []),
+        ({f"verify-{SHA}": ("UNKNOWN", None)}, ["matching", "testing", "failed"], []),
     ],
 )
 async def test_failed_job_needs_human_no_retry(env, states, stages, published):
     m = Mocks(states=states)
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "failed")
     keys = [a[0] for a in m.of("submit")]
     assert m.stages == stages and len(keys) == len(set(keys))
     assert [a[1] for a in m.of("publish_crops")] == published  # nothing is published before a review
@@ -621,16 +720,16 @@ async def test_rollover_in_review_then_approve(env, monkeypatch):
     assert (await h.describe()).run_id != h.first_run_id
     assert m.stages == ["matching", "testing", "review", "done"] and len(m.of("admit")) == 1
     assert [a.seed for a in m.jobs() if a.n_crops] == [st.seed + "-t"]
-    assert "16 crops published" in m.of("set_stage")[-1][2]  # the workspaces outlive the rollover
+    assert "16 crops saved" in m.of("set_stage")[-1][2]  # the workspaces outlive the rollover
 
 
 async def test_test_crop_failure_never_produces(env):
     m = Mocks(set_ok=0)
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "failed")
         await h.signal(MiaDataDataset.approve, ev("approve", "12", "2030-01-01T00:00:00Z"))
         await until(lambda: m.of("refuse_label"))
-    assert m.stages == ["matching", "testing", "needs-human"]
+    assert m.stages == ["matching", "testing", "failed"]
     assert [a.batch for a in m.jobs() if a.n_crops] == [0] and "publish_crops" not in m.names()
 
 
@@ -640,33 +739,86 @@ async def test_worker_death_mid_await_reattaches(env):
         await approve_review(h, m)
         await idle(h, m, "done")
     keys = [a[0] for a in m.of("submit")]
-    assert len(keys) == len(set(keys)) == 4 and len(m.of("await")) == 5  # one await retried, no job resubmitted
+    assert len(keys) == len(set(keys)) == 3 and len(m.of("await")) == 4  # one await retried, no job resubmitted
 
 
 async def test_continue_as_new_keeps_handled(env, monkeypatch):
     monkeypatch.setattr(workflows, "MAX_ROUNDS_PER_EXECUTION", 1)
     m = Mocks(outcome="blocked")
     async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
         assert (await h.describe()).run_id != h.first_run_id  # rolled over
         await h.signal(MiaDataDataset.go, ev("go", "11"))  # redelivered into the new run
         await h.signal(MiaDataDataset.go, ev("go", "12"))
         await until(lambda: len(m.of("admit")) == 2)
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
         assert (await h.query(MiaDataDataset.status)).handled == ["11", "12"]
     assert m.of("admit") == [("11",), ("12",)]
 
 
-async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke(env):
-    m = Mocks(smoke=SmokeResult(False, errors=["no data"]), lock_busy=2)
+async def test_a_restart_starts_its_round_in_a_new_run(env):
+    """A dataset's go arrives as `restart`. A run that has carried a round rolls over first, so the round runs in a
+    new run (one that takes every code path of today); the round a run starts with stays in it."""
+    m = Mocks(outcome="blocked")
+    async with started(env, m, signal="restart") as h:
+        await idle(h, m, "blocked")
+        assert (await h.describe()).run_id == h.first_run_id and m.of("admit") == [("11",)]  # a new run: in place
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))
+        await until(lambda: m.stages.count("blocked") == 2)
+        await idle(h, m, "blocked")
+        second = (await h.describe()).run_id
+        assert second != h.first_run_id  # the first run had carried a round
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))  # redelivered into the new run: handled already
+        await h.signal(MiaDataDataset.go, ev("go", "13"))  # a plain go stays in the run it reaches
+        await until(lambda: m.stages.count("blocked") == 3)
+        await idle(h, m, "blocked")
+        st = await h.query(MiaDataDataset.status)
+        assert (await h.describe()).run_id == second
+    assert m.of("admit") == [("11",), ("12",), ("13",)] and m.stages == ["matching", "blocked"] * 3
+    assert (st.handled, st.restart, st.round_id) == (["11", "12", "13"], None, "i7-e13") and not m.of("refuse_label")
+
+
+async def test_a_restart_at_review_drops_the_set_and_starts_over_in_a_new_run(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))
+        await until(lambda: m.stages.count("review") == 2)
+        await idle(h, m, "review")
+        assert (await h.describe()).run_id != h.first_run_id
+        await approve_review(h, m, eid="13")
+        await idle(h, m, "done")
+    assert m.stages == ["matching", "testing", "review", "matching", "testing", "review", "done"]
+    assert len(m.of("publish_crops")) == 1 and not m.of("refuse_label")  # the first set was never saved
+
+
+async def test_a_restart_at_review_of_a_pr_heads_set_tests_that_head_again(env):
+    """The snippet PR stays the dataset's: the new round, in a new run, tests its head again and asks autodev for
+    nothing."""
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))
+        await until(lambda: m.stages.count("review") == 2)
+        await idle(h, m, "review")
+        assert (await h.describe()).run_id != h.first_run_id
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "developing", "testing", "review", "testing", "review"]
+    assert m.of("admit") == [("11",), ("12",)] and m.of("open_snippet_issue") == [("i7-e11", None)]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]  # no second match
+    assert (st.round_id, st.snippet_issue) == ("i7-e12", 100) and not m.of("refuse_label")
+
+
+async def test_the_crop_job_waits_for_the_raw_lock_and_releases_it_after_a_failed_set(env):
+    m = Mocks(set_ok=0, lock_busy=2)
     async with started(env, m) as h:
         for tries in (1, 2):  # a refused take sleeps poll_minutes (2), doubling with each try
             await until(lambda tries=tries: len(m.of("take_lock")) == tries)
             await env.sleep(timedelta(minutes=2 * tries + 1))
-        await idle(h, m, "needs-human")
+        await idle(h, m, "failed")
         timers = [e for e in (await h.fetch_history()).events if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED]
         assert [e.timer_started_event_attributes.start_to_fire_timeout.seconds for e in timers] == [120, 240]
-    owner = "mia-data i7-e11 smoke"
+    owner = "mia-data i7-e11 crop"
     assert m.of("take_lock") == [("raw", "rec-1", owner, 900)] * 3
     waiting = [a for a in m.of("comment") if a[1] == "lock i7-e11"]
     assert waiting == [
@@ -674,25 +826,144 @@ async def test_smoke_waits_for_the_raw_lock_and_releases_it_after_a_failed_smoke
     ]
     names = [(name, args[1] if name == "submit" else None) for name, args in m.calls]
     last_take = max(i for i, (name, _) in enumerate(names) if name == "take_lock")
-    assert names.index(("submit", "smoke")) > last_take > names.index(("comment", None))
-    assert [a for a in m.of("await") if "smoke" in a[1]] == [
-        ("job-mia-7-i7-e11-smoke-1", "/w/i7-e11/smoke-1", ["raw", "rec-1", owner])
-    ]
-    assert m.of("read_smoke") == [("/w/i7-e11/smoke-1", "rec-1")]
+    assert names.index(("submit", "crop")) > last_take > names.index(("comment", None))
+    lock = ["raw", "rec-1", owner]
+    assert [a[2] for a in m.of("await")] == [None, lock, lock]  # the crop and verify jobs run under it
+    assert m.of("read_verify") == [(f"/w/i7-e11/verify-{SHA}-1", f"/w/i7-e11/crop-{SHA}-1", "rec-1")]  # the asset row
     assert m.of("release_lock") == [("raw", "rec-1", owner)]
-    assert names.index(("read_smoke", None)) < names.index(("release_lock", None))
-    assert m.stages == ["matching", "needs-human"] and "no data" in m.of("set_stage")[-1][1]
+    assert names.index(("read_verify", None)) < names.index(("release_lock", None))
+    assert m.stages == ["matching", "testing", "failed"] and "the crops failed" in m.of("set_stage")[-1][1]
 
 
-async def test_a_failed_smoke_job_still_releases_the_raw_lock_and_posts_its_own_errors(env):
-    """harness smoke exits 1 on any error: the issue gets smoke.json's errors, read after the lock is released."""
-    m = Mocks(states={"smoke": ("EXIT", 2)}, smoke=SmokeResult(False, errors=["peer closed connection"]))
+# --- a failed round is debugged and run again -----------------------------------------------
+
+CROP_FAILS = {f"crop-{SHA}": ("EXIT", 1)}
+
+
+async def debugging(h, m):
+    """Wait until the dataset is at `debugging` and its wait for the debugging agent has begun (a timer)."""
+    await until(lambda: m.stages[-1:] == ["debugging"])
+    for _ in range(500):
+        if (await h.fetch_history()).events[-1].event_type == EventType.EVENT_TYPE_TIMER_STARTED:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("the wait before the debugging agent never began")
+
+
+async def debugged(env, h, m):
+    """From `debugging` through the wait and the debugging agent, up to its go being asked for."""
+    await debugging(h, m)
+    assert "prepare_debug" not in m.names()  # the wait comes first
+    await env.sleep(timedelta(minutes=6))
+    await until(lambda: m.of("debug_go"))
+
+
+async def test_a_failed_round_is_debugged_and_run_again(env):
+    m = Mocks(debug_cycles=1, states={f"crop-{SHA}": [("EXIT", 1), ("DONE", 0)]})
+    async with started(env, m, signal="restart") as h:
+        await debugged(env, h, m)
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor="debugger"))  # what buffer-api makes of its go
+        await idle(h, m, "review")
+        st = await h.query(MiaDataDataset.status)
+        assert (await h.describe()).run_id != h.first_run_id  # the re-run is a round of its own, in a new run
+    assert m.stages == ["matching", "testing", "debugging", "matching", "testing", "review"]
+    assert "A debugging agent looks into this in 5 minutes" in m.of("set_stage")[2][1]
+    stage, failed, then, jobs, _ = m.of("result")[1]  # testing's own result carries the failure and its jobs
+    assert (stage, then, len(jobs)) == ("testing", "debugging", 2)
+    assert "**failed**: the crops failed" in failed and "1 of" not in m.of("set_stage")[2][1]
+    ((round_id, failure, binding),) = m.of("prepare_debug")
+    assert (round_id, binding) == ("i7-e11", "/s/binding-1.yaml") and "the crops failed" in failure
+    assert "debugging agent" not in failure  # the debugger reads why the round failed, not what happens next
+    assert [a[1] for a in m.of("submit")][:4] == ["match", "crop", "verify", "debug"]
+    assert [a[3] for a in m.of("reserve") if a[2] == "debug"] == [5.0]  # an agent run, reserved like the match
+    assert m.of("debug_go") == [("i7-e11", "bind the first volume only")]
+    stage, found, then, jobs, _ = next(r for r in m.of("result") if r[0] == "debugging")
+    assert found.startswith("**Debugger:** the host sent 30 KB/s") and then is None  # written by stage_result
+    assert jobs == ["/w/i7-e11/debug-1"] and not m.of("comment")
+    assert (st.round_id, st.debugs) == ("i7-e21", 1) and m.of("admit") == [("11",), ("21",)]
+
+
+async def test_a_re_run_that_fails_stops_and_a_persons_go_gets_its_own_cycle(env):
+    m = Mocks(debug_cycles=1, states=CROP_FAILS)
+    async with started(env, m, signal="restart") as h:
+        await debugged(env, h, m)
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor="debugger"))
+        await idle(h, m, "failed")
+        assert m.stages == ["matching", "testing", "debugging", "matching", "testing", "failed"]
+        assert m.of("set_stage")[-1][1].endswith("nothing more is tried automatically.")
+        assert len(m.of("prepare_debug")) == 1
+        await h.signal(MiaDataDataset.restart, ev("go", "31"))  # a person: Run again
+        await until(lambda: m.stages.count("debugging") == 2)  # their round has a cycle of its own
+
+
+@pytest.mark.parametrize(
+    "mocks, stage, said",
+    [
+        (  # no round can pass until a person changes something
+            {"debug_result": DebugResult("blocked", "a 65 MB plane is read per volume", "raise job_walltime_min")},
+            "blocked",
+            ["the crops failed", "**Debugger:** a 65 MB plane", "**What it needs:** raise job_walltime_min"],
+        ),
+        (  # the debugging agent's own job failed
+            {"states": {**CROP_FAILS, "debug": ("EXIT", 1)}, "debug_result": DebugResult("failed", "no outcome")},
+            "failed",
+            ["the crops failed", "The debugging agent did not finish: debug job job-mia-7-i7-e11-debug-1 ended EXIT"],
+        ),
+        (  # its job ran, and left nothing readable
+            {"debug_result": DebugResult("failed", "the debugging agent left no readable outcome.json")},
+            "failed",
+            ["The debugging agent did not finish: the debugging agent left no readable outcome.json"],
+        ),
+        (  # the operator's pause refuses its job, as it would refuse a new round's
+            {"reservations": {"debug": Reservation(False, "max_usd reached")}},
+            "blocked",
+            ["the crops failed", "The debugging agent did not run: root budget: max_usd reached"],
+        ),
+    ],
+)
+async def test_a_debugger_that_finds_no_way_on_stops_the_round_with_both_reasons(env, mocks, stage, said):
+    m = Mocks(debug_cycles=1, **{"states": CROP_FAILS, **mocks})
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
-    assert m.of("release_lock") == [("raw", "rec-1", "mia-data i7-e11 smoke")]
-    assert m.of("read_smoke") == [("/w/i7-e11/smoke-1", None)]  # no raw asset row for a failed job
-    assert m.names().index("release_lock") < m.names().index("read_smoke")
-    assert m.of("set_stage")[-1][1] == "smoke job job-mia-7-i7-e11-smoke-1 ended EXIT (exit 2): peer closed connection"
+        await debugging(h, m)
+        await env.sleep(timedelta(minutes=6))
+        await idle(h, m, stage)
+    assert m.stages == ["matching", "testing", "debugging", stage] and not m.of("debug_go")
+    assert all(text in m.of("set_stage")[-1][1] for text in said), m.of("set_stage")[-1][1]
+
+
+async def test_run_again_at_debugging_starts_a_persons_round_without_the_debugger(env):
+    m = Mocks(debug_cycles=1, states={f"crop-{SHA}": [("EXIT", 1), ("DONE", 0)]})
+    async with started(env, m, signal="restart") as h:
+        await debugging(h, m)
+        await h.signal(MiaDataDataset.restart, ev("go", "12"))
+        await idle(h, m, "review")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "testing", "debugging", "matching", "testing", "review"]
+    assert "prepare_debug" not in m.names() and not m.of("refuse_label") and (st.round_id, st.debugs) == ("i7-e12", 0)
+
+
+async def test_a_cancel_at_debugging_ends_it(env):
+    m = Mocks(debug_cycles=1, states=CROP_FAILS)
+    async with started(env, m) as h:
+        await debugging(h, m)
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await idle(h, m, "cancelled")
+    assert m.stages == ["matching", "testing", "debugging", "cancelled"] and "prepare_debug" not in m.names()
+
+
+@pytest.mark.parametrize(
+    "mocks, stages",
+    [
+        ({"outcome": "blocked"}, ["matching", "blocked"]),  # a person has to act: no round can pass
+        ({"admit_error": "rec-1: no such record"}, ["blocked"]),
+        ({"debug_cycles": 0, "states": CROP_FAILS}, ["matching", "testing", "failed"]),  # switched off
+    ],
+)
+async def test_only_a_failed_round_with_a_cycle_left_is_debugged(env, mocks, stages):
+    m = Mocks(**{"debug_cycles": 1, **mocks})
+    async with started(env, m) as h:
+        await idle(h, m, stages[-1])
+    assert m.stages == stages
 
 
 # --- the development path (§7.3) ------------------------------------------------------------
@@ -755,7 +1026,7 @@ async def test_develop_happy_path(env):
     assert st.snippet_issue == 100 and st.pr is None and st.pins.snippets_commit == MC and st.snippet_name == "new-snip"
     assert [(t.sha, t.ok, t.tree_sha, bool(t.approved_at)) for t in st.tests] == [(H1, True, "T", True)]
     assert [a[2] for a in m.of("set_stage") if a[0] == "review"] == [f"**Snippet PR:** {PR_URL}\n"]
-    assert "16 crops published" in m.of("set_stage")[-1][2]
+    assert "16 crops saved" in m.of("set_stage")[-1][2]
 
 
 async def test_revise_new_head_retests(env):
@@ -825,7 +1096,7 @@ async def test_reject_in_matched_review_asks_for_a_superseding_snippet(env):
         ("i7-e11", None, "/s/binding-1.yaml", {"what_fails": "alice wrote:\nthe masks are shifted by one pixel"})
     ]
     assert "superseding" in m.of("set_stage")[3][1]
-    assert [a[1] for a in m.of("submit")] == ["match", "smoke", "crop", "verify", "crop", "verify"]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]
     assert [(a.sha, a.trusted) for a in m.jobs() if a.n_crops] == [(PINS.snippets_commit, True), (H1, False)]
     assert m.of("publish_crops")[0][2] == MC and st.pins.snippets_commit == MC and st.snippet_issue == 100
 
@@ -896,7 +1167,7 @@ async def test_merge_with_different_tree_makes_the_merge_commits_set_for_review(
         await wake(h, m, head(H1, "merged", MC))
         if merge_ok:
             await approve_review(h, m, eid="13")
-        await idle(h, m, "done" if merge_ok else "needs-human")
+        await idle(h, m, "done" if merge_ok else "failed")
         st = await h.query(MiaDataDataset.status)
     tests = [a for a in m.jobs() if a.n_crops and not a.batch]
     assert [(a.sha, a.trusted) for a in tests] == [(H1, False), (MC, True)]  # the merge commit: a trusted job
@@ -912,22 +1183,78 @@ async def test_head_test_that_cannot_run_posts_error(env):
     async with started(env, m) as h:
         await idle(h, m, "developing")
         await wake(h, m, head(H1))
-        await idle(h, m, "needs-human")
+        await idle(h, m, "failed")
     assert statuses(m) == [(H1, "pending"), (H1, "error")] and "UNKNOWN" in m.of("set_stage")[-1][1]
 
 
 @pytest.mark.parametrize("now, why", [(head(H1, "closed"), "closed"), (head(H1, needs_human=True), "needs-human")])
 async def test_closed_pr_needs_human(env, now, why):
-    m = Mocks(outcome="needs_snippet")
+    """The round ends `blocked`, naming the PR and quoting what autodev last said, so the entry says why."""
+    said = "Approved, but merging failed: Pull Request has merge conflicts"
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(5, False, True, said))
     async with started(env, m) as h:
         await idle(h, m, "developing")
         await h.signal(MiaDataDataset.go, ev("go", "12"))  # busy: a round is developing
         await until(lambda: m.of("refuse_label"))
         await wake(h, m, now)
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert m.of("refuse_label")[0][0] == "data:go" and "busy" in m.of("refuse_label")[0][1]
     detail = m.of("set_stage")[-1][1]
     assert why in detail and PR_URL in detail and not [a for a in m.jobs() if a.n_crops]
+    assert f'Its last comment: "{said}"' in detail and m.of("autodev_look") == [(100, 5)]
+
+
+LOOK = timedelta(minutes=16)  # past one look of a round that waits for autodev
+
+
+async def test_a_waiting_round_ends_when_autodev_stopped_before_it_opened_a_pr(env):
+    """autodev's first run failed: there is no PR for the poller to see, and the round's own look finds the issue."""
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(None, False, True, "snippets: stopped. agent job 1 ended EXIT"))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        await idle(h, m, "blocked")
+    detail = m.of("set_stage")[-1][1]
+    assert "mia-snippets issue #100: autodev stopped before it opened a pull request" in detail
+    assert "agent job 1 ended EXIT" in detail and m.of("autodev_look") == [(100, None)]
+
+
+async def test_a_waiting_round_ends_after_the_quiet_limit_unless_autodev_is_at_work(env):
+    quiet, at_work = AutodevLook(None, False, False, "Round 1 started"), AutodevLook(None, True, False, "")
+    m = Mocks(outcome="needs_snippet", look=[at_work] * 12 + [quiet])
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await env.sleep(timedelta(hours=3, minutes=5))  # autodev is at work at every look: the limit starts over
+        assert m.stages[-1] == "developing" and len(m.of("autodev_look")) == 12
+        await env.sleep(timedelta(hours=1))
+        assert m.stages[-1] == "developing"  # quiet, but not for two hours yet
+        await env.sleep(timedelta(hours=1, minutes=16))
+        await idle(h, m, "blocked")
+    detail = m.of("set_stage")[-1][1]
+    assert "mia-snippets issue #100: nothing from autodev for 2 h" in detail and "Round 1 started" in detail
+
+
+async def test_a_look_acts_on_a_pr_the_round_was_not_told_of_and_review_is_not_timed(env):
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(5, False, False, ""), pr_now=head(H1))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        await idle(h, m, "review")  # the head's crops were made without a pr_update
+        await env.sleep(timedelta(hours=5))  # a person is awaited at review, not autodev
+        assert m.stages[-1] == "review" and m.of("autodev_look") == [(100, None)]
+
+
+async def test_a_merge_that_does_not_come_ends_the_round(env):
+    said = "Approved, but merging failed: Pull Request has merge conflicts"
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(5, False, False, said), pr_now=head(H1))
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await approve_review(h, m, eid="13")
+        await idle(h, m, "merging")
+        await env.sleep(timedelta(hours=2, minutes=16))
+        await idle(h, m, "blocked")
+    detail = m.of("set_stage")[-1][1]
+    assert "nothing from autodev for 2 h" in detail and "merge conflicts" in detail and "PR #5" in detail
 
 
 async def test_revision_limit(env):
@@ -939,8 +1266,14 @@ async def test_revision_limit(env):
             await until(lambda sha=sha: (sha, "failure") in statuses(m))
             await idle(h, m, "testing")
         await wake(h, m, head(H3))
-        await idle(h, m, "needs-human")
+        await idle(h, m, "failed")
     assert "revision limit" in m.of("set_stage")[-1][1] and [a.sha for a in m.jobs() if a.n_crops] == [H1, H2]
+    # every head tested is a pass of its own: a start, and a result written where no stage write follows
+    assert m.stages == ["matching", "developing", "testing", "testing", "failed"]
+    first, second = (r for r in m.of("result") if r[2] is None)
+    assert (first[0], second[0]) == ("testing", "testing") and H1 in first[1] and H2 in second[1]
+    assert first[3] == [f"/w/i7-e11/crop-{H1}-1", f"/w/i7-e11/verify-{H1}-1"] and first[4]
+    assert [r[2] for r in m.of("result")][-1] is None  # no pass is open at the limit: `failed` stands alone
 
 
 async def test_merge_signal_before_test_finishes(env):
@@ -965,7 +1298,7 @@ async def to_needs_human_in_develop(h, m):
     """needs_snippet → snippets issue → h1's crop job is lost (an infrastructure failure) → needs-human."""
     await idle(h, m, "developing")
     await wake(h, m, head(H1))
-    await idle(h, m, "needs-human")
+    await idle(h, m, "failed")
 
 
 async def test_go_after_needs_human_resumes_the_snippet_pr(env):
@@ -981,7 +1314,7 @@ async def test_go_after_needs_human_resumes_the_snippet_pr(env):
         await wake(h, m, head(H1, "merged", MC))
         await idle(h, m, "done")
         st = await h.query(MiaDataDataset.status)
-    assert m.stages == ["matching", "developing", "testing", "needs-human", "testing", "review", "merging", "done"]
+    assert m.stages == ["matching", "developing", "testing", "failed", "testing", "review", "merging", "done"]
     assert m.of("admit") == [("11",), ("12",)] and m.of("open_snippet_issue") == [("i7-e11", None)]
     assert [a[1] for a in m.of("submit")] == ["match", "crop", "crop", "verify"]  # no second match
     keys = [a[0] for a in m.of("submit")]
@@ -993,9 +1326,45 @@ async def test_go_after_needs_human_resumes_the_snippet_pr(env):
     assert [t.test_id for t in st.tests] == [f"i7-e12-{H1[:12]}"]
 
 
+async def debugged_in_develop(env, h, m):
+    """needs_snippet → snippets issue → h1's crop job is lost → debugging → the debugger asks for its go."""
+    await idle(h, m, "developing")
+    await wake(h, m, head(H1))
+    await debugged(env, h, m)
+
+
+@pytest.mark.parametrize("adviser", ["debugger", "cleaner-advice"])
+async def test_a_go_with_advice_matches_again_while_the_snippet_pr_is_open(env, adviser):
+    """A develop round that failed and was debugged: a go that carries advice (the debugger's, the cleaner's
+    after its diagnosis) starts from the match, whose agent reads the advice, and a reader on main that fits
+    ends the round at review. Any other go resumes the PR."""
+    m = Mocks(debug_cycles=1, outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
+    async with started(env, m, signal="restart") as h:
+        await debugged_in_develop(env, h, m)
+        m.outcome = "matched"  # the advice names a reader that is on main
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor=adviser))
+        await idle(h, m, "review")
+    assert m.stages == ["matching", "developing", "testing", "debugging", "matching", "testing", "review"]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "debug", "match", "crop", "verify"]
+    assert not any("resuming" in stage[1] for stage in m.of("set_stage"))
+    assert m.of("open_snippet_issue") == [("i7-e11", None)]
+
+
+async def test_the_debuggers_go_resumes_the_snippet_pr_when_its_match_asks_for_a_reader_again(env):
+    """The advised match finds no reader on main either: the open PR is that reader, and its head is tested."""
+    m = Mocks(debug_cycles=1, outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
+    async with started(env, m, signal="restart") as h:
+        await debugged_in_develop(env, h, m)
+        m.states = {}  # the infrastructure is fixed
+        await h.signal(MiaDataDataset.restart, ev("go", "21", actor="debugger"))
+        await idle(h, m, "review")
+    assert m.stages == ["matching", "developing", "testing", "debugging", "matching", "testing", "review"]
+    assert "resuming" in m.of("set_stage")[-2][1] and m.of("open_snippet_issue") == [("i7-e11", None)]
+
+
 @pytest.mark.parametrize("now", [head(H1, "closed"), head(H1, "merged", MC)], ids=["closed", "merged"])
 async def test_go_after_needs_human_with_a_finished_pr_matches_again(env, now):
-    """The PR is gone by the time `go` arrives: a new match, which hands the snippets issue back for reuse."""
+    """The PR is gone by the time `go` arrives: a new match, and a reader it asks for gets a new snippets issue."""
     m = Mocks(outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
     async with started(env, m) as h:
         await to_needs_human_in_develop(h, m)
@@ -1003,9 +1372,9 @@ async def test_go_after_needs_human_with_a_finished_pr_matches_again(env, now):
         await h.signal(MiaDataDataset.go, ev("go", "12"))
         await idle(h, m, "developing")
         st = await h.query(MiaDataDataset.status)
-    assert m.stages == ["matching", "developing", "testing", "needs-human", "matching", "developing"]
+    assert m.stages == ["matching", "developing", "testing", "failed", "matching", "developing"]
     assert m.of("pr_state") == [(5,), (5,)] and [a[1] for a in m.of("submit")] == ["match", "crop", "match"]
-    assert m.of("open_snippet_issue") == [("i7-e11", None), ("i7-e12", 100)]
+    assert m.of("open_snippet_issue") == [("i7-e11", None), ("i7-e12", None)]
     assert (st.round_id, st.snippet_issue, st.pr) == ("i7-e12", 100, None) and not m.of("refuse_label")
 
 
@@ -1133,6 +1502,7 @@ DEVELOP_HISTORY = HISTORY.with_name("develop_history.json")
 LOCK_HISTORY = HISTORY.with_name("dataset_history_c.json")
 CANCEL_HISTORY = HISTORY.with_name("dataset_history_cancel.json")
 AWAITED_HISTORY = HISTORY.with_name("dataset_history_b.json")
+RESULTS_HISTORY = HISTORY.with_name("dataset_history_r.json")
 
 
 def _scrub(obj):
@@ -1198,6 +1568,20 @@ async def test_replay_dataset_history_b(env):
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 
+async def test_replay_dataset_history_r(env):
+    """The match → done run under the `stage-results` patch (each stage pass writes a start and a result), as
+    test_replay_dataset_history. Re-record this one alone, so the older fixtures keep their paths:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_r"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks()
+        async with started(env, m) as h:
+            await approve_review(h, m)
+            await idle(h, m, "done")
+            RESULTS_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-stage-results", RESULTS_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
 async def cancelled_mid_match(h, m):
     """Cancel the round while its match job runs, then let the abandoned wait end."""
     await until(lambda: m.of("await"))
@@ -1216,6 +1600,8 @@ async def test_cancel_ends_the_round_kills_its_job_and_a_new_go_starts_over(env)
         assert m.of("kill_job") == [(job,)] and m.of("await")[0][0] == job
         assert [a[1] for a in m.of("settle")] == ["mia-7-i7-e11-match-1"]  # the reservation does not stay open
         assert m.of("set_stage")[-1][:2] == ("cancelled", "cancelled by alice") and "read_match" not in m.names()
+        # the cancelled pass writes its own result: the write that sets `cancelled` carries it, with the killed job
+        assert m.of("result") == [("matching", "", "cancelled", ["/w/i7-e11/match-1"], False)]
         await h.signal(MiaDataDataset.go, ev("go", "13"))
         await idle(h, m, "review")
     assert m.stages == ["matching", "cancelled", "matching", "testing", "review"]
@@ -1238,14 +1624,14 @@ async def test_cancel_at_review_ends_the_round_and_releases_nothing_twice(env):
 async def test_a_cancel_with_no_round_running_is_refused(env):
     m = Mocks(outcome="blocked")
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
         await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
         await until(lambda: m.of("refuse_label"))
         await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))  # a redelivery: answered once
         await h.signal(MiaDataDataset.go, ev("go", "13"))
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert [a[0] for a in m.of("refuse_label")] == ["data:cancel"] and "no round" in m.of("refuse_label")[0][1]
-    assert m.stages == ["matching", "needs-human", "matching", "needs-human"] and m.of("kill_job") == []
+    assert m.stages == ["matching", "blocked", "matching", "blocked"] and m.of("kill_job") == []
 
 
 async def test_cancel_while_the_shadow_judge_job_runs_ends_the_round_and_publishes_nothing(env):
@@ -1289,7 +1675,7 @@ async def test_a_job_that_cannot_be_killed_is_said_and_the_dataset_needs_a_human
     async with started(env, m) as h:
         await until(lambda: m.of("await"))
         await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
-        await idle(h, m, "needs-human")
+        await idle(h, m, "failed")
         m.gate.set()
     detail = m.of("set_stage")[-1][1]
     assert "job-mia-7-i7-e11-match-1" in detail and "may still be running" in detail and "the broker is away" in detail
@@ -1298,9 +1684,9 @@ async def test_a_job_that_cannot_be_killed_is_said_and_the_dataset_needs_a_human
 
 async def test_cancel_kills_the_job_before_the_raw_lock_is_released(env):
     """One writer per raw cache: the lock a job ran under is given up only once the job is dead."""
-    m = Mocks(gate=asyncio.Event(), gate_on="smoke")
+    m = Mocks(gate=asyncio.Event(), gate_on="crop")
     async with started(env, m) as h:
-        await until(lambda: any("smoke" in call[1] for call in m.of("await")))
+        await until(lambda: any("crop" in call[1] for call in m.of("await")))
         await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
         await idle(h, m, "cancelled")
         m.gate.set()
@@ -1331,11 +1717,24 @@ async def test_run_again_after_cancelling_a_develop_round_reuses_its_snippet_iss
         await until(
             lambda: len(m.of("open_snippet_issue")) == 2 or m.stages[-1:] == ["developing"] and len(m.stages) > 3
         )
-        await until(lambda: m.stages.count("developing") == 2)
+        await until(lambda: m.stages.count("developing") == 2 or m.stages.count("testing") == 2)
     remembered = [call[1] for call in m.of("open_snippet_issue")]
     assert remembered[0] is None and (
         len(remembered) == 1 or remembered[1] == 100
     )  # resumed, or reopened by its number
+
+
+async def test_run_again_after_its_snippet_pr_was_closed_asks_for_a_new_snippet(env):
+    """A person closed the round's snippet PR so that another reader gets written. autodev has nothing left to do
+    in that PR's issue, so the next round opens a new one and does not read the closed PR as its own stop."""
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1, "closed"))
+        await idle(h, m, "blocked")
+        await h.signal(MiaDataDataset.go, ev("go", "12"))
+        await until(lambda: m.stages.count("developing") == 2)
+    assert m.of("open_snippet_issue") == [("i7-e11", None), ("i7-e12", None)]
 
 
 async def test_replay_dataset_history_cancel(env):
@@ -1355,10 +1754,11 @@ async def test_every_job_is_reserved_against_the_root_and_settled(env):
     async with started(env, m) as h:
         await approve_review(h, m)
         await idle(h, m, "done")
-    assert [a[2] for a in m.of("reserve")] == ["match", "smoke", "crop", "verify"]
+    assert [a[2] for a in m.of("reserve")] == ["match", "crop", "verify"]
     assert [a[1] for a in m.of("reserve")] == [a[0] for a in m.of("submit")]  # the reservation id is the job key
-    assert [a[0] for a in m.of("reserve")] == [PINS.root] * 4 and m.of("reserve")[0][3] == 5.0  # the agent's cap
+    assert [a[0] for a in m.of("reserve")] == [PINS.root] * 3 and m.of("reserve")[0][3] == 5.0  # the agent's cap
     assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")]  # one settle per reservation
+    assert [a[3] for a in m.of("settle")] == [0, 4096, 0]  # the crop job's download is charged to the root
     assert m.names().index("reserve") < m.names().index("submit")
 
 
@@ -1366,7 +1766,7 @@ async def test_a_refused_reservation_ends_the_round_naming_the_root(env):
     reason = "root o/data#7: usd 99.00 reserved or spent + 5.00 would exceed max_usd 100"
     m = Mocks(reservations={"match": Reservation(False, reason)})
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert "submit" not in m.names()
     assert m.of("set_stage")[-1][1] == f"root budget: {reason}"
 
@@ -1374,7 +1774,7 @@ async def test_a_refused_reservation_ends_the_round_naming_the_root(env):
 async def test_a_paused_operator_stops_the_round_before_its_first_job(env):
     m = Mocks(paused=True)
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
 
 
@@ -1388,7 +1788,7 @@ async def test_an_approve_is_written_as_an_assessment_before_the_crops_are_publi
         await idle(h, m, "done")
     (assessed,) = m.of("assess")  # the subject is <round id>:<test id>
     assert assessed[:2] == ("crops", "crop_set") and assessed[2].startswith("i7-e11:")
-    assert assessed[3:5] == ("approve", "human:alice")
+    assert assessed[3:5] == ("approve", "human:alice") and assessed[6] == "12"  # the approve action's own id
     assert m.names().index("assess") < m.names().index("publish_crops")
 
 
@@ -1396,10 +1796,10 @@ async def test_an_approve_the_policy_refuses_publishes_nothing(env):
     m = Mocks(assess_authorized=False)
     async with started(env, m) as h:
         await approve_review(h, m)
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert "publish_crops" not in m.names()
     assert m.of("set_stage")[-1][1] == (
-        "approve recorded as as-1, but publication is not authorized: rejected by human:bob at t: wrong channel"
+        "approve recorded as as-1, but saving the crops is not authorized: rejected by human:bob at t: wrong channel"
     )
 
 
@@ -1430,7 +1830,7 @@ async def test_revoke_after_done_ends_in_needs_human_and_lists_the_blast_radius(
         await approve_review(h, m)
         await idle(h, m, "done")
         await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert m.of("revoke_dataset") == [("i7-e11", "alice", "77")]
     detail, extra = m.of("set_stage")[-1][1:3]
     assert (
@@ -1447,17 +1847,17 @@ async def test_revoke_during_a_later_review_is_taken_and_ends_the_round(env):
         await h.signal(MiaDataDataset.go, ev("go", "13"))
         await idle(h, m, "review")
         await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert m.of("revoke_dataset") == [("i7-e13", "alice", "77")] and len(m.of("publish_crops")) == 1
 
 
 async def test_revoke_with_nothing_published_is_refused(env):
     m = Mocks(outcome="blocked", revocation=Revocation(""))  # the activity finds no manifest
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
         await h.signal(MiaDataDataset.revoke, ev("revoke", "77", REVOKE_AT))
         await until(lambda: m.of("refuse_label"))
-    assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this dataset has published no crops")
+    assert m.of("refuse_label")[-1][:2] == ("data:revoke", "nothing to revoke: this dataset has no saved crops")
     assert len(m.of("revoke_dataset")) == 1
 
 
@@ -1475,14 +1875,14 @@ async def test_a_refused_revoke_during_review_leaves_the_round_under_review(env)
 async def test_a_failed_submit_settles_its_reservation(env):
     m = Mocks(submit_error="csub refused the job")
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "failed")
     assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")] == [m.of("submit")[0][0]]
 
 
 async def test_a_pause_mid_round_stops_at_the_next_job(env):
     m = Mocks(paused=[False, True])
     async with started(env, m) as h:
-        await idle(h, m, "needs-human")
+        await idle(h, m, "blocked")
     assert m.of("set_stage")[-1][1].startswith("paused by the operator") and "submit" not in m.names()
     assert m.of("prepare_match")  # the round got past admission and stopped at its first job
 
@@ -1494,7 +1894,7 @@ async def test_a_concurrency_refusal_waits_and_tries_again(env):
         await until(lambda: m.of("reserve"))
         await env.sleep(timedelta(minutes=3))  # past the first wait (poll_minutes)
         await idle(h, m, "review")
-    assert [a[2] for a in m.of("reserve")][:2] == ["match", "match"] and len(m.of("submit")) == 4
+    assert [a[2] for a in m.of("reserve")][:2] == ["match", "match"] and len(m.of("submit")) == 3
 
 
 # --- the crop judge in shadow (spec autonomous-gates §9) -------------------------------------------------
@@ -1505,10 +1905,9 @@ async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env)
     async with started(env, m) as h:
         await idle(h, m, "review")
         names = m.names()
-        assert names.index("comment") < names.index("prepare_judge") < names.index("read_judge")
-        assert m.stages.index("review") < len(m.stages) and names.index(
-            "set_stage", names.index("comment")
-        ) < names.index("prepare_judge")  # the gate opens first
+        review = [at for at, name in enumerate(names) if name == "set_stage"][2]  # it carries the crops report
+        assert m.stages[2] == "review" and "verified" in m.of("result")[1][1]
+        assert review < names.index("prepare_judge") < names.index("read_judge")  # the gate opens first
         (prepared,) = m.of("prepare_judge")
         assert (
             prepared[0] == "crops" and prepared[3] == 16 and prepared[4] == SHA[:12]
@@ -1523,6 +1922,18 @@ async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env)
         await approve_review(h, m)
         await idle(h, m, "done")
     assert "publish_crops" in m.names()
+    # the judge's own entry links its job: review's result, which reports the person's verdict, does not
+    assert next(r for r in m.of("result") if r[0] == "review")[3] == []
+
+
+async def test_a_judge_that_leaves_no_entry_of_its_own_is_linked_by_the_reviews_result(env):
+    m = Mocks(crop_judge="shadow", judge_result=ApplicationError("the registry is away", non_retryable=True))
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await until(lambda: any("did not run to the end" in call[0] for call in m.of("comment")))
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert next(r for r in m.of("result") if r[0] == "review")[3] == [f"/w/i7-e11/judge-crops-{SHA[:12]}-1"]
 
 
 async def test_shadow_judge_failure_is_a_comment_not_a_stop(env):

@@ -266,14 +266,6 @@ class GitHub:
                 )
         return found
 
-    async def last_closed_at(self, issue: int) -> str | None:
-        """`created_at` of the most recent `closed` event of the issue, or None when it was never closed."""
-        found = None
-        async for event in self._paged(f"/repos/{self.repo}/issues/{issue}/events"):
-            if event.get("event") == "closed":
-                found = event.get("created_at")
-        return found
-
     async def label_actor(self, issue: int, label: str) -> str | None:
         """Login of whoever most recently added `label` to the issue."""
         return (await self.label_event(issue, label))[0]
@@ -284,16 +276,6 @@ class GitHub:
                 "POST", f"/repos/{self.repo}/issues", json={"title": title, "body": body, "labels": labels}
             )
         ).json()
-
-    async def find_issue_by_marker(self, marker: str, labels: list[str] | None = None) -> dict | None:
-        """First issue (open or closed) whose body contains `marker`. Callers cache the result."""
-        params = {"state": "all", **({"labels": ",".join(labels)} if labels else {})}
-        return next((issue for issue in await self.list_issues(**params) if marker in (issue.get("body") or "")), None)
-
-    async def find_comment(self, number: int, marker: str) -> dict | None:
-        return next(
-            (comment for comment in await self.issue_comments(number) if marker in (comment.get("body") or "")), None
-        )
 
     async def edit_comment(self, comment_id: int, body: str) -> dict:
         return (

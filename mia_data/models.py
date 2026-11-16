@@ -8,15 +8,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+DEBUGGER = "debugger"  # the actor of the go that runs a round again after it was debugged
+CLEANER = "cleaner"  # the actor of what the cleaner asks for (spec cleaner §4.7)
+CLEANER_ADVISED = "cleaner-advice"  # the cleaner's go that carries its diagnosis' advice as its note
+ADVISERS = (DEBUGGER, CLEANER_ADVISED)  # whose go matches first, with its note as the match agent's advice
+RERUNNERS = (DEBUGGER, CLEANER, CLEANER_ADVISED)  # who runs a round again for whoever asked for the one before
+
 
 @dataclass
 class LabelEvent:
-    """A human adding `data:go`, `data:approve` or `data:reject` to a dataset issue, delivered as a signal."""
+    """An action somebody asked of a subject through buffer-api, delivered to its workflow as a signal."""
 
     kind: str  # go | approve | reject; mia-buffers adds plan
-    event_id: str
+    event_id: str  # the action's id in the registry
     actor: str
-    at: str  # ISO-8601 from GitHub
+    at: str  # ISO-8601, as buffer-api stored the action
 
 
 @dataclass
@@ -30,6 +36,16 @@ class PrUpdate:
     snippet_issue: int
     needs_human: bool  # the snippets issue has `snippets:needs-human`
     url: str | None = None  # the PR's html_url
+
+
+@dataclass
+class AutodevLook:
+    """What a round that waits for autodev finds when it looks at the snippets issue itself."""
+
+    pr: int | None  # the PR the round follows, else the open one on the issue's branch
+    working: bool  # the issue has `snippets:working`: an agent round is running
+    stopped: bool  # the issue is closed or has `snippets:needs-human`
+    last_word: str  # autodev's last comment on the issue or the PR: one line, cut and neutralized
 
 
 @dataclass
@@ -51,6 +67,7 @@ class JobDone:
     job_id: str
     state: str
     exit_code: int | None
+    bytes_fetched: int = 0  # what a crop job says it downloaded (its report.json); 0 for any other job
 
 
 @dataclass
@@ -91,6 +108,16 @@ class DatasetState:
     attempts: dict[str, int] = field(default_factory=dict)  # stage -> attempts used
     pending: list[PrUpdate] = field(default_factory=list)  # PR updates not yet acted on
     published: bool = False  # some round of this issue published crops: there is something a data:revoke withdraws
+    restart: LabelEvent | None = None  # the go a run was rolled over for: the new run's first step is its round
+    debugs: int = 0  # debugging cycles used since the last go that was not the debugger's
+    # the stage pass whose result entry is still to be written, and what the round has gathered for it; each
+    # stage write carries it out (spec job-records §3.6)
+    passes: dict[str, int] = field(default_factory=dict)  # stage -> passes begun this round
+    pass_stage: str = ""  # the open pass; "" when no result is due
+    pass_jobs: list[str] = field(default_factory=list)  # workspaces of the jobs the open pass submitted
+    result: str = ""  # what the open pass found
+    result_binding: bool = False  # whether its result entry shows the round's binding
+    waiting_since: str | None = None  # when the round last heard from autodev while it waits for it (ISO time)
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:
@@ -118,13 +145,24 @@ class JobArgs:
 class MatchResult:
     """What the match agent concluded about the dataset, after the worker checked its binding."""
 
-    outcome: str  # matched | needs_snippet | blocked (blocked = needs-human, with the reason)
+    outcome: str  # matched | needs_snippet | blocked | failed (the last two stop the round, with the reason)
     reason: str = ""
     binding_path: str | None = None  # matched: the checked binding, under state_dir
     binding_hash: str | None = None
     shapes: dict | None = None  # wire format: recorded histories carry it; unused
     draft: dict | None = None  # needs_snippet: draft_binding, what_fails, tried
     reasons: list[str] = field(default_factory=list)  # matched: the binding's reasons
+
+
+@dataclass
+class DebugResult:
+    """What the debugging agent concluded about a failed round: `rerun` (a new round may pass, with `advice` for
+    its match agent), `blocked` (a person has to decide or change something first) or `failed` (it left nothing
+    readable). `diagnosis` is what it found, for the timeline."""
+
+    outcome: str
+    diagnosis: str = ""
+    advice: str = ""
 
 
 @dataclass
@@ -151,6 +189,7 @@ class VerifyResult:
     n_effective: int | None = None  # the crop job's n, lowered by capacity (its report.json); None if unknown
     bytes_fetched: int = 0  # the crop job's, from its report.json
     crop_errors: list[str] = field(default_factory=list)  # the crop job's own errors (report.json): why it failed
+    host_not_allowed: str | None = None  # the host the crop job was refused (report.json), with its redirect chain
 
 
 @dataclass
@@ -165,6 +204,11 @@ class RoundLimits:
     agent_max_budget_usd: float = 5.0  # what a match agent run may cost: reserved against the root before it runs
     crop_judge: str = "off"  # judge.crops.mode: off | shadow | active (spec autonomous-gates §9)
     judge_max_budget_usd: float = 2.0  # what one judge run may cost: reserved like the match agent's
+    debug_cycles: int = 0  # limits.debug_cycles: failed rounds debugged and run again before one stops as failed
+    debug_wait_min: int = 5  # limits.debug_wait_min: the wait between a failure and its debugging agent
+    autodev_quiet_hours: float = (
+        2.0  # limits.autodev_quiet_hours: how long a round waits on an autodev that is not at work
+    )
 
 
 @dataclass
@@ -215,7 +259,7 @@ class GalleryResult:
 class JudgeResult:
     """What the judge said about a subject, after policy read it (spec autonomous-gates §4): `verdict` is the
     judge's own, `effective` what the assessment records (a reject without a `bad` finding is an approve, low
-    confidence is an escalate). `comment` is rendered for the issue; `assessment` is "" without a registry."""
+    confidence is an escalate). `comment` is rendered for the timeline; `assessment` is "" when its write to the registry failed."""
 
     verdict: str
     effective: str

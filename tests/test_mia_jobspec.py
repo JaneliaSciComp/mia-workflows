@@ -18,6 +18,8 @@ from mia_data.jobspec import (
     assert_pin,
     check_hosts_allowed,
     crop_job,
+    debug_job,
+    debug_prompt,
     harness_pin,
     harness_snapshot,
     judge_job,
@@ -307,12 +309,34 @@ def test_every_builder_refuses_a_moved_harness(tmp_path):
             b()
 
 
+def test_debug_job_is_the_match_agents_and_may_reach_the_checked_bindings_hosts(tmp_path):
+    cfg, ws = _cfg(tmp_path), _ws(tmp_path)
+    pins = _pins(cfg)
+    binding = {**BINDING, "labels": [{"snippet": "x", "urls": ["https://labels.example.org/l.zip"], "params": {}}]}
+    (ws / "binding.yaml").write_text(yaml.safe_dump(binding))
+    match, debug = match_job(cfg, _args(ws, pins)), debug_job(cfg, _args(ws, pins))
+    assert "labels.example.org" not in match.allow_hosts  # a match workspace's binding is the agent's own draft
+    assert debug.allow_hosts == sorted([*match.allow_hosts, "labels.example.org"])
+    assert debug.name.endswith("-debug") and debug.command == match.command and debug.agent == "claude"
+    assert (debug.ro_mounts, debug.rw_mounts, debug.walltime_min) == (
+        match.ro_mounts,
+        match.rw_mounts,
+        match.walltime_min,
+    )
+    prompt = debug_prompt(pins)
+    assert "rec-1" in prompt and "$" not in prompt
+    for word in ("failure.md", "round/", "rerun", "blocked", "outcome.json", "probe.yaml"):
+        assert word in prompt
+
+
 def test_match_prompt_names_pins_and_outcomes(tmp_path):
-    p = match_prompt(_pins(_cfg(tmp_path)))
+    pins = _pins(_cfg(tmp_path))
+    p = match_prompt(pins)
     assert "rec-1" in p and "c" * 40 in p and "$" not in p
     for o in ("matched", "needs_snippet", "blocked", "host_not_allowed", "outcome.json"):
         assert o in p
     assert "ineligible" not in p and "256" not in p  # size is the buffer plan's call (spec §12)
+    assert "advice.md" not in p and "advice.md" in match_prompt(pins, advised=True)
 
 
 def test_judge_job_is_read_only_and_short(tmp_path):

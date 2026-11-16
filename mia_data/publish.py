@@ -30,7 +30,8 @@ MAX_INDEX_FILE = 1 << 20  # binding.yaml or manifest.json, read by the service's
 
 
 class Conflict(RuntimeError):
-    """A crop exists with different checksums (or its source changed since verify): needs a human."""
+    """A crop exists with different checksums (or its source changed since verify), or the dataset folder is
+    another record's: needs a human."""
 
 
 def check_crop_id(crop_id: Any) -> str:
@@ -66,7 +67,19 @@ def _place_preview(crop_dir: Path, crop_id: str, previews: Sequence[Path]) -> No
 
 def _assert_same(dest: Path, files: dict, crop_id: str) -> None:
     if _hashes(dest) != files:
-        raise Conflict(f"{crop_id} is already published with different checksums")
+        raise Conflict(f"{crop_id} is already saved with different checksums")
+
+
+def check_owner(dataset_dir: Path, record: str) -> None:
+    """Raise Conflict when the folder's binding.yaml names another record. Two catalog records can share a folder
+    name (the same dataset under two accessions); the one published first owns the folder."""
+    try:
+        binding = yaml.safe_load(read_untrusted(dataset_dir, "binding.yaml", MAX_INDEX_FILE) or "")
+    except yaml.YAMLError:
+        return
+    owner = binding.get("record") if isinstance(binding, dict) else None
+    if isinstance(owner, str) and owner != record:
+        raise Conflict(f"{record}: its dataset folder {dataset_dir.name} belongs to record {owner}")
 
 
 def publish(

@@ -6,7 +6,7 @@ turns that into a rule, not a crash. Approximations the record schema forces (sp
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from mia_data.catalog import FAMILIES, dataset_folder
@@ -60,7 +60,6 @@ class Facts:
     download_method: str | None
     download_host: str | None
     doi: str | None
-    all_arrays: list[ArrayFacts] = field(default_factory=list)
     folder: str | None = None  # mia-data's dataset folder; None where mia-data could not place the dataset
 
     @property
@@ -134,6 +133,5 @@ def facts(path: str, record: dict) -> Facts:
         download_method=data.get("download_method"),
         download_host=urlparse(url).hostname if url else None,
         doi=record.get("doi"),
-        all_arrays=arrays,
         folder=folder,
     )

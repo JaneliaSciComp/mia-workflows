@@ -30,15 +30,17 @@ from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
 from mia_core.hosts import PolicyError, generate_policy
+from mia_core.jobrecord import RECORDS_DIR
 from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
+from mia_data.binding import record_gaps
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
-from .dispatch import DispatchError
+from .dispatch import DispatchError, dispatcher_for
 from .explore import (
     DATASET_FILTERS,
     DATASET_SORTS,
@@ -54,7 +56,7 @@ from .explore import (
 )
 from .hosts import HostCheck, Needed
 from .jobspec import levels_key
-from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger
+from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger, head_of
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
@@ -64,9 +66,11 @@ from .sync import scan_assets, scan_storage
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
-# no row = unprepared; `ineligible` ended with spec §12; `revoked` since autonomous-gates §6
+# no row = unprepared; `revoked`: withdrawn (spec autonomous-gates §6)
 DATASET_STATES = ("in-progress", "prepared", "needs-human", "revoked")
 CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
+# a job's gzipped record is kilobytes, an agent's with a long conversation a few megabytes; a larger file is not sent
+JOB_RECORD_LIMIT = 16 << 20
 CATALOG_REF_RE = re.compile(r"^[0-9a-f]{40}$")  # a commit, never a branch
 log = logging.getLogger(__name__)
 UI_NAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")  # a file of the page by basename; no dotfile, no "/"
@@ -84,10 +88,17 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
 # kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
 SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
-OFF_LINE = ("needs-human", "cancelled")  # where a round can end from any step: not steps of a lifecycle themselves
+# where a round can go from any step: not steps of a lifecycle themselves
+OFF_LINE = ("debugging", "failed", "blocked", "needs-human", "cancelled")
 # kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
 LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
 NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
+# Shelving (spec shelved-subjects): a person sets a subject aside with a reason. Its stage stays; its status reads
+# `shelved`, it takes `unshelve` alone, and a shelved dataset reads `shelved` to every plan and request. A subject
+# with one of these status words (no round open) also takes `shelve`; so does one whose round waits for a person's
+# verdict (`waiting`, and its stage takes `cancel`), and that shelve cancels the round first.
+SHELVABLE = ("not started", "stuck", "done")
+HOLD_ACTIONS = ("shelve", "unshelve")  # carried out by this service: the subject's workflow hears of neither
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
 DROP_QUIET_S = 60  # `dropped` is refused while a file under incoming/ changed this recently
@@ -248,13 +259,48 @@ class MirroredBody(_Strict):
     comment_url: str | None = None
 
 
+def _action_entry(action: dict) -> tuple[str, str]:
+    """The timeline entry (body, marker) of an action that was carried out: who asked for what, and with what."""
+    payload = action["payload"]
+    text = f"**Action:** `{action['action']}` by `{action['actor']}`"
+    if payload.get("plan_first"):
+        text += " (plan first)"
+    if payload.get("records"):
+        text += ": " + ", ".join(f"`{neutralize(record)}`" for record in payload["records"])
+    if payload.get("record"):
+        text += f": `{neutralize(payload['record'])}`"
+    if note := payload.get("note"):
+        # the mirror posts this under the bot's name: it must ping nobody (no mentions; spec §2 non-goals)
+        quiet = neutralize(note)[:16000].replace("@", "@\u200b")
+        text += "\n\n" + "\n".join(f"> {line}" for line in quiet.splitlines())
+    if spec := payload.get("spec"):  # the timeline, and so the issue, says exactly what ran
+        fenced = neutralize(spec).replace("```", "` ` `")
+        text += f"\n\n```yaml\n{fenced}{'' if fenced.endswith(chr(10)) else chr(10)}```"
+    return text, f"<!-- mia: action {action['id']} -->"
+
+
 class ActionBody(_Strict):
     """One thing a person (or a worker for a request) asks of a subject (spec webapp-actions §4.2)."""
 
-    action: Literal["go", "approve", "reject", "revoke", "keep", "retire", "dropped", "cancel", "stop"]
+    action: Literal[
+        "go",
+        "approve",
+        "reject",
+        "revoke",
+        "keep",
+        "retire",
+        "dropped",
+        "cancel",
+        "stop",
+        "shelve",
+        "unshelve",
+        "recheck",
+    ]
     key: str | None = None  # the sender's own name for this request: a repeat is the same action
-    revision: int | None = None  # approve, reject: the subject's revision the person was looking at
-    note: str = ""  # reject: the feedback for the agent
+    # the subject's revision the sender was looking at: required of a verdict, checked on any action that has it
+    revision: int | None = None
+    run: str | None = None  # stop: the run to end; one that is over already is not replaced by a later run
+    note: str = ""  # reject: the feedback for the agent; shelve: why it can wait
     root: str | None = None  # a worker's go: the root request this round is charged to
     actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
     spec: str | None = None  # a buffer's or a request's go: the YAML text that runs (default: the stored one)
@@ -283,6 +329,41 @@ class IssueBody(_Strict):
     issue: int
 
 
+CASE_STATES = ("open", "working", "waiting", "resolved", "needs-person", "dropped")
+CASES_OPEN = ("open", "working", "waiting", "needs-person")  # what `GET /cases` lists whatever its age
+CaseState = Literal["open", "working", "waiting", "resolved", "needs-person", "dropped"]
+
+
+class CaseBody(_Strict):
+    """A case the cleaner opens: what is stuck (a subject, or with no number something left behind), the rule
+    that matched and what was seen (spec cleaner §4.8)."""
+
+    kind: str
+    number: int | None = None
+    key: str
+    rule: str
+    state: CaseState = "open"
+    data: dict = {}
+
+
+class CaseUpdate(_Strict):
+    state: CaseState | None = None
+    rule: str | None = None
+    data: dict | None = None
+
+
+class TerminateBody(_Strict):
+    namespace: str
+    id: str
+    run_id: str
+    reason: str
+
+
+class WorkerBody(_Strict):
+    commit: str | None  # the commit the checkout was at when the worker started; None when it could not tell
+    code: str | None = None  # the digest of the code it loaded (`mia_core.checkout.code_digest`)
+
+
 class AssessmentBody(_Strict):
     """One assessment as `mia_core.judge.policy.new_assessment` shapes it (spec autonomous-gates §5)."""
 
@@ -304,6 +385,7 @@ class AssessmentBody(_Strict):
     model: str = ""
     prompt_version: str = ""
     coverage: dict | None = None
+    action: int | None = None
 
 
 class ReserveBody(_Strict):
@@ -392,14 +474,18 @@ def _asset_haystack(row: dict) -> tuple:
 ROUND_REF_RE = re.compile(r"^i(\d+)-e")  # a round id starts a crop set's ref: i<subject number>-e<event>
 
 
-def _assessed_record(subject: dict, numbers: dict[int, str], artifacts: dict[str, str]) -> str | None:
-    """The dataset a decision is about: a staged artifact's record, or the dataset of the round a crop set came
-    from. A snippet PR's head (`pr_head`) belongs to no one dataset."""
+def _assessed_record(
+    subject: dict, numbers: dict[int, str], artifacts: dict[str, str], heads: dict[str, str]
+) -> str | None:
+    """The dataset a decision is about: a staged artifact's record, the dataset of the round a crop set came from,
+    or, for a snippet PR's head, the dataset whose crops were made from that head (`heads`: head -> record)."""
     ref = str(subject.get("ref") or "")
     if subject.get("kind") == "artifact":
         return artifacts.get(ref.rsplit("/", 1)[-1])
     if subject.get("kind") == "crop_set" and (found := ROUND_REF_RE.match(ref)):
         return numbers.get(int(found.group(1)))
+    if subject.get("kind") == "pr_head":
+        return heads.get(head_of(subject) or "")
     return None
 
 
@@ -463,6 +549,8 @@ ROUTES = [
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
     ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
+    ("GET", re.compile(r"^/gallery/i(\d+)-e(\d+)/([0-9a-f]{40})/([^/]+)/(raw|overlay)\.png$"), "gallery_png", "read"),
+    ("GET", re.compile(r"^/jobs/(.+)$"), "job_record", "read"),
     ("POST", re.compile(r"^/plan$"), "plan", "read"),  # a POST only to carry the spec text; it writes nothing
     ("POST", re.compile(r"^/sync/datasets$"), "sync_datasets", "worker"),
     ("POST", re.compile(r"^/sync/assets$"), "sync_assets", "worker"),
@@ -505,6 +593,16 @@ ROUTES = [
     ("GET", re.compile(r"^/health$"), "health", "read"),
     ("GET", re.compile(r"^/run/([a-z]+)/(\d+)$"), "run_status", "read"),
     ("POST", re.compile(r"^/hosts/missing$"), "hosts_missing", "read"),
+    ("POST", re.compile(r"^/cases$"), "open_case", "worker"),
+    ("PUT", re.compile(r"^/cases/(\d+)$"), "update_case", "worker"),
+    ("GET", re.compile(r"^/cases$"), "cases", "read"),
+    ("PUT", re.compile(r"^/cleaner$"), "put_cleaner", "worker"),
+    ("GET", re.compile(r"^/cleaner$"), "cleaner", "read"),
+    ("PUT", re.compile(r"^/workers/([^/]+)$"), "put_worker", "worker"),
+    ("GET", re.compile(r"^/workers$"), "workers", "read"),
+    ("GET", re.compile(r"^/runs$"), "runs", "read"),
+    ("POST", re.compile(r"^/runs/terminate$"), "terminate_run", "worker"),
+    ("GET", re.compile(r"^/schedules$"), "schedules", "read"),
 ]
 
 
@@ -518,6 +616,9 @@ class BufferService:
         *,
         token: str | None = None,
         storage_root: Path | None = None,
+        work_root: Path | None = None,
+        snippets_work_root: Path | None = None,
+        snippets_repo: str | None = None,
         raw_root: Path | None = None,
         staged_root: Path | None = None,
         locks: LockDir | None = None,
@@ -534,6 +635,11 @@ class BufferService:
         self.token = token  # None disables the worker check (tests, a dev service)
         self.stale_s = stale_s
         self.storage_root = storage_root  # mia-data's published datasets; None disables the datasets sync
+        self.work_root = work_root  # the rounds' job workspaces, for a round's crops before it publishes; None: none
+        # where autodev's jobs on the snippets repo leave their records, and the directory they are under there
+        # (`<owner>__<repo>`, autodev's `repo_slug`); None: that service's records are not served
+        self.snippets_work_root = snippets_work_root if snippets_repo else None
+        self.snippets_slug = (snippets_repo or "").replace("/", "__")
         self.raw_root, self.staged_root = raw_root, staged_root  # the assets sync scans these; None skips one
         self.locks = locks  # the workers' lock files, shown read-only; None shows none
         self.archive_dir = archive_dir  # a retire writes the buffer's draws here; None keeps them (a dev service)
@@ -746,7 +852,30 @@ class BufferService:
             raise HttpError(422, "a dataset is a JSON object")
         if "state" in fields and fields["state"] not in DATASET_STATES:
             raise HttpError(422, f"state must be one of {list(DATASET_STATES)}, got {fields['state']!r}")
-        return 200, self.ledger.put_dataset(record, fields), {}
+        row = self.ledger.put_dataset(record, fields)
+        if fields.get("state") == "prepared":
+            self._recheck_requests(record)
+        return 200, row, {}
+
+    def recheck_resting(self) -> None:
+        """Tell every request resting at `needs-human` to look at its datasets again: run at start, so one whose
+        datasets settled with nobody telling it (Temporal was away, or they settled before it rested) is found."""
+        self._recheck_requests(None)
+
+    def _recheck_requests(self, record: str | None) -> None:
+        """A dataset was shelved or became prepared: tell each request resting at `needs-human` that names it to
+        look at its datasets again (`MiaPrep.recheck`); the request moves itself to `done` when each is prepared
+        or shelved. One that selects by rule names no record here, so it is told too, and with no record every
+        resting request is. Best effort: the write that led here stands, and the next start tells them again."""
+        if self.dispatcher is None:
+            return
+        for request in self.ledger.find_subjects(kind="prep"):  # ponytail: reads every request, as `_catalog_dataset`
+            if request["stage"] != "needs-human" or (record and record not in (_prep_records(request) or [record])):
+                continue
+            try:
+                self.dispatcher.signal_running("prep", request["number"], "recheck")
+            except DispatchError as error:
+                log.warning("request %s not told to look again (%s): %s", request["key"], record or "start", error)
 
     def _get_dataset(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
         row = self.ledger.dataset(record)
@@ -848,17 +977,48 @@ class BufferService:
 
     # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
 
-    def _subject_view(self, row: dict) -> dict:
-        """The row plus its status word, the actions its stage accepts (sorted, for a stable page) and `asked`:
-        the action that was sent to its workflow and that the workflow has not answered yet. Until it does the
-        stage is still the old one, and the page must not offer that stage's buttons as if nothing was clicked."""
+    def _rules(self, row: dict, hold: dict | None, gaps: list[str]) -> tuple[str, frozenset[str]]:
+        """A subject's status word and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
+        dataset whose record cannot be run (`gaps`: no Start until a synced catalog holds one that can), with
+        `shelve` while no round is working and none was just asked for (a round that waits for a verdict is
+        cancelled by the shelve, `_hold`). A shelved subject (`hold`) is `shelved` and takes `unshelve` alone."""
+        if hold is not None:
+            return "shelved", frozenset({"unshelve"})
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
-        asked = None
-        if (held := self._asked.get((row["kind"], row["number"]))) is not None:
-            action, since = held
-            if (wait_s := ASKED_WAIT_S - (time.monotonic() - since)) > 0:
-                asked = {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
-        return {**row, "status": status, "actions": sorted(actions), "asked": asked}
+        if gaps:
+            actions = actions - {"go"}
+        resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
+        if resting and self._asking(row["kind"], row.get("number")) is None:
+            actions = actions | {"shelve"}
+        return status, actions
+
+    def _asking(self, kind: str, number: int | None) -> dict | None:
+        """The action that was sent to the subject's workflow and that the workflow has not answered yet, while
+        its wait lasts."""
+        if number is None or (held := self._asked.get((kind, number))) is None:
+            return None
+        action, since = held
+        if (wait_s := ASKED_WAIT_S - (time.monotonic() - since)) <= 0:
+            return None
+        return {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
+
+    def _subject_view(self, row: dict, holds: dict[tuple[str, int], dict] | None = None) -> dict:
+        """The row plus its status word, the actions it accepts (`_rules`; sorted, for a stable page), its hold
+        when it is shelved, and `asked`: the action that was sent to its workflow and that the workflow has not
+        answered yet. Until it does the stage is still the old one, and the page must not offer that stage's
+        buttons as if nothing was clicked. `holds`: `Ledger.shelved()`, read once by a caller with many rows."""
+        hold = (self.ledger.shelved() if holds is None else holds).get((row["kind"], row["number"]))
+        gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
+        status, actions = self._rules(row, hold, gaps)
+        asked = self._asking(row["kind"], row["number"])
+        return {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
+
+    def _gaps(self, record: str) -> list[str]:
+        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for a round to run
+        (`record_gaps`); none for a record no synced catalog holds. Read from the catalog on every call, so a
+        record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
+        found = self._catalog_record(record)
+        return record_gaps(found) if found is not None else []
 
     def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
         if kind not in SUBJECT_RULES:
@@ -883,7 +1043,8 @@ class BufferService:
         if kind not in SUBJECT_RULES:
             raise HttpError(404, f"no subjects of kind {kind!r}")
         page = self._page_of(query, SUBJECT_SORTS)
-        subjects = [self._subject_view(row) for row in self.ledger.find_subjects(kind=kind)]
+        holds = self.ledger.shelved()
+        subjects = [self._subject_view(row, holds) for row in self.ledger.find_subjects(kind=kind)]
         if page is None:
             return 200, {"subjects": subjects}, {}
         rows, total = paged(subjects, page, SUBJECT_SORTS, _subject_haystack)
@@ -892,8 +1053,11 @@ class BufferService:
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
         """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
         for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
-        last day that did not reach Temporal (each with its subject, for the Retry)."""
-        views = [self._subject_view(row) for row in self.ledger.find_subjects()]
+        last day that did not reach Temporal (each with its subject, for the Retry). A shelved subject is not
+        among them: `shelved` counts those, and `?shelved=1` lists them instead. `kind` narrows the list to
+        one kind of subject; `kinds` counts every kind's share of the whole list."""
+        holds = self.ledger.shelved()
+        views = [self._subject_view(row, holds) for row in self.ledger.find_subjects()]
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
         for index, view in enumerate(views):
             if view["kind"] == "buffer" and "dropped" in view["actions"]:
@@ -902,16 +1066,29 @@ class BufferService:
                 board = self.ledger.buffer_datasets(f"i{view['number']}-e{gos[-1]['id']}") if gos else []
                 if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
                     views[index] = {**view, "drops": drops}
+        # what the cleaner could not resolve, on the subject's row
+        for case in self.ledger.cases(("needs-person",)):
+            for index, view in enumerate(views):
+                if (view["kind"], view["number"]) == (case["kind"], case["number"]) and "cleaner" not in view:
+                    views[index] = {**view, "cleaner": case["data"].get("needs", "")}
         failed = []
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
-            failed.append({**action, "subject": self._subject_view(found[0]) if found else None})
-        needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+            failed.append({**action, "subject": self._subject_view(found[0], holds) if found else None})
+        if query.get("shelved"):
+            needs = [view for view in views if view["shelved"]]
+        else:
+            needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+        kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
+        if (kind := query.get("kind")) is not None:
+            if kind not in SUBJECT_RULES:
+                raise HttpError(422, f"kind must be one of {list(SUBJECT_RULES)}, got {kind!r}")
+            needs = [view for view in needs if view["kind"] == kind]
         page = self._page_of(query, SUBJECT_SORTS)
         if page is None:
-            return 200, {"needs": needs, "failed": failed}, {}
+            return 200, {"needs": needs, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
         rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
-        return 200, {"needs": rows, "total": total, "failed": failed}, {}
+        return 200, {"needs": rows, "total": total, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
@@ -1071,6 +1248,8 @@ class BufferService:
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
         actor = self._actor(headers, parsed)
+        if parsed.action == "go" and (gaps := self._gaps(record)):  # before a subject is created for it
+            raise HttpError(409, f"the record cannot be run: {'; '.join(gaps)}")
         subject = self.ledger.subject("dataset", record)
         if subject is None:
             if parsed.action != "go":
@@ -1082,6 +1261,12 @@ class BufferService:
             # workflow id, rounds and budget root are built from it
             known = (self.ledger.dataset(record) or {}).get("issue")
             subject = self.ledger.create_subject("dataset", record, number=known if isinstance(known, int) else None)
+        # a subject no workflow has written (revision 0) is at the stage its dataset's row holds: a round that
+        # runs without a subject writes its stage there alone, and it takes what that stage takes
+        stage = (self.ledger.dataset(record) or {}).get("data_stage")
+        if subject["revision"] == 0 and stage in SUBJECT_RULES["dataset"] and stage != subject["stage"]:
+            subject = self.ledger.adopt_subject("dataset", subject["number"], record, stage=stage, data=subject["data"])
+            self.changes.announce("dataset", subject["number"])
         payload = {name: value for name, value in (("note", parsed.note), ("root", parsed.root)) if value}
         needed = (partial(self._needed, records=[record])) if parsed.action == "go" else None
         return self._act_on(subject, parsed, actor, payload, needed)
@@ -1158,7 +1343,7 @@ class BufferService:
     def _dropped_record(self, subject: dict, parsed: ActionBody) -> str:
         """The record of a `dropped`, once its files look complete. The workflow takes any non-empty file and
         records its hash, so a click during a copy would record a truncated file as good: refuse while anything
-        under `incoming/` changed in the last minute (the poller waited a whole interval for the same reason)."""
+        under `incoming/` changed in the last minute."""
         record = parsed.record or ""
         if not RECORD_ID_RE.fullmatch(record):
             raise HttpError(422, "`dropped` names the record whose files are in place: `record`")
@@ -1209,8 +1394,8 @@ class BufferService:
     def _stop(self, subject: dict, action: dict, stopped: bool) -> None:
         """The force stop, for a run that does not answer a cancel (one frozen by nondeterminism), once its
         workflow is terminated (`stopped`: one was running): retire the subject's buffers with their `retired`
-        events and set the stage a closed issue got (`retired`, or `done` for a request). The entry says what
-        was done and what is left running."""
+        events and set the stage a stopped subject rests at (`retired`, `done` for a request, `cancelled` for a
+        dataset). The entry says what was done and what is left running."""
         kind, number = subject["kind"], subject["number"]
         retired = []
         if kind == "buffer":
@@ -1232,12 +1417,13 @@ class BufferService:
             number,
             body=f"stopped: {what}. {left}\n\n{marker}",
             marker=marker,
-            stage="retired" if kind == "buffer" else "done",
+            stage={"buffer": "retired", "prep": "done", "dataset": "cancelled"}[kind],
         )
 
     def _accepts(self, subject: dict, parsed: ActionBody) -> None:
         """Steps 1 and 2 of spec §5: the subject's stage accepts the action (409 with what it does take), and a
-        verdict names the revision that was looked at (409 when the subject has moved on). A key seen before is
+        verdict names the revision that was looked at (409 when the subject has moved on; so does any other
+        action that names one). A key seen before is
         the same action: one already sent, or sent again within RETRY_WINDOW_S of the click, is not checked
         (the first try may have arrived and moved the stage; the workflow drops an event id it has handled).
         An older undelivered one is checked like a new click, so a stale Retry cannot pass the stage table."""
@@ -1246,15 +1432,16 @@ class BufferService:
             if seen["state"] == "sent" or age < RETRY_WINDOW_S:
                 return
         kind, key, stage = subject["kind"], subject["key"], subject["stage"]
-        status, accepted = SUBJECT_RULES[kind][stage]
+        number = subject.get("number")  # none yet for a buffer spec that its first go creates
+        hold = self.ledger.shelved().get((kind, number)) if number is not None else None
+        status, accepted = self._rules(subject, hold, self._gaps(key) if kind == "dataset" else [])
         if parsed.action not in accepted:
             takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
             raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
-        if parsed.action in ("approve", "reject"):
-            if parsed.revision is None:
-                raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
-            if parsed.revision != subject["revision"]:
-                raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
+        if parsed.action in ("approve", "reject") and parsed.revision is None:
+            raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
+        if parsed.revision is not None and parsed.revision != subject["revision"]:
+            raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
 
     def _check_hosts(
         self, parsed: ActionBody, needed: Callable[[], Needed] | None, kind: str, number: int | None
@@ -1295,6 +1482,8 @@ class BufferService:
         action is recorded."""
         kind, number = subject["kind"], subject["number"]
         self._accepts(subject, parsed)
+        if parsed.action in HOLD_ACTIONS:
+            return self._hold(subject, parsed, actor)
         if self.dispatcher is None:
             raise HttpError(503, "this service has no way to Temporal: no workflow can be started from it")
         if self._check_hosts(parsed, needed, kind, number):
@@ -1326,34 +1515,31 @@ class BufferService:
         try:
             if parsed.action == "cancel":  # only a running round can be cancelled: nothing is started for it
                 running = self.dispatcher.signal_running(kind, number, "cancel", event)
-            elif parsed.action == "dropped":  # the workflow's plain `dropped(record)`, as the poller sent it
+            elif parsed.action == "dropped":  # the workflow's plain `dropped(record)`
                 if not self.dispatcher.signal_running(kind, number, "dropped", payload["record"]):
                     raise DispatchError("no workflow is running for it")
             elif parsed.action == "stop":  # a terminate needs no replay: it also ends a run nondeterminism froze
                 reason = f"stopped from the page (action {action['id']})"
-                running = self.dispatcher.terminate(kind, number, reason)
+                running = self.dispatcher.terminate(kind, number, reason, parsed.run)
+                if parsed.run and not running and self.dispatcher.run_status(kind, number) == "RUNNING":
+                    # the run it names is over and a later one is open: that one's round is not this stop's
+                    self._asked.pop((kind, number), None)
+                    detail = f"run {parsed.run} is over and a later run is open: nothing was stopped"
+                    refused = self.ledger.settle_action(action["id"], "refused", detail)
+                    self.changes.announce(kind, number)
+                    return 409, {"error": detail, "action": refused}, {}
+            elif parsed.action == "recheck":  # the request's plain `recheck()`: it looks at its datasets again
+                if not self.dispatcher.signal_running(kind, number, "recheck"):
+                    raise DispatchError("no workflow is running for it")
             else:
-                self.dispatcher.send(kind, number, signal, event)
+                # a dataset's go is its workflow's `restart`: the round starts in a new run, on today's code
+                self.dispatcher.send(kind, number, "restart" if (kind, signal) == ("dataset", "go") else signal, event)
         except DispatchError as error:
             self._asked.pop((kind, number), None)  # nothing was asked of any workflow
             failed = self.ledger.settle_action(action["id"], "failed", str(error))
             self.changes.announce(kind, number)
             return 503, {"error": f"not delivered: {error}", "action": failed}, {}
-        text = f"**Action:** `{parsed.action}` by `{action['actor']}`"
-        if payload.get("plan_first"):
-            text += " (plan first)"
-        if payload.get("records"):
-            text += ": " + ", ".join(f"`{neutralize(record)}`" for record in payload["records"])
-        if payload.get("record"):
-            text += f": `{neutralize(payload['record'])}`"
-        if note := payload.get("note"):
-            # the mirror posts this under the bot's name: it must ping nobody (no mentions; spec §2 non-goals)
-            quiet = neutralize(note)[:16000].replace("@", "@\u200b")
-            text += "\n\n" + "\n".join(f"> {line}" for line in quiet.splitlines())
-        if spec := payload.get("spec"):  # the timeline, and so the issue, says exactly what ran
-            fenced = neutralize(spec).replace("```", "` ` `")
-            text += f"\n\n```yaml\n{fenced}{'' if fenced.endswith(chr(10)) else chr(10)}```"
-        sent = self.ledger.settle_action(action["id"], "sent", entry=(text, f"<!-- mia: action {action['id']} -->"))
+        sent = self.ledger.settle_action(action["id"], "sent", entry=_action_entry(action))
         if parsed.action == "stop" or not running:
             self._asked.pop((kind, number), None)  # the service answers these itself, just below
         if parsed.action == "stop":
@@ -1366,6 +1552,35 @@ class BufferService:
             self.ledger.append_entry(kind, number, body=said, marker=marker, stage="cancelled")
         self._changed(kind, number)
         return 202, sent, {}
+
+    def _hold(self, subject: dict, parsed: ActionBody, actor: str) -> Response:
+        """A `shelve` (its `note` says why) or an `unshelve`: recorded like any action and carried out here, in
+        the transaction that puts it on the timeline. A key seen before is the same action again. A shelve at a
+        stage that takes `cancel` (a round waits there for a verdict) sends that cancel first, as an action of
+        its own; one that is not delivered shelves nothing."""
+        kind, number = subject["kind"], subject["number"]
+        reason = parsed.note.strip()
+        if parsed.action == "shelve" and not reason:
+            raise HttpError(422, "a shelve says why the subject can wait: `note`")
+        self._check_hosts(parsed, None, kind, number)  # 422: nothing here starts a job
+        again = parsed.key is not None and self.ledger.action_by_key(parsed.key) is not None  # its cancel went
+        if parsed.action == "shelve" and not again and "cancel" in SUBJECT_RULES[kind][subject["stage"]][1]:
+            cancel = ActionBody(action="cancel", key=f"{parsed.key}:cancel" if parsed.key else None)
+            answer = self._act_on(subject, cancel, actor, {})
+            if answer[0] != 202:
+                return answer
+        payload = {"note": reason} if parsed.action == "shelve" else {}
+        try:
+            action, _ = self.ledger.add_action(kind, number, parsed.action, actor, key=parsed.key, payload=payload)
+        except ValueError as error:
+            raise HttpError(409, str(error)) from None
+        if action["state"] != "sent":
+            held = action["payload"].get("note") if parsed.action == "shelve" else None
+            action = self.ledger.settle_hold(action["id"], held, _action_entry(action)) or action
+            self._changed(kind, number)
+            if (kind, parsed.action) == ("dataset", "shelve"):
+                self._recheck_requests(subject["key"])
+        return 202, action, {}
 
     def _get_action(self, action_id: str, *, query: dict[str, str], body: bytes) -> Response:
         action = self.ledger.action(int(action_id))
@@ -1397,13 +1612,137 @@ class BufferService:
         return 200, self.dispatcher.health(), {}
 
     def _run_status(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
+        """The Temporal status of the subject's latest run; with `?detail=1` what the cleaner reads of it (its
+        run id, a workflow task that keeps failing, its pending activities)."""
         self._numbered(kind, number)
         if self.dispatcher is None:
             raise HttpError(503, "this service has no way to Temporal")
         try:
+            if query.get("detail"):
+                return 200, self.dispatcher.run(kind, int(number)) or {"status": None}, {}
             return 200, {"status": self.dispatcher.run_status(kind, int(number))}, {}
         except DispatchError as error:
             raise HttpError(503, str(error)) from None
+
+    def _runs(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Every open run of every namespace the services use."""
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal")
+        try:
+            return 200, {"runs": self.dispatcher.open_runs()}, {}
+        except DispatchError as error:
+            raise HttpError(503, str(error)) from None
+
+    def _terminate_run(self, *, query: dict[str, str], body: bytes) -> Response:
+        """End one run by its ids: a run no worker can execute has no subject to stop it through."""
+        parsed = _parse(TerminateBody, body)
+        if self.dispatcher is None:
+            raise HttpError(503, "this service has no way to Temporal")
+        try:
+            done = self.dispatcher.terminate_run(parsed.namespace, parsed.id, parsed.run_id, parsed.reason)
+        except DispatchError as error:
+            raise HttpError(503, str(error)) from None
+        return 200, {"terminated": done}, {}
+
+    def _schedules(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Every Temporal schedule and when it last fired; none when Temporal cannot be asked."""
+        return 200, {"schedules": self.dispatcher.schedules() if self.dispatcher is not None else []}, {}
+
+    # --- the cleaner: its cases, its last sweep and the commit each worker started on (spec cleaner §4.8) ---
+
+    def _open_case(self, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(CaseBody, body)
+        case = self.ledger.open_case(parsed.kind, parsed.number, parsed.key, parsed.rule, parsed.state, parsed.data)
+        self._case_changed(case)
+        return 201, case, {}
+
+    def _update_case(self, case_id: str, *, query: dict[str, str], body: bytes) -> Response:
+        parsed = _parse(CaseUpdate, body)
+        case = self.ledger.update_case(int(case_id), state=parsed.state, rule=parsed.rule, data=parsed.data)
+        if case is None:
+            raise HttpError(404, f"no case {case_id}")
+        self._case_changed(case)
+        return 200, case, {}
+
+    def _case_changed(self, case: dict) -> None:
+        if case["kind"] in SUBJECT_RULES and case["number"] is not None:  # the subject's row in Needs you
+            self.changes.announce(case["kind"], case["number"])
+
+    def _cases(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The cases, newest first: `state` (comma-separated; default: every state that is not over) and, with
+        `days`, also every case updated within that many days."""
+        states = tuple(part for part in query.get("state", ",".join(CASES_OPEN)).split(",") if part)
+        if unknown := [state for state in states if state not in CASE_STATES]:
+            raise HttpError(422, f"state must be among {list(CASE_STATES)}, got {unknown}")
+        try:
+            since = time.time() - float(query["days"]) * 86400 if "days" in query else None
+        except ValueError:
+            raise HttpError(422, "days must be a number") from None
+        cases = self.ledger.cases(states, since)
+        for case in cases:
+            case["jobs"] = self._case_jobs(case)
+        return 200, {"cases": cases}, {}
+
+    def _case_jobs(self, case: dict) -> list[str]:
+        """The addresses of the job records a case is about, as they are on disk now: the jobs of the round it
+        saw, autodev's jobs on the snippets issue it is about (a dataset's `party`, a left-over issue's key), then
+        the cleaner's own jobs for it (its diagnoses). Only what `GET /jobs/<address>` serves."""
+        data = case["data"]
+        round_id, issue = data.get("round"), (data.get("party") or {}).get("issue")
+        if case["kind"] == "snippets" and (named := re.fullmatch(r"issue-(\d+)", case["key"])):
+            issue = int(named.group(1))
+        places: list[tuple[Path | None, str, str]] = []  # (work root, directory of addresses, the records in it)
+        if case["number"] is not None and isinstance(round_id, str) and UI_NAME_RE.fullmatch(round_id):
+            places.append((self.work_root, f"issue-{case['number']}/{round_id}", "*.json.gz"))
+        if isinstance(issue, int) and not isinstance(issue, bool):  # one directory per run of autodev on the issue
+            places.append((self.snippets_work_root, f"{self.snippets_slug}/issue-{issue}", "*/*.json.gz"))
+        places.append((self.work_root, f"cleaner/case-{case['id']}", "*.json.gz"))
+        found = []
+        for root, directory, pattern in places:
+            if root is None:
+                continue
+            records = root / RECORDS_DIR / directory
+            for path in sorted(records.glob(pattern)):
+                where = path.relative_to(records).as_posix().removesuffix(".json.gz")
+                plain = all(UI_NAME_RE.fullmatch(segment) for segment in where.split("/"))
+                if plain and path.is_file() and not path.is_symlink() and not path.parent.is_symlink():
+                    found.append(f"{directory}/{where}")
+        return found
+
+    def _put_cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, self._put_report("cleaner", body), {}
+
+    def _cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
+        report = self.ledger.kv("cleaner")
+        return (200, *JSON_NULL) if report is None else (200, report, {})
+
+    def _put_report(self, name: str, body: bytes) -> dict:
+        """Store a scheduled pass's last report whole under `name` (`at` added when absent)."""
+        try:
+            report = json.loads(body)
+        except ValueError as error:
+            raise HttpError(422, f"invalid JSON: {error}") from None
+        if not isinstance(report, dict):
+            raise HttpError(422, f"a {name} report is a JSON object")
+        report.setdefault("at", time.time())
+        self.ledger.put_kv(name, report)
+        return report
+
+    def _put_worker(self, service: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A worker says what it started on; the cleaner compares its code with the checkout's."""
+        parsed = _parse(WorkerBody, body)
+        now = time.time()
+        with self._lock:
+            workers = self.ledger.kv("workers") or {}
+            known = workers.get(service) or {}
+            # `since`: when the worker first started on this code; a restart on the same code keeps it
+            since = known.get("since", now) if known.get("code") == parsed.code else now
+            workers[service] = {"commit": parsed.commit, "code": parsed.code, "at": now, "since": since}
+            self.ledger.put_kv("workers", workers)
+        return 200, workers[service], {}
+
+    def _workers(self, *, query: dict[str, str], body: bytes) -> Response:
+        return 200, {"workers": self.ledger.kv("workers") or {}}, {}
 
     def _mark_mirrored(self, kind: str, number: str, seq: str, *, query: dict[str, str], body: bytes) -> Response:
         parsed = _parse(MirroredBody, body)
@@ -1461,10 +1800,18 @@ class BufferService:
             for asset in self.ledger.assets("staged")
             if asset["data"]
         }
+        heads: dict[str, str] = {}  # a snippet PR head -> the dataset whose crop set was made from it
+        for row in rows if gate is None else self.ledger.assessments(limit=100_000):
+            subject = row.get("subject") or {}
+            if subject.get("kind") == "crop_set" and (head := head_of(subject)):
+                if record := _assessed_record(subject, numbers, artifacts, {}):
+                    heads.setdefault(head, record)
+        approved = {row["assessment"]: row["id"] for row in self.ledger.datasets() if row.get("assessment")}
         rejected: set[tuple] = set()  # subjects with a reject among the rows seen so far, which are the newer ones
         for row in rows:
             subject = row.get("subject") or {}
-            if record := _assessed_record(subject, numbers, artifacts):
+            # an approve names its dataset on the dataset's row, whatever it is recorded on
+            if record := _assessed_record(subject, numbers, artifacts, heads) or approved.get(row.get("id")):
                 row["record"] = record
             about = (subject.get("kind"), subject.get("ref"))
             if row.get("verdict") == "approve" and about in rejected:
@@ -1474,6 +1821,10 @@ class BufferService:
         if "record" in query:
             rows = [row for row in rows if row.get("record") == query["record"]]
         found, total = paged(rows, page, {})
+        for row in found:  # what a person wrote with their verdict is on the action the assessment names
+            action = self.ledger.action(row["action"]) if row.get("action") is not None else None
+            if action and (note := action["payload"].get("note")):
+                row["note"] = note
         gates = [gate] if gate else list(GATES)
         agreement = {name: self.ledger.agreement(name) for name in gates}
         return 200, {"assessments": found, "total": total, "agreement": agreement}, {}
@@ -1539,6 +1890,54 @@ class BufferService:
         if data is None:
             raise HttpError(404, "no such crop")
         return 200, data, {"Content-Type": "image/png", "Cache-Control": "public, max-age=3600"}
+
+    def _gallery_png(
+        self, issue: str, event: str, sha: str, crop_id: str, name: str, *, query: dict[str, str], body: bytes
+    ) -> Response:
+        """A crop of a dataset round that has published nothing yet (one at review), from the round's workspace
+        under work_root: raw.png as its crop job at snippets commit `sha` wrote it, overlay.png as its verify job
+        drew it, each from the newest attempt that has the file. The page shows them in the round's timeline."""
+        if self.work_root is None:
+            raise HttpError(503, "the service has no work_root")
+        if not UI_NAME_RE.match(crop_id):
+            raise HttpError(404, "no such crop")
+        round_rel = f"issue-{int(issue)}/i{issue}-e{event}"
+        job, rel = (
+            ("crop", f"crops/{crop_id}/raw.png") if name == "raw" else ("verify", f"preview/{crop_id}/overlay.png")
+        )
+        attempts = sorted(
+            (self.work_root / round_rel).glob(f"{job}-{sha}-*"),
+            key=lambda path: (len(path.name), path.name),
+            reverse=True,
+        )
+        for workspace in attempts:  # job output is untrusted: no symlink, nothing outside its workspace, a size cap
+            data = None if workspace.is_symlink() else read_untrusted(workspace, rel, CROP_PNG_LIMIT, binary=True)
+            if data is not None:
+                return 200, data, {"Content-Type": "image/png", "Cache-Control": "public, max-age=3600"}
+        raise HttpError(404, "no such crop")
+
+    def _job_record(self, where: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A job's record (`mia_core.jobrecord`) as its file is on disk, gzip passed through: `where` is the record's
+        address, the job's workspace relative to work_root. Every segment of it is a plain name (none empty, none
+        starting with a dot, so no `.` or `..`), and the file is a regular file inside the records directory:
+        a symlink is not followed to one, nor out of the directory. Nothing here writes or deletes a record."""
+        roots = [root for root in (self.work_root, self.snippets_work_root) if root is not None]
+        if not roots:
+            raise HttpError(503, "the service has no work_root")
+        if not all(UI_NAME_RE.fullmatch(segment) for segment in where.split("/")):
+            raise HttpError(404, "no record for this job")
+        data = None
+        for root in roots:  # the rounds' records, then those of autodev's jobs on the snippets repo
+            data = read_untrusted(root / RECORDS_DIR, f"{where}.json.gz", JOB_RECORD_LIMIT + 1, binary=True)
+            if data is not None:
+                break
+        if data is None:
+            raise HttpError(404, "no record for this job")
+        if len(data) > JOB_RECORD_LIMIT:
+            # ponytail: a record over the cap is refused, since a gzip cut short is no JSON; stream the file in
+            # chunks when records outgrow the cap
+            raise HttpError(500, f"the record of this job is over {JOB_RECORD_LIMIT >> 20} MB")
+        return 200, data, {"Content-Type": "application/json", "Content-Encoding": "gzip", "Cache-Control": "no-cache"}
 
     def _list_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         return 200, {"datasets": self.ledger.datasets(query.get("state"))}, {}
@@ -1614,7 +2013,7 @@ class BufferService:
         for buffer in buffers:
             number = _round_of(buffer["id"])[0]
             newest.setdefault(number, buffer["id"])
-            buffer["spec"] = specs.get(number)  # its spec's page; a buffer of a spec never adopted has none
+            buffer["spec"] = specs.get(number)  # its spec's page; a buffer whose spec has no subject has none
             buffer["superseded_by"] = newest[number] if number and newest[number] != buffer["id"] else None
         if "spec" in query:
             if not query["spec"].isdigit():
@@ -1782,14 +2181,16 @@ class BufferService:
         return self._ui("index.html", query=query, body=body)
 
     def _ui(self, name: str, *, query: dict[str, str], body: bytes) -> Response:
-        """A file of the page by basename only (the segment is unquoted already, so check it here)."""
+        """A file of the page by basename only (the segment is unquoted already, so check it here). The browser
+        asks again on every load, so the page's modules are never a mix of two deployments."""
         content_type = UI_TYPES.get(PurePosixPath(name).suffix)
         if self.ui_dir is None or not UI_NAME_RE.match(name) or content_type is None:
             raise HttpError(404, "no such file")
         path = self.ui_dir / name
         if not path.is_file():
             raise HttpError(404, "no such file")
-        return 200, path.read_bytes(), {"Content-Type": content_type}
+        # ponytail: no validator, so each load sends every file again (about 250 kB); an ETag when that is felt
+        return 200, path.read_bytes(), {"Content-Type": content_type, "Cache-Control": "no-cache"}
 
     def _meta(self, *, query: dict[str, str], body: bytes) -> Response:
         if self.meta is not None:
@@ -1819,15 +2220,7 @@ class BufferService:
         return 200, {**out, "days": rows, "total": total}, {}
 
     def _put_keeper(self, *, query: dict[str, str], body: bytes) -> Response:
-        try:
-            report = json.loads(body)
-        except ValueError as error:
-            raise HttpError(422, f"invalid JSON: {error}") from None
-        if not isinstance(report, dict):
-            raise HttpError(422, "a keeper report is a JSON object")
-        report.setdefault("at", time.time())
-        self.ledger.put_kv("keeper", report)
-        return 200, report, {}
+        return 200, self._put_report("keeper", body), {}
 
     def _keeper(self, *, query: dict[str, str], body: bytes) -> Response:
         report = self.ledger.kv("keeper")
@@ -1992,12 +2385,13 @@ def serve(cfg: Config) -> None:
         generate_policy(check.base_policy, check.policy_dir, check.writable)
     except PolicyError as error:
         raise SystemExit(str(error)) from error
-    from .dispatch import dispatcher_for  # here, not at the top: it reaches autodev's CLI helpers
-
     service = BufferService(
         ledger,
         token=token,
         storage_root=cfg.paths.storage_root,
+        work_root=cfg.paths.work_root,
+        snippets_work_root=cfg.snippets_work_root,
+        snippets_repo=cfg.github.snippets_repo,
         raw_root=cfg.paths.raw_root,
         staged_root=cfg.paths.staged_root,
         locks=LockDir(cfg.paths.local_root / "locks"),
@@ -2008,6 +2402,8 @@ def serve(cfg: Config) -> None:
         hosts=check,
     )
     service.kick_unmirrored()  # what a crash, or Temporal being away, left unposted
+    # a request whose datasets settled with nobody telling it; beside the start, which Temporal being away must not hold
+    threading.Thread(target=service.recheck_resting, daemon=True).start()
     server = make_server(service, url.hostname or "127.0.0.1", url.port)
     backups = cfg.paths.state_dir / "backups"
     stop = threading.Event()

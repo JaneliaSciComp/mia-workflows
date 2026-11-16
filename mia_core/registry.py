@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -11,6 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
+from mia_core.checkout import code_digest, head_commit
 from mia_core.config import ServiceCfg
 
 SYNC_TIMEOUT_S = 600.0  # a sync walks a whole root (du, stage.json reads): minutes, not the 30 s of a lookup
@@ -110,7 +112,7 @@ class Registry:
     # --- subjects: a dataset, a buffer spec or a preparation request (spec webapp-actions §4.1) ------
 
     def adopt_subject(self, kind: str, number: int, key: str, *, stage: str = "new", data: dict | None = None) -> dict:
-        """Make an existing issue a subject (or refresh one no workflow has written a stage to); 409: key taken."""
+        """Create a subject under this number (or refresh one no workflow has written a stage to); 409: key taken."""
         body = {"key": key, "stage": stage, "data": data or {}}
         return self.request("PUT", f"/subjects/{quote(kind, safe='')}/{number}", json=body)
 
@@ -133,7 +135,7 @@ class Registry:
         return self.request("POST", f"/timeline/{quote(kind, safe='')}/{number}", json=fields)
 
     def timeline(self, kind: str, number: int) -> dict | None:
-        """{subject, entries} of the subject with this number; None when there is none."""
+        """{subject, entries, actions} of the subject with this number; None when there is none."""
         return self._lookup(f"/timeline/{quote(kind, safe='')}/{number}")
 
     def mark_mirrored(self, kind: str, number: int, seq: int, comment_url: str | None) -> None:
@@ -146,7 +148,7 @@ class Registry:
     # --- actions: what a person, or a worker for a request, asked of a subject (spec webapp-actions §4.2) ---
 
     def action(self, action_id: int | str) -> dict | None:
-        """The action with this id; None when the id is not an action's (a GitHub label event's, until slice E)."""
+        """The action with this id; None when the id is not an action's."""
         return self._lookup(f"/actions/{action_id}")
 
     def refuse_action(self, action_id: int | str, detail: str) -> dict:
@@ -173,15 +175,9 @@ class Registry:
     def sync_assets(self) -> dict:
         return self.request("POST", "/sync/assets", timeout=SYNC_TIMEOUT_S)
 
-    def locks(self) -> list[dict]:
-        return self.request("GET", "/locks")["locks"]
-
     def put_records(self, ref: str, records: list[tuple[str, dict]]) -> dict:
         body = {"records": [{"path": path, "record": record} for path, record in records]}
         return self.request("PUT", f"/records/{quote(ref, safe='')}", json=body)
-
-    def plan(self, spec_text: str) -> dict:
-        return self.request("POST", "/plan", json={"spec": spec_text})
 
     def sync_datasets(self) -> dict:
         return self.request("POST", "/sync/datasets", timeout=SYNC_TIMEOUT_S)
@@ -221,6 +217,53 @@ class Registry:
         """Store the keeper's last pass for the page (`at` added when absent); returns it as stored."""
         return self.request("PUT", "/keeper", json=report)
 
+    # --- the cleaner: what it reads of the installation, and its cases (spec cleaner §4.2, §4.8) -----
+
+    def subjects(self, kind: str) -> list[dict]:
+        """Every subject of the kind, each with its status word and the actions it accepts."""
+        return self.request("GET", f"/subjects/{quote(kind, safe='')}")["subjects"]
+
+    def health(self) -> dict:
+        """{temporal, queues}: whether Temporal answers and whether a worker polls each task queue."""
+        return self.request("GET", "/health")
+
+    def run(self, kind: str, number: int) -> dict:
+        """The subject's latest run: {status, run_id, task, activities}; `status` None when it never ran."""
+        return self.request("GET", f"/run/{quote(kind, safe='')}/{number}", params={"detail": "1"})
+
+    def runs(self) -> list[dict]:
+        return self.request("GET", "/runs")["runs"]
+
+    def terminate_run(self, namespace: str, workflow_id: str, run_id: str, reason: str) -> bool:
+        """Terminate one run by its ids; False when it was over already."""
+        body = {"namespace": namespace, "id": workflow_id, "run_id": run_id, "reason": reason}
+        return self.request("POST", "/runs/terminate", json=body)["terminated"]
+
+    def schedules(self) -> list[dict]:
+        return self.request("GET", "/schedules")["schedules"]
+
+    def workers(self) -> dict:
+        """Service -> {commit, code, at, since}: what each worker said it started on."""
+        return self.request("GET", "/workers")["workers"]
+
+    def put_worker(self, service: str, commit: str | None, code: str | None) -> dict:
+        """Say what a worker started on: the checkout's commit and the digest of the code it loaded."""
+        return self.request("PUT", f"/workers/{quote(service, safe='')}", json={"commit": commit, "code": code})
+
+    def open_case(self, **fields: Any) -> dict:
+        return self.request("POST", "/cases", json=fields)
+
+    def update_case(self, case_id: int, **fields: Any) -> dict:
+        return self.request("PUT", f"/cases/{case_id}", json=fields)
+
+    def cases(self, days: float | None = None) -> list[dict]:
+        """The cases that are not over, and with `days` also every case updated within them; newest first."""
+        return self.request("GET", "/cases", params={"days": days} if days is not None else None)["cases"]
+
+    def put_cleaner(self, report: dict) -> dict:
+        """Store the cleaner's last sweep for the page (`at` added when absent)."""
+        return self.request("PUT", "/cleaner", json=report)
+
     # --- assessments, budgets and volumes (spec autonomous-gates §5, §6, §8) ---------------------
 
     def put_assessment(self, assessment: dict) -> dict:
@@ -247,13 +290,6 @@ class Registry:
         )
         params = {name: value for name, value in given if value is not None}
         return self.request("GET", "/assessments", params=params or None)["assessments"]
-
-    def decisions(self, gate: str | None = None, *, offset: int | None = None, limit: int | None = None) -> dict:
-        """{assessments, total, agreement}: one page of the Decisions view's data, newest first (spec
-        autonomous-gates §10)."""
-        given = (("gate", gate), ("offset", offset), ("limit", limit))
-        params = {name: value for name, value in given if value is not None}
-        return self.request("GET", "/decisions", params=params or None)
 
     def assessment(self, assessment_id: str) -> dict | None:
         return self._lookup(f"/assessments/{quote(assessment_id, safe='')}")
@@ -297,3 +333,11 @@ def best_effort(action: Callable[[], Any], what: str, log: logging.Logger) -> bo
         log.warning("%s: registry write skipped: %s", what, err)
         return False
     return True
+
+
+async def report_worker(registry: Registry, service: str, log: logging.Logger, retry_s: float = 30.0) -> None:
+    """Tell the registry what code this worker loaded (read now, when it starts), again until it is written:
+    buffer-api may come up after the worker does, and the cleaner compares the last report it has."""
+    started_on = (service, head_commit(), code_digest())
+    while not await asyncio.to_thread(best_effort, lambda: registry.put_worker(*started_on), "worker commit", log):
+        await asyncio.sleep(retry_s)

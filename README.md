@@ -26,18 +26,18 @@ known gaps: [`docs/autodev-runbook.md`](docs/autodev-runbook.md). Design rationa
 
 ## mia-data
 
-mia-data is a dataset → binding → crops → human approval → published crops loop. Each dataset that
+mia-data is a dataset → binding → crops → human approval → saved crops loop. Each dataset that
 [mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) has catalogued is started from the buffers
 page (*Start*); its issue in [mia-workflow-data](https://github.com/JaneliaSciComp/mia-workflow-data) is a
 copy of its timeline that the system writes and nothing reads. On *Start*, a Claude agent in a cluster
 sandbox matches the dataset to a reader snippet from [mia-snippets](https://github.com/JaneliaSciComp/mia-snippets)
 and writes a binding; plain harness jobs check it, cut the round's crops, verify them and show them on the
 dataset's page.
-A human approves on the dataset's page (*Approve*), and those crops are published to shared storage and a
+A human approves on the dataset's page (*Approve*), and those crops are saved to shared storage and a
 `galleries` branch; or rejects (*Reject*) with feedback, which goes to the agent fixing the snippet (a new
 snippet's PR, which autodev writes, is merged only when its crops are approved). Every verdict is recorded as an
 assessment, and *Revoke*
-withdraws a published dataset later: nothing is deleted, the buffers that drew from it are degraded. A **judge**
+withdraws a prepared dataset later: nothing is deleted, the buffers that drew from it are degraded. A **judge**
 (a second model, read-only, over the same gallery) can look at every set before the human does: in shadow mode its
 verdict is recorded beside the human's and decides nothing, and the buffers page's Decisions tab shows how often
 they agree; a gate goes active only on those numbers. Every stage is an entry
@@ -47,20 +47,24 @@ step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/s
 ## mia-buffers
 
 mia-buffers is a buffer spec → plan → staged pyramids → served crops loop, with no agent in it. A spec (which
-datasets by catalog fields, patch size and pyramid levels, splits, weighting, how many samples per volume) is
+datasets by catalog fields, patch size and pyramid levels, splits, weighting, how many crops the buffer holds) is
 created and run on the buffers page (*Create buffer*, *Run*); its issue in
 [mia-buffers](https://github.com/JaneliaSciComp/mia-buffers) is a copy of its timeline. On *Run* the worker plans it
 against the catalog at a pinned commit and the registry's **prepared** datasets, then sources every dataset of the
 pool in parallel: the raw files are fetched into a shared raw cache (one writer per record), and a harness job
 stages one **sparse OME-Zarr 0.6 pyramid per volume**, holding only the chunks that cover the planned samples, with
 the derivation (source bytes, code commits, plan, voxel size, verification) recorded in the Zarr itself and
-checked against the 0.6 schemas before publication. Each volume is registered with buffer-api as it becomes
+checked against the 0.6 schemas before it is saved. Each volume is registered with buffer-api as it becomes
 servable; a round started from the page stops at its plan (*Plan*, then *Run*) and is staged before a human approves
 it (*Approve*), and the buffer is `ready` once every weighting group reaches the spec's minimum. A staged artifact is
 addressed by its recipe, so a later buffer with the same binding, levels and plan reuses it instead of staging
 again. After that the buffer lives until it is retired: idle when no consumer has drawn for a while, *Keep* to
 hold it, *Retire* to release what it references, *Revoke* to withdraw single records; a round in progress takes
 only *Cancel*. A keeper evicts unreferenced caches under the configured quotas and is the only code that deletes.
+A cleaner looks every few minutes for rounds that read "in progress" with nothing running, rounds that stopped
+for a reason with a known remedy, and jobs, issues and pull requests a round left behind; it says what is wrong
+with the installation, resolves what it can through the same actions the page's buttons send, and leaves the
+rest under *Needs you* with what it takes.
 
 A dataset that is not prepared is out of the pool. A preparation request (*Prepare these datasets* on the page)
 hands its records to mia-data, each with a `go` sent through buffer-api and charged to the request, and follows

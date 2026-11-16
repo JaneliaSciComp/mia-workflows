@@ -222,7 +222,9 @@ class IssueWorkflow:
             )
 
     async def _watch_pr(self) -> str:
-        """Watch the PR until it is merged or closed, running revision rounds and escalations as needed.
+        """Watch the PR until it is merged or closed, running revision rounds and escalations as needed. An
+        escalation or a failed merge is a comment and the `needs-human` label; the watch goes on, so an approval
+        still merges and a failed merge is tried again.
 
         The wait between polls is observe_pr's retry interval (the activity fails while there is nothing to
         do), so a quiet PR is one activity in the history instead of a poll/timer staircase. The history
@@ -255,6 +257,10 @@ class IssueWorkflow:
                 await self._comment(
                     state.pr, f"Approved, but merging failed: {merge.message}", f"merge-failed {snapshot.head_sha}"
                 )
+                failed = escalation("merging failed", snapshot)  # raised once per head; the merge is tried again
+                if workflow.patched("merge-failure-needs-human") and state.escalated != failed:
+                    state.escalated = failed
+                    await self._act("set_stage", StageInput(state.issue, "needs-human"))
             elif action == REVISE:
                 assert isinstance(detail, Feedback)  # decide() returns the Feedback to act on for REVISE
                 state.handled.append(detail.id)
@@ -268,6 +274,8 @@ class IssueWorkflow:
                 if by_retry:
                     state.escalated = escalation(detail, snapshot)
                 await self._comment(state.pr, f"Needs a human: {detail}.", f"escalate {escalation(detail, snapshot)}")
+                if workflow.patched("escalate-needs-human"):  # the label says it to whoever follows the issue
+                    await self._act("set_stage", StageInput(state.issue, "needs-human"))
             if action in (MERGE, WAIT) or not by_retry:  # a failed merge (or an idle snapshot): look again later
                 await workflow.sleep(timedelta(minutes=state.poll_minutes))
             if workflow.info().is_continue_as_new_suggested():

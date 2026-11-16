@@ -1,12 +1,12 @@
 # Working in this repository
 
 Four Python packages: `mia_core/` (what every package shares: the `mia.yaml` loader, filesystem checks,
-untrusted-output helpers), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset → published crops),
-both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and `mia_buffers/` (training
-buffers: the `MiaBuffer` and `MiaPrep` workflows, the planner, the cache keeper, the buffer-api service with its ledger,
-registry and page, and the `BufferDataset` client). `mia_data` imports from `autodev`, `mia_buffers` from
-both, never the reverse; every package may import `mia_core`, which imports none of them. Full guide:
-[`docs/development.md`](docs/development.md); what each part is for: the [README](README.md).
+untrusted-output helpers, the job record), `autodev/` (GitHub issue → PR by Claude Code) and `mia_data/` (dataset →
+saved crops), both Temporal workflows with activities that talk to GitHub and the LSF cluster via csub, and
+`mia_buffers/` (training buffers: the `MiaBuffer` and `MiaPrep` workflows, the planner, the cache keeper, the
+buffer-api service with its ledger, registry and page, and the `BufferDataset` client). `mia_data` imports from
+`autodev`, `mia_buffers` from both, never the reverse; every package may import `mia_core`, which imports none of them.
+Full guide: [`docs/development.md`](docs/development.md); what each part is for: the [README](README.md).
 
 How the pieces meet: mia-data prepares a dataset (approved binding, reviewed crops) and writes its row to buffer-api's
 registry; a buffer plans over prepared rows only, fetches raw files into the shared raw cache, stages one **sparse
@@ -19,8 +19,8 @@ a round pins its HEAD, so the harness deploys first. Dated specs and plans are u
 ## Before you push
 
 ```
-pixi run fmt        # format + safe autofixes
-pixi run lint       # ruff check + format check
+pixi run fmt        # format + safe autofixes (ruff; Biome for the page's modules)
+pixi run lint       # ruff check + format check, Biome's lint + format check
 pixi run typecheck  # mypy
 pixi run test       # pytest, incl. Temporal replay tests; needs no GitHub, LSF or Temporal server
 ```
@@ -41,9 +41,46 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   call.
 - **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
   `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there.
-  buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`.
+  buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`
+  and, for a run that cannot answer one, `stop` (a dataset at `debugging` also the `go` of its next round). Any
+  action may name the `revision` it was decided at and is refused once the subject moved.
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
+- **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
+  `shelve` (with a reason); a shelved one reads the status `shelved` and takes `unshelve` alone (`_rules` in
+  `mia_buffers/api.py`). The subject's workflow hears of neither, except that a shelve of a subject whose round
+  waits for a verdict (a dataset at `review`) sends that round a `cancel` first; a request resting at `needs-human` is told to
+  look again (`recheck`) when a dataset it names is shelved or prepared and when buffer-api starts, and is `done`
+  when each is one of the two. The hold is a row of the ledger's `shelved` table; a shelved dataset reads `state: shelved` from
+  `Ledger.dataset(s)` while its stored row stays, so no plan and no request takes it. Anything new that selects
+  or starts datasets reads their state through those two.
+- **A stage pass writes its start and its result.** A stage a round works or waits at (`STAGE_ACTIONS`) writes
+  a start entry and, when it ends, a result entry that says what happened and links its jobs' records (each
+  record once, as a `**Jobs:**` line: a job with an entry of its own, the crop judge's, is linked there). The
+  workflow keeps the open pass in its state (`pass_stage`, `passes`, `pass_jobs`, `result`) and the stage write
+  carries its result out (`mia_data.status.stage_entries`); a failed or cancelled pass's result is also the entry
+  that moves the subject to the stage it rests at, so no stage ends without saying how. A new ending or a new
+  stage sets the result (`_found`) before its stage write, or calls `_flush` where none follows.
+- **Every job leaves a record, and only the job runner writes it.** `CsubJobs` writes
+  `<work_root>/_jobs/<workspace relative to work_root>.json.gz` (`mia_core.jobrecord`): the request with `env` as
+  names only, csub's answer, the outcome, LSF usage, log ends, and for an agent its prompt and conversation with
+  tool output dropped and credentials scrubbed. No job gets `_jobs` writable (`CsubJobs` refuses the mount),
+  nothing deletes a record, buffer-api serves the file as it is (`GET /jobs/<address>`) and the page shows it at
+  `#job/<address>`. Writing one is best effort and never fails a submit or a wait. An agent command prints
+  `stream-json` to `claude.jsonl` and `keep_result` copies its last line to the file the result is read from.
+- **A round's wait on autodev is timed.** While a dataset round waits for a snippet PR, a new head or a merge it
+  looks at the snippets issue itself every 15 minutes (`autodev_look`, `_look` in `mia_data/workflows.py`) and
+  ends `blocked` when autodev stopped or `limits.autodev_quiet_hours` passed with no agent round running; the
+  poller's `pr_update` only makes it faster. autodev says a stop with the `needs-human` label, never a comment
+  alone. A new wait on something outside the round gets the same: a look and a limit.
+- **The cleaner asks, like anyone, and service problems come first.** `MiaCleaner` (the buffers worker's `sweep`;
+  rules in `mia_buffers/cleaner.py`) names what is wrong with the installation before it looks at a subject, and
+  leaves alone every subject behind a finding: it never cancels or re-runs what waits on a worker that is down or
+  on old code. What it does to a subject goes through the action routes as the actor `cleaner`, with the
+  revision it just read, a key per step and for a `stop` the run it saw; it writes no stage. It sends no `go`
+  while a job of a round it ended is alive, none to a subject a person acted on since the case opened, and
+  none to a request that would start a dataset round. Its diagnosing agent is read-only and proposes;
+  `reduce_outcome` keeps only steps of the menu. A new remedy is a rule with a test named after its incident.
 - **A round writes the registry, never its issue.** Stages, comments and refusals are timeline entries
   (`Activities._post`); the `MiaMirror` workflow copies them to GitHub.
 - **Nothing reads a data or buffers issue.** No label, comment, body, close or reopen is input: nothing polls
@@ -55,11 +92,13 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   evidence that its writer stopped. Hand-run harness commands bypass it.
 - **Only the keeper deletes.** The buffers worker's `MiaCacheKeeper` is the only code that removes anything under
   `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.
-- **A staged artifact is published by the worker's rename and never written again.** Stage jobs write
+- **A staged artifact is saved by the worker's rename and never written again.** Stage jobs write
   `.building-<artifact>-<job key>`; a rebuild lands under the same id through the same rename.
 - **An artifact id is a recipe hash.** Binding, levels key, voxel size, harness commit, env digest and plan digest.
   Changing how the harness derives samples (`plan.py`) changes plan digests, so every volume restages; a buffer that
-  re-registers a volume under a new artifact loses its frozen eval lists by design.
+  re-registers a volume under a new artifact loses its frozen eval lists by design. The plan digest holds the
+  record's crop count, its weight's share of `sampling.crops` rounded up to a power of two (`plan.crops_for`):
+  change that rounding and every pool change restages every record.
 - **A buffer never asks mia-data for a dataset; a preparation request does.** `MiaBuffer` fails an unprepared
   record; `MiaPrep` sends each dataset a `go` through buffer-api (worker token, the request's root, a key per
   round and record) and follows it through the registry. Nothing opens or labels an issue in the datasets repo.
@@ -67,6 +106,10 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   against the stage table. Every other route the page needs is a read route (`tests/test_buffers_ui.py` enforces
   it). An action can ask a workflow to do something; it cannot write what a workflow found, which stays behind the
   worker token.
+- **The page has no build step.** `mia_buffers/ui/` is `index.html`, `app.css` and ES modules the browser loads as
+  they are. A module imports only modules below it, never in a circle (the table in `docs/development.md`, The
+  page); the tests import the modules under node, so a module must not touch the DOM when it is imported beyond
+  what `dom.js` does. What a job or a record wrote is inserted as text, never parsed as HTML.
 - **Only a person's click approves a host.** Brokers read `<csub.policy_dir>/broker.toml`, generated from the operator's
   `csub.base_policy` plus `approved-hosts.jsonl`, which buffer-api alone appends to, on a start action, with hosts
   that run's jobs need (records' URL hosts, bindings' too if the record names them, redirect targets, package hosts;

@@ -75,16 +75,21 @@ def test_matches():
 
 
 def test_record_mia_data_cannot_place_is_out_of_the_pool(spec):
-    """mia-data names a dataset folder from one modality family and one organism; a record it would refuse must
-    leave the plan here, never fail at sourcing (the StarDist nuclei record of the first live run had organism [])."""
+    """mia-data names a dataset folder from its modality family; a record it would refuse must leave the plan
+    here, never fail at sourcing. A record with no organism is placed under `unknown`, one of modality `other`
+    under `other`, and both stay in."""
     path, record = next(
         (str(p.relative_to(CATALOG)), yaml.safe_load(p.read_text()))
         for p in CATALOG.glob("datasets/**/*.yaml")
         if p.stem == BCSS
     )
     record["imaging"]["organism"] = []
+    assert facts(path, record).folder == "lm-unknown-github-bcss-breast-cancer-semantic-segmentation"
+    assert decide_all([facts(path, record)], spec.select)[0].admitted
+    record["imaging"]["modality"] = ["other"]
+    assert facts(path, record).folder == "other-unknown-github-bcss-breast-cancer-semantic-segmentation"
+    assert decide_all([facts(path, record)], spec.select)[0].admitted
+    record["imaging"]["modality"] = []
     decision = decide_all([facts(path, record)], spec.select)[0]
     assert not decision.admitted
-    assert (
-        decision.rule == "no dataset folder for mia-data: modality histology-WSI / organism none (one of each needed)"
-    )
+    assert decision.rule == "no dataset folder for mia-data: modality none (one family needed)"

@@ -11,6 +11,7 @@ from mia_buffers.plan import (
     Fit,
     Plan,
     build_plan,
+    crops_for,
     fit,
     plan_digest,
     positions,
@@ -212,7 +213,7 @@ def test_plan_rows_carry_voxel_size_and_recipe(spec_2d_mixed):
     two = build_plan(spec_with(spec_2d_mixed, **{"sampling.patch.c": 2}), "h", None, records())
     assert two.errors == [f"patch.c: 2 needs at least 2 channels; ['{ONE_CH}'] have fewer"]
     assert "| 45.0718×45.0718 |" in plan.render_markdown()
-    placeable = records()  # the fixture lists four organisms; mia-data places one organism and one modality
+    placeable = records()  # the fixture lists two modalities; this row is planned as one organism's FIB-SEM
     for _, record in placeable:
         if record["id"] == MITOLAB:
             record["imaging"].update(organism=["Mus musculus"], modality=["FIB-SEM"])
@@ -285,11 +286,28 @@ def records_single_plane() -> list[tuple[str, dict]]:
     return single
 
 
-def test_rows_carry_a_record_local_rule_and_digest(plan_2d, spec_2d):
+def _share(row, spec: Spec) -> dict[str, int]:
+    """What `plan_rule` gives the row: its weight's share of each split's crops."""
+    sampling = spec.sampling
+    return {
+        name: crops_for(row.weight, total, sampling.max_crops_per_dataset) for name, total in sampling.crops.items()
+    }
+
+
+def test_crops_for_is_the_share_rounded_up_to_a_power_of_two():
+    assert crops_for(0.004, 1_000_000, 1 << 20) == 4096
+    assert crops_for(0.0038, 1_000_000, 1 << 20) == 4096  # a pool that grew a little: the same count
+    assert crops_for(0.003, 1000, 4096) == 4
+    assert crops_for(0.0, 1000, 4096) == 1  # every dataset gets at least one
+    assert crops_for(0.5, 1_000_000, 4096) == 4096  # the cap
+    assert crops_for(0.5, 1_000_000, 3000) == 3000
+
+
+def test_rows_carry_their_share_as_a_rule_and_digest(plan_2d, spec_2d):
     row = next(r for r in plan_2d.rows if r.in_pool)
     assert row.plan_rule is not None
     assert set(row.plan_rule) == {"seed", "patch", "levels", "samples", "split", "channel_recipe"}
-    assert row.plan_rule["samples"] == spec_2d.sampling.plan.samples and "weight" not in row.plan_rule
+    assert row.plan_rule["samples"] == _share(row, spec_2d) and "weight" not in row.plan_rule
     assert row.plan_digest == plan_digest(row.plan_rule) and len(row.plan_digest) == 64
     other = next(r for r in plan_2d.rows if r.in_pool and r.id != row.id)
     assert (row.plan_digest == other.plan_digest) == (row.plan_rule == other.plan_rule)
@@ -298,49 +316,61 @@ def test_rows_carry_a_record_local_rule_and_digest(plan_2d, spec_2d):
 
 def test_rule_json_matches_the_harness_dump(plan_2d):
     row = plan_2d.rows_by_id[U937]
+    counts = row.plan_rule["samples"]
     assert (
         row.plan_digest
         == hashlib.sha256(
             b'{"channel_recipe":null,"levels":[1,2,4],"patch":256,'
-            b'"samples":{"test":20,"train":1000,"val":20},'
-            b'"seed":0,"split":{"fractions":{"test":0.1,"train":0.8,"val":0.1},"policy":"fractions","seed":0}}'
+            + f'"samples":{{"test":{counts["test"]},"train":{counts["train"]},"val":{counts["val"]}}},'.encode()
+            + b'"seed":0,"split":{"fractions":{"test":0.1,"train":0.8,"val":0.1},"policy":"fractions","seed":0}}'
         ).hexdigest()
     )
 
 
-def test_planned_counts_are_capped_by_capacity_and_reported(plan_2d):
-    row = next(r for r in plan_2d.rows if r.in_pool)
-    assert row.plan_rule is not None
-    assert all(row.planned[s] <= row.plan_rule["samples"][s] for s in row.planned) and row.planned_bytes > 0
-    # BCSS: 151 one-plane images of 2467×3394, 1024 px coarsest footprint → 2×3 tiles; each image lands whole in
-    # one split, so per item 6 samples × fraction: 151 × 4.8 / 0.6 / 0.6
-    assert plan_2d.rows_by_id[BCSS].planned == {"train": 724, "val": 90, "test": 90}
-    # U937: 25 planes of 2048×2048 (n_items and t count the same fields) → 2×2 tiles; 100 × 0.8 / 0.1 / 0.1
-    assert plan_2d.rows_by_id[U937].planned == {"train": 80, "val": 10, "test": 10}
-    assert plan_2d.rows_by_id[U937].planned_bytes == 3 * 100 * 4 * 256 * 256 * 3 * 2
-    md = plan_2d.render_markdown()
-    assert "planned" in md and "of requested" in md
-    # requested is per volume, planned summed over them: U937 asks 1000 / 20 / 20 of each of its 25 items
-    assert plan_2d.rows_by_id[U937].volumes == 25 and plan_2d.rows_by_id[BCSS].volumes == 151
-    assert "| train 80 / 25000 · val 10 / 500 · test 10 / 500 |" in md
-    assert "planned 1004 of requested 183040 samples; ~" in md and "expectation over each record's items" in md
+def test_planned_is_the_share_a_record_can_supply(plan_2d, spec_2d):
+    fractions = spec_2d.splits.fractions
+    bcss, u937 = plan_2d.rows_by_id[BCSS], plan_2d.rows_by_id[U937]
+    # BCSS: 151 one-plane images, each whole in one split: every split all but surely holds one of them
+    assert bcss.planned == bcss.plan_rule["samples"]
+    # U937: 25 one-plane items (n_items and t count the same fields): a split holds none with (1 - fraction) ** 25
+    assert u937.planned == {
+        name: round(count * (1 - (1 - fractions[name]) ** 25)) for name, count in u937.plan_rule["samples"].items()
+    }
+    # up to 4 chunks per crop per level, never more than the record's whole pyramids (25 planes of 2048², 3 channels)
+    crops = sum(u937.planned.values())
+    whole = int(25 * 2048 * 2048 * 3 * 2 * (1 + 1 / 4 + 1 / 16))
+    assert u937.planned_bytes == min(3 * crops * 4 * 256 * 256 * 3 * 2, whole)
     assert plan_2d.valid
 
 
 def test_split_unsupplied_by_every_record_is_an_error(spec_2d, records_single_plane):
-    plan = build_plan(spec_2d, "h", None, records_single_plane)  # every record: one plane, fractions put all in train
+    # one record of one plane: it lands whole in one split, so 1 val crop is expected 0.1 times
+    one = [(path, record) for path, record in records_single_plane if record["id"] == U937]
+    spec = spec_with(spec_2d, **{"sampling.crops": {"train": 8, "val": 1, "test": 1}})
+    plan = build_plan(spec, "h", None, one)
     assert any(e.startswith("split 'test': no record can supply it") for e in plan.errors)
+    assert any(e.startswith("split 'val': no record can supply it") for e in plan.errors)
     assert not any(e.startswith("split 'train'") for e in plan.errors)
 
 
+def test_a_pool_of_single_images_supplies_every_split(spec_2d_mixed, records_single_plane):
+    # three one-plane records of 4 val crops each (the cap): each expects 0.4, which rounds to none, the pool 1.2
+    edits = {"sampling.crops": {"train": 1000, "val": 100, "test": 100}, "sampling.max_crops_per_dataset": 4}
+    plan = build_plan(spec_with(spec_2d_mixed, **edits), "h", None, records_single_plane)
+    pool = [row for row in plan.rows if row.in_pool]
+    assert len(pool) == 3 and all(row.planned["val"] == 0 for row in pool)
+    assert not any(e.startswith("split ") for e in plan.errors)
+
+
 def test_planned_cuts_planes_exactly_like_the_harness(spec_2d):
-    # one 5-plane 4096² volume: 4×4 tiles; split_counts(5, .8/.1/.1) gives train 4, val 1 (the tie), test 0 planes
+    # one 5-plane volume: split_counts(5, .8/.1/.1) gives train 4, val 1 (the tie), test 0 planes
     five_planes = [(path, record) for path, record in records() if record["id"] == U937]
     record = five_planes[0][1]
     record["data"]["n_items"] = 1
     record["technical"]["arrays"] = [{**record["technical"]["arrays"][0], "shape": [5, 3, 4096, 4096]}]
     plan = build_plan(spec_2d, "h", None, five_planes)
-    assert plan.rows_by_id[U937].planned == {"train": min(1000, 16 * 4), "val": 16, "test": 0}
+    row = plan.rows_by_id[U937]
+    assert row.planned == {**row.plan_rule["samples"], "test": 0}
     assert any(e.startswith("split 'test': no record can supply it") for e in plan.errors)
     assert not any(e.startswith(("split 'train'", "split 'val'")) for e in plan.errors)
 
@@ -364,18 +394,45 @@ def test_raw_array_without_extents_counts_the_full_request(spec_2d):
         if record["id"] == U937:
             record["technical"]["arrays"].append({"role": "raw", "axes": "t", "shape": [5]})
     row = build_plan(spec_2d, "h", None, with_odd_array).rows_by_id[U937]
-    # the odd array is a volume per item with no shape: each of the 25 counts the full request
-    assert row.planned == {"train": 80 + 25 * 1000, "val": 10 + 25 * 20, "test": 10 + 25 * 20}
+    assert row.planned == row.plan_rule["samples"]  # an array with no shape may hold planes of every split
     assert UNKNOWN_SHAPE_NOTE in row.notes
 
 
 def test_holdout_only_pool_cannot_supply_train(spec_2d):
     plan = build_plan(spec_with(spec_2d, **{"splits.holdout_ids": [U937, BCSS]}), "h", None, records())
-    assert plan.rows_by_id[U937].planned == {"train": 0, "val": 0, "test": 25 * 4}  # 25 items × min(20, 4 tiles)
+    row = plan.rows_by_id[U937]
+    assert row.planned == {"train": 0, "val": 0, "test": row.plan_rule["samples"]["test"]}
     assert any(e.startswith("split 'train': no record can supply it") for e in plan.errors)
 
 
-def test_planned_caps_each_volume_like_the_harness(spec):
-    # hemibrain: one 3D item of 41394 z planes; 38×33 tiles of 1024 px per plane, far over every request
-    plan = build_plan(spec_with(spec, **{"select.where.dims": {"in": ["3D"]}}), "h", None, records())
-    assert plan.rows_by_id[HEMIBRAIN].planned == {"train": 1000, "val": 20, "test": 20}
+def test_a_heavy_dataset_stops_at_the_cap(spec_2d, plan_2d):
+    capped = build_plan(spec_with(spec_2d, **{"sampling.max_crops_per_dataset": 8}), "h", None, records())
+    pool = [row for row in capped.rows if row.in_pool]
+    assert pool and all(max(row.plan_rule["samples"].values()) <= 8 for row in pool)
+    assert any(row.plan_rule["samples"]["train"] == 8 for row in pool)
+    # the cap leaves the weights alone: a capped dataset's crops are drawn more often
+    assert {row.id: row.weight for row in pool} == {row.id: row.weight for row in plan_2d.rows if row.in_pool}
+
+
+def test_the_plan_table_shows_each_datasets_crops_and_coverage(plan_2d, spec_2d):
+    row = plan_2d.rows_by_id[U937]
+    md = plan_2d.render_markdown()
+    cell = " · ".join(f"{name} {row.planned[name]}" for name in spec_2d.sampling.crops)
+    coverage = sum(row.planned.values()) / row.positions
+    assert f"| {cell} | {coverage:.2g}× |" in md
+    assert "| split preview | crops | coverage | est. bytes |" in md
+    planned = sum(sum(r.planned.values()) for r in plan_2d.rows if r.in_pool)
+    assert f"planned {planned} of requested {sum(spec_2d.sampling.crops.values())} crops; ~" in md
+    assert "expectation over each record's items" in md
+    assert plan_2d.crops == spec_2d.sampling.crops
+
+
+def test_a_dataset_estimated_over_the_stage_cap_is_a_plan_warning(spec_2d, plan_2d):
+    assert not any("limits.stage_bytes" in warning for warning in plan_2d.warnings)  # no cap given: nothing to say
+    tight = build_plan(spec_2d, "h", None, records(), stage_bytes=1)
+    over = [warning for warning in tight.warnings if "limits.stage_bytes" in warning]
+    assert len(over) == 1 and over[0].startswith("2 datasets are estimated over limits.stage_bytes (1 B)")
+    assert BCSS in over[0] and U937 in over[0] and "sampling.max_crops_per_dataset" in over[0]
+    assert tight.valid  # a warning: the stage job measures the real bytes
+    roomy = build_plan(spec_2d, "h", None, records(), stage_bytes=1e15)
+    assert not any("limits.stage_bytes" in warning for warning in roomy.warnings)

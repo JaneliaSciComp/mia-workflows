@@ -28,6 +28,7 @@ from autodev.auth import bot_login, token_fn
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from autodev.github import GitHub
 from mia_core.fs import require_local_dir, require_secret_file
+from mia_core.registry import report_worker
 
 from .config import EXTRA_LABELS, STAGES, load_config
 
@@ -368,7 +369,10 @@ async def cmd_test_pr(cfg: Config, args: argparse.Namespace) -> int:
     clients = _github_clients(cfg)
     try:
         activities = Activities(
-            cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=await bot_login(cfg)
+            cfg,
+            *clients,
+            jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs", work_root=cfg.paths.work_root),
+            bot=await bot_login(cfg),
         )
         return await run_test_pr(activities, args.pr, Path(args.binding), args.record)
     finally:
@@ -391,7 +395,11 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     clients = _github_clients(cfg)
     bot = await bot_login(cfg)
     activities = Activities(
-        cfg, *clients, jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs"), bot=bot, client=client
+        cfg,
+        *clients,
+        jobs=CsubJobs(cfg.deployment, cfg.paths.state_dir / "jobs", work_root=cfg.paths.work_root),
+        bot=bot,
+        client=client,
     )
     # the dataset issues' mirror (spec webapp-actions §7)
     labels, openers = {"dataset": (cfg.label, STAGES)}, {"dataset": dataset_issue(cfg, clients[2])}
@@ -418,12 +426,15 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         cfg.task_queue,
         cfg.await_queue,
     )
+    # the code this worker's activities were loaded from: the cleaner says when a restart is owed
+    report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log))
     try:
         async with main_worker, await_worker:
             await asyncio.Event().wait()
     except asyncio.CancelledError:
         log.info("worker shutting down")
     finally:
+        report.cancel()
         for gh in clients:
             await gh.aclose()
     return 0
@@ -458,8 +469,6 @@ async def cmd_collect_judge_set(cfg: Config, args: argparse.Namespace) -> int:
     the newest human verdict on each crop set in the registry, the round's crop and verify workspaces still on disk
     become `<dir>/<item>/evidence/` through the worker's own builder, and expected.json carries the human verdict and
     the category `<modality family>/<label kind>`. Rounds whose workspaces are gone are listed as skipped."""
-    import yaml
-
     from mia_core.judge.evidence import build as build_evidence
     from mia_core.judge.schema import prompt_text
     from mia_core.registry import Registry

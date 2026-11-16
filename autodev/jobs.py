@@ -1,8 +1,9 @@
 """Running shell scripts as csub (LSF sandbox) jobs, and reading what they leave behind.
 
 `CsubJobs` submits a job at most once per key, remembering the job id in a file so a worker restart or a
-Temporal retry reattaches to the running job instead of starting a second one. `read_untrusted` is how
-every file written by a sandboxed job is read back.
+Temporal retry reattaches to the running job instead of starting a second one. It also writes each job's record
+(`mia_core.jobrecord`): the request and csub's answer at submit, the outcome at the end of the wait.
+`read_untrusted` is how every file written by a sandboxed job is read back.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mia_core.jobrecord import RECORDS_DIR, write_finished, write_submitted
 from mia_core.locks import LockLost
 from mia_core.untrusted import read_untrusted as read_untrusted
 
@@ -42,6 +44,9 @@ class JobSpec:
     rw_mounts: list[str] = field(default_factory=list)  # absolute paths, besides the workspace
     agent: str | None = None  # csub launcher agent mode, e.g. "claude"; gated by the policy [agents] table
     env: dict[str, str] = field(default_factory=dict)
+    # an agent job's prompt and its stream-json output, relative to the workspace: its record keeps both
+    prompt_file: str | None = None
+    transcript_file: str | None = None
 
 
 def csub_client(session: str) -> csub.Client:
@@ -53,7 +58,8 @@ def csub_client(session: str) -> csub.Client:
 
 
 class CsubJobs:
-    """Submit-once job runner. Job ids are remembered as `<key>.id` files in `id_dir`."""
+    """Submit-once job runner. Job ids are remembered as `<key>.id` files in `id_dir`; with `work_root`, every
+    job whose workspace is under it leaves a record in `<work_root>/_jobs`."""
 
     def __init__(
         self,
@@ -62,8 +68,9 @@ class CsubJobs:
         client_factory: Callable[[], Any] | None = None,
         sleep: Callable[[float], Any] = asyncio.sleep,
         poll_s: float = 60.0,
+        work_root: Path | None = None,
     ):
-        self.session, self.id_dir = session, Path(id_dir)
+        self.session, self.id_dir, self.work_root = session, Path(id_dir), work_root
         self._factory = client_factory or (lambda: csub_client(session))
         self._client = None
         self._sleep, self._poll_s = sleep, poll_s
@@ -91,39 +98,65 @@ class CsubJobs:
             built = spec()
             spec = await built if inspect.isawaitable(built) else built
         workspace = os.path.realpath(spec.workspace)
+        self._keep_records_apart(key, spec)
         running = [
             status
             for status in await asyncio.to_thread(self.client.status)
             if os.path.realpath(getattr(status, "cwd", None) or "/nonexistent") == workspace
         ]
+        request = {
+            "command": spec.command,
+            "shell": True,
+            "cwd": spec.workspace,
+            "name": spec.name,
+            "cpus": spec.cpus,
+            "mem_mb": spec.mem_mb,
+            "walltime_min": spec.walltime_min,
+            "allow_hosts": list(spec.allow_hosts),
+            "agent": spec.agent,
+            "session": self.session,
+            "mounts": [
+                {"path": spec.workspace, "mode": "rw"},
+                *({"path": mount, "mode": "rw"} for mount in spec.rw_mounts),
+                *({"path": mount, "mode": "ro"} for mount in spec.ro_mounts),
+            ],
+        }
+        if spec.env:
+            request["env"] = dict(spec.env)
+        answer = None
         if running:  # same workspace (unique per job): submitted, then the worker died before writing the id file
             job_id = running[0].job_id
         else:
-            request = {
-                "command": spec.command,
-                "shell": True,
-                "cwd": spec.workspace,
-                "name": spec.name,
-                "cpus": spec.cpus,
-                "mem_mb": spec.mem_mb,
-                "walltime_min": spec.walltime_min,
-                "allow_hosts": list(spec.allow_hosts),
-                "agent": spec.agent,
-                "session": self.session,
-                "mounts": [
-                    {"path": spec.workspace, "mode": "rw"},
-                    *({"path": mount, "mode": "rw"} for mount in spec.rw_mounts),
-                    *({"path": mount, "mode": "ro"} for mount in spec.ro_mounts),
-                ],
-            }
-            if spec.env:
-                request["env"] = dict(spec.env)
-            job_id = (await asyncio.to_thread(self.client.submit, request)).job_id
+            answer = await asyncio.to_thread(self.client.submit, request)
+            job_id = answer.job_id
         id_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = id_file.with_suffix(".tmp")
         tmp.write_text(job_id)
         tmp.replace(id_file)
+        await asyncio.to_thread(
+            write_submitted,
+            self.work_root,
+            spec.workspace,
+            service=self.session,
+            key=key,
+            job_id=job_id,
+            request=request,
+            submit=answer,
+            prompt_file=spec.prompt_file,
+            transcript_file=spec.transcript_file,
+        )
         return job_id
+
+    def _keep_records_apart(self, key: str, spec: JobSpec) -> None:
+        """Refuse a job that could write the job records: one whose workspace or read-write mount is the records
+        directory, lies in it, or contains it."""
+        if self.work_root is None:
+            return
+        records = Path(os.path.realpath(self.work_root)) / RECORDS_DIR
+        for mount in (spec.workspace, *spec.rw_mounts):
+            real = Path(os.path.realpath(mount))
+            if records.is_relative_to(real) or real.is_relative_to(records):
+                raise ValueError(f"job {key}: {mount} is writable and holds the job records ({records})")
 
     async def wait(self, job_id: str, workspace: str, heartbeat: Callable[[str], None]) -> JobOutcome:
         """Poll until the job is finished (or forgotten by LSF), calling `heartbeat` with each state seen.
@@ -151,4 +184,11 @@ class CsubJobs:
         if state == "UNKNOWN" and file_code is not None:  # LSF forgot the job, but the script ran to the end
             state = "DONE" if file_code == 0 else "EXIT"
         exit_code = status.exit_code if status and status.exit_code is not None else file_code
+        ended = {
+            "state": state,
+            "exit_code": exit_code,
+            "exec_host": getattr(status, "exec_host", None),
+            "queue": getattr(status, "queue", None),
+        }
+        await asyncio.to_thread(write_finished, self.work_root, workspace, job_id=job_id, outcome=ended)
         return JobOutcome(job_id, state, exit_code)

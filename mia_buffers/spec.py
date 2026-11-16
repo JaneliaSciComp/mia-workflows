@@ -162,14 +162,18 @@ class Normalize(_Strict):
 
 
 class SamplePlan(_Strict):
-    """Planned training samples per volume, per split (the harness stages only the chunks these samples touch)."""
+    """A per-volume sample count a spec may carry: read so that spec loads, never used (see Spec.warnings)."""
 
-    samples: dict[str, PositiveInt] = {"train": 1000, "val": 20, "test": 20}
+    samples: dict[str, PositiveInt] = {}
 
 
 class Sampling(_Strict):
     patch: Patch
-    plan: SamplePlan = SamplePlan()
+    # distinct crops in the whole buffer per split; a dataset stages its weight's share (mia_buffers.plan.crops_for)
+    # and the val and test numbers are the lengths of the frozen lists
+    crops: dict[str, PositiveInt] = {"train": 100000, "val": 2000, "test": 2000}
+    max_crops_per_dataset: PositiveInt = 1024  # in one split; one artifact must stay under limits.stage_bytes
+    plan: SamplePlan | None = None  # ignored, see Spec.warnings
     levels: list[int] = [1]
     assume_voxel_size: bool = True  # fill missing voxel sizes from mia_buffers.assume (spec v0.5 §2)
     output_axes: str = "tczyx"
@@ -264,12 +268,14 @@ class Spec(_Strict):
     def _collect_warnings(self) -> Spec:
         if self.sampling.label_axis is not None:
             self.warnings.append("sampling.label_axis is ignored: labels are a separate tensor (spec v0.4 §8.5)")
+        if self.sampling.plan is not None:
+            self.warnings.append("sampling.plan is ignored: sampling.crops sets the buffer's size")
         return self
 
     @model_validator(mode="after")
-    def _plan_names_the_splits(self) -> Spec:
-        if set(self.sampling.plan.samples) != set(self.splits.fractions):
-            raise ValueError(f"sampling.plan.samples must name exactly the splits {sorted(self.splits.fractions)}")
+    def _crops_name_the_splits(self) -> Spec:
+        if set(self.sampling.crops) != set(self.splits.fractions):
+            raise ValueError(f"sampling.crops must name exactly the splits {sorted(self.splits.fractions)}")
         return self
 
     def patch_for(self, dims: str) -> dict[str, int] | None:

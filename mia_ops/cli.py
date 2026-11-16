@@ -18,7 +18,7 @@ from mia_core.judge import eval as judge_eval
 
 from . import services
 from .manifest import load_manifest
-from .services import Stack, Temporal, attach, is_running, kill, service_up, windows
+from .services import Stack, Temporal, attach, dead_windows, is_running, kill, service_up, windows
 
 
 def cmd_up(stack: Stack, args: argparse.Namespace) -> int:
@@ -26,9 +26,10 @@ def cmd_up(stack: Stack, args: argparse.Namespace) -> int:
     want_temporal, selected = stack.select(args.services)
     if want_temporal and not selected:  # `mia up temporal`
         temporal.up()
+    rc = 0
     for svc in selected:  # each call starts or verifies Temporal first; after the first that is a health check
-        service_up(svc, stack, temporal)
-    return 0
+        rc |= service_up(svc, stack, temporal)  # 1 when its worker did not start: the others are still started
+    return rc
 
 
 def cmd_down(stack: Stack, args: argparse.Namespace) -> int:
@@ -55,8 +56,13 @@ def cmd_ps(stack: Stack, args: argparse.Namespace) -> int:
         rc |= "stopped" in status or "unreachable" in status
     for svc in selected:
         if is_running(svc.name):
-            print(f"{svc.name}: running")
+            dead = dead_windows(svc.name)
+            print(
+                f"{svc.name}: "
+                + (f"BROKEN, its {', '.join(dead)} has exited (mia restart {svc.name})" if dead else "running")
+            )
             print(windows(svc.name), end="")
+            rc |= bool(dead)
         else:
             print(f"{svc.name}: stopped")
             rc = 1

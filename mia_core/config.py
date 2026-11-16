@@ -32,7 +32,12 @@ class TemporalCfg(BaseModel):
 
 class ServiceCfg(BaseModel):
     url: str  # buffer-api base URL, reachable from the worker
-    token_file: Path | None = None  # the worker token the service checks
+    token_file: Path | None = None  # the worker token the service checks; comes out expanded and absolute
+
+    @field_validator("token_file")
+    @classmethod
+    def _expand(cls, token_file: Path | None) -> Path | None:
+        return token_file.expanduser().absolute() if token_file else None  # not resolve(): follow no symlink
 
     @field_validator("url")
     @classmethod
@@ -96,7 +101,7 @@ class AutonomyCfg(BaseModel):
 
 
 class GateCfg(BaseModel):
-    """One judged gate (spec autonomous-gates §9): `off` is today, `shadow` records the verdict beside the human's and
+    """One judged gate (spec autonomous-gates §9): `off` runs no judge, `shadow` records the verdict beside the human's and
     decides nothing, `active` lets the verdict authorize. `max_suspect` is how many `suspect` crops a set may carry
     and still be approved (§4.2)."""
 
@@ -179,6 +184,20 @@ def _app_of(block: object) -> str | None:
     return block.get("app") if isinstance(block, dict) else None
 
 
+# the namespace each application's Config works in when mia.yaml names none for it
+APP_NAMESPACE = {"autodev": "default", "mia-data": "mia-data", "mia-buffers": "mia-buffers"}
+
+
+def _namespace(services: dict, shared: object, name: str) -> str:
+    """The Temporal namespace service `name` works in, by the rule its application's Config follows: the one its
+    block names, else the one the shared section names, else its application's default."""
+    block = services[name] if isinstance(services[name], dict) else {}
+    for section in (block.get("temporal"), shared):
+        if isinstance(section, dict) and "namespace" in section:
+            return str(section["namespace"])
+    return APP_NAMESPACE.get(str(block.get("app")), "default")
+
+
 def service_config(manifest: dict, name: str) -> dict:
     """Merge the shared sections with service `name`'s block (one level deep); the input is not modified."""
     services = manifest.get("services")
@@ -205,12 +224,22 @@ def service_config(manifest: dict, name: str) -> dict:
     if block["app"] == "mia-buffers":
         # buffer-api starts and signals mia-data's workflows: tell it their namespace and task queue (the task
         # queue is the service's name). A manifest without such a service leaves the model's default.
+        shared = manifest.get("temporal")
         data_name = next((key for key, other in services.items() if _app_of(other) == "mia-data"), None)
         if data_name is not None:
-            temporal = service_config(manifest, data_name).get("temporal")
-            # mia-data's own default namespace when it has no temporal section; pydantic's when it has one
-            namespace = temporal.get("namespace", "default") if isinstance(temporal, dict) else "mia-data"
+            namespace = _namespace(services, shared, data_name)
             result["datasets_pipeline"] = {"namespace": namespace, "task_queue": data_name}
+        # and its /health says whether a worker polls each service's task queue: every service, by namespace
+        result["workers"] = {other: _namespace(services, shared, other) for other in services}
+        # and it serves the job records of the service that runs autodev on the snippets repo, when that service
+        # works under a root of its own
+        github = result.get("github")
+        snippets_repo = github.get("snippets_repo") if isinstance(github, dict) else None
+        for other in services.values():
+            theirs, paths = (other.get("github"), other.get("paths")) if isinstance(other, dict) else (None, None)
+            if _app_of(other) == "autodev" and isinstance(theirs, dict) and isinstance(paths, dict):
+                if snippets_repo and theirs.get("repo") == snippets_repo and isinstance(paths.get("work_root"), str):
+                    result["snippets_work_root"] = paths["work_root"]
     paths = result.get("paths")
     if isinstance(paths, dict) and "state_root" in paths:
         state_root = paths.pop("state_root")

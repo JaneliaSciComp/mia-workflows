@@ -68,7 +68,7 @@ def test_unknown_snippet_record_and_label_fields_rejected():
     b["record"], b["record_commit"] = "other", "f" * 40
     b["labels"][0].update(label_key="../raw", pairs_with=1)  # a path, not a file name
     errs = check(b)
-    assert len(errs) == 5, errs
+    assert len(errs) == 4 and not any("record_commit" in error for error in errs), errs  # the commit is not checked
     assert check({"record": "x", "raw": []}) and check("not a mapping")
 
 

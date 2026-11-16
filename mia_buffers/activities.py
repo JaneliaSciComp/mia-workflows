@@ -34,23 +34,34 @@ from mia_core import autonomy
 from mia_core.assets import cache_missing, raw_asset, read_files_json
 from mia_core.config import manifest_path
 from mia_core.fs import dir_bytes
+from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge import policy
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
 from mia_data.binding import hosts as job_hosts
-from mia_data.binding import missing_hosts
+from mia_data.binding import missing_hosts, record_gaps
 from mia_data.catalog import dataset_folder
+from mia_data.config import round_open
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
-from mia_data.models import JobDone, LockTaken, Reservation
+from mia_data.models import RERUNNERS, JobDone, LockTaken, Reservation
 from mia_data.publish import prepared_row
 from mia_data.seed import ID_RE
-from mia_data.status import render_links, render_stage
+from mia_data.status import render_jobs, render_links, render_result, stage_entries
 
 from .api import BufferConfig
 from .assume import VOXEL_NM
-from .config import HUMAN_LABELS, PREP_HUMAN_LABELS, PREP_STAGES, STAGES
+from .config import (
+    HUMAN_LABELS,
+    PREP_HUMAN_LABELS,
+    PREP_STAGE_ACTIONS,
+    PREP_STAGE_SENTENCES,
+    PREP_STAGES,
+    STAGE_SENTENCES,
+    STAGES,
+    stage_pass,
+)
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
 from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
@@ -152,9 +163,9 @@ def voxel_size_json(row: dict) -> dict[str, dict]:
 
 
 class Activities:
-    """The activity implementations, bound to the GitHub clients (issue, snippets, catalog and mia-data's
-    datasets repos), the csub job runner, buffer-api's registry (from the config's `service`) and the Temporal
-    client (for the poller)."""
+    """The activity implementations, bound to the GitHub clients (issue, snippets and catalog repos), the csub
+    job runner, buffer-api's registry (from the config's `service`) and the Temporal client (the keeper signals
+    the buffers' workflows with it)."""
 
     def __init__(
         self,
@@ -166,35 +177,11 @@ class Activities:
         bot: str,
         client: Client | None = None,
         probe: Callable[[], list[str]] | None = None,
-        gh_datasets: GitHub | None = None,
     ):
         self.cfg, self.gh_issues, self.gh_snippets, self.gh_catalog = cfg, gh_issues, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
-        self._gh_datasets = gh_datasets
         self.registry = Registry.from_config(cfg.service)  # synchronous: call it through asyncio.to_thread
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
-
-    @property
-    def gh_data(self) -> GitHub:
-        """mia-data's name for the issue repo client."""
-        return self.gh_issues
-
-    @property
-    def gh_datasets(self) -> GitHub:
-        """The client for mia-data's issue repo (`github.datasets_repo`)."""
-        if self._gh_datasets is None:
-            raise RuntimeError("no datasets-repo client: this activity runs only inside the worker")
-        return self._gh_datasets
-
-    @gh_datasets.setter
-    def gh_datasets(self, gh: GitHub) -> None:
-        self._gh_datasets = gh
-
-    @property
-    def temporal(self) -> Client:
-        if self.client is None:
-            raise RuntimeError("no Temporal client: this activity runs only inside the worker")
-        return self.client
 
     def all(self) -> list:
         """The main queue's activities; await_job runs on the -await queue."""
@@ -203,6 +190,7 @@ class Activities:
             self.plan,
             self.limits,
             self.set_stage,
+            self.stage_result,
             self.comment,
             self.comment_plan,
             self.refuse_label,
@@ -233,8 +221,10 @@ class Activities:
             self.prep_nudge,
             self.prep_status,
             self.set_prep_stage,
+            self.prep_stage_result,
             self.comment_prep,
             self.keep,
+            self.sweep,
             self.paused,
             self.reserve,
             self.settle,
@@ -547,7 +537,8 @@ class Activities:
             await catalog_sync(self.cfg, self.gh_catalog, registry, ref)
         records = await asyncio.to_thread(registry.records, ref)
         prepared = {row["id"] for row in await asyncio.to_thread(registry.datasets, "prepared")}
-        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared)
+        stage_bytes = self.cfg.limits.stage_bytes or self.cfg.limits.job_bytes
+        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared, stage_bytes)
         tensorizer = self.cfg.sourcing.tensorizer
         if not (self.cfg.harness.dir / "tensorizers" / tensorizer / "tensorizer.yaml").is_file():
             plan.errors.append(f"no tensorizer {tensorizer} in the harness checkout")
@@ -607,7 +598,14 @@ class Activities:
     async def set_stage(
         self, issue: int, stage: str, state: BufferState | None = None, detail: str = "", extra: str = ""
     ) -> None:
-        """Write the buffer spec's stage and, within a round, the stage's timeline entry once."""
+        """Write the buffer spec's stage and, within a round, the timeline entries of the stage passes involved
+        (`stage_entries`), each once.
+
+        A stage a round works or waits at starts a pass: its entry has the stage line, what the stage is doing
+        (`detail`, or the stage's sentence), the caller's `extra` and links to the folders to look at. A pass still
+        open in `state` gets its result entry first: what it found (`state.result`) and the records of its jobs. A
+        stage the buffer spec rests at is written by the open pass's result itself, which says how the pass ended
+        and where the spec rests; with no pass open it has an entry of its own."""
         if stage not in STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         if not (state and state.round_id):
@@ -625,20 +623,61 @@ class Activities:
         links = {"Workspace": paths.link(self._round_workspace(issue, state.round_id))}
         if state.levels and state.patch:
             links["Staged"] = paths.link(paths.staged_root / levels_key(state.patch, state.levels))
-        marker = self.cfg.marker(f"stage {state.round_id} {stage}")
-        parts = [
-            render_stage(stage, self._clean(detail), prefix="buffer"),
-            self._clean(extra) if extra else "",
-            render_links(links),
-        ]
-        body = "\n".join(part for part in parts if part) + f"\n{marker}"
-        await self._post("buffer", issue, body, marker, round_id=state.round_id, stage=stage)
+        is_pass = stage_pass(stage)
+        entries = stage_entries(
+            "buffer",
+            state.round_id,
+            stage,
+            is_pass=is_pass,
+            start_n=state.passes.get(stage, 0) + 1 if is_pass else 1,
+            sentence=STAGE_SENTENCES.get(stage, ""),
+            detail=self._clean(detail),
+            extra=self._clean(extra) if extra else "",
+            links=render_links(links),
+            open_stage=state.pass_stage,
+            open_n=state.passes.get(state.pass_stage, 1),
+            result=self._clean(state.result),
+            shown=self._shown(state) if state.pass_stage else "",
+            noun="buffer spec",
+        )
+        for body, marker_text, sets in entries:
+            marker = self.cfg.marker(marker_text)
+            await self._post("buffer", issue, f"{body}\n{marker}", marker, round_id=state.round_id, stage=sets)
+
+    def _shown(self, state: BufferState | PrepState) -> str:
+        """What goes under the result of the pass open in `state`: a link to the record of each job the pass
+        submitted (a job that left none is not listed)."""
+        links = {}
+        for workspace in state.pass_jobs:
+            where = address(self.cfg.paths.work_root, workspace)
+            if where and record_path(self.cfg.paths.work_root, where).is_file():
+                links[Path(workspace).name] = job_link(self.cfg.service.url, where)
+        return render_jobs(links)
+
+    async def _result(self, kind: str, issue: int, state: BufferState | PrepState) -> None:
+        """Write the result entry of the pass open in `state`, once, and no stage: for a buffer spec (`buffer`) or
+        a request (`prep`)."""
+        if not (state.round_id and state.pass_stage):
+            return
+        body = render_result(state.pass_stage, self._clean(state.result), prefix=kind)
+        count = state.passes.get(state.pass_stage, 1)
+        tag = "prep " if kind == "prep" else ""
+        marker = self.cfg.marker(f"{tag}result {state.round_id} {state.pass_stage} {count}")
+        text = "\n".join(part for part in (body, self._shown(state)) if part)
+        await self._post(kind, issue, f"{text}\n{marker}", marker, round_id=state.round_id)
+
+    @activity.defn(name="stage_result")
+    @mia_permanent_errors
+    async def stage_result(self, issue: int, state: BufferState) -> None:
+        """Write the result entry of the pass open in `state`, once: for a pass that ended where no stage write
+        follows (a new round started while the one before waited at a gate)."""
+        await self._result("buffer", issue, state)
 
     @activity.defn(name="comment")
     @mia_permanent_errors
     async def comment(self, issue: int, body: str, marker: str) -> str | None:
-        """Add an entry to the buffer spec's timeline, once per marker. Returns None (it returned the comment's
-        URL when it posted to GitHub; the signature is recorded in histories)."""
+        """Add an entry to the buffer spec's timeline, once per marker. Returns None; the return type is
+        recorded in histories."""
         full_marker = self.cfg.marker(marker)
         await self._post("buffer", issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
         return None
@@ -669,14 +708,17 @@ class Activities:
         actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
         `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). No issue is
         searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
-        registry, folder = self.registry, dataset_folder(self._record(round_id, record), record)
+        entry = self._record(round_id, record)
+        if gaps := record_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
+            raise ValueError(f"{record}: the record cannot be run: {'; '.join(gaps)}")
+        registry, folder = self.registry, dataset_folder(entry, record)
         subject = await asyncio.to_thread(registry.subject, "dataset", record)
         number, stage = (subject["number"], subject["stage"]) if subject else (0, "new")
         if stage == "done" and not again:  # `again`: a dataset that is done gets a new round all the same
             path = self.cfg.paths.storage_root / folder
             note = (
                 f"the dataset is `done` but `{path}` has no binding.yaml with a matching manifest.json: "
-                "run it again from its page so mia-data publishes both"
+                "run it again from its page so mia-data saves both"
             )
             return DatasetIssue(number, stage, False, note, folder), False
         if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
@@ -764,18 +806,18 @@ class Activities:
     @activity.defn(name="prep_nudge")
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
-        """Hand one requested record to mia-data unless the registry already settled it (prepared or
+        """Hand one requested record to mia-data unless the registry already settled it (prepared, shelved or
         needs-human); otherwise nudge_dataset, its result named for the request's entry. A request that says
         `again` hands those over too: the dataset gets a new round, and its row says `in-progress` at once, so
         the request follows that round instead of settling on what the last one left."""
         again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
-        except RegistryError as error:  # best effort: the dataset issue tells the rest
+        except RegistryError as error:  # best effort: the dataset's subject tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        settled = (state := (row or {}).get("state")) in ("prepared", "needs-human")
-        if settled and not again:
+        settled = (state := _followed_state(row)) in ("prepared", "shelved", "needs-human")
+        if settled and (not again or state == "shelved"):  # a shelved dataset is never asked
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
         found, created = await self._nudge(round_id, record, again=again)
@@ -792,22 +834,47 @@ class Activities:
     @activity.defn(name="prep_status")
     @mia_permanent_errors
     async def prep_status(self, records: list[str]) -> dict[str, str]:
-        """Each record's registry state, `unprepared` when it has no row. A registry outage raises."""
-        states = {row["id"]: row.get("state", "unprepared") for row in await asyncio.to_thread(self.registry.datasets)}
+        """Each record's state as a request follows it (`_followed_state`), `unprepared` when it has no row. A
+        registry outage raises."""
+        states = {row["id"]: _followed_state(row) for row in await asyncio.to_thread(self.registry.datasets)}
         return {record: states.get(record, "unprepared") for record in records}
 
     @activity.defn(name="set_prep_stage")
     @mia_permanent_errors
     async def set_prep_stage(self, issue: int, stage: str, state: PrepState | None = None, detail: str = "") -> None:
-        """Write the request's stage and, within its round, the stage's timeline entry once."""
+        """Write the request's stage and, within its round, the timeline entries of the stage passes involved, each
+        once, as `set_stage` does for a buffer spec: the start of a pass, the result of the pass still open in
+        `state`, or that result alone when it ends the round at the stage the request rests at."""
         if stage not in PREP_STAGES:
             raise ValueError(f"unknown preparation stage {stage!r}")
         if not (state and state.round_id):
             await self._post("prep", issue, "", "", stage=stage)
             return
-        marker = self.cfg.marker(f"prep stage {state.round_id} {stage}")
-        body = render_stage(stage, self._clean(detail), prefix="prep") + f"\n{marker}"
-        await self._post("prep", issue, body, marker, round_id=state.round_id, stage=stage)
+        is_pass = stage_pass(stage, PREP_STAGE_ACTIONS)
+        entries = stage_entries(
+            "prep",
+            state.round_id,
+            stage,
+            is_pass=is_pass,
+            start_n=state.passes.get(stage, 0) + 1 if is_pass else 1,
+            sentence=PREP_STAGE_SENTENCES.get(stage, ""),
+            detail=self._clean(detail),
+            open_stage=state.pass_stage,
+            open_n=state.passes.get(state.pass_stage, 1),
+            result=self._clean(state.result),
+            shown=self._shown(state) if state.pass_stage else "",
+            tag="prep ",
+            noun="request",
+        )
+        for body, marker_text, sets in entries:
+            marker = self.cfg.marker(marker_text)
+            await self._post("prep", issue, f"{body}\n{marker}", marker, round_id=state.round_id, stage=sets)
+
+    @activity.defn(name="prep_stage_result")
+    @mia_permanent_errors
+    async def prep_stage_result(self, issue: int, state: PrepState) -> None:
+        """Write the result entry of the request's pass open in `state`, once: for a pass no stage write follows."""
+        await self._result("prep", issue, state)
 
     @activity.defn(name="comment_prep")
     @mia_permanent_errors
@@ -874,7 +941,13 @@ class Activities:
             if subject is None or "cancel" not in subject["actions"]:
                 continue
             found = await asyncio.to_thread(registry.timeline, "dataset", subject["number"])
-            gos = [a for a in (found or {}).get("actions", []) if a["action"] == "go" and a["state"] == "sent"]
+            # the debugger and the cleaner run a round again for whoever asked for the one before: their go is
+            # not looked at
+            gos = [
+                a
+                for a in (found or {}).get("actions", [])
+                if a["action"] == "go" and a["state"] == "sent" and a["actor"] not in RERUNNERS
+            ]
             if not gos or gos[-1]["actor"] != actor:
                 continue
             cancel = functools.partial(
@@ -911,7 +984,7 @@ class Activities:
             return BindingInfo(
                 False,
                 errors=[
-                    f"no prepared dataset at {dataset_dir}: mia-data publishes binding.yaml with a matching manifest.json"
+                    f"no prepared dataset at {dataset_dir}: mia-data saves binding.yaml with a matching manifest.json"
                     " (the dataset is not data:done)"
                 ],
             )
@@ -1115,7 +1188,7 @@ class Activities:
                 log.info("%s: %s was published already; reusing it, removing %s", record, final, building.name)
                 shutil.rmtree(building)
                 return published
-            # a failed build left in place before builds had their own directory: aside, for the `.building-*` sweep
+            # what is in place is no finished artifact (no stage.json saying ok): aside, for the `.building-*` sweep
             os.rename(final, final.with_name(f".building-stale-{final.name}-{time.time_ns()}"))
             os.rename(building, final)
         return report
@@ -1330,14 +1403,13 @@ class Activities:
     @mia_permanent_errors
     async def create_buffer(self, round_id: str, buffer_id: str) -> None:
         """`PUT buffers/<id>` from the round's plan and spec, pinned to the round's harness and plan.json; no event
-        (set_stage("sourcing") writes `approved`)."""
+        (the round's stage writes are its events: STAGE_EVENTS)."""
         cfg, spec, pins = self.cfg, self._spec(round_id), self._pins(round_id)
         plan_text = (self._round_dir(round_id) / "plan.json").read_text()
         body = buffer_config(
             json.loads(plan_text),
             spec,
             tensorizer=cfg.sourcing.tensorizer,
-            split_sizes={"val": cfg.sourcing.val_size, "test": cfg.sourcing.test_size},
             recipe=recipe_for(
                 spec,
                 tensorizer=cfg.sourcing.tensorizer,
@@ -1457,7 +1529,7 @@ class Activities:
         sync datasets and assets; signal the workflows of ready and idle buffers (degraded, idle, retire); the catalog
         when `keeper.catalog_sync_hours` have passed; rows building under an
         ended job reset; `.building-*` directories and empty raw directories older than `quota.hold_hours` removed; free assets evicted per
-        kind until under quota, and a comment on the newest buffer issue when a kind stays over. With `dry_run`
+        kind until under quota, and the report says by how much a kind stays over. With `dry_run`
         the resets, removals and evictions are only reported. The catalog sync runs last, so a slow one never
         holds up an eviction; a background task heartbeats through any single long step."""
         report, registry, quota, now = KeeperReport(), self.registry, self.cfg.quota, time.time()
@@ -1501,6 +1573,13 @@ class Activities:
         report_body = {**dataclasses.asdict(report), "dry_run": dry_run}  # the page shows the last pass
         await asyncio.to_thread(best_effort, lambda: registry.put_keeper(report_body), "keeper report", log)
         return report
+
+    @activity.defn(name="sweep")
+    async def sweep(self) -> dict:
+        """One pass of the cleaner (`mia_buffers.sweep`): its report, which the page shows."""
+        from .sweep import run_sweep
+
+        return await run_sweep(self)
 
     async def _keeper_catalog(self, report: KeeperReport, now: float) -> None:
         """Sync the catalog's main head when the last sync is `keeper.catalog_sync_hours` old (or never ran)."""
@@ -1651,14 +1730,17 @@ class Activities:
         if limit <= 0:
             return
         rows = (await asyncio.to_thread(registry.assets, kind))["assets"]
-        in_progress: set[str] = set()
-        if kind == "raw":  # a prep job may be reading the raw cache of a record mia-data is working on
-            in_progress = {row["id"] for row in await asyncio.to_thread(registry.datasets, "in-progress")}
+        in_round: set[str] = set()
+        if (
+            kind == "raw"
+        ):  # a job of an open round may be reading the record's raw cache; a rejected set is made again from it
+            datasets = await asyncio.to_thread(registry.datasets)
+            in_round = {row["id"] for row in datasets if round_open(row.get("data_stage"))}
         quarantine_s = self.cfg.autonomy.quarantine_days * 86400  # a revoked artifact is evidence for this long
         rules: dict[str, Any] = {
             "hold_s": hold_s,
             "now": now,
-            "in_progress": in_progress,
+            "in_round": in_round,
             "kind": kind,
             "quarantine_s": quarantine_s,
         }
@@ -1726,6 +1808,17 @@ class Activities:
         await asyncio.to_thread(registry.put_asset, kind, key, {"state": "evicted", "evicted_at": now, "bytes": 0})
         log.info("keeper: evicted %s %s (%s bytes, last used %s)", kind, key, data.get("bytes"), data.get("last_used"))
         return True
+
+
+def _followed_state(row: dict | None) -> str:
+    """A dataset's state as a preparation request follows it: `in-progress` while its round is open, which
+    includes one waiting at review (the round goes on once a person gives the verdict); else the row's state,
+    `unprepared` without one. A shelved dataset reads `shelved` whatever its stage: it settles, a person set it
+    aside, and the request does not wait for it."""
+    row = row or {}
+    if row.get("state") == "shelved":
+        return "shelved"
+    return "in-progress" if round_open(row.get("data_stage")) else row.get("state", "unprepared")
 
 
 def _issue_of(round_id: str) -> int:

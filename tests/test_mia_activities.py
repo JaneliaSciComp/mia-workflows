@@ -14,14 +14,18 @@ from temporalio.testing import ActivityEnvironment
 from test_autodev_agent import FakeCsub
 from test_buffers_register import token_server  # noqa: F401  (fixture)
 
+from autodev.agent import issue_hosts
 from autodev.jobs import CsubJobs
 from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
+from mia_core.jobrecord import write_submitted
 from mia_core.registry import Registry, RegistryError
-from mia_data.activities import Activities
+from mia_data.activities import Activities, visible_snippets
+from mia_data.binding import record_gaps
 from mia_data.jobspec import lock_dir
 from mia_data.models import (
     DatasetState,
+    DebugResult,
     JobArgs,
     JobDone,
     LockTaken,
@@ -117,7 +121,7 @@ async def test_admit_charges_the_root_its_go_carries_or_the_dataset_itself(tmp_p
     assert (await t.a.admit(1, "11")).root == f"{t.cfg.github.data_repo}#1"
     with pytest.raises(ApplicationError, match="event 12 is not an action") as error:
         await t.a.admit(1, "12")
-    assert error.value.non_retryable
+    assert error.value.non_retryable and str(error.value).count("ValueError") == 1  # the type is named once
 
 
 async def _match_ws(t, outcome, binding=None):
@@ -130,6 +134,91 @@ async def _match_ws(t, outcome, binding=None):
     if binding is not None:
         (ws / "binding.yaml").write_text(yaml.safe_dump(binding))
     return pins, ws
+
+
+async def test_prepare_debug_gives_the_agent_what_the_rounds_jobs_left(tmp_path):
+    t = _setup(tmp_path)
+    pins, ws = await _match_ws(t, {"outcome": "matched"}, BINDING)
+    match = await t.a.read_match(str(ws))
+    crop = Path(await t.a.prepare_job(1, ROUND, "crop-abc", 1, match.binding_path))
+    (crop / "crops").mkdir()
+    (crop / "crops" / "report.json").write_text('{"errors": ["ReadTimeout"]}')
+    (crop / "exit_code").write_text("1\n")
+    (crop / ".csub" / "jobs" / "155").mkdir(parents=True)
+    (crop / ".csub" / "jobs" / "155" / "stderr").write_text("x" * 100_000 + "the end")
+    (crop / "notes.txt").write_text("not one of a job's reports")
+    (tmp_path / "elsewhere.json").write_text("{}")
+    (crop / "verify.json").symlink_to(tmp_path / "elsewhere.json")  # a job could plant a link
+    failure = "crop job 155 ended EXIT (exit 1): ReadTimeout"
+    debug = Path(await t.a.prepare_debug(1, ROUND, pins, failure, match.binding_path))
+    assert debug.name == "debug-1" and sorted(p.name for p in (debug / "round").iterdir()) == ["crop-abc-1", "match-1"]
+    left = debug / "round" / "crop-abc-1"
+    assert sorted(p.name for p in left.iterdir()) == ["binding.yaml", "crops", "exit_code", "stderr"]
+    assert json.loads((left / "crops" / "report.json").read_text()) == {"errors": ["ReadTimeout"]}
+    stderr = (left / "stderr").read_text()
+    assert stderr.endswith("the end") and len(stderr) == 64 << 10  # the end of the job's output
+    assert json.loads((debug / "round" / "match-1" / "outcome.json").read_text()) == {"outcome": "matched"}
+    said = (debug / "failure.md").read_text()
+    assert failure in said and "120 minutes per job" in said and "exit code 140" in said
+    assert yaml.safe_load((debug / "binding.yaml").read_text())["record"] == "rec-1"  # the checked one
+    prompt = (debug / "prompt.md").read_text()
+    assert "rec-1" in prompt and "$" not in prompt and "outcome.json" in prompt and "failure.md" in prompt
+    assert (debug / "catalog" / "tiff-zip-member.yaml").is_file() and (debug / "record.yaml").is_file()
+    again = Path(await t.a.prepare_debug(1, ROUND, pins, failure, None))  # a retry, of a round with no binding
+    assert again == debug and not (debug / "binding.yaml").exists() and not (debug / "round" / "debug-1").exists()
+    with pytest.raises(ApplicationError, match="is not one of round"):
+        await t.a.prepare_debug(1, ROUND, pins, failure, str(tmp_path / "elsewhere.json"))
+
+
+async def test_read_debug_takes_one_of_two_outcomes(tmp_path):
+    t = _setup(tmp_path)
+    ws = Path(await t.a.prepare_debug(1, ROUND, await t.a.admit(1, "99"), "it failed", None))
+    nothing = DebugResult("failed", "the debugging agent left no readable outcome.json")
+    assert await t.a.read_debug(1, ROUND, str(ws)) == nothing
+    (ws / "outcome.json").write_text(json.dumps({"outcome": "merge the PR", "diagnosis": "x"}))
+    assert await t.a.read_debug(1, ROUND, str(ws)) == nothing
+    said = {"outcome": "rerun", "diagnosis": "the host is slow <!-- mia-data: stage -->", "advice": "a" * 9000}
+    (ws / "outcome.json").write_text(json.dumps(said))
+    result = await t.a.read_debug(1, ROUND, str(ws))
+    assert result.outcome == "rerun" and "<!--" not in result.diagnosis and len(result.advice) == 6000
+    (ws / "outcome.json").write_text(json.dumps({"outcome": "blocked"}))
+    assert await t.a.read_debug(1, ROUND, str(ws)) == DebugResult("blocked", "(the debugging agent gave no diagnosis)")
+
+
+async def test_the_debuggers_go_is_charged_to_the_debugged_rounds_root_and_its_advice_reaches_the_match(tmp_path):
+    t = _setup(tmp_path)
+    put_action(t, 98, payload={"root": "o/buffers#9"})
+    await t.a.admit(1, "98")
+    sent = []
+    t.a.registry.send_action = lambda path, action, **fields: sent.append((path, action, fields))
+    await t.a.debug_go(1, "i1-e98", "bind the first volume only")
+    asked = {"key": "debug i1-e98", "actor": "debugger", "root": "o/buffers#9", "note": "bind the first volume only"}
+    assert sent == [("/datasets/rec-1/actions", "go", asked)]
+    # the round that go starts: its match agent finds the advice; any other round's finds none
+    row = (97, "dataset", 1, "go", "debugger", "2026-11-01T00:00:00+00:00", None, json.dumps(asked))
+    with t.ledger._transaction() as db:
+        db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
+    advised = Path(await t.a.prepare_match(1, "i1-e97", await t.a.admit(1, "97"), 1))
+    assert (advised / "advice.md").read_text() == "bind the first volume only\n"
+    assert "advice.md" in (advised / "prompt.md").read_text() and "$" not in (advised / "prompt.md").read_text()
+    # the cleaner's go after a diagnosis carries advice the same way
+    row = (
+        96,
+        "dataset",
+        1,
+        "go",
+        "cleaner-advice",
+        "2026-11-01T00:00:00+00:00",
+        None,
+        json.dumps({"note": "read zyx"}),
+    )
+    with t.ledger._transaction() as db:
+        db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
+    cleaned = Path(await t.a.prepare_match(1, "i1-e96", await t.a.admit(1, "96"), 1))
+    assert (cleaned / "advice.md").read_text() == "read zyx\n"
+    put_action(t, 99, payload={"note": "a person's note is no advice"})
+    plain = Path(await t.a.prepare_match(1, ROUND, await t.a.admit(1, "99"), 1))
+    assert not (plain / "advice.md").exists() and "advice.md" not in (plain / "prompt.md").read_text()
 
 
 async def test_read_match_matched_copies_binding(tmp_path):
@@ -155,16 +244,29 @@ async def test_read_match_symlinked_outcome_is_missing(tmp_path):
     real.write_text(json.dumps({"outcome": "matched"}))
     (ws / "outcome.json").symlink_to(real)
     r = await t.a.read_match(str(ws))
-    assert r.outcome == "blocked" and "outcome.json" in r.reason and r.binding_path is None
+    assert r.outcome == "failed" and "outcome.json" in r.reason and r.binding_path is None  # no word from the agent
 
 
-async def test_read_match_foreign_host_needs_human(tmp_path):
+async def test_read_match_foreign_host_fails_the_match(tmp_path):
     t = _setup(tmp_path)
     bad = {**BINDING, "raw": [{**BINDING["raw"][0], "urls": ["https://evil.example.com/a.tif"]}]}
     _, ws = await _match_ws(t, {"outcome": "matched"}, bad)
     r = await t.a.read_match(str(ws))
-    assert r.outcome == "blocked" and "evil.example.com" in r.reason and r.binding_path is None
+    assert r.outcome == "failed" and "evil.example.com" in r.reason and r.binding_path is None
     assert not list((t.cfg.paths.state_dir / "rounds" / ROUND).glob("binding-*"))
+
+
+async def test_read_match_takes_the_agents_word_for_why_it_stopped(tmp_path):
+    """The agent says whether a person has to act first (`blocked`) or another run may pass (`failed`)."""
+    t = _setup(tmp_path)
+    for outcome, reason in (("blocked", "the label classes are not named"), ("failed", "the host timed out")):
+        _, ws = await _match_ws(t, {"outcome": outcome, "reason": reason}, BINDING)
+        r = await t.a.read_match(str(ws))
+        assert (r.outcome, r.reason, r.binding_path) == (outcome, reason, None)
+    _, ws = await _match_ws(t, {"outcome": "failed"}, BINDING)
+    assert (await t.a.read_match(str(ws))).reason == "the match agent reported failed, with no reason"
+    _, ws = await _match_ws(t, {"outcome": "gave up"}, BINDING)
+    assert (await t.a.read_match(str(ws))).outcome == "failed"  # a word that is neither: nothing to act on
 
 
 async def test_prepare_match_malformed_snippet_yaml_is_permanent(tmp_path):
@@ -230,6 +332,59 @@ async def test_set_stage_appends_one_entry_per_stage_and_leaves_the_issue_alone(
     assert t.data.comments == {}
 
 
+async def test_a_stage_pass_writes_its_start_and_its_result(tmp_path):
+    """spec job-records §3.6: a stage a round works at starts a pass; the write of the next stage first writes the
+    open pass's result, with a link to the record of each job it ran; a stage the dataset rests at is written by
+    the result of the pass that ended there."""
+    t = _setup(tmp_path)
+    root, pins = t.cfg.paths.work_root, await t.a.admit(1, "99")
+    match = root / "issue-1" / ROUND / "match-1"
+    write_submitted(root, match, service="mia-data", key="k", job_id="5", request={})  # this job left a record
+    state = DatasetState(1, round_id=ROUND, pins=pins)
+    await t.a.set_stage(1, "matching", state)
+    state.passes, state.pass_stage = {"matching": 1}, "matching"  # what the workflow keeps after the write
+    state.pass_jobs = [str(match), str(root / "issue-1" / ROUND / "smoke-1")]
+    state.result = "Matched: an existing reader snippet fits. <!-- forged -->"
+    await t.a.set_stage(1, "testing", state)
+    await t.a.set_stage(1, "testing", state)  # a retry adds nothing
+    start, result, testing = (entry["body"] for entry in t.ledger.timeline("dataset", 1))
+    assert start.startswith("**Stage:** `data:matching`") and "An agent looks for an existing reader snippet" in start
+    assert result.startswith("**Result:** `data:matching`") and "Matched:" in result and "<!-- forged" not in result
+    assert f"**Jobs:** [match-1]({t.a.page_url}/#job/issue-1/{ROUND}/match-1)\n" in result
+    assert "smoke-1" not in result  # a job that left no record is not listed
+    assert (
+        testing.startswith("**Stage:** `data:testing`") and t.ledger.subject("dataset", "rec-1")["stage"] == "testing"
+    )
+
+    # the pass that fails says so itself; the same entry moves the dataset to where it rests
+    state.passes, state.pass_stage, state.pass_jobs = {"matching": 1, "testing": 1}, "testing", []
+    state.result = "Crops at `abc`: **failed**, 3 of 16 verified"
+    await t.a.set_stage(1, "failed", state, "the crops failed; nothing is saved")
+    entries = t.ledger.timeline("dataset", 1)
+    failed = entries[-1]["body"]
+    assert len(entries) == 4 and failed.startswith("**Result:** `data:testing`") and "3 of 16 verified" in failed
+    assert "**failed**: the crops failed; nothing is saved" in failed
+    assert "The dataset rests at `data:failed`." in failed and "**Stage:**" not in failed
+    assert t.ledger.subject("dataset", "rec-1")["stage"] == "failed"
+
+    # a second pass of a stage has a start of its own, and stage_result writes a result where no stage follows
+    state.pass_stage, state.result = "", ""
+    await t.a.set_stage(1, "testing", state)
+    state.passes, state.pass_stage, state.result = (
+        {"matching": 1, "testing": 2},
+        "testing",
+        "Test crops at `h2`: failed",
+    )
+    await t.a.stage_result(1, state)
+    await t.a.stage_result(1, state)  # once
+    entries = t.ledger.timeline("dataset", 1)
+    assert len(entries) == 6 and entries[4]["body"].startswith("**Stage:** `data:testing`")
+    assert entries[5]["body"].startswith("**Result:** `data:testing`") and "`h2`" in entries[5]["body"]
+    assert t.ledger.subject("dataset", "rec-1")["stage"] == "testing"  # a result alone moves no stage
+    await t.a.stage_result(1, DatasetState(1, round_id=ROUND))  # no pass open: nothing to write
+    assert len(t.ledger.timeline("dataset", 1)) == 6
+
+
 def _registry_seen(t, handler=None):
     """Give the activities a registry on a mock transport; the (path, body) of each write lands in the list."""
     seen = []
@@ -249,10 +404,16 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     seen = _registry_seen(t)
     await t.a.set_stage(1, "matching", state)
-    assert seen[-2] == ("/datasets/rec-1", {"state": "in-progress", "data_stage": "matching", "issue": 1})
+    working = {"state": "in-progress", "reason": None, "data_stage": "matching", "issue": 1}
+    assert seen[-2] == ("/datasets/rec-1", working)
     assert seen[-1][0] == "/timeline/dataset/1" and seen[-1][1]["stage"] == "matching"  # then the stage itself
-    await t.a.set_stage(1, "needs-human", state)
-    assert seen[-2][1]["state"] == "needs-human"
+    for stage in ("needs-human", "review", "cancelled"):  # a person has to act
+        await t.a.set_stage(1, stage, state)
+        assert seen[-2][1]["state"] == "needs-human" and seen[-2][1]["reason"] is None
+    await t.a.set_stage(1, "done", state)  # done, and the folder holds nothing: not prepared, and the row says why
+    unsaved = seen[-2][1]
+    assert unsaved["state"] == "needs-human" and "its crops are not saved" in unsaved["reason"]
+    assert "`lm-human-rec-1` holds no binding.yaml with a matching manifest.json" in unsaved["reason"]
     dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"  # binding.yaml + a manifest that matches it
     dataset_dir.mkdir(parents=True)
     binding_bytes = yaml.safe_dump(BINDING).encode()
@@ -262,9 +423,14 @@ async def test_set_stage_reports_the_dataset_state(tmp_path):
     await t.a.set_stage(1, "done", state)
     row = seen[-2][1]
     assert row["state"] == "prepared" and row["crops"] == 2 and row["binding_hash"] and row["folder"]
-    assert "record" not in row and row["issue"] == 1
+    assert "record" not in row and row["issue"] == 1 and row["reason"] is None
+    # a new round on the prepared dataset: its state follows the stage again, the folder's facts stay on the row
+    for stage, word in (("matching", "in-progress"), ("review", "needs-human"), ("needs-human", "needs-human")):
+        await t.a.set_stage(1, stage, state)
+        assert seen[-2][1]["state"] == word and seen[-2][1]["crops"] == 2
+    written = [path for path, _ in seen].count("/datasets/rec-1")
     await t.a.set_stage(1, "matching", None)  # no round: no dataset row, the stage alone
-    assert [path for path, _ in seen].count("/datasets/rec-1") == 3
+    assert [path for path, _ in seen].count("/datasets/rec-1") == written
     assert seen[-1] == ("/timeline/dataset/1", {"body": "", "marker": "", "round": None, "stage": "matching"})
     assert t.data.comments == {} and t.data.issues[1]["labels"] == []  # nothing goes to the issue from a round
 
@@ -288,9 +454,12 @@ async def test_set_stage_needs_human_with_an_unclear_record_still_comments(tmp_p
     state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
     seen = _registry_seen(t)
     record_file = t.cfg.paths.state_dir / "rounds" / ROUND / "record.yaml"
-    record_file.write_text(yaml.safe_dump({"imaging": {"modality": ["confocal"], "organism": []}}))  # no folder
+    record_file.write_text(yaml.safe_dump({"imaging": {"modality": [], "organism": []}}))  # no folder
     await t.a.set_stage(1, "needs-human", state, "why")
-    assert seen[0] == ("/datasets/rec-1", {"state": "needs-human", "data_stage": "needs-human", "issue": 1})
+    assert seen[0] == (
+        "/datasets/rec-1",
+        {"state": "needs-human", "reason": None, "data_stage": "needs-human", "issue": 1},
+    )
     (path, entry) = seen[1]
     assert path == "/timeline/dataset/1" and entry["stage"] == "needs-human" and "why" in entry["body"]
 
@@ -335,6 +504,8 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
         )
         and "<!-- x" not in body
     )
+    # the hosts the reader's job may reach, for autodev: those of the record's URLs and their redirect targets
+    assert issue_hosts(body) == ["data.example.org"] and "The reader's job may reach `data.example.org`." in body
 
 
 async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(tmp_path):
@@ -407,6 +578,37 @@ async def test_adopt_pr_binding_pins_it_to_the_sha(tmp_path):
     assert r["hash"] == hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+async def test_adopt_pr_binding_takes_an_example_written_in_an_earlier_round(tmp_path):
+    """A reader's pull request outlives the round that asked for it. Its example names the catalog commit that
+    round was pinned to; the round that picks the reader up again adopts the example under its own pins."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    _pr_binding(t, {**NEW, "record_commit": "e" * 40})
+    r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
+    assert r["errors"] == []
+    stored = yaml.safe_load(Path(r["path"]).read_text())
+    assert (stored["record_commit"], stored["snippets_commit"]) == (REC_SHA, SNIP_SHA)
+
+
+async def test_adopt_pr_binding_takes_an_example_that_names_a_snippet_superseded_since(tmp_path):
+    """A reader's example may read some arrays with a snippet that existed when it was written and tested. A
+    snippet that supersedes that one, merged meanwhile, hides it from new matches only: the tested example is
+    adopted as it is. A withdrawn snippet is wrong, and its example is refused."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    both = {**NEW, "raw": [BINDING["raw"][0], NEW["raw"][0]]}  # one array by the older snippet, one by the reader
+    _pr_binding(t, both)
+    snapshot = t.cfg.paths.work_root / "_snapshots" / SNIP_SHA
+    (snapshot / "snippets" / "tiff-zip-member-2").mkdir()
+    (snapshot / "snippets" / "tiff-zip-member-2" / "snippet.yaml").write_text(
+        "name: tiff-zip-member-2\nsupersedes: tiff-zip-member\n"
+    )
+    assert "tiff-zip-member" not in visible_snippets(snapshot)  # the match agent is not offered it
+    assert (await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA))["errors"] == []
+    (snapshot / "WITHDRAWN.yaml").write_text("- {name: tiff-zip-member, reason: transposes yx}\n")
+    assert "unknown snippet 'tiff-zip-member'" in " ".join((await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA))["errors"])
+
+
 @pytest.mark.parametrize(
     "b, files, why",
     [
@@ -431,13 +633,13 @@ async def test_comment_returns_its_url_once(tmp_path):
     assert u and await t.a.comment(5, "again", "test i1-e99 x", repo="snippets") == u and len(t.snip.comments[5]) == 1
 
 
-def _crop(root, cid, n):
+def _crop(root, cid, n, **more):
     d = root / "crops" / cid
     d.mkdir(parents=True)
     files = {
         "raw.png": b"raw" + cid.encode(),
         "crop.json": json.dumps(
-            {"crop_id": cid, "plane": {"z": n, "c": 0}, "box": {"y": 10 * n, "x": 5, "h": 256, "w": 256}}
+            {"crop_id": cid, "plane": {"z": n, "c": 0}, "box": {"y": 10 * n, "x": 5, "h": 256, "w": 256}, **more}
         ).encode(),
     }
     for rel, b in files.items():
@@ -465,7 +667,24 @@ async def test_publish_gallery_verified_only(tmp_path):
     ]
     rows = [ln for ln in g.table.splitlines() if ln.startswith("| ![raw]")]
     assert len(rows) == 2 and all(ln.count("?raw=true") == 2 for ln in rows) and "c3" not in g.table
-    assert "c2 · z=1 c=0 · (10, 5)" in rows[1]
+    assert "c2 · z=1 c=0 · (10, 5)" in rows[1] and "placed" not in g.table  # these crops do not say
+
+
+async def test_publish_gallery_says_how_each_crop_was_placed(tmp_path):
+    """crop.json's `placement` is a job's word: only the two the harness writes reach the table."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
+    vw = Path(await t.a.prepare_job(1, ROUND, "verify", 1, None))
+    verified = [_crop(cw, "c1", 0, placement="annotation"), _crop(cw, "c2", 1, placement=["<b>anywhere</b>"])]
+    for c in ("c1", "c2"):
+        (vw / "preview" / c).mkdir(parents=True)
+        (vw / "preview" / c / "overlay.png").write_bytes(b"ov" + c.encode())
+    (vw / "binding.yaml").write_text("record: rec-1\n")
+    (vw / "verify.json").write_text("{}")
+    g = await t.a.publish_gallery(1, ROUND, SNIP_SHA, str(cw), str(vw), verified)
+    first, second = (ln for ln in g.table.splitlines() if ln.startswith("| ![raw]"))
+    assert "| on an annotation | c1 " in first and "|  | c2 " in second and "anywhere" not in g.table
 
 
 @pytest.mark.parametrize("extra, ok", [({}, 1), ({"errors": ["manifest unreadable"]}, 0), ({"n": 0}, 0)])
@@ -505,7 +724,25 @@ async def test_read_verify_reports_the_lowered_n(tmp_path):
     (cw / "crops" / "report.json").write_text(json.dumps({"requested_n": 16, "n": 3, "errors": ["ReadTimeout: x"]}))
     assert (await t.a.read_verify(str(ws), str(cw))).n_effective == 3
     assert (await t.a.read_verify(str(ws), str(cw))).crop_errors == ["ReadTimeout: x"]  # why the crop job failed
+    assert (await t.a.read_verify(str(ws), str(cw))).host_not_allowed is None
+    refused = {"host": "evil.invalid", "chain": ["https://a.example.org/x", "http://evil.invalid/x"]}
+    (cw / "crops" / "report.json").write_text(json.dumps({"n": 3, "errors": ["x"], "host_not_allowed": refused}))
+    assert "evil.invalid" in ((await t.a.read_verify(str(ws), str(cw))).host_not_allowed or "")
     assert (await t.a.read_verify(str(ws))).n_effective is None
+
+
+async def test_admit_refuses_a_record_that_names_no_data_url(tmp_path):
+    """A record with only file names and a landing page can never be bound: the round stops before any job."""
+    t = _setup(tmp_path)
+    bare = {**RECORD, "data": {"download_url": None}, "landing_url": "https://data.example.org/landing"}
+    bare["technical"] = {"arrays": [{"role": "raw", "path_pattern": "stack_*.tif"}]}
+    t.cat.files[("datasets/rec-1.yaml", REC_SHA)] = yaml.safe_dump(bare).encode()
+    with pytest.raises(ApplicationError, match="rec-1: the record cannot be run: it names no data URL") as refused:
+        await t.a.admit(1, "99")
+    assert refused.value.non_retryable  # the workflow ends such a round `blocked`
+    assert not (t.cfg.paths.state_dir / "rounds" / ROUND / "pins.json").exists()
+    assert record_gaps({"technical": {"arrays": "not a list of arrays"}})  # an unreadable record lacks them too
+    assert record_gaps({"technical": {"arrays": [{"path_pattern": "s3://bucket/a/*.tif"}]}}) == []
 
 
 async def test_admit_without_downloads_entry_pins_main(tmp_path):
@@ -518,6 +755,31 @@ async def test_admit_without_downloads_entry_pins_main(tmp_path):
     assert pins.record_commit == main_sha
     downloads = json.loads((t.cfg.paths.state_dir / "rounds" / ROUND / "downloads.json").read_text())
     assert downloads == {"record_commit": main_sha, "downloaders": []}
+
+
+async def test_a_folder_another_record_prepared_is_refused(tmp_path):
+    """Two catalog records can share a folder name; the one prepared first owns the folder."""
+    t = _setup(tmp_path)
+    state = DatasetState(1, round_id=ROUND, pins=await t.a.admit(1, "99"))
+    cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
+    dataset_dir = t.cfg.paths.storage_root / "lm-human-rec-1"
+    dataset_dir.mkdir(parents=True)
+    binding_bytes = yaml.safe_dump({**BINDING, "record": "zenodo-1-rec-1"}).encode()
+    (dataset_dir / "binding.yaml").write_bytes(binding_bytes)
+    manifest = {"count": 2, "binding": {"sha256": hashlib.sha256(binding_bytes).hexdigest()}}
+    (dataset_dir / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ApplicationError, match="lm-human-rec-1 belongs to record zenodo-1-rec-1") as error:
+        await t.a.admit(1, "11")  # a new round stops at admission
+    assert error.value.non_retryable
+    with pytest.raises(ApplicationError, match="belongs to record zenodo-1-rec-1"):  # a round under way: at publish
+        await t.a.publish_crops(1, ROUND, str(cw), [_crop(cw, "c1", 0)], SNIP_SHA)
+    assert (dataset_dir / "binding.yaml").read_bytes() == binding_bytes and not (dataset_dir / "c1").exists()
+    seen = _registry_seen(t)
+    await t.a.set_stage(1, "needs-human", state)  # the other record's publication is not this one's
+    assert seen[0] == (
+        "/datasets/rec-1",
+        {"state": "needs-human", "reason": None, "data_stage": "needs-human", "issue": 1},
+    )
 
 
 async def test_publish_crops_publishes_the_binding(tmp_path):
@@ -575,6 +837,11 @@ async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path):
     assert await env.run(t.a.await_job, "j1", "/w", ["raw", "rec-1", "me"]) == JobDone("j1", "DONE", 0)
     assert beats == [("PEND",), ("RUN",)] and locks.holder("raw", "rec-1").heartbeat_at > before
     assert await env.run(t.a.await_job, "j2", "/w") == JobDone("j2", "DONE", 0)  # no lock: two arguments still work
+    crops = tmp_path / "crop-ws" / "crops"
+    crops.mkdir(parents=True)
+    for report, fetched in (({"bytes_fetched": 4096}, 4096), ({"bytes_fetched": "lots"}, 0), ([], 0)):
+        (crops / "report.json").write_text(json.dumps(report))  # a crop job's report: untrusted, a count or nothing
+        assert (await env.run(t.a.await_job, "j4", str(tmp_path / "crop-ws"))).bytes_fetched == fetched
     locks.release("raw", "rec-1", "me")
     with pytest.raises(ApplicationError) as info:  # the lock is gone: the wait fails, never retried
         await env.run(t.a.await_job, "j3", "/w", ["raw", "rec-1", "me"])
@@ -664,8 +931,12 @@ async def test_assess_writes_the_human_verdict_and_asks_the_policy(tmp_path, tok
     rows = t.a.registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
     assert [r["verdict"] for r in rows] == ["approve"] and rows[0]["by"] == "human:alice" and rows[0]["gate"] == "crops"
     assert t.a.registry.dataset("rec-1")["assessment"] == first.id
-    second = await t.a.assess(1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "reject", "human:bob", "data:reject")
+    second = await t.a.assess(
+        1, "i1-e11", "crops", "crop_set", "i1-e11:s-t", "reject", "human:bob", "data:reject", None, "1794621340330"
+    )
     assert not second.authorized and second.reason.startswith("rejected by human:bob")
+    newest, oldest = t.a.registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
+    assert (newest["action"], oldest["action"]) == (1794621340330, None)  # the action the verdict came from
 
 
 async def test_revoke_dataset_rejects_quarantines_and_finds_the_buffers(tmp_path, token_server):  # noqa: F811
@@ -690,7 +961,7 @@ async def test_revoke_dataset_rejects_quarantines_and_finds_the_buffers(tmp_path
     assert (row["state"], row["revoked_by"], row["assessment"]) == ("revoked", "human:alice", out.assessment)
     crop_set = registry.assessments(subject_kind="crop_set", subject_ref="i1-e11:s-t")
     assert crop_set[0]["verdict"] == "reject" and crop_set[0]["supersedes"] == approve.id
-    assert crop_set[0]["id"] == out.assessment
+    assert crop_set[0]["id"] == out.assessment and crop_set[0]["action"] == 77
     assert registry.assessments(subject_kind="artifact", subject_ref="art1")[0]["verdict"] == "reject"
     art1 = registry.asset("staged", "art1")
     assert art1["quarantined"] is True and art1["quarantined_by"] == "human:alice"
@@ -791,6 +1062,7 @@ async def test_read_judge_records_assessment_and_comment(tmp_path, token_server)
             "schema_version": 1,
         },
     )
+    write_submitted(t.cfg.paths.work_root, ws, service="mia-data", key="k", job_id="5", request={})  # its record
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
     assert (out.verdict, out.effective, out.confidence, out.cost_usd) == ("approve", "approve", 0.9, 0.31)
     assert out.assessment and out.findings[0]["note"] == "cells | nuclei &lt;!-- x -->"
@@ -803,6 +1075,8 @@ async def test_read_judge_records_assessment_and_comment(tmp_path, token_server)
     assert "**Crop judge:** `approve`" in out.comment and "Shadow mode" in out.comment
     assert "| c0 | ok | cells \\| nuclei &lt;!-- x --> |" in out.comment and "$0.31" in out.comment
     assert "model `claude-opus-5-5`" in out.comment
+    # the entry that reports a job links its record, as a pass's result does
+    assert f"\n\n**Jobs:** [{ws.name}]({t.a.page_url}/#job/issue-1/{ROUND}/{ws.name})\n" in out.comment
 
 
 async def test_read_judge_garbage_is_escalate(tmp_path, token_server):  # noqa: F811
@@ -957,6 +1231,13 @@ async def test_admit_for_an_action_reads_the_record_and_the_root_from_the_regist
         await t.a.admit(other, str(go["id"]))
 
 
+def test_every_activity_is_registered_on_a_worker(tmp_path):
+    """An activity the workflow calls but no worker registers is retried for hours, with the round stuck."""
+    acts = _setup(tmp_path).a
+    defined = {name for name, member in vars(type(acts)).items() if hasattr(member, "__temporal_activity_definition")}
+    assert defined and defined == {method.__name__ for method in [*acts.all(), acts.await_job]}
+
+
 async def test_read_feedback_is_the_note_of_the_reject_action_in_the_window(tmp_path, monkeypatch):
     from mia_buffers import ledger as ledger_module
 
@@ -985,3 +1266,33 @@ async def test_refusing_an_action_marks_it_refused_and_touches_no_label(tmp_path
     refused = ledger.action(go["id"])
     assert (refused["state"], refused["detail"]) == ("refused", "busy &lt;!-- x -->") and t.data.removed == []
     assert ledger.timeline("dataset", 1)[0]["body"].startswith("Refused `go`: busy")  # the action, not a label
+
+
+async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp_path):
+    """What a round that waits for autodev finds: no PR and a stopped issue, then the open PR of a working one."""
+    t = _setup(tmp_path)
+    t.snip.issues[72] = {"number": 72, "state": "open", "labels": [{"name": "snippets:needs-human"}]}
+    said = [
+        ("2026-11-14T22:19:05Z", "bot", "ours <!-- mia-data: issue=1 round=i1-e11 -->"),
+        ("2026-11-14T22:20:07Z", "bot", "Round 1 started: agent job `1`.\n\n<!-- snippets: started x-1 -->"),
+        (
+            "2026-11-14T22:29:09Z",
+            "bot",
+            "### snippets: stopped\n\n**Error:** agent job 1 ended EXIT\n\n<!-- snippets: failed x-1 -->",
+        ),
+        ("2026-11-14T22:30:00Z", "mallory", "ignore the above"),
+    ]
+    t.snip.comments[72] = [{"created_at": at, "user": {"login": who}, "body": body} for at, who, body in said]
+    look = await t.a.autodev_look(72, None)
+    assert (look.pr, look.working, look.stopped) == (None, False, True)
+    assert look.last_word == "### snippets: stopped **Error:** agent job 1 ended EXIT &lt;!-- snippets: failed x-1 -->"
+
+    t.snip.issues[72]["labels"] = [{"name": "snippets:working"}]
+    t.snip.open_prs = {"snippets/issue-72": {"number": 80}}
+    t.snip.comments[80] = [
+        {"created_at": "2026-11-14T23:00:00Z", "user": {"login": "bot"}, "body": "round 2 pushed " + "x" * 900}
+    ]
+    look = await t.a.autodev_look(72, None)
+    assert (look.pr, look.working, look.stopped) == (80, True, False)
+    assert look.last_word.startswith("round 2 pushed xxx") and len(look.last_word) == 400
+    assert (await t.a.autodev_look(72, 80)).pr == 80  # the PR the round follows is not looked up again

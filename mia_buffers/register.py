@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
-import httpx
+from mia_core.registry import Registry, RegistryError
 
 from .plan import split_counts
 from .spec import Spec
@@ -46,11 +46,10 @@ def buffer_config(
     spec: Spec,
     *,
     tensorizer: str,
-    split_sizes: dict[str, int],
     recipe: dict,
     plan_hash: str,
 ) -> dict:
-    """The `PUT buffers/<id>` body from a plan and its spec."""
+    """The `PUT buffers/<id>` body from a plan and its spec; a frozen list is as long as the spec's crops of its split."""
     patch = spec.patch_for("2D") or {}
     if patch.get("y") != patch.get("x"):
         raise ValueError(f"MuViT crops are square; the 2D patch is {patch}")
@@ -65,7 +64,7 @@ def buffer_config(
         "tensorizer": tensorizer,
         "tensorizer_params": _tensorizer_params(spec),
         "splits": dict(spec.splits.fractions),
-        "split_sizes": dict(split_sizes),
+        "split_sizes": {split: total for split, total in spec.sampling.crops.items() if split != "train"},
         "recipe": recipe,
         "plan_hash": plan_hash,
         "idle_hours": spec.idle.hours,
@@ -283,23 +282,22 @@ def register(
     staged_root: Path,
     *,
     tensorizer: str,
-    split_sizes: dict[str, int],
     recipe: dict,
     plan_hash: str,
     token: str | None = None,
 ) -> dict:
     """Create the buffer, register every pooled, staged volume (with the worker `token`, when the service wants
     one) and authorize it to serve by writing the `approved` and `ready` events; returns registered / skipped /
-    refused / events."""
+    refused / events. A volume the service refuses is listed; the service down, the token refused or a fault of
+    its own raises RegistryError."""
     out: dict = {"registered": [], "skipped": {}, "refused": {}}
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    with httpx.Client(base_url=url, timeout=30.0, headers=headers) as client:
-        client.put(
-            f"/buffers/{buffer}",
-            json=buffer_config(
-                plan, spec, tensorizer=tensorizer, split_sizes=split_sizes, recipe=recipe, plan_hash=plan_hash
-            ),
-        ).raise_for_status()
+    address = f"/buffers/{quote(buffer, safe='')}"
+    with Registry(url, token) as registry:
+        registry.request(
+            "PUT",
+            address,
+            json=buffer_config(plan, spec, tensorizer=tensorizer, recipe=recipe, plan_hash=plan_hash),
+        )
         for row in plan["rows"]:
             if not (row.get("admitted") and (row.get("fit") or {}).get("ok")):
                 continue
@@ -308,17 +306,15 @@ def register(
                 out["skipped"][row["id"]] = "not staged"
                 continue
             for volume_id, body in volume_bodies(row, staged, spec, refused=out["refused"]):
-                response = client.put(f"/buffers/{buffer}/volumes/{quote(volume_id, safe='')}", json=body)
-                if response.status_code == 200:
-                    out["registered"].append(volume_id)
+                try:
+                    registry.request("PUT", f"{address}/volumes/{quote(volume_id, safe='')}", json=body)
+                except RegistryError as error:
+                    if error.status is None or error.status == 401 or error.status >= 500:
+                        raise  # not a verdict on this volume
+                    out["refused"][volume_id] = error.message[:500]
                 else:
-                    try:
-                        out["refused"][volume_id] = response.json().get("error", response.text)
-                    except ValueError:  # not JSON: a proxy page
-                        out["refused"][volume_id] = response.text[:500]
+                    out["registered"].append(volume_id)
         for kind in ("approved", "ready"):  # buffer-api serves only under an approved, ready or idle event
-            client.post(
-                f"/buffers/{buffer}/events", json={"kind": kind, "detail": "mia-buffers register"}
-            ).raise_for_status()
+            registry.event(buffer, kind, detail="mia-buffers register")
         out["events"] = ["approved", "ready"]
     return out

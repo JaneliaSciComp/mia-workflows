@@ -184,7 +184,10 @@ def test_command_is_read_only():
     assert JUDGE_TOOLS == "Read,Glob,Grep"
     assert '--allowedTools "Read,Glob,Grep"' in cmd and '--tools "Read,Glob,Grep"' in cmd
     assert "--restricted" in cmd and "--strict-mcp-config" in cmd
-    assert "--max-budget-usd 2.0" in cmd and "--model opus" in cmd and "--output-format json" in cmd
+    assert "--max-budget-usd 2.0" in cmd and "--model opus" in cmd
+    # the whole conversation is kept for the job's record; the result object is still read from claude.json
+    assert "--output-format stream-json --verbose" in cmd and "> claude.jsonl 2> claude.err" in cmd
+    assert cmd.endswith('rc=$?\ntail -n 1 claude.jsonl > claude.json\n(exit "$rc")')
     assert "cat evidence/question.md" in cmd and "--add-dir evidence" in cmd and "> claude.json" in cmd
     assert "Bash" not in cmd and "Write" not in cmd and "Edit" not in cmd
 

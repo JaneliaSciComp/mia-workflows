@@ -136,12 +136,23 @@ def test_buffer_spec_refuses_a_prep_request_by_name():
         load_spec_text(yaml.safe_dump(data))
 
 
-def test_sample_plan_defaults_and_must_match_splits():
+def test_crops_default_and_must_match_splits():
     data = yaml.safe_load((FIXTURES / "spec.yaml").read_text())
-    assert load_spec_text(yaml.safe_dump(data)).sampling.plan.samples == {"train": 1000, "val": 20, "test": 20}
+    data["sampling"].pop("crops", None)
+    spec = load_spec_text(yaml.safe_dump(data))
+    assert spec.sampling.crops == {"train": 100000, "val": 2000, "test": 2000}
+    assert spec.sampling.max_crops_per_dataset == 1024
     data["splits"]["fractions"] = {"train": 0.8, "val": 0.1, "test": 0.0, "extra": 0.1}
-    with pytest.raises(SpecError, match="sampling.plan.samples must name exactly the splits"):
+    with pytest.raises(SpecError, match="sampling.crops must name exactly the splits"):
         load_spec_text(yaml.safe_dump(data))
+
+
+def test_a_stored_spec_with_a_sample_plan_loads_with_a_warning():
+    data = yaml.safe_load((FIXTURES / "spec.yaml").read_text())
+    data["sampling"]["plan"] = {"samples": {"train": 1000, "val": 20, "test": 20}}
+    spec = load_spec_text(yaml.safe_dump(data))
+    assert spec.sampling.crops == data["sampling"]["crops"]
+    assert any(w.startswith("sampling.plan is ignored") for w in spec.warnings)
 
 
 def test_a_prep_request_can_ask_for_prepared_datasets_again():
