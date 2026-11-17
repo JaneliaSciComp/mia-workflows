@@ -162,6 +162,13 @@ def test_the_plan_rows_are_joined_sorted_and_cut() -> None:
     assert [row["id"] for row in fit["rows"]] == ["a", "b", "c"] and fit["summary"]["fitting"] == 3
 
 
+def test_the_plan_can_list_only_what_is_left_to_prepare() -> None:
+    """A buffer's Prepare step lists the datasets that fit and are not prepared; the numbers stay the whole plan's."""
+    left = plan_view(PLAN, DATASETS, "p256-l1-2", ALL, to_prepare=True)
+    assert [row["id"] for row in left["rows"]] == ["c"] and left["total"] == 1
+    assert left["summary"] == plan_view(PLAN, DATASETS, "p256-l1-2", ALL)["summary"]
+
+
 def test_the_registry_toggles_narrow_the_rows_and_the_numbers_but_not_the_funnel() -> None:
     prepared = plan_view(PLAN, DATASETS, "p256-l1-2", ALL, prepared_only=True)
     assert [row["id"] for row in prepared["rows"]] == ["a", "b"] and prepared["summary"]["fitting"] == 2
