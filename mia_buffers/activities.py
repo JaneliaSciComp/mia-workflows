@@ -1009,12 +1009,12 @@ class Activities:
         if manual:
             drops = [list(pair) for pair in drop_names(urls)]
             return BindingInfo(True, str(dest), digest, [], drops, staged=staged, artifact=artifact, refused=refused)
-        # the hosts the dataset's rounds were refused and a person approved since (redirect targets, mostly);
-        # buffer-api unreachable: none, and a job that needs one says `host_not_allowed`
+        # what a person approved for this dataset beside its URLs' hosts (redirect targets its rounds were refused,
+        # raw GitHub); buffer-api unreachable: none, and a job that needs one says `host_not_allowed`
         try:
-            granted = granted_hosts(await asyncio.to_thread(self.registry.refused_hosts, record), patterns)
+            granted = granted_hosts(await asyncio.to_thread(self.registry.dataset_hosts, record), patterns)
         except RegistryError as error:
-            activity.logger.warning("%s: registry unavailable, no refused hosts granted: %s", record, error)
+            activity.logger.warning("%s: registry unavailable, no host of its own granted: %s", record, error)
             granted = []
         hosts = sorted({*job_hosts(urls, self.cfg), *granted})
         return BindingInfo(True, str(dest), digest, hosts, staged=staged, artifact=artifact, refused=refused)

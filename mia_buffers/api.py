@@ -36,6 +36,7 @@ from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
+from mia_data.binding import RAW_GITHUB
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
@@ -898,7 +899,10 @@ class BufferService:
         return 200, row, {}
 
     def _refused_hosts(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
-        return 200, {"hosts": (self.ledger.kv("refused_hosts") or {}).get(record, [])}, {}
+        """What is held for the dataset alone: the hosts its jobs were refused, and those a person approved for it
+        and no other dataset (`_approve_for`)."""
+        refused = (self.ledger.kv("refused_hosts") or {}).get(record, [])
+        return 200, {"hosts": refused, "approved": (self.ledger.kv("dataset_hosts") or {}).get(record, [])}, {}
 
     def _put_refused_hosts(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
         """A worker says which hosts a job of the dataset was refused (a redirect target, mostly). They join the
@@ -1058,7 +1062,7 @@ class BufferService:
         if not refused or self.hosts is None:
             return refused
         try:
-            return sorted(self.hosts.missing(self.hosts.group({record: refused})))
+            return sorted(self.hosts.missing(self.hosts.group({record: refused}), self.ledger.kv("dataset_hosts")))
         except (OSError, ValueError):
             return refused
 
@@ -1309,10 +1313,13 @@ class BufferService:
         needed = self._needed(**given)
         assert self.hosts is not None  # _needed answered 503 otherwise
         try:
-            absent = self.hosts.missing(needed)
+            absent = self.hosts.missing(needed, self.ledger.kv("dataset_hosts"))
         except (OSError, ValueError):  # a TOMLDecodeError is a ValueError
             raise HttpError(503, "the generated csub policy cannot be read: `mia up` regenerates it") from None
-        return 200, {"hosts": [{"host": host, "records": ids} for host, ids in sorted(absent.items())]}, {}
+        # `per_dataset`: approving it lets these datasets' jobs reach it and no other dataset's
+        scope = {RAW_GITHUB: {"per_dataset": True}}
+        rows = [{"host": host, "records": ids, **scope.get(host, {})} for host, ids in absent.items()]
+        return 200, {"hosts": rows}, {}
 
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
@@ -1587,6 +1594,20 @@ class BufferService:
             raise HttpError(422, str(error)) from None
         return True
 
+    def _approve_for(self, hosts: list[str], needed: Callable[[], Needed] | None) -> list[str]:
+        """Write down the approvals that hold for one dataset at a time: `raw.githubusercontent.com`, for each
+        record of the run that needs it. The policy allows that host to every job once it is approved anywhere;
+        a worker grants it only to jobs of a dataset named here. Returns the hosts newly approved for a record."""
+        if RAW_GITHUB not in hosts or needed is None:
+            return []
+        with self._lock:
+            approved = self.ledger.kv("dataset_hosts") or {}
+            new = [record for record in needed().get(RAW_GITHUB, []) if RAW_GITHUB not in approved.get(record, [])]
+            for record in new:
+                approved[record] = sorted({*approved.get(record, []), RAW_GITHUB})
+            self.ledger.put_kv("dataset_hosts", approved)
+        return [RAW_GITHUB] if new else []
+
     def _act_on(
         self,
         subject: dict,
@@ -1612,6 +1633,7 @@ class BufferService:
                 added = self.hosts.approve(parsed.approve_hosts, by=actor, kind=kind, number=number)
             except PolicyError as error:
                 raise HttpError(503, str(error)) from None
+            added = list(dict.fromkeys([*added, *self._approve_for(parsed.approve_hosts, needed)]))
             if added:
                 names = ", ".join(f"`{neutralize(host)}`" for host in added)
                 self.ledger.append_entry(

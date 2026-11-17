@@ -2877,13 +2877,36 @@ def test_a_host_a_datasets_job_was_refused_is_offered_at_its_next_start(tmp_path
     s, gateway = _starting(tmp_path)
     put = worker(s, "PUT", "/datasets/rec-b/hosts", {"hosts": ["cdn.example.net", "not a host", "10.0.0.1"]})
     assert put[:2] == (200, {"hosts": ["cdn.example.net"]})
-    assert call(s, "GET", "/datasets/rec-b/hosts")[:2] == (200, {"hosts": ["cdn.example.net"]})
+    assert call(s, "GET", "/datasets/rec-b/hosts")[:2] == (200, {"hosts": ["cdn.example.net"], "approved": []})
     assert s.handle("PUT", "/datasets/rec-b/hosts", {}, b'{"hosts": ["x.example.net"]}', JSON)[0] == 401  # no token
     assert _missing(s, {"records": ["rec-b"]})[1] == {"hosts": [{"host": "cdn.example.net", "records": ["rec-b"]}]}
     assert act(s, "/datasets/rec-b/actions", {"action": "go", "approve_hosts": ["cdn.example.net"]})[0] == 202
     assert _missing(s, {"records": ["rec-b"]})[1] == {"hosts": []} and len(gateway.sent) == 1
     worker(s, "PUT", "/datasets/rec-b/hosts", {"hosts": ["files.example.net"]})
     assert call(s, "GET", "/subjects/dataset/rec-b")[1]["hosts"] == ["files.example.net"]  # the page's notice
+
+
+def test_raw_github_is_approved_for_one_dataset_at_a_time(tmp_path, _home):
+    """Incident 2026-11-17: records with files on GitHub. A person may let one dataset's jobs read
+    raw.githubusercontent.com; that says nothing about the next dataset, though the policy then allows the host."""
+    s, gateway = _starting(tmp_path)
+    raw = "raw.githubusercontent.com"
+    urls = {"rec-g": f"https://{raw}/o/r/main/g.tif", "rec-h": f"https://{raw}/o/s/main/h.tif"}
+    records = [
+        {"path": f"{n}.yaml", "record": {"id": n, "data": {"download_url": u}, **SHAPE}} for n, u in urls.items()
+    ]
+    assert worker(s, "PUT", f"/records/{REF_A}", {"records": records})[0] == 200
+    row = {"host": raw, "records": ["rec-g", "rec-h"], "per_dataset": True}
+    assert _missing(s, {"records": ["rec-g", "rec-h"]})[1] == {"hosts": [row]}
+    assert act(s, "/datasets/rec-h/actions", {"action": "go", "approve_hosts": ["github.com"]})[0] == 422
+    status, action, _ = act(s, "/datasets/rec-g/actions", {"action": "go", "approve_hosts": [raw]})
+    assert status == 202 and _bodies(s, "dataset", action["number"])[0] == f"**Hosts approved:** `{raw}` by `page`"
+    assert _missing(s, {"records": ["rec-g", "rec-h"]})[1] == {"hosts": [{**row, "records": ["rec-h"]}]}
+    assert call(s, "GET", "/datasets/rec-g/hosts")[1]["approved"] == [raw]
+    assert call(s, "GET", "/datasets/rec-h/hosts")[1]["approved"] == []
+    status, action, _ = act(s, "/datasets/rec-h/actions", {"action": "go", "approve_hosts": [raw]})
+    assert status == 202 and _bodies(s, "dataset", action["number"])[0] == f"**Hosts approved:** `{raw}` by `page`"
+    assert _missing(s, {"records": ["rec-g", "rec-h"]})[1] == {"hosts": []}
 
 
 @pytest.mark.parametrize(

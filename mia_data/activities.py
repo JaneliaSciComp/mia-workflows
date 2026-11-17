@@ -1016,19 +1016,19 @@ class Activities:
     @activity.defn(name="submit")
     @mia_permanent_errors
     async def submit(self, key: str, kind: str, args: JobArgs) -> str:
-        """Build the job (the builders refuse a moved harness pin), let it reach the hosts the dataset's jobs were
-        refused that a person approved since, refuse hosts a fresh `csub probe` doesn't allow, and submit at most
+        """Build the job (the builders refuse a moved harness pin), let it reach what a person approved for its
+        dataset beside its URLs' hosts (`granted_hosts`), refuse hosts a fresh `csub probe` doesn't allow, and submit at most
         once per key. Returns the job id."""
         from csub import CsubError  # pixi-only dependency, imported where used (as autodev does)
 
         patterns = await asyncio.to_thread(self.probe)
-        refused = await asyncio.to_thread(self.registry.refused_hosts, args.pins.record)
+        noted = await asyncio.to_thread(self.registry.dataset_hosts, args.pins.record)
         snapshot_dir = (
             await self._snapshot(args.sha or args.pins.snippets_commit) if kind in ("smoke", "crop") else None
         )
 
         def build() -> JobSpec:
-            spec = with_hosts(self._spec(kind, args, snapshot_dir), granted_hosts(refused, patterns))
+            spec = with_hosts(self._spec(kind, args, snapshot_dir), granted_hosts(noted, patterns))
             check_hosts_allowed(spec, patterns)
             return spec
 
@@ -1132,7 +1132,7 @@ class Activities:
             snapshot_dir = await self._snapshot(sha)
             names = set(usable_snippets(snapshot_dir) if tested else visible_snippets(snapshot_dir))
             errors = check_binding(binding, self._record(round_id), names, pins=pins)
-            if not errors:  # hosts() raises if a URL would grant a GitHub host
+            if not errors:  # a malformed URL raises in urlsplit
                 hosts(
                     [url for array in binding["raw"] + (binding.get("labels") or []) for url in array["urls"]], self.cfg
                 )

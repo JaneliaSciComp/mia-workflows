@@ -297,6 +297,10 @@ export async function askHosts(run, send) {
         { class: "small", title: m.records.join(", ") },
         `${m.records.length} ${m.records.length === 1 ? "dataset" : "datasets"}`,
       ),
+      // a host approved for one dataset at a time (raw GitHub): no other dataset's jobs get it
+      m.per_dataset
+        ? el("span", { class: "small" }, m.records.length === 1 ? " · this dataset only" : " · these datasets only")
+        : null,
     ),
   );
   const box = el(

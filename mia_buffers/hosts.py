@@ -13,7 +13,7 @@ import yaml
 from autodev.config import is_github_host
 from mia_core.hosts import HOST_RE, allowed_patterns, approve_hosts, is_ip_literal, missing_hosts
 from mia_core.untrusted import read_untrusted
-from mia_data.binding import network_hosts, record_urls
+from mia_data.binding import RAW_GITHUB, network_hosts, record_urls
 from mia_data.config import NetworkCfg
 
 from .config import Config
@@ -52,8 +52,9 @@ class HostCheck:
         )
 
     def _never_approved(self, host: str) -> str | None:
-        """Why a host is never approved (a GitHub host, an IP address, this deployment's own host), or None."""
-        if is_github_host(host):
+        """Why a host is never approved (a GitHub host other than `raw.githubusercontent.com`, an IP address, this
+        deployment's own host), or None."""
+        if is_github_host(host) and host != RAW_GITHUB:
             return "is a GitHub host"
         if is_ip_literal(host):
             return "is an IP address"
@@ -73,11 +74,11 @@ class HostCheck:
     def for_records(self, records: dict[str, dict], refused: dict[str, list[str]] | None = None) -> Needed:
         """Hosts each catalog record's URLs need (record id -> catalog record) and those its jobs were refused
         (`refused`: record id -> hosts), without the hosts that are never approved; a record whose hosts cannot
-        be computed (a GitHub URL) contributes nothing."""
+        be computed (a malformed URL) contributes nothing."""
         hosts_by_record = {}
         for record_id, record in records.items():
             try:
-                named = network_hosts(record_urls(record), self.network)
+                named = network_hosts(record_urls(record), self.network, raw_github=True)
                 hosts_by_record[record_id] = [*named, *(refused or {}).get(record_id, [])]
             except (ValueError, AttributeError, TypeError):
                 continue
@@ -100,7 +101,7 @@ class HostCheck:
                     for url in (array.get("urls") or [])
                 ]
                 if not any(url.startswith("manual://") for url in urls):
-                    hosts_by_record[record_id] = network_hosts(urls, self.network)
+                    hosts_by_record[record_id] = network_hosts(urls, self.network, raw_github=True)
             except (ValueError, yaml.YAMLError, AttributeError, TypeError):
                 continue
         return self.group(hosts_by_record)
@@ -115,10 +116,16 @@ class HostCheck:
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             raise ValueError(f"round {round_id!r} has no readable plan") from error
 
-    def missing(self, needed: Needed) -> Needed:
-        """The needed hosts the csub policy does not allow."""
+    def missing(self, needed: Needed, approved: dict[str, list[str]] | None = None) -> Needed:
+        """The needed hosts the csub policy does not allow. `raw.githubusercontent.com` is approved for one dataset
+        at a time (`approved`: record id -> the hosts approved for it alone): it is missing for every record that
+        needs it and has no approval of its own, whatever the policy allows."""
         absent = set(missing_hosts(list(needed), allowed_patterns(self.policy_dir)))
-        return {host: records for host, records in needed.items() if host in absent}
+        lacking = {host: records for host, records in needed.items() if host in absent and host != RAW_GITHUB}
+        unapproved = [
+            record for record in needed.get(RAW_GITHUB, []) if RAW_GITHUB not in (approved or {}).get(record, [])
+        ]
+        return dict(sorted({**lacking, **({RAW_GITHUB: unapproved} if unapproved else {})}.items()))
 
     def check(self, hosts: list[str], needed: Needed) -> None:
         """Raise ValueError naming the first host that is not an exact hostname, is never approved, or is not

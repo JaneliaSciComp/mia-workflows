@@ -313,12 +313,26 @@ async def test_a_refused_host_is_noted_and_the_datasets_jobs_reach_it_once_the_p
     assert (await t.a.read_match(str(ws))).outcome == "blocked"
     (ws / "smoke.json").write_text(json.dumps({"host_not_allowed": {"host": "s3.example.org", "chain": ["a", "b"]}}))
     await t.a.read_smoke(str(ws))
-    assert t.a.registry.refused_hosts("rec-1") == ["cdn.elsewhere.net", "cdn.example.org", "s3.example.org"]
+    assert t.a.registry.dataset_hosts("rec-1")["hosts"] == ["cdn.elsewhere.net", "cdn.example.org", "s3.example.org"]
     await t.a.submit(job_key(1, ROUND, "match", 1), "match", JobArgs(str(ws), ROUND, await t.a.admit(1, "99")))
     (job,) = t.csub.submitted
     assert {"cdn.example.org", "s3.example.org", "data.example.org"} <= set(job["allow_hosts"])
     assert "cdn.elsewhere.net" not in job["allow_hosts"]  # nobody approved it
     assert "cdn.example.org" in job["env"]["MIA_HARNESS_ALLOWED_HOSTS"].split(",")
+
+
+async def test_a_job_reaches_raw_github_only_once_a_person_approved_it_for_its_dataset(tmp_path):
+    raw = "raw.githubusercontent.com"
+    t = _setup(
+        tmp_path, probe=lambda: ["*.example.org", raw, "pypi.org", "*.pythonhosted.org", "*.anaconda.org", "*.dev"]
+    )
+    pins, ws = await _match_ws(t, None)
+    t.ledger.put_kv("dataset_hosts", {"rec-other": [raw]})  # the policy allows it: another dataset was approved
+    await t.a.submit(job_key(1, ROUND, "match", 1), "match", JobArgs(str(ws), ROUND, pins))
+    t.ledger.put_kv("dataset_hosts", {"rec-other": [raw], "rec-1": [raw]})
+    await t.a.submit(job_key(1, ROUND, "match", 2), "match", JobArgs(str(ws), ROUND, pins))
+    first, second = t.csub.submitted
+    assert raw not in first["allow_hosts"] and raw in second["allow_hosts"]
 
 
 async def test_submit_match_once(tmp_path):

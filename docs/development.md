@@ -485,7 +485,7 @@ pool), their `network.redirect_hosts` targets, the package hosts, and for a data
 (below). Checked hosts travel as `approve_hosts` on a
 dataset's `go`, filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other
 action carrying a non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender,
-accepts only hosts that run needs (never a GitHub host, an IP literal or the host of `service.url` or
+accepts only hosts that run needs (never a GitHub host but `raw.githubusercontent.com`, an IP literal or the host of `service.url` or
 `temporal.address`), appends, regenerates (503 if it cannot) and posts a timeline entry. A broker loads its policy file
 on every request, so an approved host needs no restart: the next job sees it. Every generation checks that `policy_dir`
 is under home, apart from every read-write sandbox mount, and that its `broker.toml` is not the base policy file.
@@ -498,7 +498,16 @@ debug agent's `outcome.json`) has it noted for its dataset (`PUT /datasets/<reco
 `refused_hosts`). From then on it is one of the hosts the dataset's runs need: the dataset's page says so, and its next
 start (or a request's that names it) lists the host to check. A noted host the policy allows is granted to every job of
 that dataset that reaches any host (`with_hosts` in `submit`; a buffer's fetch and stage jobs through `read_binding`),
-and to no other dataset's. `network.redirect_hosts` names such targets ahead of the first refusal. `mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
+and to no other dataset's. `network.redirect_hosts` names such targets ahead of the first refusal.
+
+No job reaches GitHub: a GitHub host among a record's or a binding's URLs is left out of the job's hosts
+(`network_hosts`). The one exception is `raw.githubusercontent.com` (file contents, read only), approved for one
+dataset at a time. The start dialog lists it for each record that names it and has no approval of its own
+(`per_dataset` in `/hosts/missing`), whatever the policy allows; an approval is written for each of the run's records
+that need it (the `kv` row `dataset_hosts`, `_approve_for`), beside the policy line the broker needs. A worker grants
+the host to jobs of an approved dataset only (`granted_hosts`). autodev's agent never gets it.
+
+`mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
 names its `agent.allow_hosts` plus the hosts its issue names, where the policy allows them
 (`autodev.agent.agent_hosts`); a job that would need more than csub's 64 is not started and its round fails saying so. An issue names hosts with `<!-- autodev: hosts a.org b.org -->` in its body
 (`hosts_marker`), and only when a bot of `github.trusted_bots` opened it: a dataset round writes there the hosts
