@@ -483,7 +483,7 @@ class Sweep:
             if self.working >= self.rules.max_parallel:
                 return
             self.working += 1
-        state = "working"
+        state, told = "working", False  # told: an entry says already what a person must do
         while data["plan"]:
             step, failure = data["plan"][0], None
             try:
@@ -516,7 +516,7 @@ class Sweep:
             data["plan"].pop(0)
             data.pop("waiting", None)
             if step["do"] == "needs":
-                data["needs"], state = step["text"], "needs-person"
+                data["needs"], state, told = step["text"], "needs-person", bool(step.get("told"))
                 break
             if step["do"] in ACTIONS and timeline is not None:  # the next step decides on the subject as it is now
                 timeline = await self._ask(self.registry.timeline, case["kind"], case["number"])
@@ -524,7 +524,7 @@ class Sweep:
             state = "waiting" if any(step["do"] in (*STARTS_WORK, "recheck") for step in data["steps"]) else "resolved"
             if data["steps"] and data["steps"][-1]["do"] == "wait":
                 data["revision"] = None  # the wait is over: the subject is looked at again as it stands
-        if state == "needs-person":
+        if state == "needs-person" and not told:
             await self._say(case, f"needs a person: {data['needs']}", "needs")
         await self._save(case, state)
 
@@ -689,15 +689,20 @@ class Sweep:
         plan = kept.pop("plan")
         record = address(self.cfg.paths.work_root, job["workspace"])
         data["diagnosis"], data["diagnosed"] = {**kept, "job": record}, True
-        if not plan:
-            needs = kept["needs"] or "the diagnosis proposes no remedy"
-            plan = [{"do": "needs", "text": f"{needs} (diagnosis: {kept['diagnosis'][:600]})"}]
+        # no remedy: a person's turn, which the diagnosis's own entry says (`told`)
+        needs = (
+            [] if plan else [{"do": "needs", "text": kept["needs"] or "the diagnosis proposes no remedy", "told": True}]
+        )
         if kept["defect"]:
             plan.insert(0, {"do": "report_defect", **kept["defect"]})
-        data["plan"][1:] = plan  # after this step: what the diagnosis asks for replaces whatever was left
+        said = f"Diagnosis ({kept['cause']}): {kept['diagnosis']}"
+        if plan:
+            said += f" Doing: {plan_words(plan)}."
+        if needs:
+            said += f" Needs a person: {needs[0]['text']}"
+        data["plan"][1:] = plan + needs  # after this step: what the diagnosis asks for replaces whatever was left
         link = f" [Its job]({job_link(self.cfg.service.url, record)})." if record else ""
-        said = f"Diagnosis ({kept['cause']}): {kept['diagnosis']} Doing: {plan_words(plan)}.{link}"
-        await self._say(case, said, f"diagnosis {len(data['steps'])}")
+        await self._say(case, said + link, f"diagnosis {len(data['steps'])}")
         return f"{kept['cause']}: {kept['diagnosis'][:300]}"
 
     async def _report_defect(self, case: dict, step: dict) -> str:

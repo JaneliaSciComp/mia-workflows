@@ -622,7 +622,11 @@ def test_a_diagnosis_that_proposes_nothing_says_what_a_person_must_do(world):
     world.answer({"diagnosis": "the dataset has no labels at all", "cause": "data", "remedies": [], "needs": "drop it"})
     world.sweep()
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and case["data"]["needs"].startswith("drop it (diagnosis: the dataset has")
+    assert case["state"] == "needs-person" and case["data"]["needs"] == "drop it"
+    (said,) = [
+        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Cleaner:**" in entry["body"]
+    ]
+    assert "Diagnosis (data): the dataset has no labels at all Needs a person: drop it" in said  # once, in one entry
     assert cleaner_actions(world, number) == []
 
 

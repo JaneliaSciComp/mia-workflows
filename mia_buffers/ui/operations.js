@@ -256,6 +256,10 @@ const RULE_HELP = {
     "Worker restarted since",
     "The round stopped on an error of the worker, and the worker has since started on newer code. The cleaner runs it again, once per commit.",
   ],
+  "budget used up": [
+    "Budget used up",
+    "The round was refused a job because the budget of what started it is used up. Only a person raises a cap: `autonomy.root` in mia.yaml, then a restart of the workers. After that, run it again.",
+  ],
   "host not approved": [
     "Host not approved",
     "A job needs a host nobody has approved. Only a person approves hosts: Run again on the subject's page, and tick them.",
