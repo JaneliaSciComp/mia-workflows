@@ -1791,8 +1791,20 @@ async def test_prep_nudge_maps_where_the_dataset_stands(acts, gateway):
     done = await acts.prep_nudge(PREP_ROUND, U937)
     assert (done.outcome, done.issue) == ("done-unpublished", 5) and "binding.yaml" in done.note
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
-    acts.registry.put_dataset(BCSS, state="needs-human", issue=6)  # settled in the registry: its row names it
-    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "needs-human", 6)
+
+
+async def test_a_request_starts_a_stopped_dataset_without_saying_again(acts, gateway):
+    """A dataset that stopped gets a go from any request that names it (2026-11-17: 145 datasets blocked on a
+    budget, and the request filed to run them settled each as needs-human in seconds). Its row says in-progress
+    so that the request follows the new round; a prepared dataset settles at once."""
+    prep_issue(acts, records=[U937, BCSS])
+    await acts.prep_admit(8, "21")
+    acts.registry.put_dataset(BCSS, state="needs-human", issue=6)
+    acts.registry.adopt_subject("dataset", 6, BCSS, stage="needs-human")
+    assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "prepared")
+    assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
+    assert [sent[:3] for sent in gateway.sent] == [("dataset", 6, "restart")]
+    assert acts.registry.dataset(BCSS)["state"] == "in-progress"
 
 
 async def test_prep_nudge_sends_no_go_for_a_record_that_cannot_be_run(acts, gateway, monkeypatch):

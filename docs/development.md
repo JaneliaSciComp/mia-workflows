@@ -726,7 +726,7 @@ kind: preparation
 catalog: {repo: <owner/catalog>, ref: <40-hex commit>}
 records: [<record id>, ...]     # an explicit list, or
 select: {...}                   # the buffer spec's select block, run over the git catalog snapshot at catalog.ref
-again: false                    # optional; true also gives a new round to datasets that are prepared or that stopped
+again: false                    # optional; true also gives a new round to datasets that are prepared
 timeout_days: 14                # optional, default 14
 max_records: 25                 # optional; a request for more records must say so here (each is an agent run)
 ```
@@ -741,10 +741,10 @@ action carries, once.
 `needs-human`: the request stopped, and its entry names the records that did not settle, each with its last
 registry state. `cancelled`: a person cancelled it.
 
-**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or `needs-human`
-settles the record, unless the request says `again`: then the dataset is sent a `go` all the same, and its row is
-set to `in-progress` at once, so the request follows the new round instead of settling on what the last one
-left. A dataset whose crops wait for a review is `needs-human`, so it settles too. Otherwise the dataset's
+**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or shelved settles
+the record. A dataset that stopped (`needs-human`) is sent a `go`, and so is a prepared one when the request says
+`again`; its row is set to `in-progress` at once, so the request follows the new round instead of settling on
+what the last one left. A dataset whose crops wait for a review is in a round, so it is left to it. Otherwise the dataset's
 subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
 any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity

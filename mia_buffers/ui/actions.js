@@ -28,7 +28,7 @@ export const BUTTON_HELP = {
   prepare:
     "File one preparation request for these datasets: each one gets a run of the preparation workflow, and the request's page follows them.",
   prepareTicked:
-    "File one preparation request for the checked datasets: each one gets a run of the preparation workflow, also one that is already prepared or that stopped. One in a round is left to it.",
+    "File one preparation request for the checked datasets: each one gets a run of the preparation workflow, also one that is already prepared. One in a round is left to it.",
   specFrom:
     "Open New buffer on a definition that selects exactly these datasets. Only the prepared ones are in a plan; step 2 there says which fit.",
   clearSelection: "Uncheck every dataset.",
@@ -86,7 +86,7 @@ export const ACTION_HELP = {
   },
   prep: {
     ...SHELF_HELP,
-    go: "Run the request again: its datasets that have not settled are handed to the preparation workflow again.",
+    go: "Run the request again: each of its datasets that stopped or never started gets a new run of the preparation workflow. One that is prepared, shelved or in a round is left as it is.",
     cancel: "Stop the request, and the dataset rounds it started.",
     stop: "For a request that does not answer Cancel: its workflow is terminated. The dataset rounds it started keep running.",
     recheck: "Look at the request's datasets again: it is done once each of them is prepared or shelved.",

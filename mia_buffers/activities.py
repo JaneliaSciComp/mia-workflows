@@ -807,22 +807,23 @@ class Activities:
     @activity.defn(name="prep_nudge")
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
-        """Hand one requested record to mia-data unless the registry already settled it (prepared, shelved or
-        needs-human); otherwise nudge_dataset, its result named for the request's entry. A request that says
-        `again` hands those over too: the dataset gets a new round, and its row says `in-progress` at once, so
-        the request follows that round instead of settling on what the last one left."""
+        """Hand one requested record to mia-data unless the registry says it is prepared or shelved; otherwise
+        nudge_dataset, its result named for the request's entry. A dataset that stopped (`needs-human`) is handed
+        over, and so is a prepared one when the request says `again`: the dataset gets a new round, and its row
+        says `in-progress` at once, so the request follows that round instead of settling on what the last one
+        left."""
         again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
         except RegistryError as error:  # best effort: the dataset's subject tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        settled = (state := _followed_state(row)) in ("prepared", "shelved", "needs-human")
-        if settled and (not again or state == "shelved"):  # a shelved dataset is never asked
+        state = _followed_state(row)
+        if state == "shelved" or (state == "prepared" and not again):  # a shelved dataset is never asked
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
         found, created = await self._nudge(round_id, record, again=again)
-        if settled and found.nudged:
+        if state in ("prepared", "needs-human") and found.nudged:
             await asyncio.to_thread(self.registry.put_dataset, record, state="in-progress")
         if found.nudged:
             outcome = "opened" if created else "nudged"
