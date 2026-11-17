@@ -36,7 +36,6 @@ from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
-from mia_data.binding import record_gaps
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
@@ -56,6 +55,7 @@ from .explore import (
     paged,
     plan_view,
     record_row,
+    start_gaps,
 )
 from .hosts import HostCheck, Needed
 from .jobspec import levels_key
@@ -1029,11 +1029,11 @@ class BufferService:
         return view
 
     def _gaps(self, record: str) -> list[str]:
-        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for a round to run
-        (`record_gaps`); none for a record no synced catalog holds. Read from the catalog on every call, so a
-        record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
+        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for the dataset to
+        be started (`start_gaps`); none for a record no synced catalog holds. Read from the catalog on every call,
+        so a record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
         found = self._catalog_record(record)
-        return record_gaps(found) if found is not None else []
+        return start_gaps(found) if found is not None else []
 
     def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
         if kind not in SUBJECT_RULES:

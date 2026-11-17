@@ -41,7 +41,7 @@ from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
 from mia_data.binding import hosts as job_hosts
-from mia_data.binding import missing_hosts, record_gaps
+from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
 from mia_data.config import round_open
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
@@ -63,6 +63,7 @@ from .config import (
     stage_pass,
 )
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
+from .explore import start_gaps
 from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
@@ -709,7 +710,7 @@ class Activities:
         `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). No issue is
         searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
         entry = self._record(round_id, record)
-        if gaps := record_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
+        if gaps := start_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
             raise ValueError(f"{record}: the record cannot be run: {'; '.join(gaps)}")
         registry, folder = self.registry, dataset_folder(entry, record)
         subject = await asyncio.to_thread(registry.subject, "dataset", record)

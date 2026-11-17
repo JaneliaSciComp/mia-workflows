@@ -91,7 +91,7 @@ export const PILL_HELP = {
   "no patch for dims":
     "The definition has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
   "no array shape":
-    "The catalog record does not give the shape of its largest array (y and x extents, and z for 3D), so the planner cannot tell whether a crop fits in it.",
+    "The catalog record does not give the shape of its largest array (y and x extents, and z for 3D), so the planner cannot tell whether a crop fits in it. No buffer can take the dataset, so no round can be started for it.",
   "footprint too large":
     "The coarsest crop (patch size times the largest pyramid level) is bigger than the dataset's largest array.",
   "too few z slices": "The 3D patch's z extent is deeper than the dataset's largest array.",

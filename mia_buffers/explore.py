@@ -98,12 +98,31 @@ def paged(
 UNUSABLE = ("evicted", "missing")  # a staged artifact in one of these states is not on disk
 
 
+SHAPE_GAP = (
+    "it gives no shape for its largest raw array (`technical.arrays`: `axes` and `shape` with y and x, and z for "
+    "3D), so no buffer could place a crop in it; add the shape to the catalog record"
+)
+
+
+UNREADABLE_GAP = "the planner cannot read it, so no buffer could take the dataset; correct the catalog record"
+
+
+def start_gaps(record: dict) -> list[str]:
+    """What a catalog record lacks for its dataset to be started (empty = nothing): what a round needs
+    (`record_gaps`), and what a plan needs to place a crop in the dataset, a record it can read with the shape
+    of its largest raw array. Without those a round would prepare what no buffer can take."""
+    try:
+        unplanned = [SHAPE_GAP] if lacks_shape(facts("", record)) else []
+    except (TypeError, ValueError, AttributeError):
+        unplanned = [UNREADABLE_GAP]
+    return [*record_gaps(record), *unplanned]
+
+
 def record_row(path: str | None, record: dict) -> dict:
     """What a dataset's row takes from its catalog record; it never changes for a catalog ref. `gaps` is what
-    the record lacks for a round to run (`record_gaps`): a dataset with any cannot be started. `lacks` names, in a
-    word or two each, everything the record lacks whatever buffer asks for it (`LACKS`): the Datasets list flags
-    and filters by these, and a plan cannot place a crop in a dataset without an array shape. `path` None: a
-    dataset the registry knows whose record is in no synced catalog."""
+    the record lacks for the dataset to be started (`start_gaps`): a dataset with any cannot be. `lacks` names, in
+    a word or two each, everything the record lacks whatever buffer asks for it (`LACKS`): the Datasets list flags
+    and filters by these. `path` None: a dataset the registry knows whose record is in no synced catalog."""
     row: dict[str, Any] = {
         "id": str(record.get("id") or (path or "").rsplit("/", 1)[-1].removesuffix(".yaml")),
         "path": path,
@@ -114,7 +133,7 @@ def record_row(path: str | None, record: dict) -> dict:
         "modality": None,
         "licence": None,
         "bytes": None,
-        "gaps": record_gaps(record) if path is not None else [],
+        "gaps": start_gaps(record) if path is not None else [],
         "lacks": [],
     }
     if path is not None:
@@ -124,7 +143,7 @@ def record_row(path: str | None, record: dict) -> dict:
             row["lacks"] = ["readable record"]
             return row
         lacks = [
-            "data URL" if row["gaps"] else None,
+            "data URL" if record_gaps(record) else None,
             "array shape" if lacks_shape(found) else None,
             "voxel size" if not found.voxel_size_known(found.dims or "") else None,
         ]
