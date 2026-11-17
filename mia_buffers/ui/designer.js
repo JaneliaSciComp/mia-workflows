@@ -116,18 +116,6 @@ export const problem = () =>
         ? `the service refused this definition: ${S.planError.message.split("\n")[0]}`
         : null;
 export const planSummary = () => S.plan?.summary || null;
-// Why a plan of this definition would be refused by the planner, or null when it would run.
-export function planBlocker() {
-  if (problem()) return problem();
-  if (S.planError) return `the plan failed: ${S.planError.message.split("\n")[0]}`;
-  if (!S.plan) return "planning…";
-  const errors = S.plan.errors || [];
-  if (!errors.length) return null;
-  const waiting = S.plan.summary?.not_prepared || 0;
-  if (errors.includes("no dataset admitted") && waiting)
-    return `no prepared dataset fits yet; ${num(waiting)} fit but are not prepared`;
-  return "the plan has errors: " + errors.join("; ");
-}
 export function setOnDesign(fn) {
   onDesign = fn;
 }

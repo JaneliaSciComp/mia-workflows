@@ -821,7 +821,7 @@ def test_a_subjects_page_says_where_it_stands_with_its_lifecycle_alone() -> None
     in the row under its name, and a table names a subject's stage, not a status word."""
     assert not has("subjectFacts") and not has("waiting on you") and not has('"workflow " +')
     assert not has("statePill(subject.status)") and not has('statePill(x.status), " ", x.stage')
-    assert count("stagePill(x.stage)") == 2  # the requests and Needs you; a buffer's row says its step
+    assert count("stagePill(x.stage)") == 3  # the requests (all, and a buffer's own) and Needs you
     assert has("subjectLinks(subject, entries)")
 
 
@@ -852,7 +852,7 @@ def test_every_button_that_asks_for_something_says_what_it_does() -> None:
         offered = set().union(*(actions for _, actions in table.values())) - own_control.get(kind, set())
         assert offered <= set(covered[kind]), (kind, offered - set(covered[kind]))
     assert has("title: actionHelp(subject, action)")
-    assert {"save", "saveChanges", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
+    assert {"save", "saveChanges", "plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
     for key in keys:
         assert has(f"title: BUTTON_HELP.{key}"), key
 
@@ -1043,6 +1043,22 @@ def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
     # saving: a new subject and no action; a saved buffer's change is an edit that names the revision it was made at
     assert has('body: JSON.stringify({ spec: definition() })', flow) and has('api("/specs", {', flow)
     assert has('{ action: "edit", spec: definition(), revision: subject.revision, key: newKey() }', flow)
+
+
+def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() -> None:
+    """Prepare lists the fitting datasets that are not prepared and the requests this buffer filed. A request
+    filed there names the buffer and leaves the person on the step. The way forward plans over whatever is
+    prepared now, and always stops at the plan."""
+    flow, actions = squeezed(FILES["flow.js"]), squeezed(FILES["actions.js"])
+    assert has("to_prepare: true", flow)
+    assert has('pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number }))', flow)
+    assert has("...(owner == null ? {} : { buffer: owner })", actions)
+    assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
+    # only what a request could start can be ticked: the plan's own list, not every row
+    assert has("startable.has(x.id)", flow)
+    assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
+    assert count("plan_first: true") == 1 and has("title: BUTTON_HELP.plan", flow)  # every plan stops for its Run
+    assert has("disabled: !!blocker || !!subject.asked", flow)
 
 
 def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:

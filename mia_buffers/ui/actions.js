@@ -9,6 +9,7 @@ import { api, banner, JSON_HEADERS, newKey, S } from "./api.js";
 // What a button does, said on hover. BUTTON_HELP: the buttons with a control of their own. ACTION_HELP: a subject's
 // action bar, by kind and action; a function where the stage changes what the action means.
 export const BUTTON_HELP = {
+  plan: "Plan this buffer over the datasets that are prepared now. The round stops at its plan: nothing is downloaded until you press Run.",
   save: "Save this definition as a new buffer. Nothing runs yet: the next step prepares its datasets.",
   saveChanges: "Store the changed definition of this buffer. Nothing runs.",
   startOver: "Drop what is entered here and start from the defaults.",
@@ -439,7 +440,8 @@ export function undelivered(subject, actions, after) {
 const PREP_MAX = 200; // the most datasets one preparation request takes (mia_buffers.spec.MAX_PREP_RECORDS)
 // `again` (the Datasets list's ticks): every ticked dataset gets a round, also one that is prepared or that stopped;
 // its value is how many of them are prepared or in a round already. Without it only what is not prepared is asked for.
-export function prepareButton(container, all, blocker, done, again, text) {
+// `owner` (a buffer's Prepare step): the number of the buffer the request is filed for; the person stays on that step.
+export function prepareButton(container, all, blocker, done, again, text, owner) {
   // `text`: the button's word, where the count stands beside it
   // a request takes at most PREP_MAX datasets: a longer list is prepared in parts, the first PREP_MAX now
   const todo = all.slice(0, PREP_MAX),
@@ -485,10 +487,15 @@ export function prepareButton(container, all, blocker, done, again, text) {
       const action = await api("/prep", {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify({ spec: yaml, key: newKey(), ...(hosts.length ? { approve_hosts: hosts } : {}) }),
+        body: JSON.stringify({
+          spec: yaml,
+          key: newKey(),
+          ...(hosts.length ? { approve_hosts: hosts } : {}),
+          ...(owner == null ? {} : { buffer: owner }),
+        }),
       });
       if (done) done(todo);
-      location.hash = "#find/" + action.number;
+      if (owner == null) location.hash = "#find/" + action.number;
     } catch (err) {
       banner(
         err.status === 422

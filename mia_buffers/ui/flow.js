@@ -1,10 +1,24 @@
 // A buffer's page: its name and state, the strip of its six steps, the step being shown, and its timeline.
 import { editable, STEP_TITLES, STEPS, stepOf, stepToShow, stripOf } from "./steps.js";
-import { $, bufferLink, card, el, ghIcon, num, pill, stagePill, statePill, SUBJECT_HASH, when } from "./dom.js";
+import {
+  $,
+  bufferLink,
+  card,
+  datasetLink,
+  el,
+  fmtBytes,
+  ghIcon,
+  num,
+  pill,
+  stagePill,
+  statePill,
+  SUBJECT_HASH,
+  when,
+} from "./dom.js";
 import { api, banner, JSON_HEADERS, load, newKey, S } from "./api.js";
 import { pagedTable, pageOf } from "./table.js";
 import { gist, mdInline } from "./markdown.js";
-import { actionBar, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
+import { actionBar, BUTTON_HELP, onScreen, prepareButton, sendAction, undelivered } from "./actions.js";
 import { servableText, stageOf } from "./buffers.js";
 import {
   changed,
@@ -326,10 +340,196 @@ const designed = footer => async (_pane, subject, _redraw, wanted) => {
   showDesigner();
   footer(subject);
 };
+// ---- step 3: the fitting datasets that are not prepared, the requests this buffer filed, and the way on.
+// The buffer waits here for as long as the person likes; the way on takes what is prepared at that moment.
+const ticked = { key: null, chosen: new Set() }; // the ticks of the buffer shown: they outlast the page's redraws
+// Why the planner would refuse this plan (`plan`: what POST /plan answered), or null when a round of it would run.
+function planRefusal(plan) {
+  const errors = plan.errors || [],
+    waiting = plan.summary?.not_prepared || 0;
+  if (!errors.length) return null;
+  if (errors.includes("no dataset admitted") && waiting)
+    return `no prepared dataset fits yet; ${num(waiting)} fit but are not prepared`;
+  return "the plan has errors: " + errors.join("; ");
+}
+// `plan`: the plan of the definition as the step last read it; null while it is being read.
+function prepareFoot(subject, plan, redraw) {
+  const prepared = plan?.summary?.prepared || 0,
+    resting = stepOf(subject.stage) === "prepare";
+  const blocker = !plan
+    ? "planning…"
+    : !subject.actions.includes("go")
+      ? lockReason(subject) || "Nothing can be planned at this stage."
+      : planRefusal(plan);
+  foot(
+    el("button", { type: "button", class: "btn", onclick: () => goTo(subject, "datasets") }, "← Datasets"),
+    resting ? blocker || "You can come back and prepare more later." : null,
+    resting
+      ? el(
+          "button",
+          {
+            type: "button",
+            class: "btn primary",
+            title: BUTTON_HELP.plan,
+            disabled: !!blocker || !!subject.asked,
+            onclick: e => {
+              e.target.disabled = true;
+              const go = { action: "go", plan_first: true, revision: subject.revision, key: newKey() };
+              sendAction(subject, go, redraw);
+            },
+          },
+          subject.asked?.action === "go"
+            ? "Planning…"
+            : `Continue with ${num(prepared)} prepared ${prepared === 1 ? "dataset" : "datasets"}`,
+        )
+      : el(
+          "a",
+          { class: "btn primary", href: SUBJECT_HASH.buffer(subject.key) },
+          `Next: ${STEP_TITLES[stepOf(subject.stage)].toLowerCase()}`,
+        ),
+  );
+}
+async function prepareStep(pane, subject, redraw, wanted) {
+  await ensureDefinition(subject);
+  if (!wanted()) return;
+  if (ticked.key !== subject.key) Object.assign(ticked, { key: subject.key, chosen: new Set() });
+  const chosen = ticked.chosen;
+  let startable = new Set(); // what a request could start: it fits, is not prepared, is in no round, its record can run
+  const counts = el("p", {}, "planning…"),
+    bar = el("i"),
+    prepare = el("span", { class: "actions" });
+  const offer = () => {
+    prepareButton(
+      prepare,
+      [...chosen],
+      chosen.size ? null : "tick the datasets to prepare",
+      () => {
+        chosen.clear();
+        redraw();
+      },
+      undefined,
+      chosen.size > 1 ? `Prepare the ${num(chosen.size)} ticked datasets` : "Prepare the ticked dataset",
+      subject.number,
+    );
+  };
+  const left = async state => {
+    // the plan of the definition, narrowed to what is left to prepare; its summary is over the whole plan
+    let out = null;
+    const page = {
+      limit: state.limit,
+      offset: state.offset,
+      dir: state.dir,
+      q: state.q,
+      ...(state.sort ? { sort: state.sort } : {}),
+      to_prepare: true,
+    };
+    try {
+      out = await api("/plan", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ spec: definition(), page }),
+      });
+    } catch (e) {
+      banner(`The plan of this definition failed (${e.status || "network error"}): ${e.message}`);
+    }
+    return { rows: out?.rows || [], total: out?.total || 0, out };
+  };
+  const seen = page => {
+    const m = page.out?.summary;
+    startable = new Set(m?.to_prepare || []);
+    for (const id of chosen) if (!startable.has(id)) chosen.delete(id); // prepared, or started, since it was ticked
+    if (m) {
+      counts.replaceChildren(
+        el("b", {}, `${num(m.prepared || 0)} of ${num(m.fitting || 0)}`),
+        ` datasets that fit are prepared; ${num(m.in_progress || 0)} are being prepared now.`,
+      );
+      bar.style.width = `${m.fitting ? (100 * (m.prepared || 0)) / m.fitting : 0}%`;
+    }
+    offer();
+    if (wanted() && page.out) prepareFoot(subject, page.out, redraw);
+  };
+  const table = pagedTable("to-prepare:" + subject.key, {
+    source: left,
+    onPage: seen,
+    sort: "state",
+    search: "search id, title, modality, licence",
+    empty: "Every dataset that fits is prepared.",
+    cols: [
+      {
+        label: "prepare",
+        title: "tick a dataset to prepare it; one that is in a round already, or whose record cannot run, has no tick",
+        cell: x => {
+          if (!startable.has(x.id)) return "";
+          const input = el("input", { type: "checkbox", "aria-label": "prepare " + x.id });
+          input.checked = chosen.has(x.id);
+          input.addEventListener("change", () => {
+            if (input.checked) chosen.add(x.id);
+            else chosen.delete(x.id);
+            offer();
+          });
+          return input;
+        },
+      },
+      { key: "dataset", label: "dataset", cell: x => datasetLink(x.id) },
+      { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
+      { key: "modality", label: "modality", cell: x => x.modality_group || "" },
+      { key: "dims", label: "dims", cell: x => x.dims || "" },
+      { key: "state", label: "state", cell: x => statePill(x.prepared) },
+      { label: "where it is", cell: x => x.stage || "" },
+      { key: "bytes", label: "size", num: true, cell: x => (x.bytes ? fmtBytes(x.bytes) : "") },
+    ],
+  });
+  pane.replaceChildren(
+    counts,
+    el("div", { class: "progress" }, bar),
+    card(
+      "Left to prepare",
+      "The datasets that fit this definition and are not prepared. Preparing them is one request, filed for this buffer; the buffer waits here meanwhile.",
+      el(
+        "div",
+        { class: "actions" },
+        el(
+          "button",
+          {
+            type: "button",
+            class: "btn",
+            title: "Tick every dataset that a request could start now.",
+            onclick: () => {
+              for (const id of startable) chosen.add(id);
+              table.reload();
+            },
+          },
+          "Tick all",
+        ),
+        prepare,
+      ),
+      table,
+    ),
+    card(
+      "Requests of this buffer",
+      "The preparation requests filed from this step, newest first. Open one for its datasets.",
+      pagedTable("buffer-requests:" + subject.key, {
+        source: pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number })),
+        sort: "updated",
+        dir: "desc",
+        search: false,
+        empty: "This buffer has asked for no preparation yet.",
+        cols: [
+          { key: "key", label: "request", cell: x => el("a", { href: SUBJECT_HASH.prep(x.key) }, x.key) },
+          { key: "status", label: "stage", cell: x => stagePill(x.stage) },
+          { key: "updated", label: "changed", cell: x => when(x.updated) },
+          { label: "", wrap: true, cell: x => actionBar(x, redraw) },
+        ],
+      }),
+    ),
+  );
+  offer();
+  prepareFoot(subject, null, redraw);
+}
 const STEP_VIEWS = {
   define: designed(defineFoot),
   datasets: designed(datasetsFoot),
-  prepare: waiting("The datasets that are left to prepare."),
+  prepare: prepareStep,
   plan: waiting("The plan of this round."),
   source: async (pane, subject, redraw, wanted) => {
     const { board } = await newestVersion(subject);

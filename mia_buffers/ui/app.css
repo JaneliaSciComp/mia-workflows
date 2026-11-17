@@ -90,6 +90,9 @@ fieldset.lock:disabled{opacity:.6}
 .statrow .card{margin-bottom:0}
 @media (max-width:760px){.statrow{grid-template-columns:1fr}}
 .takenout{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:6px 0;font-size:13px}
+/* how far something is: a filled bar */
+.progress{height:8px;border-radius:4px;background:var(--grid);overflow:hidden;margin:6px 0 14px;max-width:520px}
+.progress i{display:block;height:100%;width:0;background:var(--s3)}
 .more{position:relative}
 .more summary{list-style:none}
 .more summary::-webkit-details-marker{display:none}
