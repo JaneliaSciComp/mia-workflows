@@ -960,9 +960,16 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
         "allowUnknown": True, "annRequired": True, "sources": ["manual", "proofread"], "minVox": 1000000,
         "patch": 128, "level": 8, "patchZ": 16, "dedup": False, "T": 0.25,
         "cropsTrain": 5000, "cropsVal": 300, "cropsTest": 200, "maxCrops": 64, "holdout": "u937 bcss",
+        "exclude": ["bcss", "u937"],
     }  # fmt: skip
-    sets = "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources) });\n"
-    lists = "const listed = c => ({ ...c, dims: [...c.dims], lic: [...c.lic], sources: [...c.sources] });\n"
+    sets = (
+        "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources),"
+        " exclude: new Set(c.exclude) });\n"
+    )
+    lists = (
+        "const listed = c => ({ ...c, dims: [...c.dims], lic: [...c.lic], sources: [...c.sources],"
+        " exclude: [...c.exclude].sort() });\n"
+    )
     written = run_js(
         sets + "print(toSpecYaml(filled(input.controls), input.ref, 'o/catalog'));",
         {"spec.js": "toSpecYaml"},
@@ -979,12 +986,72 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
     assert back == controls and same == []
     hand_controls, hand_text = lost
     assert hand_controls["name"] == "microscopy-foundation-pretrain" and hand_controls["level"] == 4
+    assert load_spec_text(written).select.exclude.ids == ["bcss", "u937"]  # an unticked dataset is an exclusion
     differs = run_js(
         "print(specDiff(input.hand, input.rewritten));",
         {"spec.js": "specDiff"},
         {"hand": parsed(by_hand), "rewritten": parsed(hand_text)},
     )
     assert "sampling.patch.c" in differs and "name" not in differs and "select.where.license.in" not in differs
+
+
+def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:
+    """Unticking a dataset writes its id to `select.exclude.ids`. A reason beside it, or an excluded path, is
+    something no control shows: specDiff names it, so the page keeps the text."""
+    from mia_buffers.spec import load_spec_text
+
+    def parsed(text: str) -> dict:
+        return load_spec_text(text).model_dump(mode="json", by_alias=True, exclude={"warnings"})
+
+    by_hand = (Path(__file__).parent / "fixtures" / "buffers" / "spec.yaml").read_text()
+    plain = parsed(by_hand)
+    reasoned = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {"x": "blurry"}}}}
+    ticked = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {}}}}
+    ids, differs = run_js(
+        "print([[...fromSpec(input.reasoned).exclude], specDiff(input.reasoned, input.ticked)]);",
+        {"spec.js": "fromSpec, specDiff"},
+        {"reasoned": reasoned, "ticked": ticked},
+    )
+    assert ids == ["x"] and differs == ["select.exclude.reasons.x"]
+
+
+def test_a_stage_opens_at_its_step() -> None:
+    """A buffer is six steps. A stage a round works or waits at is the step of that work; every other stage is
+    Prepare, where a saved buffer rests. A hash may ask for a step already passed, never one ahead."""
+    from mia_buffers.config import STAGE_ACTIONS
+
+    steps, at, shown, words, can = run_js(
+        "print([STEPS, Object.fromEntries(input.stages.map(stage => [stage, stepOf(stage)])),\n"
+        "  input.asks.map(([stage, asked]) => stepToShow(stage, asked)),\n"
+        "  input.subjects.map(statusWord), input.subjects.map(editable).concat(editable(null))]);",
+        {"steps.js": "STEPS, stepOf, stepToShow, statusWord, editable"},
+        {
+            "stages": list(STAGE_ACTIONS),
+            "asks": [["plan-review", "serve"], ["plan-review", "define"], ["ready", "bogus"], ["new", None]],
+            "subjects": [
+                {"stage": "new", "status": "not started", "actions": ["edit", "go"]},
+                {"stage": "plan-review", "status": "waiting", "actions": ["approve"]},
+                {"stage": "sourcing", "status": "working", "actions": ["cancel"]},
+                {"stage": "ready", "status": "done", "actions": ["go"]},
+                {"stage": "idle", "status": "waiting", "actions": ["keep"]},
+                {"stage": "needs-human", "status": "stuck", "actions": ["edit", "go"]},
+                {"stage": "retired", "status": "done", "actions": ["edit", "go"]},
+                {"stage": "cancelled", "status": "shelved", "actions": ["unshelve"], "shelved": {"reason": "later"}},
+            ],
+        },
+    )
+    assert steps == ["define", "datasets", "prepare", "plan", "source", "serve"]
+    assert at == {
+        "new": "prepare", "planning": "plan", "plan-review": "plan", "sourcing": "source", "staged": "source",
+        "ready": "serve", "idle": "serve", "retired": "prepare", "needs-human": "prepare", "cancelled": "prepare",
+    }  # fmt: skip
+    for stage, (status, _actions) in STAGE_ACTIONS.items():  # a round in progress is never shown as resting
+        assert (at[stage] == "prepare") == (status not in ("working", "waiting") and stage not in ("ready",)), stage
+    assert shown == ["plan", "define", "serve", "prepare"]
+    assert words == [
+        "saved, not started", "waits for you", "working", "serving", "serving", "needs you", "retired", "shelved",
+    ]  # fmt: skip
+    assert can == [True, False, False, False, False, True, True, False, True]  # an unsaved buffer is editable
 
 
 def test_a_datasets_page_lists_every_address_of_its_catalog_record_in_its_links_card() -> None:
