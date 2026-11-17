@@ -576,7 +576,6 @@ def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
 def test_a_buffer_is_always_planned_first() -> None:
     """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
     assert not has("Show me the plan first") and not has("first.checked")
-    assert count("plan_first: true") == 1  # the one place a buffer's plan is asked for
     assert has('subject.stage === "plan-review" ? "Run"')
 
 
@@ -853,7 +852,7 @@ def test_every_button_that_asks_for_something_says_what_it_does() -> None:
         offered = set().union(*(actions for _, actions in table.values())) - own_control.get(kind, set())
         assert offered <= set(covered[kind]), (kind, offered - set(covered[kind]))
     assert has("title: actionHelp(subject, action)")
-    assert {"plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
+    assert {"save", "saveChanges", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
     for key in keys:
         assert has(f"title: BUTTON_HELP.{key}"), key
 
@@ -947,7 +946,7 @@ def test_the_yaml_the_page_writes_is_what_the_service_reads() -> None:
 
 
 def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> None:
-    """Clone and Edit open New buffer on a spec: the controls take their values from the spec as the service parsed
+    """A definition opened or pasted as YAML: the controls take their values from the spec as the service parsed
     it (fromSpec), and a spec the controls write comes back from them unchanged. For a spec written by hand,
     specDiff names what the controls cannot say, so the page keeps its text."""
     from mia_buffers.spec import load_spec_text
@@ -1015,6 +1014,35 @@ def test_a_buffer_is_one_page_and_the_tabs_name_no_spec_and_no_preparation() -> 
     assert has("timelineCard(entries)", flow) and has("shelvedNotice(subject.shelved)", flow)
     # the stream redraws the buffer's page, not a subject's
     assert has("if (onScreen.redraw) onScreen.redraw();") and has("onScreen.redraw = null;")
+
+
+def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
+    """Steps 1 and 2. The definition is one text with two views: the Controls tab writes it, the YAML tab is read
+    back into the controls by the service. Nothing is saved before step 2's button, and a saved buffer's change is
+    an `edit`."""
+    index, designer, flow = FILES["index.html"], squeezed(FILES["designer.js"]), squeezed(FILES["flow.js"])
+    assert all(f'id="{name}"' in index for name in ("tabControls", "tabYaml", "specText", "controlsLock", "kpisFit"))
+    assert 'id="filterBox"' not in index and not has("Create buffer", designer) and not has("designFrom")
+    # one text: what the YAML tab holds while that is not what the controls write, else what they write
+    assert has("export const definition = () => TEXT ?? toSpecYaml(C, S.ref, S.meta.catalog_repo);", designer)
+    assert has('api("/specs/parse"', designer) and has("Object.assign(C, fromSpec(parsed));", designer)
+    assert has("spec: definition(), page", designer)  # the plan is of the definition, not of the controls alone
+    # a control was changed: the controls are the definition again
+    assert has("function touched() { TEXT = null; INVALID = null;", designer)
+    # YAML that does not parse: the controls keep their values, nothing is planned or sent, the way on is closed
+    assert has("INVALID = error.message.split", designer) and has("if (INVALID) return", designer)
+    assert has("export const problem = () =>", designer) and has("disabled: !!problem()", flow)
+    # YAML that holds what no control shows: the controls are read-only, and say what they cannot show
+    assert has('$("controlsLock").disabled = LOCKED || LOST.length > 0;', designer)
+    assert has("the controls do not show", designer)
+    # a redraw the stream asked for leaves a definition someone is changing alone
+    assert has("if (changed()) return;", designer)
+    # the four numbers of step 1, and the tick of step 2 that takes a dataset out
+    assert has('$("kpisFit").replaceChildren(tile("Datasets that fit"', designer)
+    assert has("C.exclude.add(x.id);", designer) and has("C.exclude.delete(id);", designer)
+    # saving: a new subject and no action; a saved buffer's change is an edit that names the revision it was made at
+    assert has('body: JSON.stringify({ spec: definition() })', flow) and has('api("/specs", {', flow)
+    assert has('{ action: "edit", spec: definition(), revision: subject.revision, key: newKey() }', flow)
 
 
 def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:

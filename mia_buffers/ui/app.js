@@ -148,22 +148,6 @@ function route() {
   if (view === "datasets") return viewDatasetList(arg, new URLSearchParams(filters || ""));
   VIEWS[view](arg);
 }
-function setupFilterBox() {
-  // the fold is a per-viewer convenience, remembered in this browser
-  const box = $("filterBox");
-  try {
-    if (localStorage.getItem("mia-filters") === "closed") box.open = false;
-  } catch {
-    /* storage blocked: open */
-  }
-  box.addEventListener("toggle", () => {
-    try {
-      localStorage.setItem("mia-filters", box.open ? "open" : "closed");
-    } catch {
-      /* not remembered */
-    }
-  });
-}
 function setupTheme() {
   const root = document.documentElement;
   try {
@@ -189,7 +173,6 @@ function setupTheme() {
 }
 export async function boot() {
   setupTheme();
-  setupFilterBox();
   bindControls();
   const [meta, catalogs] = await Promise.all([load("/meta"), load("/catalogs")]);
   S.meta = meta || {};

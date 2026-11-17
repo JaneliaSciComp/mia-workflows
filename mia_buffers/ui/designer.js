@@ -1,5 +1,5 @@
-// New buffer: the controls that describe a spec, its plan as numbers, charts and a table, and the buttons that
-// create the buffer or prepare what it lacks.
+// Steps 1 and 2 of a buffer: its definition as controls and as YAML, the plan of that definition as numbers,
+// charts and a table, and the tick that takes a dataset out.
 import { DIMS, fromSpec, levelsKey, levelsOf, LIC, SRC, specDiff, toSpecYaml } from "./spec.js";
 import {
   $,
@@ -21,12 +21,12 @@ import {
   thumb,
   tile,
 } from "./dom.js";
-import { api, banner, JSON_HEADERS, newKey, S } from "./api.js";
-import { pagedTable, TABLE_STATE } from "./table.js";
-import { BUTTON_HELP, prepareButton } from "./actions.js";
+import { api, banner, JSON_HEADERS, S } from "./api.js";
+import { pagedTable } from "./table.js";
 
 const NOT_PREPARED = "not prepared"; // mia_buffers.plan.NOT_PREPARED
 const PLAN_DEBOUNCE_MS = 300;
+const YAML_DEBOUNCE_MS = 400; // a pause in typing before the service is asked to read the YAML
 
 // ---- horizontal bars (single series, sequential hue)
 function barPath(x, y, w, h, r) {
@@ -67,8 +67,10 @@ function hbars(container, items, opts) {
   container.replaceChildren(svg);
 }
 
-// ---- the spec the controls describe
-const C = {
+// ---- the definition. It is one text with two views. While the YAML tab holds a text that is not what the
+// controls write (typed or pasted there, or a saved buffer's own text), that text is the definition (`TEXT`);
+// once a control is changed, the definition is what the controls write.
+const defaults = () => ({
   name: "microscopy-2d-gray",
   paths: "datasets/**",
   dims: new Set(["2D"]),
@@ -87,112 +89,176 @@ const C = {
   cropsTest: 2000,
   maxCrops: 1024,
   holdout: "",
+  exclude: new Set(), // the datasets unticked on step 2
   preparedOnly: false,
   rawCached: false,
   stagedGeom: false,
-};
+});
+const C = defaults();
+let TEXT = null; // the definition as text, while it is not what the controls write
+let LOST = []; // what TEXT holds that no control shows: while it holds any, the controls are read-only
+let INVALID = null; // why the YAML tab's text is not a definition
+let SAVED = null; // the stored text of the saved buffer being shown; null for a buffer that is not saved
+let LOADED = null; // whose definition this is: a saved buffer's key, "new" for one not saved, null for none yet
+let LOCKED = false; // the buffer cannot change now: a round is open, it serves, or it is shelved
+let onDesign = () => {}; // told whenever the definition or its plan changed (the page redraws the step's footer)
 
-// ---- a spec opened from its own page: Edit (Plan saves to that spec) or Clone (Plan makes a new one)
-let FROM = null; // { subject, edit, lost: what the spec holds that the controls cannot say }
-
-// ---- creating the buffer: its spec is posted to the service, which runs it
-function createBuffer(container, yaml, blocker) {
-  // built once and kept: what a person typed into the box survives the page's re-renders
-  let area = container.querySelector("textarea");
-  if (!area) {
-    area = el("textarea", {
-      class: "specbox",
-      spellcheck: "false",
-      "aria-label": "buffer spec YAML",
-      oninput: () => {
-        area.dataset.edited = "1";
-        renderActions();
-      },
-    }); // an edited spec enables Plan
-    const status = el("span", { class: "small" });
-    const run = el(
-      "button",
-      {
-        type: "button",
-        class: "btn",
-        title: BUTTON_HELP.plan,
-        onclick: async () => {
-          run.disabled = true;
-          status.textContent = "planning…";
-          try {
-            const edited = FROM?.edit ? FROM.subject : null; // its revision: refused if the spec moved meanwhile
-            const go = { spec: area.value, action: "go", plan_first: true, key: newKey() };
-            const action = edited
-              ? await api(`/specs/${encodeURIComponent(edited.key)}/actions`, {
-                  method: "POST",
-                  headers: JSON_HEADERS,
-                  body: JSON.stringify({ ...go, revision: edited.revision }),
-                })
-              : await api("/specs", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(go) });
-            FROM = null;
-            delete area.dataset.edited;
-            location.hash = "#find/" + action.number;
-          } catch (e) {
-            status.textContent = "";
-            banner(
-              e.status === 422
-                ? `The spec was refused: ${e.message}`
-                : e.status === 409
-                  ? `Not started. ${e.message}`
-                  : `Not started (${e.status || "network error"}): ${e.message}`,
-            );
-          }
-          run.disabled = false;
-        },
-      },
-      "Plan",
-    );
-    const reset = el(
-      "button",
-      {
-        type: "button",
-        class: "btn",
-        title: "replace the text with the spec the controls above describe",
-        onclick: () => {
-          delete area.dataset.edited;
-          renderActions();
-        },
-      },
-      "Reset to the controls",
-    );
-    container.replaceChildren(
-      el(
-        "details",
-        {},
-        el("summary", {}, "Create buffer"),
-        el(
-          "div",
-          { class: "small" },
-          "The spec the controls describe; edit it here if you need what they do not offer. Plan saves it as a new spec, or to the spec being edited, and starts a round, which stops at its plan: Run on the spec's page starts the jobs.",
-        ),
-        area,
-        el("div", { class: "actions" }, run, reset, status),
-      ),
-    );
-  }
-  if (!area.dataset.edited) area.value = yaml;
-  const run = container.querySelector("button"),
-    status = container.querySelector(".actions .small");
-  run.disabled = !!blocker && !area.dataset.edited; // an edited spec is judged by the service, not by the controls' plan
-  run.title = run.disabled ? blocker : BUTTON_HELP.plan;
-  if (!status.textContent || status.dataset.blocker) {
-    status.textContent = run.disabled ? blocker : "";
-    status.dataset.blocker = "1";
-  }
+export const definition = () => TEXT ?? toSpecYaml(C, S.ref, S.meta.catalog_repo);
+// whether a saved buffer's definition differs from what is stored
+export const changed = () => SAVED != null && definition() !== SAVED;
+// why the way forward is closed, or null
+export const problem = () =>
+  !S.ref
+    ? "no catalog synced"
+    : INVALID
+      ? `the YAML is not a definition: ${INVALID}`
+      : S.planError?.status === 422
+        ? `the service refused this definition: ${S.planError.message.split("\n")[0]}`
+        : null;
+export const planSummary = () => S.plan?.summary || null;
+// Why a plan of this definition would be refused by the planner, or null when it would run.
+export function planBlocker() {
+  if (problem()) return problem();
+  if (S.planError) return `the plan failed: ${S.planError.message.split("\n")[0]}`;
+  if (!S.plan) return "planning…";
+  const errors = S.plan.errors || [];
+  if (!errors.length) return null;
+  const waiting = S.plan.summary?.not_prepared || 0;
+  if (errors.includes("no dataset admitted") && waiting)
+    return `no prepared dataset fits yet; ${num(waiting)} fit but are not prepared`;
+  return "the plan has errors: " + errors.join("; ");
+}
+export function setOnDesign(fn) {
+  onDesign = fn;
 }
 
-// ---- the plan's table: the datasets the spec's selection admits, one page at a time (POST /plan with `page`).
+const parseSpec = async text =>
+  (await api("/specs/parse", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: text }) })).spec;
+let readSeq = 0;
+// Take `text` as the definition: the controls get its values as the service parsed it, and what they cannot show
+// is found by parsing the definition the controls would write for it. Text that is no definition changes nothing
+// but `INVALID`.
+async function readText(text) {
+  const seq = ++readSeq;
+  let parsed,
+    lost = [];
+  try {
+    parsed = await parseSpec(text);
+  } catch (error) {
+    if (seq !== readSeq) return;
+    TEXT = text;
+    INVALID = error.message.split("\n")[0];
+    return;
+  }
+  try {
+    lost = specDiff(parsed, await parseSpec(toSpecYaml(fromSpec(parsed), parsed.catalog.ref, parsed.catalog.repo)));
+  } catch {
+    lost = ["its sampling and splits"]; // the controls' own text is refused: they cannot hold this one at all
+  }
+  if (seq !== readSeq) return; // a later text was typed while this one was read
+  Object.assign(C, fromSpec(parsed));
+  TEXT = text;
+  INVALID = null;
+  LOST = lost;
+}
+// A control was changed: from here on the definition is what the controls write.
+function touched() {
+  TEXT = null;
+  INVALID = null;
+  showText();
+  schedulePlan();
+  onDesign();
+}
+// the YAML tab shows the definition, but is never rewritten under someone typing in it
+function showText() {
+  const box = $("specText");
+  if (document.activeElement !== box) box.value = definition();
+}
+function showLock() {
+  $("controlsLock").disabled = LOCKED || LOST.length > 0;
+  $("specText").readOnly = LOCKED;
+  $("yamlMsg").textContent = INVALID ? `Not a definition: ${INVALID}` : "";
+}
+const SHOW = []; // one function per control: make it show what C holds
+function showAll() {
+  SHOW.forEach(show => show());
+  showText();
+  showLock();
+}
+// Open a definition: a saved buffer's text, or (null) a new one from the defaults and `preset`.
+async function openDefinition(text, preset) {
+  Object.assign(C, defaults(), preset || {});
+  TEXT = null;
+  LOST = [];
+  INVALID = null;
+  SAVED = text;
+  if (text != null) await readText(text);
+  showAll();
+  schedulePlan(0);
+}
+// Make the controls and the YAML tab hold this buffer's definition (`subject`: null for one not saved). A
+// definition someone is changing is left alone: the stream redraws the page while they type.
+export async function ensureDefinition(subject) {
+  const key = subject ? subject.key : "new",
+    stored = subject ? subject.data?.spec || "" : null;
+  if (LOADED !== key) {
+    LOADED = key;
+    return openDefinition(stored);
+  }
+  if (stored == null || stored === SAVED) return;
+  if (definition() === stored) {
+    SAVED = stored; // this page's own change, now stored
+    return;
+  }
+  if (changed()) return; // stored text moved under an edit: the save will be refused by its revision
+  return openDefinition(stored);
+}
+// The buffer can change now, or not (a round is open, it serves, it is shelved).
+export function setLocked(locked) {
+  LOCKED = locked;
+  showLock();
+}
+// Start a new buffer from the defaults, dropping what was entered.
+export function startOver() {
+  LOADED = "new";
+  return openDefinition(null);
+}
+// A buffer that is not saved yet, with the definition now shown: of a saved buffer (Clone), or one built by
+// `specFromDatasets`. The page then opens New buffer on it.
+export function keepAsNew() {
+  LOADED = "new";
+  SAVED = null;
+}
+// The buffer that was not saved is saved now: the next New buffer starts from the defaults.
+export function forgetNew() {
+  if (LOADED === "new") LOADED = null;
+}
+
+// ---- the plan's table: the datasets the definition's selection admits, one page at a time (POST /plan with `page`).
 // The server joins each row with the registry and says why it is in the pool or not (mia_buffers.explore).
 const splitText = x =>
   Object.entries(x.splits || {})
     .map(([k, v]) => `${k} ${num(v)}`)
     .join(" · ");
 const PLAN_COLS = [
+  {
+    label: "selected",
+    title: "untick a dataset that fits to take it out of this buffer; it is then listed above the table",
+    cell: x => {
+      if (!x.fits) return ""; // a rule of the definition keeps it out: there is nothing to tick
+      const input = el("input", {
+        type: "checkbox",
+        "aria-label": "selected: " + x.id,
+        disabled: LOCKED || LOST.length > 0,
+      });
+      input.checked = true;
+      input.addEventListener("change", () => {
+        C.exclude.add(x.id);
+        touched();
+      });
+      return input;
+    },
+  },
   {
     key: "dataset",
     label: "dataset",
@@ -236,7 +302,7 @@ const PLAN_COLS = [
   { label: "split", cell: splitText },
 ];
 
-// ---- datasets: controls → YAML → POST /plan (debounced) → KPIs, funnel, charts, table, actions
+// ---- controls → the definition → POST /plan (debounced) → numbers, funnel, charts, table
 function chips(container, values, set, onchange) {
   container.replaceChildren(
     ...values.map(v => {
@@ -260,11 +326,11 @@ function schedulePlan(ms) {
   planTimer = setTimeout(() => {
     if (planTable) planTable.reload(true);
   }, ms ?? PLAN_DEBOUNCE_MS);
-  renderActions();
 }
 async function planPage(state) {
-  // the table's source: the plan of the spec the controls describe, one page of its rows
+  // the table's source: the plan of the definition, one page of its rows
   if (!S.ref) return null;
+  if (INVALID) return { rows: S.plan?.rows || [], total: S.plan?.total || 0, out: S.plan }; // nothing to plan: the last plan stays
   const seq = ++planSeq;
   $("planStatus").textContent = "planning…";
   const page = {
@@ -284,7 +350,7 @@ async function planPage(state) {
     out = await api("/plan", {
       method: "POST",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ spec: toSpecYaml(C, S.ref, S.meta.catalog_repo), page }),
+      body: JSON.stringify({ spec: definition(), page }),
     });
   } catch (e) {
     error = e;
@@ -298,13 +364,11 @@ async function planPage(state) {
   }
   return { rows: out?.rows || [], total: out?.total || 0, out };
 }
-const SHOW = []; // one function per control: make it show what C holds
 export function bindControls() {
-  const replan = () => schedulePlan();
   const drawChips = () => {
-    chips($("dims"), DIMS, C.dims, replan);
-    chips($("lic"), LIC, C.lic, replan);
-    chips($("src"), SRC, C.sources, replan);
+    chips($("dims"), DIMS, C.dims, touched);
+    chips($("lic"), LIC, C.lic, touched);
+    chips($("src"), SRC, C.sources, touched);
   };
   drawChips();
   SHOW.push(drawChips);
@@ -318,34 +382,59 @@ export function bindControls() {
     SHOW.push(show);
     n.addEventListener(n.type === "range" || n.type === "text" ? "input" : "change", () => {
       C[key] = n.type === "checkbox" ? n.checked : parse(n.value);
-      if (n.type === "number") show(); // a count that was not one reads as the count the spec gets
+      if (n.type === "number") show(); // a count that was not one reads as the count the definition gets
       after();
     });
   };
   const text = v => v,
     int = v => +v,
     count = v => Math.max(1, Math.floor(+v) || 1);
-  bind("specName", "name", text, renderActions);
-  bind("paths", "paths", text, replan);
-  bind("allowUnknown", "allowUnknown", null, replan);
-  bind("annRequired", "annRequired", null, replan);
-  bind("minVox", "minVox", int, replan);
-  bind("patch", "patch", int, replan);
-  bind("level", "level", int, replan);
-  bind("patchZ", "patchZ", int, replan);
-  bind("dedup", "dedup", null, replan);
-  bind("temp", "T", int, replan);
+  bind("specName", "name", text, touched);
+  bind("paths", "paths", text, touched);
+  bind("allowUnknown", "allowUnknown", null, touched);
+  bind("annRequired", "annRequired", null, touched);
+  bind("minVox", "minVox", int, touched);
+  bind("patch", "patch", int, touched);
+  bind("level", "level", int, touched);
+  bind("patchZ", "patchZ", int, touched);
+  bind("dedup", "dedup", null, touched);
+  bind("temp", "T", int, touched);
   for (const [id, key] of [
     ["cropsTrain", "cropsTrain"],
     ["cropsVal", "cropsVal"],
     ["cropsTest", "cropsTest"],
     ["maxCrops", "maxCrops"],
   ])
-    bind(id, key, count, replan);
-  bind("holdout", "holdout", text, replan);
-  for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, () => schedulePlan(0)); // registry state: the same plan, fewer rows
+    bind(id, key, count, touched);
+  bind("holdout", "holdout", text, touched);
+  // what the registry knows narrows the table: the same definition, fewer rows
+  for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, () => schedulePlan(0));
+  // the two tabs of the definition
+  const tabs = { tabControls: "paneControls", tabYaml: "paneYaml" };
+  for (const [tab, pane] of Object.entries(tabs))
+    $(tab).addEventListener("click", () => {
+      for (const [other, shown] of Object.entries(tabs)) {
+        $(other).setAttribute("aria-selected", String(other === tab));
+        $(shown).hidden = shown !== pane;
+      }
+      showText();
+    });
+  // the YAML tab: after a pause in typing the service reads the text, and the controls follow
+  let typing = 0;
+  $("specText").addEventListener("input", () => {
+    clearTimeout(typing);
+    const typed = $("specText").value;
+    typing = setTimeout(async () => {
+      await readText(typed);
+      SHOW.forEach(show => show());
+      showLock();
+      schedulePlan(0);
+      renderPlanMessages();
+      onDesign();
+    }, YAML_DEBOUNCE_MS);
+  });
   $("download").addEventListener("click", () => {
-    const blob = new Blob([toSpecYaml(C, S.ref, S.meta.catalog_repo)], { type: "application/yaml" });
+    const blob = new Blob([definition()], { type: "application/yaml" });
     const a = el("a", { href: URL.createObjectURL(blob), download: `${C.name.trim() || "buffer"}.yaml` });
     document.body.append(a);
     a.click();
@@ -353,44 +442,11 @@ export function bindControls() {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   });
 }
-// A spec opened from its page: New buffer opens with the controls set from it. With `edit`, Plan saves to that spec
-// (the service refuses once it has built a buffer); without, Plan makes a new spec. What the spec holds that the
-// controls cannot say is found by parsing the spec the controls write for it: then its own text stays in the box.
-const parseSpec = async text =>
-  (await api("/specs/parse", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: text }) })).spec;
-export async function designFrom(subject, edit) {
-  const text = subject.data?.spec || "";
-  let parsed;
-  try {
-    parsed = await parseSpec(text);
-  } catch (e) {
-    banner(`The spec cannot be opened in New buffer: ${e.message}`);
-    return;
-  }
-  Object.assign(C, fromSpec(parsed), { preparedOnly: false, rawCached: false, stagedGeom: false });
-  SHOW.forEach(show => show());
-  let lost;
-  try {
-    lost = specDiff(parsed, await parseSpec(toSpecYaml(C, parsed.catalog.ref, parsed.catalog.repo)));
-  } catch {
-    lost = ["its sampling and splits"]; // the controls' own spec is refused: they cannot hold this one at all
-  }
-  FROM = { subject, edit, lost };
-  location.hash = "#buffers/new";
-  renderActions(); // the box exists from here on
-  renderPlanMessages(); // says what is open, before the plan answers
-  const area = $("bufferIssue").querySelector("textarea");
-  if (lost.length) {
-    area.value = text;
-    area.dataset.edited = "1";
-  } else delete area.dataset.edited;
-  schedulePlan(0);
-}
-// A spec for chosen datasets: New buffer opens on one that selects exactly them, each by its record's file name
-// (a record's path ends `/<id>.yaml`), with every filter that could drop one opened. The plan there says which of
-// them are in the pool: a dataset that is not prepared, or that the patch does not fit, still stays out.
-export function specFromDatasets(ids) {
-  Object.assign(C, {
+// A definition for chosen datasets: New buffer opens on one that selects exactly them, each by its record's file
+// name (a record's path ends `/<id>.yaml`), with every filter that could drop one opened. The plan there says
+// which of them are selected: a dataset that the patch does not fit still stays out.
+export async function specFromDatasets(ids) {
+  await openDefinition(null, {
     name: "selected-datasets",
     paths: ids.map(id => `*/${id}.yaml`).join(" "),
     dims: new Set(DIMS),
@@ -400,74 +456,21 @@ export function specFromDatasets(ids) {
     sources: new Set(SRC),
     minVox: 0,
     dedup: false,
-    preparedOnly: false,
-    rawCached: false,
-    stagedGeom: false,
   });
-  SHOW.forEach(show => show());
+  keepAsNew();
   location.hash = "#buffers/new";
-  schedulePlan(0);
-}
-// Why a buffer for the current spec would be refused by the planner, or null when the plan is clean.
-function bufferBlocker() {
-  if (!S.ref) return "no catalog synced";
-  if (S.planError) return `the plan failed: ${S.planError.message.split("\n")[0]}`;
-  if (!S.plan) return "planning…";
-  const errors = S.plan.errors || [];
-  if (!errors.length) return null;
-  const waiting = S.plan.summary?.not_prepared || 0;
-  if (errors.includes("no dataset admitted") && waiting)
-    return `no prepared dataset fits yet; ${num(waiting)} fit but are not prepared: request preparation first`;
-  return "the plan has errors: " + errors.join("; ");
-}
-function renderActions() {
-  createBuffer($("bufferIssue"), toSpecYaml(C, S.ref, S.meta.catalog_repo), bufferBlocker());
-  // every dataset that fits the spec and is not prepared; one in progress is already on its way
-  const todo = S.plan?.summary?.to_prepare || [];
-  prepareButton(
-    $("prepIssue"),
-    todo,
-    !S.plan
-      ? "no plan yet"
-      : todo.length
-        ? null
-        : TABLE_STATE.get("plan")?.q
-          ? "no dataset that fits and matches the search is left to prepare"
-          : "every dataset that fits is prepared or in progress",
-  );
 }
 function renderPlanMessages() {
   const box = $("planMsgs");
   box.replaceChildren();
-  if (FROM) {
-    const { subject, edit, lost } = FROM,
-      named = `${subject.name || subject.key} (#${subject.number})`;
+  if (LOST.length)
     box.append(
       el(
         "div",
         { class: "notice" },
-        edit ? `Editing ${named}: Plan saves to it. ` : `A copy of ${named}: Plan makes a new spec. `,
-        lost.length
-          ? `It holds what the controls do not offer (${lost.join(", ")}), so its full text is in the Create buffer box and Plan runs that text; the numbers here follow the controls. `
-          : "",
-        edit
-          ? el(
-              "button",
-              {
-                type: "button",
-                class: "btn",
-                title: "keep the controls as they are; Plan then makes a new spec",
-                onclick: () => {
-                  FROM = null;
-                  renderPlanMessages();
-                },
-              },
-              "Stop editing",
-            )
-          : "",
+        `The YAML holds what the controls do not show (${LOST.join(", ")}). The YAML is the definition, and the controls are read-only while it holds that.`,
       ),
     );
-  }
   const e = S.planError;
   if (e)
     box.append(
@@ -475,7 +478,7 @@ function renderPlanMessages() {
         "div",
         { class: "notice" },
         e.status === 422
-          ? "The service refused the spec (422):"
+          ? "The service refused the definition (422):"
           : e.status === 409
             ? "The catalog is not synced (409):"
             : `The plan failed (${e.status || "network error"}):`,
@@ -496,14 +499,17 @@ function renderDesigner() {
   const plan = S.plan,
     m = plan?.summary || {},
     dims = m.dims || [];
-  $("kpis").replaceChildren(
+  // step 1: the two numbers beside the two cards
+  $("kpisFit").replaceChildren(
     tile(
       "Datasets that fit",
       plan ? num(m.fitting) : "—",
-      plan ? `of ${plural(plan.n_seen, "record")} seen at ${short(plan.catalog_ref, 8)}` : "no plan yet",
-      "hero",
+      plan ? `of ${plural(plan.n_seen, "record")} at ${short(plan.catalog_ref, 8)}` : "no plan yet",
     ),
-    tile("Prepared", num(m.prepared || 0), "the buffer's pool today"),
+    tile("Prepared", num(m.prepared || 0), `${num(m.in_progress || 0)} more in progress`),
+  );
+  // step 2: the rest
+  $("kpis").replaceChildren(
     tile("In progress", num(m.in_progress || 0), "mia-data is preparing them"),
     tile(
       "Unprepared",
@@ -513,7 +519,7 @@ function renderDesigner() {
     tile(
       "Raw bytes",
       `${fmtBytes(m.bytes_pool || 0)} / ${fmtBytes(m.bytes_fitting || 0)}`,
-      `the prepared pool now / every fitting dataset; ${fmtBytes(m.bytes_to_fetch || 0)} not in the raw cache`,
+      `the prepared datasets now / every fitting dataset; ${fmtBytes(m.bytes_to_fetch || 0)} not in the raw cache`,
     ),
     tile(
       "Dimensionalities",
@@ -522,7 +528,7 @@ function renderDesigner() {
       "text",
     ),
     tile("Capacity", fmt(m.capacity || 0), "non-overlapping coarsest crops in the fitting datasets"),
-    tile("Top dataset share", m.pool ? pct(m.top_share) : "—", "of the crops drawn from the prepared pool"),
+    tile("Top dataset share", m.pool ? pct(m.top_share) : "—", "of the crops drawn from the prepared datasets"),
   );
   // the funnel is the plan's own: it ignores the registry toggles
   const steps = (m.funnel || []).map(step => ({
@@ -534,12 +540,12 @@ function renderDesigner() {
   hbars($("funnel"), steps, {
     labelW: 165,
     aria: "Records removed per rule",
-    empty: S.planError ? "no plan: see the message above the actions" : "planning…",
+    empty: S.planError ? "no plan: see the message on step 1" : "planning…",
   });
   hbars($("bymod"), m.by_modality || [], {
     labelW: 140,
     aria: "Fitting datasets by modality",
-    empty: "No dataset fits this spec.",
+    empty: "No dataset fits this definition.",
   });
   hbars(
     $("byweight"),
@@ -547,7 +553,7 @@ function renderDesigner() {
     {
       labelW: 140,
       aria: "Weight share by modality",
-      empty: "No prepared dataset in the pool yet: weights cover prepared datasets only.",
+      empty: "No prepared dataset fits yet: weights cover prepared datasets only.",
     },
   );
   const heavy = m.heaviest || [];
@@ -565,14 +571,50 @@ function renderDesigner() {
             ),
           ),
         )
-      : [el("li", { class: "empty" }, "No prepared dataset in the pool yet.")]),
+      : [el("li", { class: "empty" }, "No prepared dataset fits yet.")]),
   );
-  renderActions();
+  // the datasets a person took out: the planner drops them before the table, so they are listed here to put back
+  const out = [...C.exclude].sort();
+  $("takenOut").replaceChildren(
+    ...(out.length
+      ? [
+          el(
+            "div",
+            { class: "takenout" },
+            el("b", {}, `Taken out (${num(out.length)}):`),
+            ...out.map(id =>
+              el(
+                "span",
+                { class: "chosen" },
+                id,
+                el(
+                  "button",
+                  {
+                    type: "button",
+                    class: "btn",
+                    title: "select this dataset again",
+                    disabled: LOCKED || LOST.length > 0,
+                    onclick: () => {
+                      C.exclude.delete(id);
+                      touched();
+                    },
+                  },
+                  "put back",
+                ),
+              ),
+            ),
+          ),
+        ]
+      : []),
+  );
+  onDesign();
 }
-export function viewDesigner() {
+// Draw steps 1 and 2 (the page shows one of them): the table is the one thing that asks for the plan.
+export function showDesigner() {
   $("dsEmpty").hidden = !!S.ref;
   $("dsBody").hidden = !S.ref;
   if (!S.ref) return;
+  showAll();
   if (planTable) return planTable.reload();
   const fit = el("input", { type: "checkbox" });
   fit.addEventListener("change", () => {
@@ -585,7 +627,7 @@ export function viewDesigner() {
     sort: "decision",
     search: "search id, title, modality, licence",
     tools: [el("label", { class: "inline" }, fit, " fitting only")],
-    empty: "The spec admits no dataset.",
+    empty: "The definition admits no dataset.",
     rowAttrs: x => ({ class: x.in_pool ? "" : "out" }),
   });
   $("planTable").replaceChildren(planTable);

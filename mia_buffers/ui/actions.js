@@ -9,7 +9,10 @@ import { api, banner, JSON_HEADERS, newKey, S } from "./api.js";
 // What a button does, said on hover. BUTTON_HELP: the buttons with a control of their own. ACTION_HELP: a subject's
 // action bar, by kind and action; a function where the stage changes what the action means.
 export const BUTTON_HELP = {
-  plan: "Save this spec and start a round that plans the pool and stops there. Nothing is downloaded until you press Run.",
+  save: "Save this definition as a new buffer. Nothing runs yet: the next step prepares its datasets.",
+  saveChanges: "Store the changed definition of this buffer. Nothing runs.",
+  startOver: "Drop what is entered here and start from the defaults.",
+  clone: "Open New buffer on a copy of this buffer's definition. Saving there makes a buffer of its own.",
   dropped:
     "Tell the round that this dataset's files are in its incoming/ folder. Press it once the copy has finished: the worker checks them and moves them into the cache.",
   revokeTicked:
@@ -20,7 +23,7 @@ export const BUTTON_HELP = {
   prepareTicked:
     "File one preparation request for the ticked datasets: each one gets a run of the preparation workflow, also one that is already prepared or that stopped. One in a round is left to it.",
   specFrom:
-    "Open New buffer on a spec that selects exactly these datasets. Only the prepared ones can enter a buffer; the plan there says which are in.",
+    "Open New buffer on a definition that selects exactly these datasets. Only the prepared ones are in a plan; step 2 there says which fit.",
   clearSelection: "Untick every dataset.",
   sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
   cancelReject: "Close this without sending anything.",
