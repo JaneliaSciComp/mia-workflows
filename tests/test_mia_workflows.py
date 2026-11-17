@@ -1530,6 +1530,7 @@ LOCK_HISTORY = HISTORY.with_name("dataset_history_c.json")
 CANCEL_HISTORY = HISTORY.with_name("dataset_history_cancel.json")
 AWAITED_HISTORY = HISTORY.with_name("dataset_history_b.json")
 RESULTS_HISTORY = HISTORY.with_name("dataset_history_r.json")
+VERDICT_HISTORY = HISTORY.with_name("dataset_history_v.json")
 
 
 def _scrub(obj):
@@ -1606,6 +1607,25 @@ async def test_replay_dataset_history_r(env):
             await idle(h, m, "done")
             RESULTS_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("mia-stage-results", RESULTS_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def test_replay_dataset_history_v(env):
+    """The match → done run under the `verdict-first` patch (an approve that comes while the shadow judge looks is
+    acted on, and the judge ends beside the round), as test_replay_dataset_history. Re-record this one alone:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_v"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks(crop_judge="shadow", gate=asyncio.Event(), gate_on="judge")
+        async with started(env, m) as h:
+            await until(lambda: any("judge" in call[1] for call in m.of("await")))
+            fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
+            await h.signal(MiaDataDataset.approve, ev("approve", "12", shift(fin, 1)))
+            await idle(h, m, "done")
+            m.gate.set()
+            await until(lambda: [a for a in m.of("comment") if a[1].startswith("judge crops")])
+            await idle(h, m, "done")
+            VERDICT_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-verdict-first", VERDICT_HISTORY.read_text())
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 
@@ -1952,6 +1972,63 @@ async def test_shadow_judge_runs_after_the_test_and_the_human_still_decides(env)
     assert "publish_crops" in m.names()
     # the judge's own entry links its job: review's result, which reports the person's verdict, does not
     assert next(r for r in m.of("result") if r[0] == "review")[3] == []
+
+
+async def test_a_verdict_given_while_the_crop_judge_looks_is_acted_on_at_once(env):
+    """Dataset 27657349, 2026-11-17: an approve clicked 78 s into `review` waited 45 s, until the judge's job ended.
+    The round takes a person's verdict when it comes; the judge's reading ends beside it, on record only."""
+    m = Mocks(crop_judge="active", gate=asyncio.Event(), gate_on="judge")
+    async with started(env, m) as h:
+        await until(lambda: any("judge" in call[1] for call in m.of("await")))
+        fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
+        await h.signal(MiaDataDataset.approve, ev("approve", "12", shift(fin, 1)))
+        await idle(h, m, "done")  # the judge's job still runs
+        assert "publish_crops" in m.names() and "read_judge" not in m.names() and m.of("kill_job") == []
+        await h.signal(MiaDataDataset.go, ev("go", "13"))  # the next round waits for the judge to end
+        m.gate.set()
+        await idle(h, m, "review")
+    (read,) = [call for call in m.of("read_judge") if call[3] == f"i7-e11:i7-e11-{SHA[:12]}"]
+    assert read[4] == "shadow"  # a person decided: an active judge's approve grants nothing after that
+    assert [a for a in m.of("comment") if a[1] == f"judge crops i7-e11 {SHA}"]  # its entry is written all the same
+    assert [a[1] for a in m.of("settle") if "i7-e11-judge" in a[1]]  # and its reservation settled
+    assert m.stages == ["matching", "testing", "review", "done", "matching", "testing", "review"]
+    assert not m.of("refuse_label")
+
+
+async def test_a_cancel_after_a_verdict_stops_the_crop_judge_that_still_looks(env):
+    """A reject sends the round on to autodev while the judge's job runs; a cancel there kills that job too."""
+    m = Mocks(crop_judge="shadow", gate=asyncio.Event(), gate_on="judge")
+    async with started(env, m) as h:
+        await until(lambda: any("judge" in call[1] for call in m.of("await")))
+        fin = (await h.query(MiaDataDataset.status)).tests[-1].finished_at
+        await h.signal(MiaDataDataset.reject, ev("reject", "12", shift(fin, 1)))
+        await idle(h, m, "developing")
+        assert "read_judge" not in m.names()
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "13"))
+        await idle(h, m, "cancelled")
+        m.gate.set()
+    judge_job = next(call[0] for call in m.of("await") if "judge" in call[1])
+    assert m.of("kill_job") == [(judge_job,)] and "read_judge" not in m.names()
+    assert [a[1] for a in m.of("settle") if "judge" in a[1]]  # the reservation does not stay open
+
+
+async def test_a_cancel_while_the_crop_judges_job_is_being_submitted_kills_that_job(env):
+    """The judge's task runs beside the round's: its submit in flight is waited for like the round's own, so the
+    job the cluster got is killed, never left running with nobody waiting on it."""
+    m = Mocks(crop_judge="shadow", submit_gate=asyncio.Event(), gate=asyncio.Event(), gate_on="verify")
+    m.submit_gate.set()
+    async with started(env, m) as h:
+        await until(lambda: any("verify" in call[1] for call in m.of("await")))
+        m.submit_gate.clear()  # the next submit is the judge's: it hangs in the cluster's hands
+        m.gate.set()
+        await until(lambda: [a for a in m.of("submit") if a[1] == "judge"])
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "12"))
+        await asyncio.sleep(0.5)
+        assert m.stages[-1] == "review"  # not cancelled while the job's fate is unknown
+        m.submit_gate.set()
+        await idle(h, m, "cancelled")
+    (judge_job,) = [f"job-{a[0]}" for a in m.of("submit") if a[1] == "judge"]
+    assert m.of("kill_job") == [(judge_job,)] and "read_judge" not in m.names()
 
 
 async def test_a_judge_that_leaves_no_entry_of_its_own_is_linked_by_the_reviews_result(env):

@@ -194,6 +194,13 @@ binding's set, or comments `/approve <head>` on the snippet PR. Anything else th
 or revoke queued while it looked, leaves the set to a person. `judge.review.mode: active` is refused by the
 config: nothing grants on the review judge's verdict.
 
+**A person's verdict never waits for the crop judge.** The judge runs as a task beside the round's (`_judged`,
+patch `verdict-first`): the round waits for its verdict or for a label, whichever comes first. A label is acted on
+at once; the judge's job runs on, its verdict is read as shadow whatever the mode (so it grants nothing after a
+person decided), and its assessment and entry are written. The round closes when they are (`_guard`), so a `go`
+sent before that starts its round then; a cancel kills the judge's job with the round's (`_cancel_round`), and no
+run rolls over while a judge looks (`_roll_due`).
+
 **Shadow never blocks.** With `judge.<gate>.mode: shadow` the judge runs on every live round (the crop judge after
 a passing set, the review judge after a pushed head), its assessment and comment are written, and the round goes
 on to the human gate: `authorized()` ignores a judge's approve for a gate that is not `active`, and a judge job
