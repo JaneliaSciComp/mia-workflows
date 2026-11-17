@@ -277,7 +277,7 @@
 <text class="s" x="840" y="182">rows from the files</text>
 <!-- buffers lane -->
 <text class="hd" x="20" y="236">mia-buffers</text>
-<rect class="b" x="20" y="248" width="200" height="40" rx="8"/><text class="t" x="120" y="267" text-anchor="middle">preparation request</text><text class="s" x="120" y="281" text-anchor="middle">ticked datasets, or a plan's</text>
+<rect class="b" x="20" y="248" width="200" height="40" rx="8"/><text class="t" x="120" y="267" text-anchor="middle">preparation request</text><text class="s" x="120" y="281" text-anchor="middle">checked datasets, or a plan's</text>
 <rect class="bs" x="500" y="248" width="150" height="40" rx="8"/><text class="t" x="575" y="267" text-anchor="middle">buffer plan</text><text class="s" x="575" y="281" text-anchor="middle">prepared rows only</text>
 <path class="e" d="M120 248 V210 H75 V188" marker-end="url(#f2)"/>
 <text class="l" x="200" y="222">a go for each dataset</text>
@@ -649,7 +649,7 @@
 <div class="tw"><table>
 <tr><th>tab</th><th>shows</th><th>reads</th></tr>
 <tr><td>Needs you</td><td>everything that waits on a person or is stuck, with the buttons that answer it, and the actions of the last day that were not delivered; the <i>Shelved</i> toggle lists what a person set aside, with the reason</td><td><code>/needs</code></td></tr>
-<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw download, staged artifacts and buffers; a tick per dataset and <i>Prepare</i>; a link to the list of preparation requests, whose pages list their datasets with where each stands. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/subjects/prep</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
+<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw download, staged artifacts and buffers; a check per dataset and <i>Prepare</i>; a link to the list of preparation requests, whose pages list their datasets with where each stands. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/subjects/prep</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
 <tr><td>Buffers</td><td>the buffers, each with its step and the id it serves. A buffer's page is its six steps: its definition as controls and as YAML against a live plan, its datasets, the datasets left to prepare with the requests it filed, the plan, the sourcing, and the version being served; under the step its timeline. A version's page (one round's buffer, by its id) has its datasets, volumes, consumers, daily usage and health line</td><td><code>/subjects/buffer</code> · <code>/buffers</code> · <code>POST /plan</code> · <code>POST /specs/parse</code> · <code>/subjects/prep</code> · <code>/usage</code></td></tr>
 <tr><td>Cache</td><td>raw by dataset, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets/raw</code> · <code>/assets/staged</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
 <tr><td>Decisions</td><td>every verdict at a gate, newest first, with how often the judge and the person agree</td><td><code>/decisions</code></td></tr>

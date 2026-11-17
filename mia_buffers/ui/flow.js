@@ -223,7 +223,7 @@ function revokeCard(subject, board, redraw) {
   );
   return card(
     "Revoke datasets",
-    "The ticked datasets leave this version: their volumes are unregistered and their staged pyramids quarantined.",
+    "The checked datasets leave this version: their volumes are unregistered and their staged pyramids quarantined.",
     records.length ? ticks : el("div", { class: "empty" }, "No dataset is being served."),
     el(
       "div",
@@ -237,10 +237,10 @@ function revokeCard(subject, board, redraw) {
           disabled: !!subject.asked,
           onclick: e => {
             const chosen = [...ticks.querySelectorAll("input:checked")].map(i => i.value);
-            if (!chosen.length) return banner("Tick the datasets to revoke first.");
+            if (!chosen.length) return banner("Check the datasets to revoke first.");
             if (
               !confirm(
-                "Revoke the ticked datasets? Their volumes leave this version and their staged pyramids are quarantined; nothing is deleted.",
+                "Revoke the checked datasets? Their volumes leave this version and their staged pyramids are quarantined; nothing is deleted.",
               )
             )
               return;
@@ -248,7 +248,7 @@ function revokeCard(subject, board, redraw) {
             sendAction(subject, { action: "revoke", records: chosen, key: newKey() }, redraw);
           },
         },
-        "Revoke the ticked",
+        "Revoke the checked",
       ),
     ),
   );
@@ -381,7 +381,7 @@ const approval = subject => ({ action: "approve", revision: subject.revision, ke
 
 // ---- step 3: the fitting datasets that are not prepared, the requests this buffer filed, and the way on.
 // The buffer waits here for as long as the person likes; the way on takes what is prepared at that moment.
-const ticked = { key: null, chosen: new Set() }; // the ticks of the buffer shown: they outlast the page's redraws
+const ticked = { key: null, chosen: new Set() }; // the checks of the buffer shown: they outlast the page's redraws
 // Why the planner would refuse this plan (`plan`: what POST /plan answered), or null when a round of it would run.
 function planRefusal(plan) {
   const errors = plan.errors || [],
@@ -434,13 +434,13 @@ function prepareStep(pane, subject, redraw, wanted) {
     prepareButton(
       prepare,
       [...chosen],
-      chosen.size ? null : "tick the datasets to prepare",
+      chosen.size ? null : "check the datasets to prepare",
       () => {
         chosen.clear();
         redraw();
       },
       undefined,
-      chosen.size > 1 ? `Prepare the ${num(chosen.size)} ticked datasets` : "Prepare the ticked dataset",
+      chosen.size > 1 ? `Prepare the ${num(chosen.size)} checked datasets` : "Prepare the checked dataset",
       subject.number,
     );
   };
@@ -470,7 +470,7 @@ function prepareStep(pane, subject, redraw, wanted) {
   const seen = page => {
     const m = page.out?.summary;
     startable = new Set(m?.to_prepare || []);
-    for (const id of chosen) if (!startable.has(id)) chosen.delete(id); // prepared, or started, since it was ticked
+    for (const id of chosen) if (!startable.has(id)) chosen.delete(id); // prepared, or started, since it was checked
     if (m) {
       counts.replaceChildren(
         el("b", {}, `${num(m.prepared || 0)} of ${num(m.fitting || 0)}`),
@@ -490,7 +490,8 @@ function prepareStep(pane, subject, redraw, wanted) {
     cols: [
       {
         label: "prepare",
-        title: "tick a dataset to prepare it; one that is in a round already, or whose record cannot run, has no tick",
+        title:
+          "check a dataset to prepare it; one that is in a round already, or whose record cannot run, has no checkbox",
         cell: x => {
           if (!startable.has(x.id)) return "";
           const input = el("input", { type: "checkbox", "aria-label": "prepare " + x.id });
@@ -534,13 +535,13 @@ function prepareStep(pane, subject, redraw, wanted) {
           {
             type: "button",
             class: "btn",
-            title: "Tick every dataset that a request could start now.",
+            title: "Check every dataset that a request could start now.",
             onclick: () => {
               for (const id of startable) chosen.add(id);
               table.reload();
             },
           },
-          "Tick all",
+          "Check all",
         ),
         prepare,
       ),

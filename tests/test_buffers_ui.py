@@ -134,7 +134,7 @@ def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
 
 
 def test_page_names_the_revoked_states_and_the_pause() -> None:
-    for needle in ('"revoked":', '"quarantined":', "Revoke the ticked", "paused by the operator"):
+    for needle in ('"revoked":', '"quarantined":', "Revoke the checked", "paused by the operator"):
         assert has(needle), needle
 
 
@@ -574,7 +574,7 @@ def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
 
 
 def test_a_buffer_is_always_planned_first() -> None:
-    """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
+    """The page has no check for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
     assert not has("Show me the plan first") and not has("first.checked")
     assert has('subject.stage === "plan-review" ? "Run"')
 
@@ -634,7 +634,7 @@ def test_the_page_asks_which_hosts_a_run_lacks_before_it_starts() -> None:
 
 
 def test_the_hosts_dialog_offers_approve_start_anyway_and_cancel() -> None:
-    """The dialog lists the hosts with Select all; Approve and start waits for a ticked host."""
+    """The dialog lists the hosts with Select all; Approve and start waits for a checked host."""
     for text in (
         "Approve and start",
         "Start without approving",
@@ -875,7 +875,7 @@ def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
 
 
 def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> None:
-    """Every row of the Datasets list has a tick, prepared or not. The ticked that still need it can be prepared
+    """Every row of the Datasets list has a check, prepared or not. The checked that still need it can be prepared
     in one request, and all of them can open New buffer as a spec that selects exactly them: each by a glob on
     its record's file name, which no other record's path matches."""
     from mia_buffers.select import _glob
@@ -903,10 +903,10 @@ def test_the_datasets_list_flags_and_filters_what_a_record_lacks() -> None:
 
 
 def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked() -> None:
-    """With nothing ticked the list offers Select all and Clear selection and says nothing more. With a tick, a
+    """With nothing checked the list offers Select all and Clear selection and says nothing more. With a check, a
     box of its own colour says how many datasets are selected and offers Prepare and Create buffer."""
     assert has('"Select all")') and not has("Select all matching")
-    assert not has("tick the datasets to prepare first")
+    assert not has("check the datasets to prepare first")
     assert has('class: "chosen", hidden: true') and has(".chosen[hidden]{display:none}")
     assert has("box.hidden = !CHOSEN.size") and has('"Create buffer")')
     # Select all takes the rows of the page that is showing, and asks the server for nothing
@@ -1002,7 +1002,7 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
     assert back == controls and same == []
     hand_controls, hand_text = lost
     assert hand_controls["name"] == "microscopy-foundation-pretrain" and hand_controls["level"] == 4
-    assert load_spec_text(written).select.exclude.ids == ["bcss", "u937"]  # an unticked dataset is an exclusion
+    assert load_spec_text(written).select.exclude.ids == ["bcss", "u937"]  # an unchecked dataset is an exclusion
     differs = run_js(
         "print(specDiff(input.hand, input.rewritten));",
         {"spec.js": "specDiff"},
@@ -1054,7 +1054,7 @@ def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
     assert has("the controls do not show", designer)
     # a redraw the stream asked for leaves a definition someone is changing alone
     assert has("if (changed()) return;", designer)
-    # the four numbers of step 1, and the tick of step 2 that takes a dataset out
+    # the four numbers of step 1, and the check of step 2 that takes a dataset out
     assert has('$("kpisFit").replaceChildren(tile("Datasets that fit"', designer)
     assert has("C.exclude.add(x.id);", designer) and has("C.exclude.delete(id);", designer)
     # saving: a new subject and no action; a saved buffer's change is an edit that names the revision it was made at
@@ -1071,7 +1071,7 @@ def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() 
     assert has('pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number }))', flow)
     assert has("...(owner == null ? {} : { buffer: owner })", actions)
     assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
-    # only what a request could start can be ticked: the plan's own list, not every row
+    # only what a request could start can be checked: the plan's own list, not every row
     assert has("startable.has(x.id)", flow)
     assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
     assert count("plan_first: true") == 1 and has("title: BUTTON_HELP.plan", flow)  # every plan stops for its Run
@@ -1227,7 +1227,7 @@ def test_the_page_says_buffer_and_definition_and_explains_nothing_by_its_past() 
 
 
 def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:
-    """Unticking a dataset writes its id to `select.exclude.ids`. A reason beside it, or an excluded path, is
+    """Unchecking a dataset writes its id to `select.exclude.ids`. A reason beside it, or an excluded path, is
     something no control shows: specDiff names it, so the page keeps the text."""
     from mia_buffers.spec import load_spec_text
 
@@ -1240,11 +1240,11 @@ def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> N
         **plain,
         "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {"x": "blurry"}}},
     }
-    ticked = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {}}}}
+    checked = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {}}}}
     ids, differs = run_js(
-        "print([[...fromSpec(input.reasoned).exclude], specDiff(input.reasoned, input.ticked)]);",
+        "print([[...fromSpec(input.reasoned).exclude], specDiff(input.reasoned, input.checked)]);",
         {"spec.js": "fromSpec, specDiff"},
-        {"reasoned": reasoned, "ticked": ticked},
+        {"reasoned": reasoned, "checked": checked},
     )
     assert ids == ["x"] and differs == ["select.exclude.reasons.x"]
 

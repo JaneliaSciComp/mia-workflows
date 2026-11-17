@@ -51,7 +51,7 @@ function subjectLinks(subject, entries) {
     );
   return out;
 }
-// A view a person is typing into (an edited spec, ticked records) is not rebuilt under them: it says that
+// A view a person is typing into (an edited spec, checked records) is not rebuilt under them: it says that
 // something changed, and waits for them. Any input in the view sets `root.dataset.dirty` and the start of a redraw
 // clears it, so a load that ends finds it set when someone typed while it ran. True when the view is to be kept.
 function keepTyping(root, reload) {

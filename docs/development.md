@@ -225,7 +225,7 @@ never writes over an artifact whose newest assessment is a reject: only a repair
 `go` on the dataset that saves its crops removes `revoked.json`, writes a `policy:repair` approve on each
 quarantined artifact of the record and clears their quarantine marks, and the next stage write makes the row
 prepared again. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
-page's *Revoke the ticked*; records not in the buffer are ignored), rejects and quarantines those records'
+page's *Revoke the checked*; records not in the buffer are ignored), rejects and quarantines those records'
 artifacts and takes the keeper's `revoked` path at once.
 
 **A stage pass writes its start and its result.** A round is a series of stage passes: every stage whose word in
@@ -481,7 +481,7 @@ sandbox bypasses its proxy for loopback names, and inside it they point at the s
 host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the hosts
 the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request) or its
 saved bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
-pool), their `network.redirect_hosts` targets and the package hosts. Ticked hosts travel as `approve_hosts` on a
+pool), their `network.redirect_hosts` targets and the package hosts. Checked hosts travel as `approve_hosts` on a
 dataset's `go`, filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other
 action carrying a non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender,
 accepts only hosts that run needs (never a GitHub host, an IP literal or the host of `service.url` or
@@ -717,7 +717,7 @@ pyramid as it is. A failed build next to a saved artifact (not a rebuild of it) 
 ## Preparation requests
 
 A buffer never asks mia-data for a dataset; a preparation request does. The page files one (`POST /prep`) for the
-datasets ticked on the Datasets list or the ones a new buffer's plan needs. Its spec is YAML, with `records` or
+datasets checked on the Datasets list or the ones a new buffer's plan needs. Its spec is YAML, with `records` or
 `select` (exactly one):
 
 ```yaml
@@ -930,9 +930,9 @@ Each tab is one kind of thing, and each thing has one page:
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
   download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
   (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, or `anything`; `record_row` names them,
-  whatever buffer asks, and the row shows each as a pill). Every row has a tick (the
-  header's and *Select all* tick the page that is showing). While something is ticked, a box says how many datasets are
-  selected and offers *Prepare* and *Create buffer*. The ticked are prepared in one request (one
+  whatever buffer asks, and the row shows each as a pill). Every row has a check (the
+  header's and *Select all* check the page that is showing). While something is checked, a box says how many datasets are
+  selected and offers *Prepare* and *Create buffer*. The checked are prepared in one request (one
   `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a definition that
   selects exactly them (`specFromDatasets`: one `*/<id>.yaml` glob per dataset in `select.paths`). `#datasets?state=<state>` opens the list with a filter set.
 - **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`,
@@ -953,12 +953,12 @@ Each tab is one kind of thing, and each thing has one page:
     page of rows. Step 2's table asks for the rows that fit (`page.fit_only`), which is the number step 1 counts; the
     rows the selection admits but the patch does not fit are listed only on request, and the rows the planner could
     not place because of their record (`RECORD_LACKS_GROUPS`) never: the step counts them (`summary.record_lacks`)
-    and links to `#datasets?lacks=anything`. Unticking a
+    and links to `#datasets?lacks=anything`. Unchecking a
     dataset adds its id to `select.exclude.ids`. Step 2's button saves a new
     buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
     `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
     someone is changing (`ensureDefinition`).
-  - *Prepare* lists the plan's rows that are left to prepare (`page.to_prepare`), ticks only what a request could
+  - *Prepare* lists the plan's rows that are left to prepare (`page.to_prepare`), checks only what a request could
     start (`summary.to_prepare`), files the request with `buffer`, and lists the buffer's requests. Its way
     forward is the one `go` a buffer gets from the page (`planRound`).
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the

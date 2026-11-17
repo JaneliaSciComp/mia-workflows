@@ -1,5 +1,5 @@
 // Steps 1 and 2 of a buffer: its definition as controls and as YAML, the plan of that definition as numbers,
-// charts and a table, and the tick that takes a dataset out.
+// charts and a table, and the check that takes a dataset out.
 import { DIMS, fromSpec, levelsKey, levelsOf, LIC, SRC, specDiff, toSpecYaml } from "./spec.js";
 import {
   $,
@@ -89,7 +89,7 @@ const defaults = () => ({
   cropsTest: 2000,
   maxCrops: 1024,
   holdout: "",
-  exclude: new Set(), // the datasets unticked on step 2
+  exclude: new Set(), // the datasets unchecked on step 2
   preparedOnly: false,
   rawCached: false,
   stagedGeom: false,
@@ -245,9 +245,9 @@ const splitText = x =>
 const PLAN_COLS = [
   {
     label: "selected",
-    title: "untick a dataset that fits to take it out of this buffer; it is then listed above the table",
+    title: "uncheck a dataset that fits to take it out of this buffer; it is then listed above the table",
     cell: x => {
-      if (!x.fits) return ""; // a rule of the definition keeps it out: there is nothing to tick
+      if (!x.fits) return ""; // a rule of the definition keeps it out: there is nothing to check
       const input = el("input", {
         type: "checkbox",
         "aria-label": "selected: " + x.id,

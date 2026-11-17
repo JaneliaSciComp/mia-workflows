@@ -36,7 +36,7 @@ import { stageOf } from "./buffers.js";
 // `lacks`: what the catalog record lacks whatever buffer asks for it (an array shape, a voxel size, a data URL)
 const DS_FILTER = { state: "", modality: "", dims: "", licence: "", lacks: "" };
 const CHOSEN = new Set(),
-  SETTLED = new Set(); // the ticked datasets, and those of them that are prepared or in a round
+  SETTLED = new Set(); // the checked datasets, and those of them that are prepared or in a round
 export const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging", "debugging"]); // the stages of a round under way or at review
 const PREPARABLE = row => row.state !== "prepared" && !ROUND_OPEN.has(row.stage);
 // the catalog the list is read from: its commit (linked into the catalog repo at that commit), how many datasets
@@ -97,7 +97,7 @@ export function viewDatasetList(_arg, params) {
       select.value = DS_FILTER[name];
     }
   };
-  // what can be done with the ticked datasets: a box of its own, shown only while something is ticked
+  // what can be done with the checked datasets: a box of its own, shown only while something is checked
   const prepare = el("span"),
     count = el("b");
   const spec = el(
@@ -133,7 +133,7 @@ export function viewDatasetList(_arg, params) {
     {
       type: "button",
       class: "btn",
-      title: "ticks every dataset on this page",
+      title: "checks every dataset on this page",
       onclick: () => {
         for (const row of TABLE_STATE.get("datasets").last?.rows || []) {
           CHOSEN.add(row.id);
@@ -225,7 +225,7 @@ export function viewDatasetList(_arg, params) {
     el(
       "p",
       { class: "small" },
-      "Every dataset of the catalog and what is known about it. Open one for its record, crops, decisions, cache and timeline. Tick datasets to prepare them in one request, or to start a buffer from them. ",
+      "Every dataset of the catalog and what is known about it. Open one for its record, crops, decisions, cache and timeline. Check datasets to prepare them in one request, or to start a buffer from them. ",
       el("a", { href: "#preparation", title: "every preparation request, with its stage" }, "Preparation requests"),
     ),
     el("div", { class: "actions" }, selectAll, clear, box),

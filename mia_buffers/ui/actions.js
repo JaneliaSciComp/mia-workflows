@@ -23,20 +23,20 @@ export const BUTTON_HELP = {
   dropped:
     "Tell the round that this dataset's files are in its incoming/ folder. Press it once the copy has finished: the worker checks them and moves them into the cache.",
   revokeTicked:
-    "Withdraw the ticked datasets from this buffer: their volumes are unregistered and their staged pyramids are quarantined. Nothing is deleted.",
+    "Withdraw the checked datasets from this buffer: their volumes are unregistered and their staged pyramids are quarantined. Nothing is deleted.",
   retry: "Send the same action again. It carries the same key, so it cannot run twice.",
   prepare:
     "File one preparation request for these datasets: each one gets a run of the preparation workflow, and the request's page follows them.",
   prepareTicked:
-    "File one preparation request for the ticked datasets: each one gets a run of the preparation workflow, also one that is already prepared or that stopped. One in a round is left to it.",
+    "File one preparation request for the checked datasets: each one gets a run of the preparation workflow, also one that is already prepared or that stopped. One in a round is left to it.",
   specFrom:
     "Open New buffer on a definition that selects exactly these datasets. Only the prepared ones are in a plan; step 2 there says which fit.",
-  clearSelection: "Untick every dataset.",
+  clearSelection: "Uncheck every dataset.",
   sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
   cancelReject: "Close this without sending anything.",
   sendShelve: "Shelve it with this reason. Unshelve on its page takes it back.",
   cancelShelve: "Close this without shelving anything.",
-  approveHosts: "Allow jobs to download from the ticked hosts, then start.",
+  approveHosts: "Allow jobs to download from the checked hosts, then start.",
   startUnapproved:
     "Start with the policy as it is. A dataset on one of these hosts stops and needs a person; a buffer waits for that dataset's files to be copied in by hand, or refuses its job.",
   cancelHosts: "Close this without starting anything.",
@@ -251,7 +251,7 @@ function askNote(subject, dialog, send) {
   box.showModal();
 }
 // Before a run starts, the service says which hosts it needs that the csub policy lacks (`run`: {records}, {prep} or
-// {spec}). `send(hosts)` is called once: [] when nothing is missing or the person starts without approving, the ticked
+// {spec}). `send(hosts)` is called once: [] when nothing is missing or the person starts without approving, the checked
 // hosts on "Approve and start". On Cancel, and when the check fails, it is not called. The promise settles when the
 // check has failed or the dialog has closed, whether or not `send` ran.
 export async function askHosts(run, send) {
@@ -444,7 +444,7 @@ export function undelivered(subject, actions, after) {
 
 // ---- the Prepare button: a preparation request is posted to the service, which runs it
 const PREP_MAX = 200; // the most datasets one preparation request takes (mia_buffers.spec.MAX_PREP_RECORDS)
-// `again` (the Datasets list's ticks): every ticked dataset gets a round, also one that is prepared or that stopped;
+// `again` (the Datasets list's checks): every checked dataset gets a round, also one that is prepared or that stopped;
 // its value is how many of them are prepared or in a round already. Without it only what is not prepared is asked for.
 // `owner` (a buffer's Prepare step): the number of the buffer the request is filed for; the person stays on that step.
 export function prepareButton(container, all, blocker, done, again, text, owner) {

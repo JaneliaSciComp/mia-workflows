@@ -313,7 +313,7 @@ class ActionBody(_Strict):
     plan_first: bool = False  # a buffer's go: stop at the plan and wait for an approve before staging anything
     records: list[str] = []  # a buffer's revoke: the records that leave it
     record: str | None = None  # dropped: the dataset whose files are in place
-    approve_hosts: list[str] = []  # a start action: hosts the run needs that the person ticked (spec host-approval §5)
+    approve_hosts: list[str] = []  # a start action: hosts the run needs that the person checked (spec host-approval §5)
 
 
 class SpecBody(_Strict):
@@ -323,7 +323,7 @@ class SpecBody(_Strict):
     action: Literal["go"] | None = None
     plan_first: bool = False
     key: str | None = None
-    approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person ticked
+    approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person checked
     buffer: int | None = None  # a preparation request: the number of the buffer whose Prepare step filed it
 
 

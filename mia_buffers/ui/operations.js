@@ -262,7 +262,7 @@ const RULE_HELP = {
   ],
   "host not approved": [
     "Host not approved",
-    "A job needs a host nobody has approved. Only a person approves hosts: Run again on the subject's page, and tick them.",
+    "A job needs a host nobody has approved. Only a person approves hosts: Run again on the subject's page, and check them.",
   ],
   "record gap": [
     "Catalog record is incomplete",
@@ -476,7 +476,7 @@ export async function viewPreparation() {
   root.replaceChildren(
     card(
       "Preparation requests",
-      "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a buffer's Prepare step. Open one for its datasets, to cancel it or to run it again.",
+      "A request prepares a set of datasets under one budget. File one from Datasets (check datasets, Prepare) or from a buffer's Prepare step. Open one for its datasets, to cancel it or to run it again.",
       pagedTable("requests", {
         source: pageOf("/subjects/prep", "subjects"),
         sort: "updated",
