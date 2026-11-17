@@ -1,8 +1,7 @@
-// A subject's page (a dataset, a buffer spec or a request: its state, buttons and timeline), the lookup box's
-// results, and Needs you.
+// A subject's page (a dataset or a request: its state, buttons and timeline; a buffer's is flow.js), the lookup
+// box's results, and Needs you.
 import {
   $,
-  bufferLink,
   card,
   datasetLink,
   el,
@@ -13,22 +12,22 @@ import {
   num,
   stagePill,
   statePill,
+  KIND_WORDS,
   SUBJECT_HASH,
   when,
 } from "./dom.js";
-import { api, banner, load, newKey, S } from "./api.js";
+import { api, load, newKey, S } from "./api.js";
 import { pagedTable, pageOf, TABLE_STATE } from "./table.js";
 import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
 import { actionBar, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
-import { servableText, stageOf } from "./buffers.js";
 import { datasetCards } from "./datasets.js";
-import { designFrom } from "./designer.js";
 
 // ---- a subject's page
 let subjectTurn = 0; // the newest load of a subject's page: one that started earlier never paints over it
 // the stream, and the end of an asked action's wait, redraw the subject's page or Needs you, whichever is shown
 onScreen.refresh = () => {
-  if (onScreen.subject) viewSubject(onScreen.subject.kind, onScreen.subject.key, "stream");
+  if (onScreen.redraw) onScreen.redraw();
+  else if (onScreen.subject) viewSubject(onScreen.subject.kind, onScreen.subject.key, "stream");
   else if (onScreen.view === "needs") viewNeeds("", "stream");
 };
 // Every link of a subject stands in the row under its name: its GitHub issue, and for a dataset its workflow in
@@ -51,144 +50,6 @@ function subjectLinks(subject, entries) {
       ),
     );
   return out;
-}
-async function specControls(subject) {
-  // what only a buffer spec has: edit and run, its datasets' files, revoke, its buffers
-  const box = el("div"),
-    again = () => viewSubject(subject.kind, subject.key, true);
-  const mine = (await load(`/buffers?limit=1&spec=${subject.number}`))?.buffers || []; // its newest round's buffer
-  const board = mine.length
-    ? (await load(`/buffers/${encodeURIComponent(mine[0].id)}/datasets`, true))?.datasets || []
-    : [];
-  if (subject.actions.includes("dropped")) {
-    const waiting = board.filter(d => d.status === "waiting-drop");
-    for (const d of waiting)
-      box.append(
-        el(
-          "div",
-          { class: "notice" },
-          el("b", {}, d.record),
-          " waits for its files to be copied into its incoming/ folder. ",
-          el(
-            "button",
-            {
-              type: "button",
-              class: "btn",
-              title: BUTTON_HELP.dropped,
-              disabled: !!subject.asked,
-              onclick: e => {
-                e.target.disabled = true;
-                sendAction(subject, { action: "dropped", record: d.record, key: newKey() }, again);
-              },
-            },
-            "Files are in place",
-          ),
-        ),
-      );
-  }
-  if (subject.actions.includes("revoke")) {
-    const records = board.filter(d => d.status === "servable").map(d => d.record);
-    const ticks = el(
-      "div",
-      { class: "ticks" },
-      ...records.map(r => el("label", { class: "inline" }, el("input", { type: "checkbox", value: r }), " " + r)),
-    );
-    box.append(
-      card(
-        "Revoke datasets",
-        "The ticked datasets leave this buffer: their volumes are unregistered and their staged pyramids quarantined.",
-        records.length ? ticks : el("div", { class: "empty" }, "No dataset is being served."),
-        el(
-          "div",
-          { class: "actions" },
-          el(
-            "button",
-            {
-              type: "button",
-              class: "btn danger",
-              title: BUTTON_HELP.revokeTicked,
-              disabled: !!subject.asked,
-              onclick: e => {
-                const chosen = [...ticks.querySelectorAll("input:checked")].map(i => i.value);
-                if (!chosen.length) return banner("Tick the datasets to revoke first.");
-                if (
-                  !confirm(
-                    "Revoke the ticked datasets? Their volumes leave this buffer and their staged pyramids are quarantined; nothing is deleted.",
-                  )
-                )
-                  return;
-                e.target.disabled = true;
-                sendAction(subject, { action: "revoke", records: chosen, key: newKey() }, again);
-              },
-            },
-            "Revoke the ticked",
-          ),
-        ),
-      ),
-    );
-  }
-  const area = el("textarea", { class: "specbox", spellcheck: "false", "aria-label": "buffer spec YAML" });
-  area.readOnly = true;
-  area.value = subject.data?.spec || "";
-  const canPlan = subject.actions.includes("go"),
-    open = (edit, label, title) =>
-      el("button", { type: "button", class: "btn", title, onclick: () => designFrom(subject, edit) }, label);
-  box.append(
-    card(
-      "Spec",
-      subject.frozen
-        ? "This spec has built a buffer and no longer changes. Plan again runs it as it is: the round stops at its plan until you press Run, the buffer it builds gets a new id, and training jobs keep the buffer they connected to. Clone opens New buffer on a copy, which becomes a spec of its own."
-        : "A spec can change until a round of it is run. Edit opens New buffer on it, and Plan there saves to this spec; Clone opens a copy, which becomes a spec of its own.",
-      area,
-      el(
-        "div",
-        { class: "actions" },
-        canPlan
-          ? el(
-              "button",
-              {
-                type: "button",
-                class: "btn",
-                title: BUTTON_HELP.plan,
-                disabled: !!subject.asked,
-                onclick: e => {
-                  e.target.disabled = true;
-                  sendAction(subject, { action: "go", plan_first: true, key: newKey() }, again);
-                },
-              },
-              subject.asked?.action === "go" ? "Plan…" : subject.stage === "new" ? "Plan" : "Plan again",
-            )
-          : "",
-        canPlan && !subject.frozen ? open(true, "Edit", "open New buffer on this spec; Plan there saves to it") : "",
-        open(false, "Clone", "open New buffer on a copy of this spec; Plan there makes a new spec"),
-      ),
-    ),
-  );
-  box.append(
-    card(
-      "Buffers of this spec",
-      "Newest first; each run builds a new one.",
-      pagedTable("spec-buffers:" + subject.key, {
-        source: pageOf("/buffers", "buffers", () => ({ spec: subject.number })),
-        search: false,
-        empty: "No buffer yet.",
-        cols: [
-          { key: "buffer", label: "buffer", cell: b => bufferLink(b.id) },
-          {
-            key: "updated",
-            label: "state",
-            cell: b =>
-              b.latest_event
-                ? el("span", {}, statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at))
-                : "no events",
-          },
-          { key: "volumes", label: "volumes", num: true, cell: b => num(b.volumes) },
-          { label: "servable", cell: b => servableText(b.servable) },
-        ],
-      }),
-    ),
-  );
-  return box;
 }
 // A view a person is typing into (an edited spec, ticked records) is not rebuilt under them: it says that
 // something changed, and waits for them. Any input in the view sets `root.dataset.dirty` and the start of a redraw
@@ -223,7 +84,7 @@ const gapsNotice = gaps =>
     ". Start is offered once a catalog sync brings a record that has it; nothing has to be done here.",
   );
 // A shelved subject (spec shelved-subjects): who set it aside, when and why. Its only button is Unshelve.
-const shelvedNotice = hold =>
+export const shelvedNotice = hold =>
   el(
     "div",
     { class: "notice" },
@@ -279,7 +140,7 @@ export async function viewSubject(kind, key, refresh) {
         ? detail
           ? null
           : "No dataset with this id in the newest catalog or the registry."
-        : "No such " + (kind === "buffer" ? "buffer spec" : "request") + ".";
+        : "No such request.";
     root.replaceChildren(
       ...[
         el("h2", {}, key),
@@ -300,10 +161,9 @@ export async function viewSubject(kind, key, refresh) {
   }
   onScreen.subject.number = subject.number;
   subject.again = again;
-  const [timeline, run, extras] = await Promise.all([
+  const [timeline, run] = await Promise.all([
     load(`/timeline/${kind}/${subject.number}`),
     api(`/run/${kind}/${subject.number}`).catch(() => null),
-    kind === "buffer" ? specControls(subject) : null,
   ]);
   if (location.hash !== hash || turn !== subjectTurn) return;
   if (keepTyping(root, redraw)) return;
@@ -356,13 +216,9 @@ export async function viewSubject(kind, key, refresh) {
         `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round to settle it.`,
       ),
     );
-  parts.push(
-    actionBar(subject, redraw, kind === "buffer" ? ["go", "revoke"] : []),
-    undelivered(subject, timeline?.actions || [], redraw),
-  );
+  parts.push(actionBar(subject, redraw), undelivered(subject, timeline?.actions || [], redraw));
   if (subject.shelved) parts.push(shelvedNotice(subject.shelved));
   if (gaps.length) parts.push(gapsNotice(gaps));
-  if (extras) parts.push(extras);
   parts.push(...cards);
   if (kind === "prep")
     parts.push(
@@ -394,6 +250,12 @@ export async function viewSubject(kind, key, refresh) {
     );
   if (kind === "prep" && subject.data?.spec)
     parts.push(card("The request", "As it was filed.", el("pre", { class: "err" }, subject.data.spec)));
+  const log = timelineCard(entries);
+  parts.push(log);
+  root.replaceChildren(...parts);
+}
+// A subject's timeline as a card: what was asked and what each round did, the newest entry first.
+export function timelineCard(entries) {
   const log = el(
     "div",
     { class: "card" },
@@ -426,11 +288,10 @@ export async function viewSubject(kind, key, refresh) {
     fold.open = n === 0;
   });
   if (!entries.length) log.append(el("div", { class: "empty" }, "Nothing yet."));
-  parts.push(log);
-  root.replaceChildren(...parts);
+  return log;
 }
 export async function viewFind(text) {
-  // the lookup box: an issue number, an issue URL, a record id or a spec name
+  // the lookup box: an issue number, an issue URL, a record id or a buffer's name
   const root = $("subjectBody"),
     hash = location.hash;
   root.replaceChildren(el("div", { class: "empty" }, "looking…"));
@@ -459,17 +320,16 @@ export async function viewFind(text) {
       : el(
           "div",
           { class: "empty" },
-          "Nothing matches. Try an issue number (#234), a pasted issue URL, a record id or a spec name.",
+          "Nothing matches. Try an issue number (#234), a pasted issue URL, a record id or a buffer's name.",
         ),
   );
 }
 
 // ---- Needs you: everything that waits on a person, with the button that answers it (spec webapp-actions §8.2)
-const KIND_WORDS = { dataset: "dataset", buffer: "buffer spec", prep: "request" };
 const NEEDS_KINDS = [
   ["", "All"],
   ["dataset", "Datasets"],
-  ["buffer", "Buffer specs"],
+  ["buffer", "Buffers"],
   ["prep", "Requests"],
 ]; // the "what" a person can narrow the list to
 let needsKind = ""; // the kind shown; kept while the list redraws itself, cleared by opening the tab

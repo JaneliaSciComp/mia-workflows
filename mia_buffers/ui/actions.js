@@ -9,7 +9,17 @@ import { api, banner, JSON_HEADERS, newKey, S } from "./api.js";
 // What a button does, said on hover. BUTTON_HELP: the buttons with a control of their own. ACTION_HELP: a subject's
 // action bar, by kind and action; a function where the stage changes what the action means.
 export const BUTTON_HELP = {
-  plan: "Save this spec and start a round that plans the pool and stops there. Nothing is downloaded until you press Run.",
+  plan: "Plan this buffer over the datasets that are prepared now. The round stops at its plan: nothing is downloaded until you press Run.",
+  run: "Accept the plan and start the jobs: its datasets are downloaded and staged, then the round stops for your approval.",
+  serve:
+    "Serve this version as the table shows it. The share each weighting group has now becomes the floor it is judged against.",
+  back: "Cancel the round in progress, so that the buffer can be changed. Its cluster jobs are killed and the work so far is not kept.",
+  planAgain:
+    "Plan this buffer again over the datasets that are prepared now. The version being served keeps serving until the new one is approved.",
+  save: "Save this definition as a new buffer. Nothing runs yet: the next step prepares its datasets.",
+  saveChanges: "Store the changed definition of this buffer. Nothing runs.",
+  startOver: "Drop what is entered here and start from the defaults.",
+  clone: "Open New buffer on a copy of this buffer's definition. Saving there makes a buffer of its own.",
   dropped:
     "Tell the round that this dataset's files are in its incoming/ folder. Press it once the copy has finished: the worker checks them and moves them into the cache.",
   revokeTicked:
@@ -20,7 +30,7 @@ export const BUTTON_HELP = {
   prepareTicked:
     "File one preparation request for the ticked datasets: each one gets a run of the preparation workflow, also one that is already prepared or that stopped. One in a round is left to it.",
   specFrom:
-    "Open New buffer on a spec that selects exactly these datasets. Only the prepared ones can enter a buffer; the plan there says which are in.",
+    "Open New buffer on a definition that selects exactly these datasets. Only the prepared ones are in a plan; step 2 there says which fit.",
   clearSelection: "Untick every dataset.",
   sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
   cancelReject: "Close this without sending anything.",
@@ -72,7 +82,7 @@ export const ACTION_HELP = {
     keep: "Keep this idle buffer: it goes back to ready instead of being retired.",
     retire: "Release the buffer's staged data: training jobs are refused from then on, and the space can be reclaimed.",
     cancel: "Stop the round in progress: its cluster jobs are killed and its buffer is retired.",
-    stop: "For a run that does not answer Cancel: the workflow is terminated and the spec's buffers are retired. A cluster job already running is not killed.",
+    stop: "For a run that does not answer Cancel: the workflow is terminated and the buffer's versions are retired. A cluster job already running is not killed.",
   },
   prep: {
     ...SHELF_HELP,
@@ -151,8 +161,9 @@ const UNDELIVERED_AFTER_S = 10; // an action still pending this long was not del
 
 // ---- sending an action
 // What is on screen, kept by whoever draws it: `subject` is the subject page's {kind, key, number} (what the
-// stream refetches), `view` the view's name, and `refresh()` redraws it the way the stream does.
-export const onScreen = { subject: null, view: "", refresh: () => {} };
+// stream refetches), `view` the view's name, and `refresh()` redraws it the way the stream does. A view that
+// redraws itself (a buffer's page) sets `redraw`, which `refresh()` then calls.
+export const onScreen = { subject: null, view: "", refresh: () => {}, redraw: null };
 let askedTimer = 0; // looks again when an asked action's wait ends, should its workflow never answer
 export async function sendAction(subject, body, after) {
   // the answer is shown by the redraw that follows (`after`), a refusal by the banner
@@ -435,7 +446,8 @@ export function undelivered(subject, actions, after) {
 const PREP_MAX = 200; // the most datasets one preparation request takes (mia_buffers.spec.MAX_PREP_RECORDS)
 // `again` (the Datasets list's ticks): every ticked dataset gets a round, also one that is prepared or that stopped;
 // its value is how many of them are prepared or in a round already. Without it only what is not prepared is asked for.
-export function prepareButton(container, all, blocker, done, again, text) {
+// `owner` (a buffer's Prepare step): the number of the buffer the request is filed for; the person stays on that step.
+export function prepareButton(container, all, blocker, done, again, text, owner) {
   // `text`: the button's word, where the count stands beside it
   // a request takes at most PREP_MAX datasets: a longer list is prepared in parts, the first PREP_MAX now
   const todo = all.slice(0, PREP_MAX),
@@ -481,10 +493,15 @@ export function prepareButton(container, all, blocker, done, again, text) {
       const action = await api("/prep", {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify({ spec: yaml, key: newKey(), ...(hosts.length ? { approve_hosts: hosts } : {}) }),
+        body: JSON.stringify({
+          spec: yaml,
+          key: newKey(),
+          ...(hosts.length ? { approve_hosts: hosts } : {}),
+          ...(owner == null ? {} : { buffer: owner }),
+        }),
       });
       if (done) done(todo);
-      location.hash = "#find/" + action.number;
+      if (owner == null) location.hash = "#find/" + action.number;
     } catch (err) {
       banner(
         err.status === 422

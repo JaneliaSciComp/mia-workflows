@@ -69,35 +69,36 @@ export const link = (href, text, title) =>
 // what each pill means, by its text; the tooltip shows it (a decision pill adds the planner's exact reason)
 export const PILL_HELP = {
   // the planner's decision for a dataset against the current spec
-  "pool": "Fits the spec and is prepared: the dataset is in the plan's pool and would supply crops.",
-  "path not selected": "The record's path in the catalog is not under the spec's select.paths globs.",
-  "excluded by path": "The record's path matches one of the spec's exclude.paths globs.",
-  "excluded by id": "The record's id is listed in the spec's exclude.ids.",
-  "dims not selected": "The dataset's dimensionality (2D, 2D+t, 3D, 3D+t) is not in the spec's where.dims.",
-  "modality": "None of the dataset's modalities is in the spec's where.modality.",
-  "organism": "The dataset's organism is not in the spec's where.organism.",
-  "licence unknown": "The record names no SPDX licence and the spec does not allow unknown licences.",
-  "licence not allowed": "The record's licence is not in the spec's licence allowlist.",
-  "annotations required": "The spec requires annotations and the record has none.",
-  "annotation types": "The record's annotation types (masks, boxes, points, …) are not among those the spec asks for.",
+  "pool": "Fits the definition and is prepared: the dataset is in the plan's pool and would supply crops.",
+  "path not selected": "The record's path in the catalog is not under the definition's select.paths globs.",
+  "excluded by path": "The record's path matches one of the definition's exclude.paths globs.",
+  "excluded by id": "The record's id is listed in the definition's exclude.ids.",
+  "dims not selected": "The dataset's dimensionality (2D, 2D+t, 3D, 3D+t) is not in the definition's where.dims.",
+  "modality": "None of the dataset's modalities is in the definition's where.modality.",
+  "organism": "The dataset's organism is not in the definition's where.organism.",
+  "licence unknown": "The record names no SPDX licence and the definition does not allow unknown licences.",
+  "licence not allowed": "The record's licence is not in the definition's licence allowlist.",
+  "annotations required": "The definition requires annotations and the record has none.",
+  "annotation types":
+    "The record's annotation types (masks, boxes, points, …) are not among those the definition asks for.",
   "annotation source":
-    "The record's annotation source (manual, proofread, automatic, …) is not among those the spec asks for.",
-  "array below minimum": "The record's largest array has fewer voxels than the spec's where.min_size_voxels.",
+    "The record's annotation source (manual, proofread, automatic, …) is not among those the definition asks for.",
+  "array below minimum": "The record's largest array has fewer voxels than the definition's where.min_size_voxels.",
   "no mia-data folder":
     "The record names no modality the preparation pipeline knows, and a prepared dataset's folder is named after its modality family, so the pipeline cannot place it.",
   "duplicate DOI": "Another record with the same DOI is already in the pool; dedup keeps the first.",
   "record unreadable": "The record's YAML could not be parsed; the planner skipped it.",
   "no patch for dims":
-    "The spec has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
+    "The definition has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
   "no array shape":
     "The catalog record does not give the shape of its largest array (y and x extents, and z for 3D), so the planner cannot tell whether a crop fits in it.",
   "footprint too large":
     "The coarsest crop (patch size times the largest pyramid level) is bigger than the dataset's largest array.",
   "too few z slices": "The 3D patch's z extent is deeper than the dataset's largest array.",
   "voxel size unknown":
-    "The record gives no voxel size and the spec does not allow assuming one (sampling.assume_voxel_size).",
+    "The record gives no voxel size and the definition does not allow assuming one (sampling.assume_voxel_size).",
   "not prepared":
-    "Fits the spec, but no reader exists for the dataset's files yet; prepare it, and a later round will pick it up.",
+    "Fits the definition, but no reader exists for the dataset's files yet; prepare it, and a later round will pick it up.",
   // the preparation pipeline's view of a dataset
   "prepared": "An approved binding and verified crops exist: the dataset can be staged and served.",
   "in-progress":
@@ -126,20 +127,20 @@ export const PILL_HELP = {
     "Kept on disk for autonomy.quarantine_days after a revocation; the keeper does not evict it while an investigation may need it.",
   // a buffer's stage
   "new": "Nothing has run yet.",
-  "planning": "Resolving the spec against the catalog.",
+  "planning": "Resolving the definition against the catalog.",
   "plan-review": "The plan is in the timeline; the round waits here for Run, and no job has run yet.",
   "sourcing": "Fetching and converting the pool's datasets, several at a time.",
   "ready": "Serving: consumers can draw crops.",
   "idle": "No consumer has drawn for a while; Keep returns it to ready, otherwise the keeper retires it later.",
   "retired": "Its references are released; consumers get 410, and the keeper may reclaim the space.",
-  "superseded": "A newer round of the same spec replaced this buffer.",
+  "superseded": "A newer version of the same buffer replaced this one.",
   // a dataset of a buffer's pool during sourcing (the board)
   "pending": "Not started yet; waits for a sourcing slot.",
   "waiting-dataset": "No approved binding yet; the preparation pipeline is working on the dataset.",
   "waiting-lock": "Another job holds the dataset's raw-cache lock; this one waits for it.",
   "blocked": "The raw cache is over its quota; the fetch waits for the keeper to make room.",
   "servable": "Its volumes are registered and the service can draw crops from them.",
-  "failed": "The fetch or stage job failed; the reason is in the row and in the spec's timeline.",
+  "failed": "The fetch or stage job failed; the reason is in the row and in the buffer's timeline.",
   "dropped": "Left out of the round: still waiting when the day limit passed.",
   // the preparation pipeline's stages (mia-data)
   "matching": "Looking for an existing reader snippet that fits the dataset's files.",
@@ -359,10 +360,11 @@ export function lifecycle(line, stage, history, busy) {
 export const VERDICT_KIND = { approve: "pool", reject: "warn", escalate: "" };
 
 // ---- addresses: a subject's own page by kind, and the view and tab its address belongs to
-export const SUBJECT_VIEWS = { datasets: "dataset", specs: "buffer", requests: "prep" }; // #datasets/<record>, #specs/<key>, #requests/<key>
-export const SUBJECT_TAB = { datasets: "datasets", specs: "buffers", requests: "preparation" };
+export const SUBJECT_VIEWS = { datasets: "dataset", requests: "prep" }; // #datasets/<record>, #requests/<key>; a buffer: flow.js
+export const SUBJECT_TAB = { datasets: "datasets", requests: "datasets" };
+export const KIND_WORDS = { dataset: "dataset", buffer: "buffer", prep: "request" };
 export const SUBJECT_HASH = {
   dataset: key => "#datasets/" + encodeURIComponent(key),
-  buffer: key => "#specs/" + encodeURIComponent(key),
+  buffer: key => "#buffer/" + encodeURIComponent(key),
   prep: key => "#requests/" + encodeURIComponent(key),
 };

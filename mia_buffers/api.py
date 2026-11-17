@@ -195,6 +195,7 @@ class PlanPage(_Strict):
     dir: str = "asc"
     q: str = ""
     fit_only: bool = False
+    to_prepare: bool = False  # only the rows that fit and are not prepared
     prepared_only: bool = False
     raw_cached: bool = False
     staged_geom: bool = False
@@ -295,6 +296,7 @@ class ActionBody(_Strict):
         "shelve",
         "unshelve",
         "recheck",
+        "edit",
     ]
     key: str | None = None  # the sender's own name for this request: a repeat is the same action
     # the subject's revision the sender was looking at: required of a verdict, checked on any action that has it
@@ -303,7 +305,8 @@ class ActionBody(_Strict):
     note: str = ""  # reject: the feedback for the agent; shelve: why it can wait
     root: str | None = None  # a worker's go: the root request this round is charged to
     actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
-    spec: str | None = None  # a buffer's or a request's go: the YAML text that runs (default: the stored one)
+    # a buffer's or a request's go: the YAML text that runs (default: the stored one); a buffer's edit: its new text
+    spec: str | None = None
     plan_first: bool = False  # a buffer's go: stop at the plan and wait for an approve before staging anything
     records: list[str] = []  # a buffer's revoke: the records that leave it
     record: str | None = None  # dropped: the dataset whose files are in place
@@ -318,6 +321,7 @@ class SpecBody(_Strict):
     plan_first: bool = False
     key: str | None = None
     approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person ticked
+    buffer: int | None = None  # a preparation request: the number of the buffer whose Prepare step filed it
 
 
 class RefusalBody(_Strict):
@@ -1005,8 +1009,7 @@ class BufferService:
 
     def _subject_view(self, row: dict, holds: dict[tuple[str, int], dict] | None = None) -> dict:
         """The row plus its name, its status word, the actions it accepts (`_rules`; sorted, for a stable page), its
-        hold when it is shelved, for a buffer spec whether it is `frozen` (it has built a buffer: its text no
-        longer changes), and `asked`: the action that was sent to its workflow and that the workflow has not
+        hold when it is shelved, and `asked`: the action that was sent to its workflow and that the workflow has not
         answered yet. Until it does the stage is still the old one, and the page must not offer that stage's
         buttons as if nothing was clicked. `holds`: `Ledger.shelved()`, read once by a caller with many rows."""
         hold = (self.ledger.shelved() if holds is None else holds).get((row["kind"], row["number"]))
@@ -1014,9 +1017,7 @@ class BufferService:
         status, actions = self._rules(row, hold, gaps)
         asked = self._asking(row["kind"], row["number"])
         view = {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
-        view["name"] = (row.get("data") or {}).get("name") or row["key"]  # a buffer spec's name is not its key
-        if row["kind"] == "buffer":
-            view["frozen"] = self.ledger.spec_has_buffer(row["number"])
+        view["name"] = (row.get("data") or {}).get("name") or row["key"]  # a buffer's name is not its key
         return view
 
     def _gaps(self, record: str) -> list[str]:
@@ -1051,10 +1052,27 @@ class BufferService:
         page = self._page_of(query, SUBJECT_SORTS)
         holds = self.ledger.shelved()
         subjects = [self._subject_view(row, holds) for row in self.ledger.find_subjects(kind=kind)]
+        if kind == "buffer":
+            serving = self._served_versions()
+            subjects = [{**view, "serving": serving.get(view["number"])} for view in subjects]
+        if (owner := query.get("buffer")) is not None:  # the requests a buffer's Prepare step filed
+            if not owner.isdecimal():
+                raise HttpError(422, f"buffer must be a buffer's number, got {owner!r}")
+            subjects = [view for view in subjects if (view.get("data") or {}).get("buffer") == int(owner)]
         if page is None:
             return 200, {"subjects": subjects}, {}
         rows, total = paged(subjects, page, SUBJECT_SORTS, _subject_haystack)
         return 200, {"subjects": rows, "total": total}, {}
+
+    def _served_versions(self) -> dict[int, str]:
+        """A buffer's number -> the id of the version consumers draw from now: its newest round's buffer whose
+        latest event is one of `SERVING`. That id is what a training run names."""
+        serving: dict[int, str] = {}
+        for buffer in sorted(self.ledger.buffers(), key=lambda row: _round_of(row["id"])):
+            number = _round_of(buffer["id"])[0]
+            if number and (buffer.get("latest_event") or {}).get("kind") in SERVING:
+                serving[number] = buffer["id"]
+        return serving
 
     def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
         """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
@@ -1220,7 +1238,7 @@ class BufferService:
             raise HttpError(422, "give records, prep or spec")
         subject = self.ledger.subject("buffer", spec)
         if subject is None:
-            raise HttpError(404, f"no buffer spec {spec!r}")
+            raise HttpError(404, f"no buffer {spec!r}")
         rounds = [
             entry["round"]
             for entry in self.ledger.timeline("buffer", subject["number"])
@@ -1285,7 +1303,7 @@ class BufferService:
         try:
             return load_spec_text(text).name
         except SpecError as error:
-            raise HttpError(422, f"not a buffer spec: {error}") from None
+            raise HttpError(422, f"not a buffer's definition: {error}") from None
 
     def _new_spec(self, text: str) -> dict:
         """A new buffer subject holding this text. Its name is the spec's and need not be unique: the first
@@ -1330,22 +1348,25 @@ class BufferService:
         return self._buffer_action(name, _parse(ActionBody, body), headers)
 
     def _buffer_action(self, key: str, parsed: ActionBody, headers: dict[str, str]) -> Response:
-        """An action on the buffer spec with this key. A `go` runs the text the spec holds, or the `spec` sent
-        with it: a spec that has built no buffer takes the new text (and the name in it); one that has is frozen,
-        and a changed text is refused, since a change to it is a new spec."""
+        """An action on the buffer with this key. A `go` runs the text the buffer holds, or the `spec` sent with
+        it, which is stored (with the name in it) once the stage takes the go. A serving buffer (`ready`, `idle`)
+        is fixed: a go there runs the stored text and refuses another. An `edit` stores a new text and runs
+        nothing (`_edit`)."""
         actor = self._actor(headers, parsed)
         subject = self.ledger.subject("buffer", key)
         if subject is None:
-            raise HttpError(404, f"no buffer spec {key!r}")
+            raise HttpError(404, f"no buffer {key!r}")
+        if parsed.action == "edit":
+            return self._edit(subject, parsed, actor)
         payload: dict = {}
         if parsed.action == "go":
             stored = subject["data"].get("spec")
             text = parsed.spec if parsed.spec is not None else stored
             if not text:
-                raise HttpError(422, f"buffer spec {key!r} has no spec text to run: send one")
+                raise HttpError(422, f"buffer {key!r} has no definition to run: send one as `spec`")
             name = self._spec_name(text)
-            if text != stored and self.ledger.spec_has_buffer(subject["number"]):
-                raise HttpError(409, f"buffer spec {key!r} has built a buffer and no longer changes: clone it")
+            if text != stored and subject["stage"] in ("ready", "idle"):
+                raise HttpError(409, f"buffer {key!r} is serving and does not change: clone it")
             self._accepts(subject, parsed)
             self._check_hosts(parsed, None, "buffer", subject["number"])  # a go: no `needed`
             if text != stored:  # only once the stage takes a go: what is stored is what ran last
@@ -1367,6 +1388,30 @@ class BufferService:
         if parsed.action == "dropped":
             payload = {"record": self._dropped_record(subject, parsed)}
         return self._act_on(subject, parsed, actor, payload, needed)
+
+    def _edit(self, subject: dict, parsed: ActionBody, actor: str) -> Response:
+        """An `edit`: the buffer's definition becomes the `spec` sent with it, and its name the name in that text.
+        The stage table says where (a buffer that rests); the action is recorded and carried out here, with its
+        timeline entry, and no workflow hears of it. A key seen before is the same action again."""
+        number = subject["number"]
+        self._accepts(subject, parsed)
+        if parsed.spec is None:
+            raise HttpError(422, "an edit carries the buffer's new definition: `spec`")
+        name = self._spec_name(parsed.spec)  # 422 for what is not a buffer spec, before anything is recorded
+        self._check_hosts(parsed, None, "buffer", number)  # 422: nothing here starts a job
+        try:
+            action, _ = self.ledger.add_action(
+                "buffer", number, "edit", actor, key=parsed.key, payload={"spec": parsed.spec}
+            )
+        except ValueError as error:
+            raise HttpError(409, str(error)) from None
+        if action["state"] != "sent":
+            text = action["payload"]["spec"]
+            changed = {**subject["data"], "spec": text, "name": name}
+            self.ledger.set_subject_data("buffer", number, changed, revise=True)
+            action = self.ledger.settle_action(action["id"], "sent", entry=_action_entry(action)) or action
+            self._changed("buffer", number)
+        return 202, action, {}
 
     def _dropped_record(self, subject: dict, parsed: ActionBody) -> str:
         """The record of a `dropped`, once its files look complete. The workflow takes any non-empty file and
@@ -1392,6 +1437,8 @@ class BufferService:
             records = load_prep_text(parsed.spec).records
         except SpecError as error:
             raise HttpError(422, f"not a preparation request: {error}") from None
+        if parsed.buffer is not None and not self.ledger.find_subjects(kind="buffer", number=parsed.buffer):
+            raise HttpError(422, f"no buffer #{parsed.buffer} for this request to belong to")
         go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, approve_hosts=parsed.approve_hosts)
         needed = partial(self._needed, request=records)
         repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
@@ -1399,7 +1446,8 @@ class BufferService:
             subject = self.ledger.find_subjects(kind="prep", number=repeat["number"])[0]
         else:
             self._check_hosts(go, needed, "prep", None)
-            subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec})
+            owner = {} if parsed.buffer is None else {"buffer": parsed.buffer}
+            subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec, **owner})
         return self._act_on(subject, go, self._actor(headers, go), {"spec": parsed.spec}, needed)
 
     def _prep_action(self, number: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
@@ -2004,6 +2052,7 @@ class BufferService:
             staged_as,
             page,
             fit_only=asked.fit_only,
+            to_prepare=asked.to_prepare,
             prepared_only=asked.prepared_only,
             raw_cached=asked.raw_cached,
             staged_geom=asked.staged_geom,

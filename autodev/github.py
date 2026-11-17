@@ -47,13 +47,16 @@ class GitHub:
         writes_per_second: float = 1.0,
         creates_per_hour: int = 400,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.repo = repo
         self._token_fn = token_fn
-        self._sleep = sleep
+        self._sleep, self._clock = sleep, clock  # the waits and the time they are measured on
         self._min_gap = 1.0 / writes_per_second
         self._creates_per_hour = creates_per_hour
-        self._last_write = 0.0
+        self._next_write = 0.0  # the earliest the next write may be sent (monotonic): one gap after the last
+        self._resume_at = 0.0  # no request is sent before this (monotonic): the wait a rate limit asked for
+        self._limited = 0  # rate-limit answers in a row; the wait doubles with each
         self._creates: collections.deque[float] = collections.deque()  # times of recent POSTs, for the hourly cap
         # ETag and last 200 response of each conditional GET, keyed by (path, params). GitHub does not count a
         # 304 against the rate limit, so polling a quiet PR is nearly free. Lives in the worker process.
@@ -84,23 +87,23 @@ class GitHub:
     async def _throttle(self, create: bool) -> None:
         """Space out writes, and cap creations per hour, to stay under GitHub's secondary rate limits."""
         # ponytail: per-process limits; a second process writing with the same token is not counted.
-        wait = self._last_write + self._min_gap - time.monotonic()
-        if wait > 0:
-            await self._sleep(wait)
+        # each write takes its turn before it waits, so writes asked for at once still leave a gap apart
+        now = self._clock()
+        turn = max(now, self._next_write)
+        self._next_write = turn + self._min_gap
+        if turn > now:
+            await self._sleep(turn - now)
         if create:
-            while self._creates and self._creates[0] < time.monotonic() - 3600:
+            while self._creates and self._creates[0] < self._clock() - 3600:
                 self._creates.popleft()
             if len(self._creates) >= self._creates_per_hour:
-                await self._sleep(self._creates[0] + 3600 - time.monotonic())
-            self._creates.append(time.monotonic())
-        self._last_write = time.monotonic()
+                await self._sleep(self._creates[0] + 3600 - self._clock())
+            self._creates.append(self._clock())
 
-    @staticmethod
-    def _retry_delay(response: httpx.Response, attempt: int) -> float | None:
-        """Seconds to wait before retrying this response, or None when it is final. A 5xx backs off
-        exponentially; a (primary or secondary) rate limit waits as long as GitHub says."""
-        if response.status_code >= 500:
-            return min(2**attempt, 60)
+    def _rate_limit_delay(self, response: httpx.Response) -> float | None:
+        """Seconds a (primary or secondary) rate-limit answer asks every request to wait, or None when the
+        response is not one: as long as GitHub says, else a minute that doubles with each such answer in a row,
+        up to 15 minutes."""
         if response.status_code not in (403, 429):
             return None
         if "retry-after" in response.headers:
@@ -108,7 +111,7 @@ class GitHub:
         if response.headers.get("x-ratelimit-remaining") == "0" and "x-ratelimit-reset" in response.headers:
             return max(1.0, float(response.headers["x-ratelimit-reset"]) - time.time() + 1)
         if response.status_code == 429 or "rate limit" in response.text.lower():
-            return min(60.0 * 2**attempt, 900.0)  # GitHub: wait ≥1 min, then back off exponentially
+            return min(60.0 * 2**self._limited, 900.0)  # GitHub: wait ≥1 min, then back off exponentially
         return None
 
     def _remember_etag(self, cache_key: tuple, response: httpx.Response) -> None:
@@ -162,6 +165,10 @@ class GitHub:
     ) -> httpx.Response | None:
         """One API call with retries. With `ok404`, a 404 returns None instead of raising.
 
+        A rate-limit answer holds every request of this client, not only the one that got it: nothing is sent
+        until the wait is over, whichever caller asks, and a caller that gave up or was cancelled leaves the wait
+        standing for the next.
+
         `write` marks a request that counts against the write throttle; it defaults to "not a GET".
         `conditional` (GETs only) sends the ETag of the last 200 for this URL as If-None-Match, and a 304
         answer returns that cached response, so callers never see the 304."""
@@ -170,6 +177,8 @@ class GitHub:
         create = write and method == "POST"
         cache_key = (path, tuple(sorted((params or {}).items()))) if conditional and method == "GET" else None
         for attempt in range(attempts):
+            if (wait := self._resume_at - self._clock()) > 0:
+                await self._sleep(wait)
             if write:
                 await self._throttle(create)
             request_headers = {**(headers or {}), "Authorization": f"Bearer {self._token_fn()}"}
@@ -181,10 +190,18 @@ class GitHub:
                 log.warning("github %s %s transport error %s (attempt %d)", method, path, error, attempt + 1)
                 await self._sleep(min(2**attempt, 60))
                 continue
-            if (delay := self._retry_delay(response, attempt)) is not None:
+            if response.status_code >= 500:
+                delay = min(2**attempt, 60)
                 log.warning("github %s %s -> %d; retrying in %.0fs", method, path, response.status_code, delay)
                 await self._sleep(delay)
                 continue
+            if (delay := self._rate_limit_delay(response)) is not None:
+                if self._clock() >= self._resume_at:  # else the answer to a request sent before the wait began
+                    log.warning("github %s %s -> %d; rate limited for %.0fs", method, path, response.status_code, delay)
+                    self._limited += 1
+                    self._resume_at = self._clock() + delay
+                continue
+            self._limited = 0
             if response.status_code == 304 and cache_key in self._etags:
                 return self._etags[cache_key][1]
             if response.status_code == 404 and ok404:

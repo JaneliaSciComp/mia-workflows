@@ -222,7 +222,7 @@ const RULE_HELP = {
   ],
   "frozen run": [
     "Workflow run is frozen",
-    "The run's workflow task fails every time, so the run cannot take a step. The cleaner force-stops it, ends its cluster jobs and runs it again. A buffer's run is left to a person, because stopping it retires the spec's buffers.",
+    "The run's workflow task fails every time, so the run cannot take a step. The cleaner force-stops it, ends its cluster jobs and runs it again. A buffer's run is left to a person, because stopping it retires the buffer's versions.",
   ],
   "activity retrying": [
     "A step keeps failing",
@@ -255,6 +255,10 @@ const RULE_HELP = {
   "fixed since": [
     "Worker restarted since",
     "The round stopped on an error of the worker, and the worker has since started on newer code. The cleaner runs it again, once per commit.",
+  ],
+  "budget used up": [
+    "Budget used up",
+    "The round was refused a job because the budget of what started it is used up. Only a person raises a cap: `autonomy.root` in mia.yaml, then a restart of the workers. After that, run it again.",
   ],
   "host not approved": [
     "Host not approved",
@@ -472,7 +476,7 @@ export async function viewPreparation() {
   root.replaceChildren(
     card(
       "Preparation requests",
-      "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a new buffer's plan. Open one for its datasets, to cancel it or to run it again.",
+      "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a buffer's Prepare step. Open one for its datasets, to cancel it or to run it again.",
       pagedTable("requests", {
         source: pageOf("/subjects/prep", "subjects"),
         sort: "updated",

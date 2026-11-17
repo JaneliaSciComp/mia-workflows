@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buffer flow mockup</title>
+<style>
+:root{
+  --bg:#f9f9f7; --surface:#fcfcfb; --fg:#0b0b0b; --fg2:#52514e; --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --accent:#2a78d6; --accent-soft:#cde2fb; --warn:#ec835a; --warn-soft:#fbeedd; --ok:#1baf7a; --note:#eda100; --note-soft:#fdf3d7;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root{
+  --bg:#0d0d0d; --surface:#1a1a19; --fg:#f0efec; --fg2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --accent:#3987e5; --accent-soft:#184f95; --warn:#ec835a; --warn-soft:#3a2812; --ok:#199e70; --note:#c98500; --note-soft:#33290f; color-scheme:dark } }
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14.5px;line-height:1.5;margin:0;padding:0 16px 80px}
+main{max-width:1300px;margin:0 auto}
+h1{font-size:20px;font-weight:600;margin:0}
+h2{font-size:17px;font-weight:600;margin:0 0 4px}
+p{margin:0 0 8px;max-width:76ch}
+a{color:var(--accent)}
+button,select,input,textarea{font:inherit;color:inherit}
+.small{font-size:12.5px;color:var(--muted)}
+.mono{font-family:var(--mono);font-size:12.5px}
+.mockbar{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;padding:6px 16px;margin:0 -16px 0;background:var(--note-soft);border-bottom:1px solid var(--note);font-size:12.5px}
+.mockbar b{letter-spacing:.06em}
+.mockbar button{border:1px solid var(--note);background:transparent;border-radius:6px;padding:1px 8px;cursor:pointer;font-size:12.5px}
+.topbar{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin:14px 0;padding-bottom:10px;border-bottom:1px solid var(--grid)}
+.tabs{display:flex;gap:4px;flex-wrap:wrap}
+.tabs span{padding:3px 10px;border-radius:6px;color:var(--fg2);border:1px solid transparent}
+.tabs span.on{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
+.btn{display:inline-block;border:1px solid var(--axis);background:transparent;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:13.5px;color:var(--fg)}
+.btn:hover:not(:disabled){background:var(--accent-soft)}
+.btn:disabled{color:var(--muted);cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500}
+.btn.primary:hover:not(:disabled){filter:brightness(1.1);background:var(--accent)}
+.btn.primary:disabled{background:transparent;border-color:var(--axis);color:var(--muted)}
+.btn.danger{border-color:var(--warn);color:var(--warn)}
+.viewhead{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;justify-content:space-between;margin-bottom:10px}
+.pill{display:inline-block;border-radius:999px;padding:0 8px;font-size:11.5px;border:1px solid var(--axis);white-space:nowrap}
+.pill.ok{border-color:var(--ok);color:var(--ok)}
+.pill.you{background:var(--accent-soft);border-color:var(--accent)}
+.pill.warn{border-color:var(--warn);color:var(--warn)}
+.pill.busy{border-style:dashed}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;font-weight:500;color:var(--fg2);font-size:12px;border-bottom:1px solid var(--axis);padding:4px 8px}
+td{border-bottom:1px solid var(--grid);padding:5px 8px;vertical-align:middle}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.row{cursor:pointer}
+tr.row:hover td{background:var(--accent-soft)}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:14px;min-width:0}
+.card .sub{font-size:12.5px;color:var(--fg2);margin-bottom:8px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:14px;margin-bottom:14px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:10px 12px}
+.tile .label{font-size:12px;color:var(--fg2)}
+.tile .value{font-size:24px;font-weight:600;line-height:1.1;margin-top:2px}
+.tile .sub{font-size:12px;color:var(--muted);margin-top:2px}
+/* the step strip: the one new piece of the page */
+.steps{list-style:none;display:flex;flex-wrap:wrap;gap:0;padding:0;margin:0 0 4px;counter-reset:step}
+.steps li{counter-increment:step;display:flex;align-items:center;gap:8px;padding:7px 14px 7px 10px;border:1px solid var(--axis);border-right-width:0;font-size:13.5px;color:var(--muted);background:var(--surface)}
+.steps li:first-child{border-radius:8px 0 0 8px}
+.steps li:last-child{border-right-width:1px;border-radius:0 8px 8px 0}
+.steps li::before{content:counter(step);display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1px solid var(--axis);font-size:11.5px}
+.steps li.done{color:var(--fg);cursor:pointer}
+.steps li.done::before{content:"✓";border-color:var(--ok);color:var(--ok)}
+.steps li.done:hover{background:var(--accent-soft)}
+.steps li.here{color:var(--fg);font-weight:600;background:var(--accent-soft);border-color:var(--accent);border-right-width:1px}
+.steps li.here + li{border-left-width:0}
+.steps li.here::before{border-color:var(--accent);background:var(--accent);color:#fff}
+.stageline{margin:0 0 14px}
+.filters{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:flex-start}
+.filters fieldset{border:0;padding:0;margin:0;min-width:0}
+.filters legend{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0;margin-bottom:4px}
+.filters select,.filters input[type=text],.filters input[type=number]{border:1px solid var(--axis);border-radius:6px;padding:3px 6px;background:var(--surface)}
+.filters input[type=number]{width:7em}
+.filters label{display:inline-flex;gap:6px;align-items:center;font-size:13px;margin-right:8px}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chips button{border:1px solid var(--axis);background:transparent;border-radius:999px;padding:1px 10px;font-size:12.5px;cursor:pointer}
+.chips button[aria-pressed=true]{background:var(--accent-soft);border-color:var(--accent)}
+textarea.yaml{width:100%;min-height:19em;font-family:var(--mono);font-size:12.5px;padding:8px;border:1px solid var(--axis);border-radius:6px;background:transparent;resize:vertical}
+.bar{display:grid;grid-template-columns:110px 1fr 44px;gap:8px;align-items:center;font-size:13px;padding:2px 0}
+.bar i{display:block;height:12px;border-radius:3px;background:var(--accent)}
+.bar b{font-weight:500;text-align:right;font-variant-numeric:tabular-nums}
+.toplist{list-style:none;padding:0;margin:0;font-size:13px}
+.toplist li{display:grid;grid-template-columns:52px 1fr;gap:8px;padding:3px 0;border-top:1px solid var(--grid)}
+.toplist li span{color:var(--fg2)}
+.footer{position:sticky;bottom:0;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-top:16px;padding:10px 0;background:var(--bg);border-top:1px solid var(--grid)}
+.footer .right{display:flex;gap:10px;align-items:center}
+.progress{height:8px;border-radius:4px;background:var(--grid);overflow:hidden;margin:6px 0 12px;max-width:520px}
+.progress i{display:block;height:100%;background:var(--ok)}
+.notice{border-left:3px solid var(--accent);padding:6px 10px;margin:0 0 12px;font-size:13px;background:var(--surface);max-width:90ch}
+.pane{background:var(--surface);border:1px solid var(--ring);border-radius:8px;margin-bottom:14px}
+.panetabs{display:flex;gap:2px;padding:8px 10px 0;border-bottom:1px solid var(--grid)}
+.panetabs button{border:1px solid transparent;border-bottom:0;background:transparent;border-radius:6px 6px 0 0;padding:5px 16px;cursor:pointer;font-size:13.5px;color:var(--fg2);margin-bottom:-1px}
+.panetabs button[aria-selected=true]{border-color:var(--grid);background:var(--bg);color:var(--fg);font-weight:600;border-bottom:1px solid var(--bg)}
+.panetabs .hint{margin-left:auto;align-self:center}
+.panebody{padding:14px}
+.statrow{display:grid;grid-template-columns:170px 1fr 1fr;gap:14px;margin-bottom:14px;align-items:start}
+.statrow .stack{display:grid;gap:10px}
+@media (max-width:760px){.statrow{grid-template-columns:1fr}}
+.locked [data-step]:not([data-step=serve]) :is(input,select,button:not([data-tab])){pointer-events:none;opacity:.55}
+.locked [data-step]:not([data-step=serve]) .footer{display:none}
+/* design notes: not part of the page */
+.dn{border:1px dashed var(--note);background:var(--note-soft);border-radius:8px;padding:8px 12px;margin:14px 0;font-size:13px;max-width:100ch}
+.dn b{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--note);display:block}
+.dn ul{margin:2px 0 0;padding-left:18px}
+body.nonotes .dn{display:none}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="mockbar">
+  <b>MOCKUP</b> revision 8 · fake data, nothing is sent · jump to:
+  <span id="jump"></span>
+  <label style="margin-left:auto"><input type="checkbox" id="notes" checked> design notes</label>
+</div>
+<main>
+<header class="topbar">
+  <h1>MIA Buffers</h1>
+  <nav class="tabs"><span>Needs you</span><span>Datasets</span><span class="on">Buffers</span><span>Cache</span><span>Cleaner</span><span>Decisions</span><span>Docs</span></nav>
+</header>
+
+<!-- ============ the list ============ -->
+<section data-screen="list">
+  <div class="viewhead"><h2>Buffers</h2><button class="btn primary" id="newBuffer">+ New buffer</button></div>
+  <table>
+    <thead><tr><th>Buffer</th><th>Name</th><th>Step</th><th>Status</th><th>Serving id</th><th class="num">Datasets</th><th class="num">Train crops</th><th>Changed</th></tr></thead>
+    <tbody id="listRows"></tbody>
+  </table>
+  <div class="dn"><b>Design notes</b><ul>
+    <li>One noun. No "spec" rows and no separate list of specs: a buffer is its definition plus whatever has been built from it.</li>
+    <li>A buffer is known by its number; the name is a label. The id a script uses belongs to the version being served and is shown only then.</li>
+    <li>A row opens the buffer at the step it is on. The Status column says whether it waits for you or is working.</li>
+    <li><i>My guess:</i> the Preparation tab goes away. A preparation started from a buffer shows inside that buffer's Prepare step; each dataset shows its own state on the Datasets tab.</li>
+  </ul></div>
+</section>
+
+<!-- ============ a buffer: strip + one step ============ -->
+<section data-screen="buffer" hidden>
+  <p><a href="#" id="back">← all buffers</a></p>
+  <div class="viewhead"><h2><span id="bufName"></span> <span class="small mono" id="bufNumber"></span> <span class="pill" id="savedPill"></span></h2><button class="btn" title="What is not a step: Clone, Shelve, Force stop. Only what the stage accepts is offered.">More ▾</button></div>
+  <ol class="steps" id="steps"></ol>
+  <p class="small stageline" id="stageLine"></p>
+  <div class="notice" id="stoppedNote" hidden><span id="stoppedText"></span> <button class="btn" id="serveAgain" style="margin-left:8px"></button> <button class="btn danger" id="retire">Retire</button></div>
+  <div class="notice" id="lockNote" hidden>This buffer is serving, so nothing about it can change. Stop serving to change it. <button class="btn" data-go="serve" style="margin-left:8px">Go to Serve</button></div>
+
+  <!-- 1 define -->
+  <div data-step="define">
+    <div class="pane">
+      <div class="panetabs" role="tablist">
+        <button type="button" role="tab" data-tab="controls" aria-selected="true">Controls</button>
+        <button type="button" role="tab" data-tab="yaml" aria-selected="false">YAML</button>
+        <span class="small hint" id="yamlMsg"></span>
+      </div>
+      <div class="panebody" data-pane="controls">
+        <div class="filters">
+          <fieldset><legend>Name (a label, need not be unique)</legend><input type="text" id="cName" size="22"></fieldset>
+          <fieldset><legend>Dimensionality</legend><div class="chips" id="cDims"></div></fieldset>
+          <fieldset><legend>Annotations</legend><label><input type="checkbox" id="cAnn"> required</label></fieldset>
+          <fieldset><legend>Patch</legend><select id="cPatch"><option>64</option><option>128</option><option>256</option><option>512</option></select></fieldset>
+          <fieldset><legend>Weighting temperature <span id="cTv" class="small"></span></legend><input type="range" id="cT" min="0" max="1" step="0.05"></fieldset>
+          <fieldset><legend>Crops</legend>
+            <label>train <input type="number" id="cTrain" min="1"></label>
+            <label>val <input type="number" id="cVal" min="1"></label>
+            <label>test <input type="number" id="cTest" min="1"></label></fieldset>
+        </div>
+        <p class="small" style="margin-top:12px">…and the rest of today's controls: paths, licence, annotation source, smallest array, coarsest level, z patch, dedup, most per dataset, held out for test.</p>
+      </div>
+      <div class="panebody" data-pane="yaml" hidden>
+        <p class="small">Edit or paste a definition here. The Controls tab shows the same buffer.</p>
+        <textarea class="yaml" id="yaml" spellcheck="false"></textarea>
+      </div>
+    </div>
+    <div class="statrow">
+      <div class="stack">
+        <div class="tile"><div class="label">Datasets that fit</div><div class="value" id="kFit"></div><div class="sub">of the catalog</div></div>
+        <div class="tile"><div class="label">Prepared</div><div class="value" id="kPrep"></div><div class="sub" id="kPrepSub"></div></div>
+      </div>
+      <div class="card"><h2>Weight share by modality</h2><div class="sub">Share of crops over the prepared datasets.</div><div id="byMod"></div></div>
+      <div class="card"><h2>Heaviest datasets</h2><div class="sub">The prepared datasets that would supply the most crops.</div><ol class="toplist" id="top"></ol></div>
+    </div>
+    <div class="dn"><b>Design notes</b><ul>
+      <li>Controls and YAML are two tabs over one definition: a change in either is in the other when you switch. The stats below follow both.</li>
+      <li>Only the four stats you named are here; "where datasets leave" and the full table move to step 2.</li>
+      <li><i>My guess:</i> when the YAML holds something no control can show, the YAML is what counts and a line under the controls names what they cannot show (as the page does today).</li>
+      <li><i>My guess:</i> invalid YAML leaves the controls as they were, shows the error in the tab bar, and disables Next.</li>
+    </ul></div>
+    <div class="footer"><span class="small" id="defineHint"></span><div class="right"><button class="btn primary" data-go="datasets" id="toDatasets"></button></div></div>
+  </div>
+
+  <!-- 2 datasets -->
+  <div data-step="datasets">
+    <p id="dsSummary"></p>
+    <table><thead><tr><th style="width:80px">Selected</th><th>Dataset</th><th>Modality</th><th>Dims</th><th>State</th><th class="num">Weight</th></tr></thead><tbody id="dsRows"></tbody></table>
+    <div class="dn"><b>Design notes</b><ul>
+      <li>This is where the buffer is saved. Before that it exists only in this browser tab.</li>
+      <li>The table can also hold "where datasets leave" (the datasets that do not fit, and the rule that removed each) behind a toggle.</li>
+      <li>Your ruling: a buffer can be changed at any step until it serves. A change here or in step 1 clears the ticks of the steps after it: they are done again from the new definition.</li>
+      <li>Three words are kept apart on every step: a dataset is <i>selected</i> here, <i>in this version</i> once a plan holds it (steps 4 to 6), and <i>on disk now</i> when it is staged (steps 5 and 6).</li>
+      <li><i>My guess:</i> taking a dataset out is unticking it here. That writes <code>select.exclude.ids</code> in the definition (the spec has it today), so "revoke" is one more edit of the definition and shows in the YAML tab.</li>
+    </ul></div>
+    <div class="footer"><button class="btn" data-go="define">← Change the definition</button>
+      <div class="right"><span class="small" id="saveHint"></span><button class="btn primary" id="save"></button></div></div>
+  </div>
+
+  <!-- 3 prepare -->
+  <div data-step="prepare">
+    <p id="prepSummary"></p>
+    <div class="progress"><i id="prepBar"></i></div>
+    <div class="viewhead"><span class="small">Tick the datasets you want prepared. The buffer waits here for as long as you like.</span>
+      <button class="btn" id="prepGo" disabled>Prepare selected</button></div>
+    <table><thead><tr><th style="width:28px"><input type="checkbox" id="prepAll" aria-label="all"></th><th>Dataset</th><th>Modality</th><th>State</th><th>Where it is</th></tr></thead><tbody id="prepRows"></tbody></table>
+    <div class="dn"><b>Design notes</b><ul>
+      <li>Preparing no longer loses the buffer: the buffer is saved, and what it asked for is listed here with its progress.</li>
+      <li>"Continue" is always available when at least one dataset is prepared, and takes what is prepared at that moment.</li>
+      <li>A dataset that finishes preparing later joins at the next plan: before serving, come back here and continue again; while serving, stop first.</li>
+    </ul></div>
+    <div class="footer"><button class="btn" data-go="datasets">← Datasets</button>
+      <div class="right"><span class="small">You can come back and prepare more later.</span><button class="btn primary" id="toPlan" data-go="plan"></button></div></div>
+  </div>
+
+  <!-- 4 plan -->
+  <div data-step="plan">
+    <div class="notice" id="planDiff" hidden></div>
+    <div class="notice" id="planDisk" hidden>This plan is larger than the disk. The buffer stages up to the limit and serves; data that was used is evicted and the next part of the plan is brought in, so it serves 100 TB of the plan at a time.</div>
+    <div class="kpis">
+      <div class="tile"><div class="label">Datasets in the plan</div><div class="value" id="pPool"></div><div class="sub">prepared when the plan ran</div></div>
+      <div class="tile"><div class="label">Crops</div><div class="value" id="pCrops"></div><div class="sub">train · val · test</div></div>
+      <div class="tile"><div class="label">To fetch</div><div class="value" id="pFetch"></div><div class="sub" id="pFetchSub"></div></div>
+      <div class="tile"><div class="label">Staged size</div><div class="value" id="pStaged"></div><div class="sub" id="pStagedSub"></div></div>
+      <div class="tile"><div class="label">Hosts to approve</div><div class="value">2</div><div class="sub">ticked when you press Run</div></div>
+    </div>
+    <table><thead><tr><th>Dataset</th><th>Modality</th><th class="num">Weight</th><th class="num">Train crops</th><th>Raw cache</th></tr></thead><tbody id="planRows"></tbody></table>
+    <div class="dn"><b>Design notes</b><ul>
+      <li>"Staged size" compares the plan with the disk limit. A plan larger than the limit is not an error: the blue line says the buffer will serve a window (open <i>all-3d-diverse</i> and go to step 4).</li>
+      <li>Same as today's plan-review, reached by a button instead of a go. Run is today's approve at the plan, with the host approval dialog.</li>
+      <li>Going back to any earlier step drops this plan; the next Continue plans again with the definition and the prepared datasets of that moment.</li>
+      <li>A stopped version keeps its data until its replacement serves. The blue line says whether both fit under the limit. When they do not, the forward button becomes "Release version N and run" (stop <i>all-3d-diverse</i>, then go to step 4).</li>
+      <li>For a buffer that served before, the blue line says what the new plan adds and takes out. What is staged again is known only when sourcing runs, so step 5 says it per dataset.</li>
+    </ul></div>
+    <div class="footer"><button class="btn" data-go="prepare">← Prepare more datasets</button>
+      <div class="right"><span class="small">Nothing is fetched until you press Run.</span><button class="btn primary" data-go="source" id="runPlan">Run: fetch and stage →</button></div></div>
+  </div>
+
+  <!-- 5 source -->
+  <div data-step="source">
+    <p id="srcSummary"></p>
+    <div class="progress"><i id="srcBar"></i></div>
+    <table><thead><tr><th>Dataset</th><th>State</th><th>Job</th></tr></thead><tbody id="srcRows"></tbody></table>
+    <div class="dn"><b>Design notes</b><ul>
+      <li>Today's sourcing board and the staged wait in one step. "Approve and serve" is disabled while jobs run.</li>
+      <li>Going back cancels the running jobs first (your earlier ruling: cancel before change). Volumes already staged that still match the new plan are reused.</li>
+    </ul></div>
+    <div class="footer"><button class="btn" data-go="prepare">← Change the buffer (cancels the jobs)</button>
+      <div class="right"><button class="btn" id="srcFinish">(mock: let the jobs finish)</button><button class="btn primary" id="toServe" data-go="serve" disabled>Approve and serve →</button></div></div>
+  </div>
+
+  <!-- 6 serve -->
+  <div data-step="serve">
+    <div class="notice" id="lateNote"></div>
+    <div class="kpis">
+      <div class="tile"><div class="label">Version</div><div class="value" id="sVersion"></div><div class="sub mono" id="sId"></div></div>
+      <div class="tile"><div class="label">Serving</div><div class="value">since 14:02</div><div class="sub">approved by you</div></div>
+      <div class="tile"><div class="label">Datasets</div><div class="value" id="sPool"></div><div class="sub">in this version's plan</div></div>
+      <div class="tile"><div class="label">Consumers</div><div class="value" id="sRuns"></div><div class="sub" id="sRunsSub"></div></div>
+    </div>
+    <div class="card" style="margin-bottom:14px"><h2>On disk now</h2><div class="sub" id="diskSub"></div>
+      <div class="progress" style="max-width:none"><i id="diskBar"></i></div><div class="small" id="diskCounts"></div>
+      <table style="margin-top:8px;max-width:560px"><thead><tr><th>Mix by modality</th><th class="num">Planned</th><th class="num">On disk now</th></tr></thead><tbody id="mixRows"></tbody></table>
+      <p class="small" id="windowLater" style="margin-top:8px"></p></div>
+    <div class="card" style="margin-bottom:14px"><h2>Use it</h2><div class="sub">From a training script:</div>
+      <pre class="mono" style="margin:0" id="snippet"></pre></div>
+    <div class="dn"><b>Design notes</b><ul>
+      <li>Your ruling: a serving buffer is fixed. Every earlier step can be looked at and none can be changed. The one button is Stop serving.</li>
+      <li>Fixed means the plan: the definition, the datasets and their weights, the planned crops, the val and test lists. It does not mean the bytes on disk. Open <i>all-3d-diverse</i> from the list for a buffer ten times larger than the disk: "On disk now" is its moving window. How the window moves is a design of its own; these are the numbers it has to produce.</li>
+      <li>Stopping interrupts training: a consumer's next request fails, it does not wait. Stop serving therefore asks first and names the runs it will break.</li>
+      <li>Stop serving keeps the staged data, refuses consumers, and puts the buffer back at step 3 with steps 1 to 3 editable: untick datasets, take in newly prepared ones, change the definition, then go forward to serve a new version. The blue line of a stopped buffer offers "Serve version N again" (which puts that version's definition back, after asking, if you changed it) and Retire.</li>
+            <li>Your ruling: each time a changed buffer is served it is a new version with its own id. Scripts ask for the id; the name is only a label and the service never looks a buffer up by it.</li>
+      <li>The id keeps today's form (<code>i&lt;buffer number&gt;-e&lt;go&gt;</code>); "version 2" is a count shown beside it. An earlier version stays on the buffer's page to look at (its definition, datasets and lists), and a script that asks for it is told it was stopped and which version replaced it.</li>
+      <li><i>My guess:</i> a buffer stopped and served again with no change keeps its version and id.</li>
+    </ul></div>
+    <div class="footer"><span class="small">Serving: nothing about this buffer changes until you stop it.</span><div class="right"><button class="btn danger" id="stopServe">Stop serving</button></div></div>
+  </div>
+</section>
+</main>
+
+<script>
+// A clickable sketch of the buffer flow. Everything is made up in this file; no request is sent.
+const $ = id => document.getElementById(id);
+const STEPS = ["define", "datasets", "prepare", "plan", "source", "serve"];
+const TITLES = { define: "Define", datasets: "Datasets", prepare: "Prepare", plan: "Plan", source: "Source", serve: "Serve" };
+const STAGE = { define: "not saved", datasets: "not saved", prepare: "new", plan: "plan-review", source: "sourcing", serve: "ready" };
+const DIMS = ["2D", "2D+t", "3D", "3D+t"];
+const MODS = ["EM", "light-sheet", "confocal", "X-ray CT", "brightfield"];
+const WHERE = ["matching", "crops", "review"];
+
+// the fake catalog: 56 datasets, each with a state mia-data would report
+const CATALOG = Array.from({ length: 56 }, (_, i) => ({
+  id: `${MODS[i % 5].toLowerCase().replace(/[^a-z]/g, "")}-${String(i + 1).padStart(3, "0")}`,
+  mod: MODS[i % 5],
+  dims: DIMS[(i * 7 + (i >> 2)) % 4],
+  annotated: i % 3 !== 0,
+  capacity: 1 + ((i * 37) % 23),
+  state: i % 8 === 5 ? "in progress" : i % 5 === 3 || i % 11 === 0 ? "not prepared" : i === 26 ? "failed" : "prepared",
+  where: WHERE[i % 3],
+}));
+
+const C = { name: "em-and-lightsheet-3d", dims: new Set(["3D", "3D+t"]), ann: false, patch: 256, T: 0.5, train: 100000, val: 2000, test: 2000, exclude: new Set() };
+const B = { saved: false, step: "define", reached: 0, sourced: false, serving: false, stopped: false, number: 213, version: 1, big: false };
+
+const matching = () => CATALOG.filter(d => C.dims.has(d.dims) && (!C.ann || d.annotated)); // before the person's own exclusions
+const fits = () => matching().filter(d => !C.exclude.has(d.id));
+const prepared = () => fits().filter(d => d.state === "prepared");
+function weights(pool) {
+  const raw = pool.map(d => Math.pow(d.capacity, C.T));
+  const total = raw.reduce((a, b) => a + b, 0) || 1;
+  return pool.map((d, i) => ({ ...d, weight: raw[i] / total }));
+}
+const idOf = (number, version) => `i${number}-e${3100 + 713 * version}`; // a version's id, in today's form
+const pct = x => `${(100 * x).toFixed(x < 0.1 ? 1 : 0)}%`;
+const num = n => n.toLocaleString("en-US");
+const pill = d => `<span class="pill ${{ prepared: "ok", "in progress": "busy", failed: "warn" }[d.state] || ""}">${d.state}${d.fresh ? " · new" : ""}</span>`;
+
+// ---- step 1: the controls and the YAML are two views of C
+function toYaml() {
+  return [
+    "schema_version: 1",
+    `name: ${C.name}`,
+    "",
+    "select:",
+    "  where:",
+    `    dims: {in: [${DIMS.filter(d => C.dims.has(d)).join(", ")}]}`,
+    "    annotations:",
+    `      required: ${C.ann}`,
+    ...(C.exclude.size ? ["  exclude:", `    ids: [${[...C.exclude].join(", ")}]`] : []),
+    "",
+    "sampling:",
+    `  patch: {y: ${C.patch}, x: ${C.patch}}`,
+    `  crops: {train: ${C.train}, val: ${C.val}, test: ${C.test}}`,
+    "  weighting:",
+    `    temperature: ${C.T}`,
+    "",
+  ].join("\n");
+}
+function fromYaml(text) {
+  const grab = (re, set) => { const m = text.match(re); if (!m) throw new Error(`cannot read ${re.source.split(":")[0].replace(/\W/g, "")}`); set(m); };
+  const next = {};
+  grab(/^name:\s*(\S.*)$/m, m => (next.name = m[1].trim()));
+  grab(/dims:\s*\{in:\s*\[(.*?)\]\}/, m => (next.dims = new Set(m[1].split(",").map(s => s.trim()).filter(d => DIMS.includes(d)))));
+  grab(/required:\s*(true|false)/, m => (next.ann = m[1] === "true"));
+  grab(/patch:\s*\{y:\s*(\d+)/, m => (next.patch = +m[1]));
+  grab(/crops:\s*\{train:\s*(\d+),\s*val:\s*(\d+),\s*test:\s*(\d+)\}/, m => Object.assign(next, { train: +m[1], val: +m[2], test: +m[3] }));
+  grab(/temperature:\s*([\d.]+)/, m => (next.T = +m[1]));
+  const out = text.match(/exclude:\s*\n\s*ids:\s*\[(.*?)\]/);
+  next.exclude = new Set(out ? out[1].split(",").map(s => s.trim()).filter(Boolean) : []);
+  Object.assign(C, next);
+}
+function showControls() {
+  $("cName").value = C.name; $("cAnn").checked = C.ann; $("cPatch").value = C.patch; $("cT").value = C.T; $("cTv").textContent = C.T;
+  $("cTrain").value = C.train; $("cVal").value = C.val; $("cTest").value = C.test;
+  $("cDims").innerHTML = DIMS.map(d => `<button type="button" aria-pressed="${C.dims.has(d)}" data-dim="${d}">${d}</button>`).join("");
+}
+function showStats() {
+  const f = fits(), p = weights(prepared());
+  $("kFit").textContent = f.length; $("kPrep").textContent = p.length;
+  $("kPrepSub").textContent = `${f.filter(d => d.state === "in progress").length} more in progress`;
+  const byMod = MODS.map(m => [m, p.filter(d => d.mod === m).reduce((a, d) => a + d.weight, 0)]).filter(x => x[1]).sort((a, b) => b[1] - a[1]);
+  $("byMod").innerHTML = byMod.map(([m, w]) => `<div class="bar"><span>${m}</span><span><i style="width:${100 * w / byMod[0][1]}%"></i></span><b>${pct(w)}</b></div>`).join("") || `<p class="small">No prepared dataset fits yet.</p>`;
+  $("top").innerHTML = [...p].sort((a, b) => b.weight - a.weight).slice(0, 6).map(d => `<li><b>${pct(d.weight)}</b><span>${d.id} · ${d.mod}</span></li>`).join("");
+  $("toDatasets").textContent = `Next: the ${f.length} datasets →`;
+  $("toDatasets").disabled = !f.length;
+  $("bufName").textContent = C.name;
+}
+function controlsChanged() { $("yaml").value = toYaml(); $("yamlMsg").textContent = ""; $("cTv").textContent = C.T; showStats(); edited(); }
+function bindDefine() {
+  const on = (id, key, read) => $(id).addEventListener("input", e => { C[key] = read(e.target); controlsChanged(); });
+  on("cName", "name", t => t.value); on("cAnn", "ann", t => t.checked); on("cPatch", "patch", t => +t.value); on("cT", "T", t => +t.value);
+  on("cTrain", "train", t => +t.value); on("cVal", "val", t => +t.value); on("cTest", "test", t => +t.value);
+  $("cDims").addEventListener("click", e => {
+    const d = e.target.dataset.dim; if (!d) return;
+    C.dims.has(d) ? C.dims.delete(d) : C.dims.add(d); showControls(); controlsChanged();
+  });
+  $("yaml").addEventListener("input", e => {
+    try { fromYaml(e.target.value); $("yamlMsg").textContent = ""; showControls(); showStats(); edited(); }
+    catch (err) { $("yamlMsg").innerHTML = `<span class="pill warn">${err.message}</span>`; $("toDatasets").disabled = true; }
+  });
+}
+
+// ---- steps 2 to 6
+function showDatasets() {
+  const f = fits(), w = new Map(weights(prepared()).map(d => [d.id, d.weight]));
+  $("dsSummary").innerHTML = `<b>${f.length}</b> datasets fit this definition: <b>${prepared().length}</b> prepared, ${f.filter(d => d.state === "in progress").length} in progress, ${f.filter(d => d.state === "not prepared").length} not prepared, ${f.filter(d => d.state === "failed").length} failed.` + (C.exclude.size ? ` ${C.exclude.size} taken out by you.` : "");
+  $("dsRows").innerHTML = matching().map(d => {
+    const kept = !C.exclude.has(d.id);
+    return `<tr><td><input type="checkbox" data-keep="${d.id}" ${kept ? "checked" : ""} aria-label="selected"></td><td class="mono">${d.id}</td><td>${d.mod}</td><td>${d.dims}</td><td>${kept ? pill(d) : '<span class="pill">taken out</span>'}</td><td class="num">${w.has(d.id) ? pct(w.get(d.id)) : "—"}</td></tr>`;
+  }).join("");
+  $("save").textContent = B.saved ? "Next: prepare →" : "Save buffer and continue →";
+  $("saveHint").textContent = B.saved ? "Saved." : "Saving creates the buffer; nothing runs yet.";
+}
+function showPrepare() {
+  const f = fits(), p = prepared(), rest = f.filter(d => d.state !== "prepared");
+  $("prepSummary").innerHTML = `<b>${p.length} of ${f.length}</b> datasets are prepared. ${rest.filter(d => d.state === "in progress").length} are being prepared now.`;
+  $("prepBar").style.width = `${100 * p.length / (f.length || 1)}%`;
+  $("prepRows").innerHTML = rest.map(d => `<tr><td>${d.state === "not prepared" ? `<input type="checkbox" data-id="${d.id}">` : ""}</td><td class="mono">${d.id}</td><td>${d.mod}</td><td>${pill(d)}</td><td class="small">${d.state === "in progress" ? d.where : d.state === "failed" ? "stopped at crops · <a href='#'>open the dataset</a>" : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="small">Every dataset that fits is prepared.</td></tr>`;
+  $("toPlan").textContent = `Continue with ${p.length} prepared datasets →`;
+  $("toPlan").disabled = !p.length;
+  $("prepAll").checked = false; prepTicks();
+}
+function prepTicks() {
+  const n = document.querySelectorAll("#prepRows input:checked").length;
+  $("prepGo").textContent = n ? `Prepare ${n} selected` : "Prepare selected"; $("prepGo").disabled = !n;
+  $("prepGo").classList.toggle("primary", !!n);
+}
+function showPlan() {
+  const p = weights(prepared()), fresh = p.filter(d => d.fresh).length;
+  $("planDiff").hidden = !B.stopped;
+  $("planDiff").textContent = `Compared with what was served: ${fresh} datasets added, ${C.exclude.size} taken out. Step 5 shows which datasets are staged again. ` + (B.big
+    ? `Version ${B.version} holds 100 TB on disk and the limit is 100 TB: the new version does not fit beside it. Releasing version ${B.version} means it cannot be served again without staging it anew, and its space is free after the keeper's hold of 48 hours.`
+    : `Version ${B.version} holds 180 GB on disk; the new version fits beside it, so version ${B.version} is kept until the new one serves.`);
+  $("runPlan").textContent = B.stopped && B.big ? `Release version ${B.version} and run →` : "Run: fetch and stage →";
+  $("pPool").textContent = B.big ? "1,412" : p.length;
+  $("planDisk").hidden = !B.big;
+  $("pFetch").textContent = B.big ? "3.4 PB" : "212 GB"; $("pFetchSub").textContent = B.big ? "raw files, fetched as the window moves" : "7 datasets not in the raw cache";
+  $("pStaged").textContent = B.big ? "1.0 PB" : "180 GB"; $("pStagedSub").textContent = B.big ? "10 times the 100 TB limit" : "fits: the limit is 100 TB"; $("pCrops").textContent = `${num(C.train)} · ${num(C.val)} · ${num(C.test)}`;
+  $("planRows").innerHTML = p.sort((a, b) => b.weight - a.weight).map((d, i) => `<tr><td class="mono">${d.id}</td><td>${d.mod}</td><td class="num">${pct(d.weight)}</td><td class="num">${num(Math.round(d.weight * C.train))}</td><td>${i % 4 === 1 ? '<span class="pill">to fetch</span>' : '<span class="pill ok">cached</span>'}</td></tr>`).join("");
+}
+function showSource() {
+  const p = prepared(), done = B.sourced ? p.length : Math.floor(p.length * 0.6);
+  $("srcSummary").innerHTML = `<b>${done} of ${p.length}</b> datasets of this version are on disk.` + (B.sourced ? " Waiting for your approve." : " 4 jobs running.");
+  $("srcBar").style.width = `${100 * done / (p.length || 1)}%`;
+  $("srcRows").innerHTML = p.map((d, i) => {
+    const state = i < done ? ["ok", "on disk"] : i < done + 4 ? ["busy", i % 2 ? "fetching" : "staging"] : ["", "queued"];
+    return `<tr><td class="mono">${d.id}</td><td><span class="pill ${state[0]}">${state[1]}</span></td><td>${state[1] === "queued" ? "" : "<a href='#'>job record</a>"}</td></tr>`;
+  }).join("");
+  $("toServe").disabled = !B.sourced; $("srcFinish").hidden = B.sourced;
+}
+function showServe() {
+  const late = fits().filter(d => d.state === "in progress").length;
+  $("sPool").textContent = B.big ? "1,412" : prepared().length;
+  $("diskSub").textContent = B.big ? "100 TB of the plan's 1.0 PB: a moving window." : "All of the plan is on disk.";
+  $("diskBar").style.width = B.big ? "10%" : "100%";
+  $("diskCounts").textContent = B.big ? "142 datasets on disk · 1,270 waiting for space" : `${prepared().length} datasets on disk · none waiting for space`;
+  const mix = B.big ? [["EM", 38, 71], ["light-sheet", 31, 29], ["confocal", 19, 0], ["X-ray CT", 12, 0]] : [["brightfield", 43, 43], ["confocal", 29, 29], ["light-sheet", 16, 16], ["EM", 13, 13]];
+  $("mixRows").innerHTML = mix.map(([m, planned, disk]) => `<tr><td>${m}</td><td class="num">${planned}%</td><td class="num">${disk === planned ? `${disk}%` : `<span class="pill warn">${disk}%</span>`}</td></tr>`).join("");
+  $("windowLater").textContent = B.big ? "Until the moving window is built, this version serves what is on disk and the rest waits for space: training sees the mix on the right, not the planned one. With the window, this card also shows the time until the data on disk is used up, refill latency and throughput, the time consumers starved, unique samples against repeats, and the delivered mix." : "";
+  $("sRuns").textContent = B.big ? "2" : "0"; $("sRunsSub").textContent = B.big ? "drew in the last 10 minutes" : "none has drawn yet";
+  $("sVersion").textContent = `${B.version}`; $("sId").textContent = `id ${idOf(B.number, B.version)}`;
+  $("snippet").textContent = `from mia_buffers.client import BufferDataset\ntrain = BufferDataset("http://buffer-api.example.org:8765", buffer="${idOf(B.number, B.version)}", split="train")  # the id of version ${B.version}, never the name`;
+}
+const SHOW = { define: showStats, datasets: showDatasets, prepare: showPrepare, plan: showPlan, source: showSource, serve: showServe };
+
+// ---- the shell: the list, the strip, moving between steps
+const ROWS = [
+  ["all-3d-diverse", "serve", "ok", "serving · 100 TB of 1.0 PB on disk", 1412, 5000000, "1 hour ago"],
+  ["lightsheet-3d-v2", "serve", "ok", "serving", 31, 250000, "2 days ago"],
+  ["em-membranes", "source", "busy", "working · 12 of 18 staged", 18, 100000, "12 minutes ago"],
+  ["confocal-nuclei", "prepare", "you", "waits for you · 9 of 22 prepared", 22, 50000, "yesterday"],
+  ["brightfield-2d", "plan", "you", "waits for you · plan ready", 14, 80000, "3 hours ago"],
+  ["xray-pilot", "datasets", "", "saved, nothing started", 6, 20000, "last week"],
+  ["confocal-old", "datasets", "", "stopped · staged data kept", 17, 60000, "last month"],
+];
+function showList() {
+  $("listRows").innerHTML = ROWS.map((r, i) => `<tr class="row" data-row="${i}"><td class="mono">#${212 - i}</td><td>${r[0]}</td><td>${STEPS.indexOf(r[1]) + 1} · ${TITLES[r[1]]}</td><td><span class="pill ${r[2]}">${r[3]}</span></td><td class="mono">${r[1] === "serve" ? idOf(212 - i, 2) : "—"}</td><td class="num">${r[4]}</td><td class="num">${num(r[5])}</td><td class="small">${r[6]}</td></tr>`).join("");
+}
+function showScreen(name) { for (const s of document.querySelectorAll("[data-screen]")) s.hidden = s.dataset.screen !== name; }
+function strip() {
+  const here = STEPS.indexOf(B.step);
+  $("steps").innerHTML = STEPS.map((s, i) => `<li class="${i === here ? "here" : i <= B.reached ? "done" : ""}" data-go="${i <= B.reached && i !== here ? s : ""}">${TITLES[s]}</li>`).join("");
+}
+// the definition changed: every step after this one is done again
+function edited() { B.reached = STEPS.indexOf(B.step); B.changed = true; strip(); stoppedLine(); }
+function stoppedLine() {
+  $("stoppedNote").hidden = !B.stopped || STEPS.indexOf(B.step) > 2;
+  $("stoppedText").textContent = `Version ${B.version} is stopped; its staged data is kept. ${fits().filter(d => d.fresh).length} datasets prepared since it was planned are marked new and join at the next plan.`;
+  $("serveAgain").textContent = `Serve version ${B.version} again`;
+}
+function go(step) {
+  const index = STEPS.indexOf(step);
+  B.step = step; B.reached = Math.max(B.reached, index);
+  if (index > 1) B.saved = true;
+  if (step === "serve") Object.assign(B, { serving: true, version: B.version + (B.stopped && !B.resume ? 1 : 0), stopped: false, resume: false, changed: false });
+  showScreen("buffer");
+  for (const d of document.querySelectorAll("[data-step]")) d.hidden = d.dataset.step !== step;
+  strip();
+  document.querySelector('[data-screen="buffer"]').classList.toggle("locked", B.serving);
+  $("lockNote").hidden = !B.serving || step === "serve"; $("yaml").readOnly = B.serving; stoppedLine();
+  $("savedPill").textContent = B.serving ? "serving" : B.stopped ? "stopped" : B.saved ? "saved" : "not saved";
+  $("savedPill").className = `pill ${B.serving ? "ok" : ""}`;
+  const stage = B.serving ? "ready" : B.stopped && index < 3 ? "stopped (a new stage)" : B.saved && index < 3 ? "new" : STAGE[step];
+  $("stageLine").textContent = `Step ${index + 1} of 6 · the registry's stage here: ${stage}`;
+  $("bufName").textContent = C.name; $("bufNumber").textContent = B.saved ? `#${B.number}` : "";
+  $("defineHint").textContent = B.saved ? "Saved. A change here is saved when you go on." : "Not saved yet.";
+  SHOW[step](); window.scrollTo(0, 0);
+}
+function openBuffer(name, step, saved, stopped = false) {
+  if (name) C.name = name;
+  Object.assign(B, { saved, stopped, reached: STEPS.indexOf(step), sourced: step === "serve", serving: step === "serve", big: C.name === "all-3d-diverse" });
+  showControls(); $("yaml").value = toYaml(); go(step);
+}
+document.addEventListener("click", e => {
+  const target = e.target.closest("[data-go]"), row = e.target.closest("[data-row]");
+  if (target?.dataset.go) go(target.dataset.go);
+  if (row) openBuffer(ROWS[row.dataset.row][0], ROWS[row.dataset.row][1], true, ROWS[row.dataset.row][3].startsWith("stopped"));
+});
+$("newBuffer").onclick = () => openBuffer("new-buffer", "define", false);
+$("back").onclick = e => { e.preventDefault(); showScreen("list"); };
+$("save").onclick = () => { B.saved = true; go("prepare"); };
+$("prepRows").addEventListener("change", prepTicks);
+$("prepAll").onchange = e => { for (const box of document.querySelectorAll("#prepRows input")) box.checked = e.target.checked; prepTicks(); };
+$("prepGo").onclick = () => {
+  for (const box of document.querySelectorAll("#prepRows input:checked")) Object.assign(CATALOG.find(d => d.id === box.dataset.id), { state: "in progress", where: "matching" });
+  showPrepare();
+};
+$("dsRows").addEventListener("change", e => {
+  const id = e.target.dataset.keep; if (!id) return;
+  e.target.checked ? C.exclude.delete(id) : C.exclude.add(id);
+  $("yaml").value = toYaml(); edited(); showDatasets();
+});
+document.querySelector(".panetabs").addEventListener("click", e => {
+  const tab = e.target.dataset.tab; if (!tab) return;
+  for (const b of document.querySelectorAll("[data-tab]")) b.setAttribute("aria-selected", b.dataset.tab === tab);
+  for (const p of document.querySelectorAll("[data-pane]")) p.hidden = p.dataset.pane !== tab;
+});
+$("stopServe").onclick = () => {
+  const runs = B.big ? "2 training runs drew from this version in the last 10 minutes (gpu-node-14, gpu-node-22). Their next request fails with 409, and they do not wait." : "No training run drew from this version in the last 10 minutes.";
+  if (!confirm(`Stop serving version ${B.version}?\n\n${runs}\n\nWhat is on disk is kept. If you change the buffer, it comes back as a new version under another id, which every training run has to be given.`)) return;
+  for (const d of CATALOG) if (d.state === "in progress") Object.assign(d, { state: "prepared", fresh: true }); // the mock's "prepared since"
+  Object.assign(B, { serving: false, stopped: true, changed: false, sourced: false, reached: 2 });
+  B.served = { ...C, dims: new Set(C.dims), exclude: new Set(C.exclude) }; // the definition the stopped version ran
+  go("prepare");
+};
+$("serveAgain").onclick = () => {
+  if (B.changed && !confirm(`Serve version ${B.version} again?\n\nThe buffer's definition goes back to that version's. The changes you made since are discarded.`)) return;
+  if (B.served) Object.assign(C, B.served, { dims: new Set(B.served.dims), exclude: new Set(B.served.exclude) });
+  showControls(); $("yaml").value = toYaml();
+  B.resume = true; B.sourced = true; go("serve");
+};
+$("srcFinish").onclick = () => { B.sourced = true; showSource(); };
+$("notes").onchange = e => document.body.classList.toggle("nonotes", !e.target.checked);
+$("jump").innerHTML = `<button data-jump="list">Buffers</button> ` + STEPS.map((s, i) => `<button data-jump="${s}">${i + 1} ${TITLES[s]}</button>`).join(" ");
+$("jump").onclick = e => { const j = e.target.dataset.jump; if (j === "list") showScreen("list"); else if (j) openBuffer(null, j, STEPS.indexOf(j) > 1 || B.saved); };
+bindDefine(); showList(); showControls(); $("yaml").value = toYaml(); showScreen("list");
+</script>
+</body>
+</html>

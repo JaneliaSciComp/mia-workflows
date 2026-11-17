@@ -1,15 +1,16 @@
 // The shell: the Docs view, health, the stream, hash routing, the top bar, the theme and boot.
 // The page holds no token. It reads with GETs (and with POST /plan and POST /hosts/missing, which write nothing)
 // and asks for things through the action routes, which take none. All hosts and repos come from GET /meta.
-import { $, el, hideTip, SUBJECT_TAB, SUBJECT_VIEWS, toEpoch } from "./dom.js";
+import { $, el, hideTip, SUBJECT_HASH, SUBJECT_TAB, SUBJECT_VIEWS, toEpoch } from "./dom.js";
 import { HttpError, load, S, send } from "./api.js";
 import { onScreen } from "./actions.js";
-import { bindControls, viewDesigner } from "./designer.js";
+import { bindControls } from "./designer.js";
 import { viewBuffers } from "./buffers.js";
 import { viewDatasetList } from "./datasets.js";
 import { viewCache, viewCleaner, viewDecisions, viewPreparation } from "./operations.js";
 import { viewJob } from "./job.js";
 import { viewFind, viewNeeds, viewSubject } from "./subjects.js";
+import { viewFlow } from "./flow.js";
 
 // ---- the Docs view
 // Static: show one of the two documents and mark its sub-tab. A document is a file of the page (guide.html,
@@ -100,21 +101,27 @@ const VIEWS = {
   docs: viewDocs,
   job: viewJob, // #job/<address>: a job's record; the address is everything after the first slash
 };
-const REFRESH_MS = 30000; // the buffer views poll
+const REFRESH_MS = 30000; // the Buffers list, a version's page and a buffer's page poll
 let refreshTimer = 0;
 function route() {
   const [path, filters] = location.hash.slice(1).split("?"); // #datasets?state=in-progress: a list with its filters set
   const [name, ...rest] = path.split("/");
-  let arg = rest.join("/");
-  try {
-    arg = decodeURIComponent(arg);
-  } catch {
-    /* a malformed escape: use the raw text */
-  }
-  const designer = name === "buffers" && arg === "new";
-  const kind = arg ? SUBJECT_VIEWS[name] : null; // #datasets/<record>, #specs/<name>, #requests/<key>: its own page
-  const view = designer ? "designer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "needs";
-  const tab = designer ? "buffers" : kind ? SUBJECT_TAB[name] : view;
+  const decoded = text => {
+    try {
+      return decodeURIComponent(text);
+    } catch {
+      return text; // a malformed escape: use the raw text
+    }
+  };
+  const arg = decoded(rest.join("/"));
+  // #specs/<key> is another address of a buffer's page
+  if (name === "specs" && rest.length) return location.replace(SUBJECT_HASH.buffer(arg));
+  // a buffer's page: #buffer/<key>[/<step>], and #buffers/new[/<step>] for one that is not saved yet
+  const fresh = name === "buffers" && rest[0] === "new",
+    flow = fresh || (name === "buffer" && !!rest[0]);
+  const kind = arg ? SUBJECT_VIEWS[name] : null; // #datasets/<record>, #requests/<key>: its own page
+  const view = flow ? "buffer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "needs";
+  const tab = flow ? "buffers" : kind ? SUBJECT_TAB[name] : view === "preparation" ? "datasets" : view;
   document.querySelectorAll("[data-view]").forEach(s => {
     s.hidden = s.dataset.view !== view;
   });
@@ -125,10 +132,14 @@ function route() {
   hideTip();
   clearInterval(refreshTimer);
   onScreen.subject = null;
+  onScreen.redraw = null;
   onScreen.view = view;
+  if (flow) {
+    refreshTimer = setInterval(() => onScreen.redraw?.(), REFRESH_MS);
+    return viewFlow(fresh ? null : decoded(rest[0]), rest[1]);
+  }
   if (kind) return viewSubject(kind, arg);
   if (view === "subject") return viewFind(arg);
-  if (designer) return viewDesigner();
   if (view === "buffers")
     refreshTimer = setInterval(() => {
       hideTip();
@@ -136,22 +147,6 @@ function route() {
     }, REFRESH_MS);
   if (view === "datasets") return viewDatasetList(arg, new URLSearchParams(filters || ""));
   VIEWS[view](arg);
-}
-function setupFilterBox() {
-  // the fold is a per-viewer convenience, remembered in this browser
-  const box = $("filterBox");
-  try {
-    if (localStorage.getItem("mia-filters") === "closed") box.open = false;
-  } catch {
-    /* storage blocked: open */
-  }
-  box.addEventListener("toggle", () => {
-    try {
-      localStorage.setItem("mia-filters", box.open ? "open" : "closed");
-    } catch {
-      /* not remembered */
-    }
-  });
 }
 function setupTheme() {
   const root = document.documentElement;
@@ -178,7 +173,6 @@ function setupTheme() {
 }
 export async function boot() {
   setupTheme();
-  setupFilterBox();
   bindControls();
   const [meta, catalogs] = await Promise.all([load("/meta"), load("/catalogs")]);
   S.meta = meta || {};

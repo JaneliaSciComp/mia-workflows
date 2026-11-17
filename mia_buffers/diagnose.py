@@ -64,7 +64,7 @@ Propose at most four remedies, in order, from this list. Nothing else can be car
 
 ## Rules
 
-- Never invent a cause. Say what the evidence shows and where (file and line).
+- Never invent a cause. Before your answer, say what the evidence shows and where (file and line).
 - Choose by what would be different next time. A second run that would fail the same way helps nobody: when
   nothing you can propose would change the outcome, propose nothing and say in `needs` what a person has to do.
 - A cause in this installation's own code or configuration is a `defect`: describe it under `defect` so that
@@ -72,10 +72,12 @@ Propose at most four remedies, in order, from this list. Nothing else can be car
 
 ## Your answer
 
-End with one JSON object, and nothing after it:
+End with one JSON object, and nothing after it. Its `diagnosis` and `needs` are posted on the subject's page
+for a person who has not seen this directory: at most two sentences each, in plain words, with no file names
+or line numbers, and without repeating one in the other.
 
 ```json
-{"diagnosis": "<the cause, with the evidence for it>",
+{"diagnosis": "<the cause and what shows it, in at most two sentences>",
  "cause": "passing | data | record | defect | service | autodev | unknown",
  "remedies": [{"do": "go", "note": "<advice for the next round>"}],
  "needs": "<what a person has to do; empty when a remedy is proposed>",

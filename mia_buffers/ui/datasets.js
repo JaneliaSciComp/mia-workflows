@@ -217,7 +217,8 @@ export function viewDatasetList(_arg, params) {
     el(
       "p",
       { class: "small" },
-      "Every dataset of the catalog and what is known about it. Open one for its record, crops, decisions, cache and timeline. Tick datasets to prepare them in one request, or to start a buffer spec from them.",
+      "Every dataset of the catalog and what is known about it. Open one for its record, crops, decisions, cache and timeline. Tick datasets to prepare them in one request, or to start a buffer from them. ",
+      el("a", { href: "#preparation", title: "every preparation request, with its stage" }, "Preparation requests"),
     ),
     el("div", { class: "actions" }, selectAll, clear, box),
     list,
@@ -515,7 +516,7 @@ export function datasetCards(d) {
           { key: "buffer", label: "buffer", cell: b => bufferLink(b.id) },
           {
             key: "spec",
-            label: "spec",
+            label: "buffer",
             cell: b => (b.spec ? el("a", { href: SUBJECT_HASH.buffer(b.spec) }, b.spec) : b.config?.spec_name || ""),
           },
           { label: "in its pool", cell: b => statePill(b.board?.status) },

@@ -292,6 +292,12 @@ class Config(BaseModel):
         """The task queue for the long-running job waits, kept apart from the short activities."""
         return self.deployment + "-await"
 
+    @property
+    def mirror_queue(self) -> str:
+        """The task queue of the mirror's passes, kept apart from the rounds' activities: a pass waits on
+        GitHub, and no round waits for a pass."""
+        return self.deployment + "-mirror"
+
     def label(self, stage: str) -> str:
         return f"data:{stage}"
 

@@ -56,18 +56,19 @@ PREP_HUMAN_LABELS = {"go": ("0e8a16", "Prepare the datasets this request names")
 # waited for its files at the approve keeps its place and joins when they land. The workflow stays the code that
 # carries a round out, and two things a stage does not say stay its refusal: a `staged` buffer whose late
 # datasets still have a job running refuses a go, and a `ready` buffer rebuilding a lost volume abandons the
-# rebuild on a go or retire.
+# rebuild on a go or retire. `edit` replaces the definition text where the buffer rests: no round is open and it
+# does not serve. buffer-api settles it itself, so the workflow hears of none.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
-    "new": ("not started", frozenset({"go"})),
+    "new": ("not started", frozenset({"edit", "go"})),
     "planning": ("working", frozenset({"cancel", "stop"})),
     "plan-review": ("waiting", frozenset({"approve", "go", "cancel", "stop"})),
     "sourcing": ("working", frozenset({"cancel", "dropped", "stop"})),
     "staged": ("waiting", frozenset({"approve", "go", "dropped", "cancel", "stop"})),
     "ready": ("done", frozenset({"go", "revoke", "retire", "dropped", "stop"})),
     "idle": ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"})),
-    "retired": ("done", frozenset({"go"})),
-    "needs-human": ("stuck", frozenset({"go"})),
-    "cancelled": ("done", frozenset({"go"})),
+    "retired": ("done", frozenset({"edit", "go"})),
+    "needs-human": ("stuck", frozenset({"edit", "go"})),
+    "cancelled": ("done", frozenset({"edit", "go"})),
 }
 CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")  # the buffer stages `cancel` ends a round at
 PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {

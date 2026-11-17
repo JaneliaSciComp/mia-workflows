@@ -267,6 +267,15 @@ def test_what_only_a_person_can_settle_says_so():
     assert stopped("the crops do not match the annotation") == (None, [{"do": "diagnose"}])
 
 
+def test_a_round_its_budget_refused_is_left_to_a_person_and_not_diagnosed():
+    """Incident 2026-11-16: a request for 154 datasets used its budget up after 20, and the cleaner ran its
+    diagnosing agent on each of the other 134 to learn what their stop said already."""
+    refusal = "root JaneliaSciComp/mia-buffers#27657338: usd 100.00 reserved or spent + 5.00 would exceed max_usd"
+    rule, (step,) = stopped(f"root budget: {refusal} 100\n\nThe dataset rests at `data:blocked`.")
+    assert rule == "budget used up" and step["do"] == "needs" and "would exceed max_usd 100)" in step["text"]
+    assert stopped(f"root budget: {refusal} 500")[0] == "budget used up"  # not the 500 of a passing cause
+
+
 def test_left_over_snippet_work_is_named_by_why_it_is_left():
     from mia_buffers.cleaner import leftover_reason
 

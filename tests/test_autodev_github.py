@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -12,12 +13,13 @@ R = "/repos/o/r"
 
 @pytest.fixture
 def gh():
-    sleeps = []
+    sleeps, now = [], [1000.0]
 
-    async def fake_sleep(s):
+    async def fake_sleep(s):  # a wait passes at once, and the client's clock moves by it
         sleeps.append(s)
+        now[0] += s
 
-    g = GitHub("o/r", lambda: "tok", writes_per_second=1000, sleep=fake_sleep)
+    g = GitHub("o/r", lambda: "tok", writes_per_second=1000, sleep=fake_sleep, clock=lambda: now[0])
     g.sleeps = sleeps
     return g
 
@@ -33,7 +35,7 @@ async def test_secondary_rate_limit_backoff(gh):
     )
     assert (await gh.comment(1, "hi"))["id"] == 1
     assert route.call_count == 3
-    assert gh.sleeps[:1] == [60.0] and 7.0 in gh.sleeps
+    assert gh.sleeps == [60.0, 7.0]
     assert route.calls[0].request.headers["authorization"] == "Bearer tok"
 
 
@@ -48,6 +50,31 @@ async def test_primary_rate_limit_waits_for_reset(gh, monkeypatch):
     )
     assert (await gh.get_issue(5))["number"] == 5
     assert gh.sleeps == [31.0]
+
+
+@respx.mock
+async def test_a_rate_limit_holds_the_next_request_and_the_wait_doubles_until_one_passes(gh):
+    limited = httpx.Response(403, json={"message": "You have exceeded a secondary rate limit"})
+    respx.post(f"{API}{R}/issues/1/comments").mock(return_value=limited)
+    route = respx.get(f"{API}{R}/issues/5").mock(side_effect=[limited, httpx.Response(200, json={"number": 5})])
+    with pytest.raises(GitHubError, match="gave up"):
+        await gh.request("POST", f"{R}/issues/1/comments", json={"body": "hi"}, attempts=1)
+    assert gh.sleeps == []  # the caller that gave up did not sit out the wait: the next request does
+    assert (await gh.get_issue(5))["number"] == 5
+    # the minute the first answer asked for, before anything is sent; then twice that
+    assert gh.sleeps == [60.0, 120.0] and route.call_count == 2
+    respx.get(f"{API}{R}/issues/6").mock(side_effect=[limited, httpx.Response(200, json={"number": 6})])
+    await gh.get_issue(6)
+    assert gh.sleeps[2:] == [60.0]  # an answer that passed starts the backoff over
+
+
+@respx.mock
+async def test_rate_limit_answers_to_requests_sent_together_count_as_one(gh):
+    limited = httpx.Response(403, json={"message": "You have exceeded a secondary rate limit"})
+    for number in (5, 6, 7):
+        respx.get(f"{API}{R}/issues/{number}").mock(side_effect=[limited, httpx.Response(200, json={})])
+    await asyncio.gather(*(gh.get_issue(number) for number in (5, 6, 7)))
+    assert max(gh.sleeps) == 60.0  # one minute for the three, not one that doubled twice
 
 
 @respx.mock
@@ -70,6 +97,19 @@ async def test_write_throttle(monkeypatch):
     await g.comment(1, "a")
     await g.comment(1, "b")
     assert len(sleeps) == 1 and 0.9 < sleeps[0] <= 1.0
+
+
+@respx.mock
+async def test_writes_sent_at_once_are_spaced_one_gap_apart():
+    sleeps = []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+
+    g = GitHub("o/r", lambda: "t", writes_per_second=1.0, sleep=fake_sleep)
+    respx.post(f"{API}{R}/issues/1/comments").mock(return_value=httpx.Response(201, json={}))
+    await asyncio.gather(*(g.comment(1, text) for text in "abc"))
+    assert sorted(sleeps) == [pytest.approx(1, abs=0.1), pytest.approx(2, abs=0.1)]
 
 
 @respx.mock

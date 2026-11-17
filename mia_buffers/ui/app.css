@@ -58,6 +58,49 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .subject h2{margin:0 0 6px;font-size:18px;overflow-wrap:anywhere}
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
 .btn.danger{border-color:var(--warn);color:var(--warn)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500}
+.btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.1)}
+.btn.primary:disabled{background:transparent;border-color:var(--axis);color:var(--muted)}
+/* a buffer's page: the strip of its six steps (the one shown filled, the ones that can be opened ticked), what
+   is not a step behind More, and under the step its one way back and its one way forward */
+.steps{list-style:none;display:flex;flex-wrap:wrap;padding:0;margin:0 0 12px;counter-reset:step}
+.steps li{counter-increment:step;display:flex;align-items:center;gap:8px;padding:6px 14px 6px 10px;border:1px solid var(--axis);border-right-width:0;font-size:13.5px;color:var(--muted);background:var(--surface)}
+.steps li:first-child{border-radius:8px 0 0 8px}
+.steps li:last-child{border-right-width:1px;border-radius:0 8px 8px 0}
+.steps li::before{content:counter(step);display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1px solid var(--axis);font-size:11.5px}
+.steps li a{color:var(--fg);text-decoration:none}
+.steps li.done:hover{background:var(--accent-soft)}
+.steps li.done::before{content:"✓";border-color:var(--s3);color:var(--s3)}
+.steps li.here{color:var(--fg);font-weight:600;background:var(--accent-soft);border-color:var(--accent);border-right-width:1px}
+.steps li.here + li{border-left-width:0}
+.steps li.here::before{border-color:var(--accent);background:var(--accent);color:#fff}
+/* step 1: the definition as two tabs over one text, then two numbers in a narrow column beside two cards */
+.pane{background:var(--surface);border:1px solid var(--ring);border-radius:8px;margin-bottom:14px}
+.panetabs{display:flex;gap:2px;padding:8px 10px 0;border-bottom:1px solid var(--grid)}
+.panetabs button{border:1px solid transparent;border-bottom:0;background:transparent;border-radius:6px 6px 0 0;padding:5px 16px;cursor:pointer;font-size:13.5px;color:var(--fg2);margin-bottom:-1px}
+.panetabs button[aria-selected=true]{border-color:var(--grid);background:var(--bg);color:var(--fg);font-weight:600;border-bottom:1px solid var(--bg)}
+.panetabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.panetabs .hint{margin-left:auto;align-self:center}
+.panebody{padding:14px}
+.panebody .specbox{max-width:none;min-height:26em}
+fieldset.lock{border:0;padding:0;margin:0;min-width:0}
+fieldset.lock:disabled{opacity:.6}
+.statrow{display:grid;grid-template-columns:170px minmax(0,1fr) minmax(0,1fr);gap:14px;margin-bottom:14px;align-items:start}
+.statrow .stack{display:grid;gap:10px}
+.statrow .card{margin-bottom:0}
+@media (max-width:760px){.statrow{grid-template-columns:1fr}}
+.takenout{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:6px 0;font-size:13px}
+/* how far something is: a filled bar */
+.progress{height:8px;border-radius:4px;background:var(--grid);overflow:hidden;margin:6px 0 14px;max-width:520px}
+.progress i{display:block;height:100%;width:0;background:var(--s3)}
+pre.snippet{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--axis);border-radius:6px;background:var(--bg)}
+.more{position:relative}
+.more summary{list-style:none}
+.more summary::-webkit-details-marker{display:none}
+.more .actions{position:absolute;right:0;top:100%;z-index:5;margin:4px 0 0;padding:10px;min-width:220px;flex-direction:column;align-items:stretch;background:var(--surface);border:1px solid var(--ring);border-radius:8px;box-shadow:0 4px 14px var(--ring)}
+.stepfoot{position:sticky;bottom:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin:16px 0;padding:10px 0;background:var(--bg);border-top:1px solid var(--grid)}
+.stepfoot:empty{display:none}
+.stepfoot .right{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-left:auto}
 .chosen{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:4px 10px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-soft);font-size:13px}
 .chosen[hidden]{display:none}
 .chosen b{font-weight:600}

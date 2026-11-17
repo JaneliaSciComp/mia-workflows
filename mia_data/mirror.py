@@ -5,7 +5,9 @@ issue: the mirror opens one, with a first line that names the subject so an issu
 found again. Each timeline entry becomes one comment, in order, once: the entry's marker is in the comment, so a
 pass that died between posting and writing back finds its comment again. The stage label follows the subject's
 stage. Nothing here is read back as input.
-The workflow that runs this (`MiaMirror`) is in `workflows.py`; each worker registers the activity for its kinds."""
+The workflow that runs this (`MiaMirror`) is in `workflows.py`; each worker process runs the activity for its
+kinds on a task queue of its own (`mirror_worker`), one pass at a time, through a GitHub client that writes
+slowly (`WRITE_GAP_S`): the issue may be hours behind, and no round's activity waits behind a pass."""
 
 from __future__ import annotations
 
@@ -14,7 +16,9 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from urllib.parse import quote
 
 from temporalio import activity
+from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
+from temporalio.worker import Worker
 
 from autodev.github import GitHub
 from mia_core.registry import Registry
@@ -22,6 +26,11 @@ from mia_core.registry import Registry
 from . import catalog
 from .config import Config
 from .seed import render_issue
+
+# Seconds between two writes of a mirror's GitHub client. GitHub stops an account that sends more than 80
+# content-creating requests a minute or 500 an hour; one write every 9 s is 400 an hour, with room for the
+# rounds' own few writes under the same token.
+WRITE_GAP_S = 9.0
 
 # what an issue of a subject says: (title, body, labels); the body's first line is the marker naming the subject
 Describe = Callable[[dict], Awaitable[tuple[str, str, list[str]]]]
@@ -62,6 +71,13 @@ def dataset_issue(cfg: Config, gh_catalog: GitHub) -> Describe:
         return title, f"{marker}\n{read_only_line(dataset_page(cfg)(subject))}\n{facts}", labels
 
     return describe
+
+
+def mirror_worker(client: Client, task_queue: str, mirror: Callable[..., Awaitable[int]]) -> Worker:
+    """The worker of a mirror queue: the `mirror` activity alone, one pass at a time, so the passes of every
+    subject write to GitHub in single file and a pass that waits (the write gap, a rate limit) holds up only
+    other passes."""
+    return Worker(client, task_queue=task_queue, activities=[mirror], max_concurrent_activities=1)
 
 
 class Mirror:

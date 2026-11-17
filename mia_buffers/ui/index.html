@@ -14,14 +14,13 @@
   <nav class="tabs" aria-label="Views">
     <a href="#needs" data-tab="needs">Needs you</a>
     <a href="#datasets" data-tab="datasets">Datasets</a>
-    <a href="#preparation" data-tab="preparation">Preparation</a>
     <a href="#buffers" data-tab="buffers">Buffers</a>
     <a href="#cache" data-tab="cache">Cache</a>
     <a href="#cleaner" data-tab="cleaner">Cleaner</a>
     <a href="#decisions" data-tab="decisions">Decisions</a>
     <a href="#docs" data-tab="docs">Docs</a>
   </nav>
-  <input type="search" class="lookup" id="lookup" placeholder="#234, issue URL, record, spec" aria-label="Find a dataset, buffer spec or request by issue number, issue URL or name">
+  <input type="search" class="lookup" id="lookup" placeholder="#234, issue URL, record, buffer" aria-label="Find a dataset, buffer or request by issue number, issue URL or name">
   <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme" title="Switch between the light and the dark theme">theme</button>
 </header>
 <div class="banner" id="down" role="alert"></div>
@@ -29,16 +28,24 @@
 <noscript><p class="notice">This page needs JavaScript: every number on it comes from the service's routes.</p></noscript>
 
 <section data-view="datasets" hidden><div id="datasetsBody"></div></section>
-<section data-view="designer" hidden>
+<section data-view="buffer" class="subject" hidden>
   <p><a href="#buffers">← all buffers</a></p>
-  <h2>New buffer</h2>
-  <p class="small">Describe the buffer with the controls; the plan below shows which datasets it would draw from. Only prepared datasets enter a buffer: prepare the ones that fit first.</p>
+  <div id="bufferHead"></div>
+  <ol class="steps" id="bufferSteps" aria-label="The steps of this buffer"></ol>
+  <div id="bufferNotes"></div>
+  <div data-step="define" hidden>
   <div id="dsEmpty" class="empty" hidden>No catalog synced; run <code>mia-buffers catalog sync</code>.</div>
   <div id="dsBody">
-  <details class="filterbox" id="filterBox" open>
-  <summary>Filters</summary>
-  <section class="filters" aria-label="Spec filters">
-    <fieldset><legend>Spec name</legend><input type="text" id="specName" size="22" aria-label="spec name"></fieldset>
+  <div class="pane">
+    <div class="panetabs" role="tablist" aria-label="The definition, as controls or as YAML">
+      <button type="button" role="tab" id="tabControls" aria-controls="paneControls" aria-selected="true">Controls</button>
+      <button type="button" role="tab" id="tabYaml" aria-controls="paneYaml" aria-selected="false">YAML</button>
+      <span class="small hint" id="yamlMsg" aria-live="polite"></span>
+    </div>
+    <div class="panebody" id="paneControls" role="tabpanel" aria-labelledby="tabControls">
+  <fieldset class="lock" id="controlsLock">
+  <section class="filters" aria-label="The buffer's definition">
+    <fieldset><legend>Name (a label; it need not be unique)</legend><input type="text" id="specName" size="26" aria-label="the buffer's name"></fieldset>
     <fieldset><legend>Paths (glob)</legend><input type="text" id="paths" size="18" aria-label="paths glob"></fieldset>
     <fieldset><legend>Dimensionality</legend><div class="chips" id="dims"></div></fieldset>
     <fieldset><legend>Licence allowlist</legend><div class="chips" id="lic"></div>
@@ -56,42 +63,55 @@
       <label class="inline"><input type="checkbox" id="dedup"> one record per DOI</label></fieldset>
     <fieldset><legend>Weighting temperature <span id="tVal" class="footprint"></span></legend>
       <input type="range" id="temp" min="0" max="1" step="0.05" aria-label="temperature"><div class="small">0 = uniform over modalities, then over datasets · 1 = proportional to capacity</div></fieldset>
-    <fieldset><legend>Crops in the buffer</legend>
+    <fieldset><legend>Crops</legend>
       <label class="inline">train <input type="number" id="cropsTrain" min="1" step="1"></label>
       <label class="inline">val <input type="number" id="cropsVal" min="1" step="1"></label>
       <label class="inline">test <input type="number" id="cropsTest" min="1" step="1"></label>
       <label class="inline">most per dataset <input type="number" id="maxCrops" min="1" step="1"></label>
       <div class="small">shared among the datasets by weight · val and test are also the lengths of their lists</div></fieldset>
     <fieldset><legend>Held out for test (dataset ids)</legend><input type="text" id="holdout" size="22" aria-label="dataset ids held out for test"></fieldset>
-    <fieldset><legend>Registry (filters the view, not the spec)</legend>
-      <label class="inline"><input type="checkbox" id="preparedOnly"> prepared only</label><br>
-      <label class="inline"><input type="checkbox" id="rawCached"> raw cached</label><br>
-      <label class="inline"><input type="checkbox" id="stagedGeom"> staged for this geometry <span class="mono" id="levelsKey"></span></label></fieldset>
   </section>
-  </details>
-  <div id="planMsgs" aria-live="polite"></div>
-  <div class="actions">
-    <button type="button" class="btn" id="download" title="Save the spec these controls describe as a YAML file">Download spec YAML</button>
-    <div id="bufferIssue"></div>
-    <div id="prepIssue"></div>
-    <span class="small" id="planStatus"></span>
+  </fieldset>
+    </div>
+    <div class="panebody" id="paneYaml" role="tabpanel" aria-labelledby="tabYaml" hidden>
+      <p class="small">The definition as text. Edit or paste here and the controls follow.
+        <button type="button" class="btn" id="download" title="Save this definition as a YAML file">Download</button></p>
+      <textarea class="specbox" id="specText" spellcheck="false" aria-label="the buffer's definition as YAML"></textarea>
+    </div>
   </div>
-
-  <section class="kpis" id="kpis" aria-label="Summary"></section>
-  <section class="grid2">
-    <div class="card"><h2>Where datasets leave</h2><div class="sub">Rules in the planner's order; a dataset is counted once, at the first rule that removes it. The last rule, <code>not prepared</code>, keeps a fitting dataset out until mia-data has prepared it.</div><div id="funnel"></div></div>
-    <div class="card"><h2>Fitting datasets by modality</h2><div class="sub">Datasets that fit the spec, prepared or not, by modality group.</div><div id="bymod"></div></div>
-  </section>
-  <section class="grid2">
-    <div class="card"><h2>Weight share by modality</h2><div class="sub">Share of crops over the prepared pool, as the plan weighs it: modality → dataset, measure = coarsest-crop positions.</div><div id="byweight"></div></div>
+  <div id="planMsgs" aria-live="polite"></div>
+  <section class="statrow">
+    <div class="stack" id="kpisFit" aria-label="Summary"></div>
+    <div class="card"><h2>Weight share by modality</h2><div class="sub">Share of crops over the prepared datasets, as the plan weighs it: modality → dataset, measure = coarsest-crop positions.</div><div id="byweight"></div></div>
     <div class="card"><h2>Heaviest datasets</h2><div class="sub">The prepared datasets that would supply the most crops.</div><ol class="toplist" id="top"></ol></div>
   </section>
+  </div>
+  </div>
+  <div data-step="datasets" id="datasetsStep" hidden>
+  <section class="kpis" id="kpis" aria-label="Summary"></section>
+  <section class="grid2">
+    <div class="card"><h2>Where datasets leave</h2><div class="sub">Rules in the planner's order; a dataset is counted once, at the first rule that removes it. The last rule, <code>not prepared</code>, keeps a fitting dataset out of a plan until mia-data has prepared it.</div><div id="funnel"></div></div>
+    <div class="card"><h2>Fitting datasets by modality</h2><div class="sub">Datasets that fit the definition, prepared or not, by modality group.</div><div id="bymod"></div></div>
+  </section>
   <section>
-    <h2>The plan's datasets</h2>
-    <p class="small">Every dataset the spec's selection admits, and why it is in the pool or not. The search also narrows what <b>Prepare</b> takes.</p>
+    <h2>The datasets</h2>
+    <p class="small">Every dataset the definition admits, and why it is selected or not. Untick a dataset that fits to take it out of this buffer.</p>
+    <div id="takenOut"></div>
+    <div class="ticks" aria-label="Narrow the list by what the registry knows (the definition is not changed)">
+      <label class="inline"><input type="checkbox" id="preparedOnly"> prepared only</label>
+      <label class="inline"><input type="checkbox" id="rawCached"> raw cached</label>
+      <label class="inline"><input type="checkbox" id="stagedGeom"> staged for this geometry <span class="mono" id="levelsKey"></span></label>
+      <span class="small" id="planStatus"></span>
+    </div>
     <div id="planTable"></div>
   </section>
   </div>
+  <div data-step="prepare" id="prepareStep" hidden></div>
+  <div data-step="plan" id="planStep" hidden></div>
+  <div data-step="source" id="sourceStep" hidden></div>
+  <div data-step="serve" id="serveStep" hidden></div>
+  <div class="stepfoot" id="bufferFoot"></div>
+  <div id="bufferTimeline"></div>
 </section>
 
 <section data-view="needs" class="subject" hidden><div id="needsBody"></div></section>

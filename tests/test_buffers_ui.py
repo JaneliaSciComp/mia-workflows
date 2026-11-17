@@ -370,7 +370,7 @@ def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
         " ...(needsShelved ? { shelved: 1 } : {}) }))",
         view,
     )
-    assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]')
+    assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffers"], ["prep", "Requests"]')
     assert has('.toggles .btn[aria-pressed="true"]')
 
 
@@ -576,14 +576,15 @@ def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
 def test_a_buffer_is_always_planned_first() -> None:
     """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
     assert not has("Show me the plan first") and not has("first.checked")
-    assert count("plan_first: true") == 2  # New buffer, and a spec's own page
     assert has('subject.stage === "plan-review" ? "Run"')
 
 
 def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     """A click is not shown as the old stage's buttons again: while the subject says an action is `asked`, every
     button that would send an action is disabled, and a reload that started earlier never paints over a later one."""
+    # the bar, a drop, a revoke, a new plan; the forward and back buttons of a step add the stage to theirs
     assert count("disabled: !!subject.asked") == 4 and has("disabled: !!x.asked")
+    assert count("|| !!subject.asked") == 4  # the plan of step 3, Run, Approve and serve, the way back
     assert has("waiting for its workflow to answer")
     assert has("turn !== subjectTurn")
 
@@ -736,9 +737,10 @@ def test_the_hosts_dialog_works_as_it_runs() -> None:
 
 
 def test_a_second_click_during_the_host_check_starts_nothing() -> None:
-    """Both start buttons hold a flag from the click until `askHosts` settles."""
-    assert count("if (checking) return;") == 2 and count("checking = true;") == 2
-    assert count("checking = false; })") == 2
+    """Every start button (a subject's bar, Prepare, a buffer's Run) holds a flag from the click until `askHosts`
+    settles."""
+    assert count("if (checking) return;") == 3 and count("checking = true;") == 3
+    assert count("checking = false; })") == 3
 
 
 def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
@@ -822,7 +824,7 @@ def test_a_subjects_page_says_where_it_stands_with_its_lifecycle_alone() -> None
     in the row under its name, and a table names a subject's stage, not a status word."""
     assert not has("subjectFacts") and not has("waiting on you") and not has('"workflow " +')
     assert not has("statePill(subject.status)") and not has('statePill(x.status), " ", x.stage')
-    assert count("stagePill(x.stage)") == 3  # the specs, the requests and Needs you
+    assert count("stagePill(x.stage)") == 3  # the requests (all, and a buffer's own) and Needs you
     assert has("subjectLinks(subject, entries)")
 
 
@@ -837,8 +839,8 @@ def test_a_lifecycle_marks_the_step_a_round_is_working_at() -> None:
 
 
 def test_every_button_that_asks_for_something_says_what_it_does() -> None:
-    """A button's tooltip says what pressing it does. Every action a stage table offers has one (a spec's go,
-    revoke and dropped have controls of their own, which carry theirs), and so has every other such button."""
+    """A button's tooltip says what pressing it does. Every action a stage table offers has one (a buffer's go,
+    edit, revoke and dropped have controls of their own, which carry theirs), and so has every other such button."""
     from mia_buffers.config import PREP_STAGE_ACTIONS
     from mia_buffers.config import STAGE_ACTIONS as BUFFER_ACTIONS
     from mia_data.config import STAGE_ACTIONS as DATASET_ACTIONS
@@ -848,12 +850,12 @@ def test_every_button_that_asks_for_something_says_what_it_does() -> None:
         " Object.keys(BUTTON_HELP)]);",
         {"actions.js": "ACTION_HELP, BUTTON_HELP"},
     )
-    own_control = {"buffer": {"go", "revoke", "dropped"}}
+    own_control = {"buffer": {"go", "revoke", "dropped", "edit"}}
     for kind, table in (("dataset", DATASET_ACTIONS), ("buffer", BUFFER_ACTIONS), ("prep", PREP_STAGE_ACTIONS)):
         offered = set().union(*(actions for _, actions in table.values())) - own_control.get(kind, set())
         assert offered <= set(covered[kind]), (kind, offered - set(covered[kind]))
     assert has("title: actionHelp(subject, action)")
-    assert {"plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
+    assert {"save", "saveChanges", "plan", "dropped", "revokeTicked", "retry", "prepare", "sendReject"} <= set(keys)
     for key in keys:
         assert has(f"title: BUTTON_HELP.{key}"), key
 
@@ -947,7 +949,7 @@ def test_the_yaml_the_page_writes_is_what_the_service_reads() -> None:
 
 
 def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> None:
-    """Clone and Edit open New buffer on a spec: the controls take their values from the spec as the service parsed
+    """A definition opened or pasted as YAML: the controls take their values from the spec as the service parsed
     it (fromSpec), and a spec the controls write comes back from them unchanged. For a spec written by hand,
     specDiff names what the controls cannot say, so the page keeps its text."""
     from mia_buffers.spec import load_spec_text
@@ -960,9 +962,16 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
         "allowUnknown": True, "annRequired": True, "sources": ["manual", "proofread"], "minVox": 1000000,
         "patch": 128, "level": 8, "patchZ": 16, "dedup": False, "T": 0.25,
         "cropsTrain": 5000, "cropsVal": 300, "cropsTest": 200, "maxCrops": 64, "holdout": "u937 bcss",
+        "exclude": ["bcss", "u937"],
     }  # fmt: skip
-    sets = "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources) });\n"
-    lists = "const listed = c => ({ ...c, dims: [...c.dims], lic: [...c.lic], sources: [...c.sources] });\n"
+    sets = (
+        "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources),"
+        " exclude: new Set(c.exclude) });\n"
+    )
+    lists = (
+        "const listed = c => ({ ...c, dims: [...c.dims], lic: [...c.lic], sources: [...c.sources],"
+        " exclude: [...c.exclude].sort() });\n"
+    )
     written = run_js(
         sets + "print(toSpecYaml(filled(input.controls), input.ref, 'o/catalog'));",
         {"spec.js": "toSpecYaml"},
@@ -979,12 +988,284 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
     assert back == controls and same == []
     hand_controls, hand_text = lost
     assert hand_controls["name"] == "microscopy-foundation-pretrain" and hand_controls["level"] == 4
+    assert load_spec_text(written).select.exclude.ids == ["bcss", "u937"]  # an unticked dataset is an exclusion
     differs = run_js(
         "print(specDiff(input.hand, input.rewritten));",
         {"spec.js": "specDiff"},
         {"hand": parsed(by_hand), "rewritten": parsed(hand_text)},
     )
     assert "sampling.patch.c" in differs and "name" not in differs and "select.where.license.in" not in differs
+
+
+def test_a_buffer_is_one_page_and_the_tabs_name_no_spec_and_no_preparation() -> None:
+    """The Buffers tab lists buffers, each opening its own page of six steps; there is no list of specs, no list
+    of every round's buffer and no Preparation tab. The requests stay reachable from Datasets."""
+    index, flow = FILES["index.html"], squeezed(FILES["flow.js"])
+    assert 'data-tab="preparation"' not in index and 'data-view="designer"' not in index
+    assert all(f'data-step="{step}"' in index for step in ("define", "datasets", "prepare", "plan", "source", "serve"))
+    assert has('el("a", { href: "#preparation"', squeezed(FILES["datasets.js"]))
+    assert count('pageOf("/subjects/buffer", "subjects")') == 1 and not has('source: pageOf("/buffers", "buffers"),')
+    assert has('el("a", { class: "btn primary", href: "#buffers/new" }, "New buffer")')
+    assert not has("Buffer specs") and not has("specControls")
+    # an old address of a buffer's page still opens it
+    assert not has('"#specs/"') and has('if (name === "specs" && rest.length)')
+    assert has('buffer: key => "#buffer/" + encodeURIComponent(key)')
+    assert "/#buffer/" in (UI_DIR.parent / "mirror.py").read_text()
+    # the strip, and what is not a step
+    assert has("stripOf(subject?.stage, step)", flow) and has("stepToShow(subject.stage, asked)", flow)
+    assert has('el("summary", { class: "btn" }, "More")', flow) and has("actionBar(subject, redraw, ", flow)
+    assert has("timelineCard(entries)", flow) and has("shelvedNotice(subject.shelved)", flow)
+    # the stream redraws the buffer's page, not a subject's
+    assert has("if (onScreen.redraw) onScreen.redraw();") and has("onScreen.redraw = null;")
+
+
+def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
+    """Steps 1 and 2. The definition is one text with two views: the Controls tab writes it, the YAML tab is read
+    back into the controls by the service. Nothing is saved before step 2's button, and a saved buffer's change is
+    an `edit`."""
+    index, designer, flow = FILES["index.html"], squeezed(FILES["designer.js"]), squeezed(FILES["flow.js"])
+    assert all(f'id="{name}"' in index for name in ("tabControls", "tabYaml", "specText", "controlsLock", "kpisFit"))
+    assert 'id="filterBox"' not in index and not has("Create buffer", designer) and not has("designFrom")
+    # one text: what the YAML tab holds while that is not what the controls write, else what they write
+    assert has("export const definition = () => TEXT ?? toSpecYaml(C, S.ref, S.meta.catalog_repo);", designer)
+    assert has('api("/specs/parse"', designer) and has("Object.assign(C, fromSpec(parsed));", designer)
+    assert has("spec: definition(), page", designer)  # the plan is of the definition, not of the controls alone
+    # a control was changed: the controls are the definition again
+    assert has("function touched() { TEXT = null; INVALID = null;", designer)
+    # YAML that does not parse: the controls keep their values, nothing is planned or sent, the way on is closed
+    assert has("INVALID = error.message.split", designer) and has("if (INVALID) return", designer)
+    assert has("export const problem = () =>", designer) and has("disabled: !!problem()", flow)
+    # YAML that holds what no control shows: the controls are read-only, and say what they cannot show
+    assert has('$("controlsLock").disabled = LOCKED || LOST.length > 0;', designer)
+    assert has("the controls do not show", designer)
+    # a redraw the stream asked for leaves a definition someone is changing alone
+    assert has("if (changed()) return;", designer)
+    # the four numbers of step 1, and the tick of step 2 that takes a dataset out
+    assert has('$("kpisFit").replaceChildren(tile("Datasets that fit"', designer)
+    assert has("C.exclude.add(x.id);", designer) and has("C.exclude.delete(id);", designer)
+    # saving: a new subject and no action; a saved buffer's change is an edit that names the revision it was made at
+    assert has("body: JSON.stringify({ spec: definition() })", flow) and has('api("/specs", {', flow)
+    assert has('{ action: "edit", spec: definition(), revision: baseRevision(), key: newKey() }', flow)
+
+
+def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() -> None:
+    """Prepare lists the fitting datasets that are not prepared and the requests this buffer filed. A request
+    filed there names the buffer and leaves the person on the step. The way forward plans over whatever is
+    prepared now, and always stops at the plan."""
+    flow, actions = squeezed(FILES["flow.js"]), squeezed(FILES["actions.js"])
+    assert has("to_prepare: true", flow)
+    assert has('pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number }))', flow)
+    assert has("...(owner == null ? {} : { buffer: owner })", actions)
+    assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
+    # only what a request could start can be ticked: the plan's own list, not every row
+    assert has("startable.has(x.id)", flow)
+    assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
+    assert count("plan_first: true") == 1 and has("title: BUTTON_HELP.plan", flow)  # every plan stops for its Run
+    assert has("disabled: !!blocker || !!subject.asked", flow)
+
+
+def test_steps_four_to_six_are_the_rounds_own_buttons_and_back_is_a_cancel() -> None:
+    """Plan, Source and Serve are the round's stages. Forward is the approve of that stage (the first after the
+    host check); back from Plan and Source asks, then cancels the round; Serve names the version by its id."""
+    flow = squeezed(FILES["flow.js"])
+    assert has("askHosts({ spec: subject.key }, hosts =>", flow)
+    assert has("...(hosts.length ? { approve_hosts: hosts } : {})", flow)
+    assert has('{ action: "approve", revision: subject.revision, key: newKey() }', flow)
+    assert has('disabled: subject.stage !== "staged" || !!subject.asked', flow)  # Approve and serve
+    assert has('sendAction(subject, { action: "cancel", key: newKey() }, redraw)', flow) and has("if (!confirm(", flow)
+    assert has("droppedNotices(subject, board, redraw)", flow) and has("poolTable(version.id", flow)
+    # the plan is shown as the round wrote it, as text
+    assert has("/^# Plan for /.test(entry.body)", flow) and has("markdown(plan.body", flow)
+    # step 6: the id a training run names, never the buffer's name
+    assert has('buffer="${version.id}"', flow) and has("versionsCard(subject)", flow)
+    assert count("plan_first: true") == 1  # one place builds a plan's go: step 3 and "Plan a new version" share it
+
+
+DESIGNER_STUB = """
+// the service, as the designer reaches it: /specs/parse answers the parsed spec of a known text (of any other, the
+// fallback's: the text the controls write for it), /plan an empty plan
+const { S } = await import(input.api);
+S.ref = "a".repeat(40);
+globalThis.fetch = async (path, options) => {
+  const body = JSON.parse(options.body);
+  const answer = path === "/plan" ? { rows: [], total: 0, summary: {} } : { spec: input.parsed[body.spec] || input.fallback };
+  return { ok: true, status: 200, text: async () => JSON.stringify(answer) };
+};
+const later = ms => new Promise(done => setTimeout(done, ms));
+"""
+
+
+def designer(body: str, texts: dict[str, str]) -> Any:
+    """Run `body` over designer.js with its controls bound and the service stubbed; `texts` name the definitions
+    the stub can parse (`input.texts.<name>`)."""
+    from mia_buffers.spec import load_spec_text
+
+    def parsed(text: str) -> dict:
+        return load_spec_text(text).model_dump(mode="json", by_alias=True, exclude={"warnings"})
+
+    return run_js(
+        DESIGNER_STUB + "bindControls();\n" + body,
+        {"designer.js": "bindControls, ensureDefinition, definition, changed, baseRevision, showDesigner"},
+        {
+            "api": (UI_DIR / "api.js").as_uri(),
+            "texts": texts,
+            "parsed": {text: parsed(text) for text in texts.values()},
+            "fallback": parsed(next(iter(texts.values()))),
+        },
+    )
+
+
+def _definitions() -> dict[str, str]:
+    by_hand = (Path(__file__).parent / "fixtures" / "buffers" / "spec.yaml").read_text()
+    return {"first": by_hand, "second": by_hand.replace("name: ", "name: other-", 1)}
+
+
+def test_a_definition_changed_elsewhere_is_not_overwritten_by_an_edit_made_before_it() -> None:
+    """Two tabs. While a person changes a buffer's definition, a redraw brings a newer stored text (someone
+    else's edit). What they typed is kept, and it keeps the revision it was made at: the service refuses their
+    save. A definition nobody is changing follows the stored one, with its revision."""
+    kept, moved, followed = designer(
+        "const at = (revision, text) => ({ key: 'a', revision, actions: ['edit'], data: { spec: text } });\n"
+        "await ensureDefinition(at(1, input.texts.first));\n"
+        "const name = document.getElementById('specName');\n"
+        "name.value = 'typed here'; name.fire('change');\n"  # the person changes a control
+        "await ensureDefinition(at(2, input.texts.second));\n"  # the other tab's edit arrives
+        "const kept = [changed(), definition().includes('typed here'), baseRevision()];\n"
+        "await ensureDefinition(at(3, definition()));\n"  # this page's own text is the stored one now
+        "const moved = [changed(), baseRevision()];\n"
+        "await ensureDefinition(at(4, input.texts.second));\n"  # nobody is typing: the stored text is shown
+        "print([kept, moved, [changed(), definition() === input.texts.second, baseRevision()]]);",
+        _definitions(),
+    )
+    assert kept == [True, True, 1] and moved == [False, 3] and followed == [False, True, 4]
+    assert has("revision: baseRevision()", squeezed(FILES["flow.js"]))
+
+
+def test_a_redraw_leaves_a_number_being_typed_alone() -> None:
+    """A crop count is taken when its field is left. A redraw of the step (the stream, the poll) before that does
+    not put the old number back into the field."""
+    typed = designer(
+        "const field = document.getElementById('cropsTrain');\n"
+        "field.value = '25000';\n"  # typed, the field not left yet
+        "showDesigner();\n"
+        "print(field.value);",
+        _definitions(),
+    )
+    assert typed == "25000"
+
+
+def test_yaml_typed_into_one_buffer_never_lands_in_the_next_one_opened() -> None:
+    """The YAML tab is read after a pause in typing. Opening another buffer within that pause drops the read: the
+    buffer opened shows its own definition, unchanged."""
+    shown = designer(
+        "const at = (key, text) => ({ key, revision: 1, actions: ['edit'], data: { spec: text } });\n"
+        "await ensureDefinition(at('a', input.texts.first));\n"
+        "const box = document.getElementById('specText');\n"
+        "box.value = input.texts.second; box.fire('input');\n"  # typed into a's YAML tab
+        "await ensureDefinition(at('b', input.texts.first));\n"  # b is opened before the pause ends
+        "await later(700);\n"
+        "print([definition() === input.texts.first, changed()]);",
+        _definitions(),
+    )
+    assert shown == [True, False]
+
+
+def test_prepare_plans_what_is_stored_and_the_versions_are_under_every_step() -> None:
+    """Step 3's numbers and its way forward are of the stored definition, which is what the round will run, not of
+    a change that was made on steps 1 and 2 and not saved. A buffer's versions are listed under every step: after a
+    round that failed or was cancelled the buffer rests at Prepare, and its versions are still one click away."""
+    flow = squeezed(FILES["flow.js"])
+    prepare = flow[flow.index("functionprepareStep(") : flow.index("//----step4")]
+    assert has("JSON.stringify({ spec: subject.data.spec, page })", prepare) and "definition()" not in prepare
+    assert "ensureDefinition" not in prepare
+    assert has("[versionsCard(subject), timelineCard(entries)]", flow) and count("versionsCard(subject)", flow) == 1
+
+
+def test_the_page_says_buffer_and_definition_and_explains_nothing_by_its_past() -> None:
+    """What a person reads names a buffer and its definition, a dataset is selected, in a version or on disk, and
+    no comment says how the page once was."""
+    assert not re.search(r"in the buffer\b", FILES["index.html"], re.I)
+    assert not has("the definition's buffers") and not re.search(r"before it was|used to be", PAGE)
+    service = (UI_DIR.parent / "api.py").read_text()
+    for said in ('f"no buffer spec', 'f"not a buffer spec', 'f"buffer spec {key!r}'):
+        assert said not in service, said
+
+
+def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:
+    """Unticking a dataset writes its id to `select.exclude.ids`. A reason beside it, or an excluded path, is
+    something no control shows: specDiff names it, so the page keeps the text."""
+    from mia_buffers.spec import load_spec_text
+
+    def parsed(text: str) -> dict:
+        return load_spec_text(text).model_dump(mode="json", by_alias=True, exclude={"warnings"})
+
+    by_hand = (Path(__file__).parent / "fixtures" / "buffers" / "spec.yaml").read_text()
+    plain = parsed(by_hand)
+    reasoned = {
+        **plain,
+        "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {"x": "blurry"}}},
+    }
+    ticked = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {}}}}
+    ids, differs = run_js(
+        "print([[...fromSpec(input.reasoned).exclude], specDiff(input.reasoned, input.ticked)]);",
+        {"spec.js": "fromSpec, specDiff"},
+        {"reasoned": reasoned, "ticked": ticked},
+    )
+    assert ids == ["x"] and differs == ["select.exclude.reasons.x"]
+
+
+def test_a_stage_opens_at_its_step() -> None:
+    """A buffer is six steps. A stage a round works or waits at is the step of that work; every other stage is
+    Prepare, where a saved buffer rests. A hash may ask for a step already passed, never one ahead."""
+    from mia_buffers.config import STAGE_ACTIONS
+
+    steps, at, shown, words, can, strips = run_js(
+        "print([STEPS, Object.fromEntries(input.stages.map(stage => [stage, stepOf(stage)])),\n"
+        "  input.asks.map(([stage, asked]) => stepToShow(stage, asked)),\n"
+        "  input.subjects.map(statusWord), input.subjects.map(editable).concat(editable(null)),\n"
+        "  input.strips.map(([stage, shown]) => stripOf(stage, shown).map(item => item.state).join(' '))]);",
+        {"steps.js": "STEPS, stepOf, stepToShow, statusWord, editable, stripOf"},
+        {
+            "stages": list(STAGE_ACTIONS),
+            "asks": [
+                ["plan-review", "serve"],
+                ["plan-review", "define"],
+                ["ready", "bogus"],
+                ["new", None],
+                [None, "prepare"],
+                [None, "datasets"],
+                [None, None],
+            ],  # fmt: skip
+            "strips": [["plan-review", "plan"], ["plan-review", "define"], [None, "define"], ["ready", "serve"]],
+            "subjects": [
+                {"stage": "new", "status": "not started", "actions": ["edit", "go"]},
+                {"stage": "plan-review", "status": "waiting", "actions": ["approve"]},
+                {"stage": "sourcing", "status": "working", "actions": ["cancel"]},
+                {"stage": "ready", "status": "done", "actions": ["go"]},
+                {"stage": "idle", "status": "waiting", "actions": ["keep"]},
+                {"stage": "needs-human", "status": "stuck", "actions": ["edit", "go"]},
+                {"stage": "retired", "status": "done", "actions": ["edit", "go"]},
+                {"stage": "cancelled", "status": "shelved", "actions": ["unshelve"], "shelved": {"reason": "later"}},
+            ],
+        },
+    )
+    assert steps == ["define", "datasets", "prepare", "plan", "source", "serve"]
+    assert at == {
+        "new": "prepare", "planning": "plan", "plan-review": "plan", "sourcing": "source", "staged": "source",
+        "ready": "serve", "idle": "serve", "retired": "prepare", "needs-human": "prepare", "cancelled": "prepare",
+    }  # fmt: skip
+    for stage, (status, _actions) in STAGE_ACTIONS.items():  # a round in progress is never shown as resting
+        assert (at[stage] == "prepare") == (status not in ("working", "waiting") and stage not in ("ready",)), stage
+    # a buffer that is not saved (no stage) has its first two steps and opens at the first
+    assert shown == ["plan", "define", "serve", "prepare", "define", "datasets", "define"]
+    assert strips == [
+        "done done done here ahead ahead", "here done done done ahead ahead", "here done ahead ahead ahead ahead",
+        "done done done done done here",
+    ]  # fmt: skip
+    assert words == [
+        "saved, not started", "waits for you", "working", "serving", "serving", "needs you", "retired", "shelved",
+    ]  # fmt: skip
+    assert can == [True, False, False, False, False, True, True, False, True]  # an unsaved buffer is editable
 
 
 def test_a_datasets_page_lists_every_address_of_its_catalog_record_in_its_links_card() -> None:
@@ -1144,24 +1425,44 @@ def test_a_jobs_record_is_shown_as_text_never_as_markup() -> None:
 
 def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() -> None:
     """`#job/<address>` is the whole remainder after `#job/`, slashes and all, and the page reads `/jobs/<address>`
-    (a read route); a 404 is a job that left no record."""
-    assert has("job: viewJob") and has('let arg = rest.join("/")') and has('data-view="job"') and has('id="jobBody"')
-    assert ("GET", "/jobs/x") in requested_paths() and resolve("GET", f"/jobs/{JOB_ADDRESS}") == "read"
-    found, missing = run_js(
-        "globalThis.location = { hash: '#job/issue-12/i12-e345/match-1' };\n"
-        "const asked = [], out = [];\n"
-        "for (const answer of input) {\n"
-        "  globalThis.fetch = async path => { asked.push(path); return { ...answer, text: async () => answer.body }; };\n"
-        "  await viewJob('issue-12/i12-e345/match-1');\n"
-        "  out.push({ asked: asked.pop(), text: textOf(document.getElementById('jobBody')) });\n"
-        "}\n"
-        "print(out);",
-        {"job.js": "viewJob"},
-        [
-            {"ok": True, "status": 200, "body": json.dumps({"request": {"name": "match"}})},
-            {"ok": False, "status": 404, "statusText": "Not Found", "body": '{"error": "no record for this job"}'},
-        ],
+    (a read route); a 404 is a job that left no record. A round's job links the subject its round is of: the
+    number in its address, looked up, in the kind its service and round say."""
+    assert (
+        has("job: viewJob")
+        and has('const arg = decoded(rest.join("/"))')
+        and has('data-view="job"')
+        and has('id="jobBody"')
     )
-    assert found["asked"] == missing["asked"] == f"/jobs/{JOB_ADDRESS}"
-    assert found["text"].startswith("match" + JOB_ADDRESS + "This job is still running")
+    assert ("GET", "/jobs/x") in requested_paths() and resolve("GET", f"/jobs/{JOB_ADDRESS}") == "read"
+    found = run_js(
+        "globalThis.location = { hash: '#job/issue-12/i12-e345/match-1' };\n"
+        "const asked = [], out = [], body = $('jobBody');\n"
+        "for (const answer of input.answers) {\n"
+        "  const lookup = { ok: true, status: 200, body: JSON.stringify(input.lookup) };\n"
+        "  globalThis.fetch = async path => { asked.push(path);\n"
+        "    const sent = path.startsWith('/lookup') ? lookup : answer; return { ...sent, text: async () => sent.body }; };\n"
+        "  await viewJob('issue-12/i12-e345/match-1');\n"
+        "  out.push({ asked: asked.splice(0), text: textOf(body), html: html(body) });\n"
+        "}\n"
+        "print([...out, subjectOf({}, 'issue-12/p12-e3/plan-1'), subjectOf({}, 'cleaner/case-1/diagnose-0')]);",
+        {"job.js": "viewJob, subjectOf", "dom.js": "$"},
+        {
+            "answers": [
+                {"ok": True, "status": 200, "body": json.dumps({"service": "mia-data", "request": {"name": "match"}})},
+                {"ok": False, "status": 404, "statusText": "Not Found", "body": '{"error": "no record for this job"}'},
+            ],
+            # issue numbers repeat across the kinds: the job's own kind is the one linked
+            "lookup": {
+                "subjects": [
+                    {"kind": "buffer", "number": 12, "key": "spec-a"},
+                    {"kind": "dataset", "number": 12, "key": "ds a"},
+                ]
+            },
+        },
+    )
+    found, missing, request, cleaner = found
+    assert found["asked"] == [f"/jobs/{JOB_ADDRESS}", "/lookup?q=12"] and missing["asked"] == [f"/jobs/{JOB_ADDRESS}"]
+    assert found["text"].startswith("match" + JOB_ADDRESS + "dataset ds aThis job is still running")
+    assert '<a href="#datasets/ds%20a">ds a</a>' in found["html"] and "spec-a" not in found["text"]
     assert missing["text"] == "match-1No record for this job."
+    assert (request, cleaner) == ({"kind": "prep", "number": 12}, None)

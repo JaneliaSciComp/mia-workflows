@@ -1,45 +1,41 @@
-<!-- The user guide: the loop from spec to training, for the person training a model. The Docs view shows it. -->
+<!-- The user guide: a buffer from its definition to training, for the person training a model. The Docs view shows it. -->
 <header>
   <div class="eyebrow">user guide · training on a buffer</div>
   <h1>Training on a MIA buffer</h1>
-  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match a spec. The spec is a short YAML file, and it defines both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalisation, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the pool, downloads and converts the datasets it already knows how to read, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process.</p>
-  <p>Everything a person does is a button on this page: plan a buffer, run it, approve it, cancel it. Every step the system takes is an entry in the spec's timeline, which its page shows as it happens. <a href="#needs">Needs you</a> lists whatever is waiting for a person. Something that can wait is taken off that list with <i>Shelve…</i> and a reason: nothing starts it and no buffer plan takes it until <i>Unshelve</i> on its page. The page needs no login: anyone who can reach it can press its buttons.</p>
+  <p>A buffer is a pool of training crops drawn from the catalogued datasets that match its definition. The definition is a short YAML text, and it describes both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalisation, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the buffer over the datasets it already knows how to read, downloads and converts them, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process.</p>
+  <p>A buffer is six steps on one page, in a fixed order, and its page opens at the step it is on. Each step has one button that moves it forward and one that goes back; what else can be asked of it is under <i>More</i>. Every step the system takes is an entry in the buffer's timeline, under the step. <a href="#needs">Needs you</a> lists whatever is waiting for a person. Something that can wait is taken off that list with <i>Shelve…</i> and a reason: nothing starts it and no plan takes it until <i>Unshelve</i>. The page needs no login: anyone who can reach it can press its buttons.</p>
 </header>
 
 <h2>The whole loop</h2>
 <figure>
-<svg viewBox="0 0 980 230" role="img" aria-label="Six steps: build a spec under Buffers, New buffer; Plan saves it and plans the pool; Run downloads and stages; the staged board is posted; Approve serves the buffer; train with BufferDataset. Plan, Run and Approve are a person's clicks; the spec's page and Needs you show the state.">
+<svg viewBox="0 0 980 230" role="img" aria-label="The six steps of a buffer: Define its definition, look at its Datasets and save it, Prepare the datasets that are missing, Plan, Source, Serve. Saving, continuing from Prepare, Run and Approve are a person's clicks; the buffer's page and Needs you show the state.">
   <defs><marker id="g-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
   <rect x="14" y="14" width="952" height="200" rx="6" class="band"/>
   <text x="26" y="34" class="hd">one buffer, start to finish</text>
-  <rect x="26" y="60" width="140" height="58" rx="5" class="b"/><text x="96" y="84" text-anchor="middle" class="ts">1 · spec</text><text x="96" y="102" text-anchor="middle" class="s">New buffer → spec YAML</text>
-  <rect x="190" y="60" width="140" height="58" rx="5" class="bs"/><text x="260" y="84" text-anchor="middle" class="ts">2 · Plan</text><text x="260" y="102" text-anchor="middle" class="s">the pool is planned</text>
-  <rect x="354" y="60" width="140" height="58" rx="5" class="bs"/><text x="424" y="84" text-anchor="middle" class="ts">3 · Run</text><text x="424" y="102" text-anchor="middle" class="s">download, stage</text>
-  <rect x="518" y="60" width="140" height="58" rx="5" class="b"/><text x="588" y="84" text-anchor="middle" class="ts">4 · staged</text><text x="588" y="102" text-anchor="middle" class="s">read the board</text>
-  <rect x="682" y="60" width="140" height="58" rx="5" class="bs"/><text x="752" y="84" text-anchor="middle" class="ts">5 · Approve</text><text x="752" y="102" text-anchor="middle" class="s">serve what is there</text>
-  <rect x="846" y="60" width="108" height="58" rx="5" class="b"/><text x="900" y="84" text-anchor="middle" class="ts">6 · train</text><text x="900" y="102" text-anchor="middle" class="s">BufferDataset</text>
+  <rect x="26" y="60" width="140" height="58" rx="5" class="b"/><text x="96" y="84" text-anchor="middle" class="ts">1 · Define</text><text x="96" y="102" text-anchor="middle" class="s">controls or YAML</text>
+  <rect x="190" y="60" width="140" height="58" rx="5" class="bs"/><text x="260" y="84" text-anchor="middle" class="ts">2 · Datasets</text><text x="260" y="102" text-anchor="middle" class="s">save the buffer</text>
+  <rect x="354" y="60" width="140" height="58" rx="5" class="bs"/><text x="424" y="84" text-anchor="middle" class="ts">3 · Prepare</text><text x="424" y="102" text-anchor="middle" class="s">continue when you like</text>
+  <rect x="518" y="60" width="140" height="58" rx="5" class="bs"/><text x="588" y="84" text-anchor="middle" class="ts">4 · Plan</text><text x="588" y="102" text-anchor="middle" class="s">Run</text>
+  <rect x="682" y="60" width="140" height="58" rx="5" class="bs"/><text x="752" y="84" text-anchor="middle" class="ts">5 · Source</text><text x="752" y="102" text-anchor="middle" class="s">Approve and serve</text>
+  <rect x="846" y="60" width="108" height="58" rx="5" class="b"/><text x="900" y="84" text-anchor="middle" class="ts">6 · Serve</text><text x="900" y="102" text-anchor="middle" class="s">train on its id</text>
   <line x1="166" y1="89" x2="188" y2="89" class="e" marker-end="url(#g-arrow)"/>
   <line x1="330" y1="89" x2="352" y2="89" class="e" marker-end="url(#g-arrow)"/>
   <line x1="494" y1="89" x2="516" y2="89" class="e" marker-end="url(#g-arrow)"/>
   <line x1="658" y1="89" x2="680" y2="89" class="e" marker-end="url(#g-arrow)"/>
   <line x1="822" y1="89" x2="844" y2="89" class="e" marker-end="url(#g-arrow)"/>
-  <rect x="190" y="150" width="302" height="44" rx="5" class="note"/><text x="341" y="169" text-anchor="middle" class="l">your clicks: Plan, Run, Approve</text><text x="341" y="185" text-anchor="middle" class="s">the accented steps; the rest runs unattended</text>
-  <rect x="518" y="150" width="304" height="44" rx="5" class="note"/><text x="670" y="169" text-anchor="middle" class="l">state: the spec's page and Needs you</text><text x="670" y="185" text-anchor="middle" class="s">every stage change is a timeline entry</text>
+  <rect x="190" y="150" width="302" height="44" rx="5" class="note"/><text x="341" y="169" text-anchor="middle" class="l">your clicks: one per accented step</text><text x="341" y="185" text-anchor="middle" class="s">what follows each click runs unattended</text>
+  <rect x="518" y="150" width="304" height="44" rx="5" class="note"/><text x="670" y="169" text-anchor="middle" class="l">state: the buffer's page and Needs you</text><text x="670" y="185" text-anchor="middle" class="s">every stage change is a timeline entry</text>
   <line x1="260" y1="118" x2="260" y2="150" class="ed"/><line x1="424" y1="118" x2="424" y2="150" class="ed"/><line x1="588" y1="118" x2="588" y2="150" class="ed"/><line x1="752" y1="118" x2="752" y2="150" class="ed"/>
 </svg>
-<figcaption><b>The six steps of one buffer.</b> The accented boxes are a person's clicks: <i>Plan</i>, <i>Run</i> and <i>Approve</i>. The other steps run on their own, and each stage change is an entry in the spec's timeline.</figcaption>
+<figcaption><b>The six steps of one buffer.</b> The accented steps end in a person's click: <i>Save buffer and continue</i>, <i>Continue with N prepared datasets</i>, <i>Run</i>, <i>Approve and serve</i>. What follows a click runs on its own, and each stage change is an entry in the buffer's timeline.</figcaption>
 </figure>
 
-<h2>Step 1. The spec</h2>
-<p><a href="#buffers/new">New buffer</a>, on the Buffers tab, builds a spec from its filters: dimensionality, licence, annotation source, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, the weighting between datasets, the crops per split, the most crops one dataset may hold, and the datasets held out for test. The spec's <code>sampling.crops</code> is the buffer's size: how many distinct crops it holds per split, shared out among the datasets by weight and placed at random in each. The val and test lists are drawn from their crops and are that long, or shorter when the datasets hold fewer. Each change is planned against the catalog on the server, so the counts shown are the plan that spec produces.</p>
-<ul>
-  <li><b>Where datasets leave</b> counts the datasets each rule removes. The last rule, <em>not prepared</em>, means a dataset fits the spec but no reader exists for its files yet; the other rules are the spec's own filters.</li>
-  <li><b>Fitting datasets by modality</b> and <b>Weight share</b> show the composition of the pool and of the draws. The weighting temperature runs from uniform over modalities (0) to proportional to each dataset's capacity (1).</li>
-  <li><b>Prepare these datasets</b> files one request that hands every dataset that fits the spec and is not prepared to the preparation pipeline. (To prepare datasets of your own choosing, tick them on the <a href="#datasets">Datasets</a> tab.) Each one is an agent run that writes and verifies a reader for that dataset's files; some stop with a question for a person. The request's page lists its datasets with where each stands; every request is on the <a href="#preparation">Preparation</a> tab. A buffer plans over prepared datasets only, so a buffer started today uses what is prepared today, and a later round picks up the rest.</li>
-  <li><b>Download spec YAML</b> saves the spec as a file, for editing by hand or for keeping with an experiment.</li>
-</ul>
-<p>The fields of a spec that are usually edited:</p>
-<pre>name: my-2d-nuclei                      <span class="c"># names the spec and its page; saving the same name edits that spec</span>
+<h2>Step 1. Define</h2>
+<p><a href="#buffers/new">New buffer</a>, on the Buffers tab, opens a buffer that is not saved yet. Its definition has two tabs over one text. <b>Controls</b> sets it through filters: dimensionality, licence, annotation source, whether annotations are required, the smallest array accepted, the patch size and pyramid levels, the weighting between datasets, the crops per split, the most crops one dataset may hold, and the datasets held out for test. <b>YAML</b> shows the same definition as text: edit or paste there and the controls follow. When the YAML holds something no control shows, the YAML is the definition, the page says what the controls cannot show, and the controls are read-only while it holds that. YAML that is not a definition is said so beside the tabs, and the way forward is closed until it is one.</p>
+<p>The name is a label. It need not be unique and nothing looks a buffer up by it. <code>sampling.crops</code> is the buffer's size: how many distinct crops it holds per split, shared out among the datasets by weight and placed at random in each. The val and test lists are drawn from their crops and are that long, or shorter when the datasets hold fewer.</p>
+<p>Under the definition are the numbers of its plan, computed on the server at each change: how many datasets fit, how many of those are prepared, the <b>weight share by modality</b> and the <b>heaviest datasets</b>. The weighting temperature runs from uniform over modalities (0) to proportional to each dataset's capacity (1).</p>
+<p>The fields of a definition that are usually edited:</p>
+<pre>name: my-2d-nuclei                      <span class="c"># a label: it may repeat, and can be changed</span>
 catalog: {repo: …, ref: &lt;commit&gt;}       <span class="c"># pinned by the page: the plan is reproducible</span>
 select:
   where:
@@ -47,6 +43,7 @@ select:
     modality: {in: [fluorescence, brightfield]}
     license: {in: [CC0-1.0, CC-BY-4.0], allow_unknown: false}
     annotations: {required: true}
+  exclude: {ids: [a-dataset-id]}        <span class="c"># the datasets unticked on step 2</span>
 sampling:
   patch: {2D: {y: 256, x: 256}, c: 1}   <span class="c"># crop edges in pixels at level 1; one channel per crop</span>
   levels: [1, 2, 4]                     <span class="c"># the pyramid levels each crop is served at</span>
@@ -55,50 +52,68 @@ sampling:
 splits:
   fractions: {train: 0.8, val: 0.1, test: 0.1}
 ready:
-  min_fraction: 0.5                     <span class="c"># how much of each weighting group must be servable before the board says "ready"</span></pre>
+  min_fraction: 0.5                     <span class="c"># how much of each weighting group must be servable before the buffer counts as ready</span></pre>
 
-<h2>Step 2. Plan, then run</h2>
-<p><b>Create buffer</b>, below the filters, shows the spec as YAML, with the catalog commit pinned; edit it there if the controls do not offer what you need. <b>Plan</b> saves the spec as a new one and starts a round that stops at its plan, before any job runs. Two specs may have the same name; each has its own number.</p>
-<p>The page then opens the spec's own page: its lifecycle with the current stage marked, what it is waiting for, the buttons its stage accepts, and its timeline. The plan is a timeline entry that lists the pool, one row per dataset, with weights. <b>Run</b> starts the jobs. To change the spec instead, press <i>Edit</i>: New buffer opens with the controls set from it, and <b>Plan</b> there saves to the same spec and plans it again. A spec can be edited until one of its rounds is run; after that its text is fixed, and <i>Clone</i> opens New buffer on a copy that becomes a spec of its own.</p>
-<div class="tw"><table>
-<tr><th>button</th><th>offered when the spec is</th><th>what it does</th></tr>
-<tr><td><i>Plan</i></td><td>not in a round; or waiting at a gate</td><td>Saves the spec text and starts a round that stops at its plan. Each round builds a buffer with a new id. A buffer that is already serving keeps serving the training jobs connected to it; a staged buffer nobody approved is retired.</td></tr>
-<tr><td><i>Run</i></td><td><code>plan-review</code></td><td>Accepts the plan: download, convert, then stop once at <code>staged</code>.</td></tr>
-<tr><td><i>Approve</i></td><td><code>staged</code></td><td>Serves the buffer as the board shows it.</td></tr>
-<tr><td><i>Files are in place</i></td><td><code>sourcing</code>, <code>staged</code>, <code>ready</code></td><td>For a dataset waiting on files placed by hand: tells the round they are in its <code>incoming/</code> directory.</td></tr>
-<tr><td><i>Keep</i></td><td><code>idle</code></td><td>An idle buffer stays; back to ready.</td></tr>
-<tr><td><i>Retire</i></td><td><code>ready</code>, <code>idle</code></td><td>Releases the buffer's staged data.</td></tr>
-<tr><td><i>Revoke the ticked</i></td><td><code>ready</code>, <code>idle</code></td><td>Withdraws the ticked datasets from a serving buffer. Their volumes leave the buffer and their artifacts are quarantined; the buffer serves on at its floor or asks for a person.</td></tr>
-<tr><td><i>Cancel the round</i></td><td>a round before <code>ready</code></td><td>Ends the round: its cluster jobs are killed and its buffer is retired.</td></tr>
-<tr><td><i>Force stop</i></td><td>any stage with a run</td><td>For a run that does not answer a cancel: terminates the workflow and retires the buffers. It does not kill a job already running.</td></tr>
-<tr><td><i>Check again</i></td><td>a request at <code>needs-human</code></td><td>The request looks at its datasets again and is done once each is prepared or shelved.</td></tr>
-</table></div>
-<p>A round in progress accepts only <i>Cancel the round</i>: cancel it before asking for anything else. After a click the buttons are held, with the pressed one marked, until the round answers.</p>
-<div class="tw"><table>
-<tr><th>stage</th><th>the buffer is</th></tr>
-<tr><td><code>new</code></td><td>saved; nothing has run.</td></tr>
-<tr><td><code>planning</code> → <code>plan-review</code></td><td>resolving the spec; then the plan is in the timeline and the round waits for <i>Run</i>.</td></tr>
-<tr><td><code>sourcing</code></td><td>downloading and converting, several datasets at a time. One timeline entry per dataset as it lands or fails.</td></tr>
-<tr><td><code>staged</code></td><td>no job left to run; the board is posted. Waiting for <i>Approve</i>.</td></tr>
-<tr><td><code>ready</code></td><td>serving. The entry holds the Python cell with the buffer id filled in.</td></tr>
-<tr><td><code>idle</code> · <code>retired</code></td><td>nobody drew from it for a while (default 72 hours) · its data is released.</td></tr>
-<tr><td><code>needs-human</code></td><td>stopped. The newest entry says why; the usual answer is an edited spec and <i>Plan</i> again.</td></tr>
-<tr><td><code>cancelled</code></td><td>a person cancelled the round; <i>Plan</i> starts another.</td></tr>
-</table></div>
+<h2>Step 2. Datasets</h2>
+<p><b>Next</b> shows every dataset the definition admits, and why each is selected or not. <b>Where datasets leave</b> counts the datasets each rule removes; the last rule, <em>not prepared</em>, means a dataset fits but no reader exists for its files yet, and the other rules are the definition's own filters. Untick a dataset that fits to take it out of this buffer: it is listed above the table, with <i>put back</i>, and written to the definition as an excluded id.</p>
+<p><b>Save buffer and continue</b> creates the buffer. Nothing runs yet. From here on the buffer has a page of its own, which the Buffers tab lists, and its definition can still be changed: go back to step 1 or 2, change it, and going on saves the change. A definition can be changed while the buffer rests: before its first plan, and after a round that was cancelled, stopped or retired. While a round is in progress it cannot (go back from that step, which cancels the round), and a buffer that serves is fixed. <i>Clone</i>, under <i>More</i>, opens New buffer on a copy of any buffer's definition.</p>
 
-<h2>Step 3. Read the board, then approve</h2>
-<p>Sourcing runs until no dataset has a job left. The spec then moves to <code>staged</code> and its timeline gets the board: each dataset's outcome (with the error of one that failed), each weighting group's servable share against <code>ready.min_fraction</code>, volumes per split, bytes on disk, and which datasets are still waiting on something.</p>
-<p><b>Approve.</b> <i>Approve</i> serves the buffer as the board shows it. A dataset that failed stays out; one that is waiting keeps its place and joins when it lands, with a new board entry. The share each group has at the approve becomes the floor it is judged against afterwards, so a partial buffer accepted on purpose is not later reported as degraded. No job runs between the approve and <code>ready</code>.</p>
-<p><b>Or plan again, or clone.</b> <i>Plan again</i> on the spec's page retires the staged buffer and plans a new round of the same spec. To change something, <i>Clone</i> it: the copy is a new spec with its own buffers. Converted pyramids stay in the shared cache, so a round over the same datasets skips the conversion.</p>
+<h2>Step 3. Prepare</h2>
+<p>A buffer is planned over prepared datasets only. This step lists the datasets that fit and are not prepared. Tick the ones you want and press <b>Prepare the ticked datasets</b>: that files one preparation request for this buffer. Each dataset in it is an agent run that writes and verifies a reader for that dataset's files; some stop with a question for a person. The step lists the buffer's requests with their stage, and each dataset with where it stands. (To prepare datasets apart from any buffer, tick them on the <a href="#datasets">Datasets</a> tab; every request is listed under <a href="#preparation">Preparation requests</a> there.)</p>
+<p>The buffer waits at this step for as long as you like, and nothing about it runs meanwhile. <b>Continue with N prepared datasets</b> plans it over whatever is prepared at that moment. Datasets that are prepared later join the next plan.</p>
+
+<h2>Step 4. Plan</h2>
+<p>The round resolves the definition against the catalog and the prepared datasets and stops at its plan: the datasets in this version, one row each, with weights and crops. Nothing has been downloaded. <b>Run: fetch and stage</b> accepts the plan; before it starts, the page lists any host the downloads need that jobs may not reach yet, to approve with the start. <b>Change the buffer</b>, the way back, cancels the round, and the buffer rests at step 3 where it can be changed and planned again.</p>
+
+<h2>Step 5. Source</h2>
+<p>The datasets of the plan are downloaded and converted, several at a time, and the step shows each one: on disk, fetching, staging, waiting, or failed with the reason. Sourcing runs until no dataset has a job left; the buffer is then <code>staged</code>, and its timeline gets the board: each dataset's outcome, each weighting group's servable share against <code>ready.min_fraction</code>, volumes per split, and bytes on disk.</p>
+<p><b>Approve and serve</b> serves the version as the step shows it. A dataset that failed stays out; one that is waiting keeps its place and joins when it lands. The share each group has at the approve becomes the floor it is judged against afterwards, so a partial buffer accepted on purpose is not later reported as degraded. The way back cancels the round, as on step 4. Converted pyramids stay in the shared cache, so a later round over the same datasets skips the conversion.</p>
 <ul>
-  <li><b>Waiting on a drop.</b> Some datasets sit on hosts no job may reach. The timeline lists the files to place by hand in the dataset's <code>incoming/</code> directory. Once the copy has finished, press <i>Files are in place</i>, and the worker takes them into the cache. The button is refused while the directory is empty or a file in it changed in the last minute.</li>
+  <li><b>Waiting on a drop.</b> Some datasets sit on hosts no job may reach. The timeline lists the files to place by hand in the dataset's <code>incoming/</code> directory. Once the copy has finished, press <i>Files are in place</i> on this step, and the worker takes them into the cache. The button is refused while the directory is empty or a file in it changed in the last minute.</li>
   <li><b>Waiting for a quota or a lock.</b> The cache is full, or another buffer is converting the same dataset. Both clear on their own.</li>
-  <li><b>Day limit.</b> A group with nothing servable after <code>sourcing.dataset_timeout_days</code> (default 14) drops its waiters; with nothing servable at all the spec stops at <code>needs-human</code>.</li>
-  <li><b>Automatic approve.</b> <code>plan: {auto_approve: true}</code> in the spec approves the staged buffer without a person when every group meets <code>min_fraction</code>. A short group still waits for one.</li>
+  <li><b>Day limit.</b> A group with nothing servable after <code>sourcing.dataset_timeout_days</code> (default 14) drops its waiters; with nothing servable at all the buffer stops at <code>needs-human</code>.</li>
+  <li><b>Automatic approve.</b> <code>plan: {auto_approve: true}</code> in the definition approves the staged version without a person when every group meets <code>min_fraction</code>. A short group still waits for one.</li>
 </ul>
 
-<h2>Step 4. Train</h2>
-<p>The <code>ready</code> entry names the buffer id and gives this cell. It runs in the harness environment of the mia-snippets checkout, with this repository on the Python path and torch and muvit installed:</p>
+<h2>Step 6. Serve</h2>
+<p>The step names the <b>version</b> being served by its id, with the line a training script pastes. Every round that reaches its plan makes a version with an id of its own, and a training run names that id, never the buffer's name. The step lists the buffer's versions, each opening a page with its events, datasets, volumes, consumers and usage.</p>
+<p>A serving buffer's definition is fixed. <b>Plan a new version</b> plans it again over the datasets that are prepared now; the version being served keeps serving the runs connected to it until the new one is approved. <i>Revoke the ticked</i> withdraws single datasets from the serving version, and <i>Retire</i>, under <i>More</i>, releases all of it.</p>
+
+<h2>Buttons and stages</h2>
+<div class="tw"><table>
+<tr><th>button</th><th>where</th><th>what it does</th></tr>
+<tr><td><i>Save buffer and continue</i></td><td>step 2, a buffer not saved yet</td><td>Creates the buffer. Nothing runs.</td></tr>
+<tr><td><i>Save changes and continue</i></td><td>steps 1 and 2 of a buffer that rests</td><td>Stores the changed definition. Nothing runs.</td></tr>
+<tr><td><i>Continue with N prepared datasets</i></td><td>step 3</td><td>Starts a round that stops at its plan.</td></tr>
+<tr><td><i>Run: fetch and stage</i></td><td>step 4, <code>plan-review</code></td><td>Accepts the plan: download, convert, then stop once at <code>staged</code>.</td></tr>
+<tr><td><i>Approve and serve</i></td><td>step 5, <code>staged</code></td><td>Serves the version as the step shows it.</td></tr>
+<tr><td><i>Change the buffer</i></td><td>steps 4 and 5</td><td>Cancels the round: its cluster jobs are killed and its version is retired. The buffer rests at step 3.</td></tr>
+<tr><td><i>Files are in place</i></td><td>step 5</td><td>For a dataset waiting on files placed by hand: tells the round they are in its <code>incoming/</code> directory.</td></tr>
+<tr><td><i>Plan a new version</i></td><td>step 6</td><td>A new round of the same definition, over the datasets prepared now.</td></tr>
+<tr><td><i>Revoke the ticked</i></td><td>step 6</td><td>Withdraws the ticked datasets from the serving version. Their volumes leave it and their artifacts are quarantined; the version serves on at its floor or asks for a person.</td></tr>
+<tr><td><i>Keep</i></td><td><i>More</i>, <code>idle</code></td><td>An idle buffer stays; back to ready.</td></tr>
+<tr><td><i>Retire</i></td><td><i>More</i>, <code>ready</code>, <code>idle</code></td><td>Releases the version's staged data.</td></tr>
+<tr><td><i>Cancel the round</i></td><td><i>More</i>, a round before <code>ready</code></td><td>The same cancel as the way back from steps 4 and 5.</td></tr>
+<tr><td><i>Force stop</i></td><td><i>More</i>, any stage with a run</td><td>For a run that does not answer a cancel: terminates the workflow and retires the versions. It does not kill a job already running.</td></tr>
+<tr><td><i>Clone</i></td><td><i>More</i></td><td>Opens New buffer on a copy of this buffer's definition.</td></tr>
+<tr><td><i>Check again</i></td><td>a request at <code>needs-human</code></td><td>The request looks at its datasets again and is done once each is prepared or shelved.</td></tr>
+</table></div>
+<p>A round in progress accepts only its cancel: cancel it before asking for anything else. After a click the buttons are held, with the pressed one marked, until the round answers.</p>
+<div class="tw"><table>
+<tr><th>stage</th><th>step</th><th>the buffer is</th></tr>
+<tr><td><code>new</code></td><td>3</td><td>saved; nothing has run.</td></tr>
+<tr><td><code>planning</code> → <code>plan-review</code></td><td>4</td><td>resolving the definition; then the plan is shown and the round waits for <i>Run</i>.</td></tr>
+<tr><td><code>sourcing</code></td><td>5</td><td>downloading and converting, several datasets at a time. One timeline entry per dataset as it lands or fails.</td></tr>
+<tr><td><code>staged</code></td><td>5</td><td>no job left to run; the board is in the timeline. Waiting for <i>Approve and serve</i>.</td></tr>
+<tr><td><code>ready</code></td><td>6</td><td>serving.</td></tr>
+<tr><td><code>idle</code></td><td>6</td><td>serving, and nobody drew from it for a while (default 72 hours).</td></tr>
+<tr><td><code>retired</code></td><td>3</td><td>its version's data is released. It can be changed and planned again.</td></tr>
+<tr><td><code>needs-human</code></td><td>3</td><td>stopped. The newest entry says why; the usual answer is a changed definition, or more prepared datasets, and <i>Continue</i> again.</td></tr>
+<tr><td><code>cancelled</code></td><td>3</td><td>a person cancelled the round. It can be changed and planned again.</td></tr>
+</table></div>
+
+<h2>Training</h2>
+<p>Step 6 names the id of the version being served. This cell runs in the harness environment of the mia-snippets checkout, with this repository on the Python path and torch and muvit installed:</p>
 <pre>from mia_buffers.client import BufferDataset
 
 URL, TENSORIZERS = "&lt;service url&gt;", "&lt;mia-snippets checkout&gt;"   <span class="c"># or export MIA_BUFFERS_TENSORIZERS</span>
@@ -108,20 +123,20 @@ val_ds = BufferDataset(URL, "&lt;buffer id&gt;", "val", tensorizers=TENSORIZERS)
 loader = DataLoader(train_ds, batch_size=32, num_workers=8, collate_fn=BufferDataset.collate)
 model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)</pre>
 <ul>
-  <li><b>Train is a stream.</b> Each item is a crop drawn by the service under the spec's weighting; <code>n_samples</code> is the length of one virtual epoch and the index is ignored. <b>Val and test replay a frozen list</b> that is the same every epoch and every run.</li>
+  <li><b>Train is a stream.</b> Each item is a crop drawn by the service under the definition's weighting; <code>n_samples</code> is the length of one virtual epoch and the index is ignored. <b>Val and test replay a frozen list</b> that is the same every epoch and every run.</li>
   <li><b>The service serves descriptors, not pixels.</b> A descriptor names the pyramid, the window, the channels and the normalisation bounds. The training process reads the OME-Zarr pyramid from shared storage and tensorises it, so the load of a DataLoader with many workers falls on the training node. Each worker registers itself as a consumer, listed on the buffer's page.</li>
   <li><b>What a sample holds.</b> The image at each level in <code>sampling.levels</code>, the label layers the dataset has, and <code>meta</code> with the record, the voxel size and the crop's position in physical units. A buffer mixes datasets whose label layers differ, which is why the custom collate is needed: a batch keeps the keys every sample has.</li>
-  <li><b>What is pinned.</b> The buffer records the catalog commit, the spec hash, the plan hash and the commit of the conversion code. A checkout at a different commit raises on construction; <code>allow_recipe_mismatch=True</code> turns that into a warning.</li>
+  <li><b>What is pinned.</b> A version records the catalog commit, the definition's hash, the plan hash and the commit of the conversion code. A checkout at a different commit raises on construction; <code>allow_recipe_mismatch=True</code> turns that into a warning.</li>
   <li><b>Before the approve</b>, while the buffer <b>needs a human</b>, or when it has <b>no approved event</b>, the service answers 409 with the reason and the client raises <code>BufferNotApproved</code>. <b>After a retire</b> it answers 410. A split with nothing servable yet raises <code>BufferEmpty</code>.</li>
 </ul>
 
-<h2>Step 5. During training, and afterwards</h2>
-<p>The <a href="#buffers">Buffers</a> tab lists every spec and every buffer with its latest event; a buffer's own page has the board, the volumes per split, the consumers seen, the draws per day and a health line. After <code>ready</code> the spec changes only when one of these happens:</p>
+<h2>During training, and afterwards</h2>
+<p>The <a href="#buffers">Buffers</a> tab lists every buffer with its step and the id it is serving; a version's own page has its datasets, the volumes per split, the consumers seen, the draws per day and a health line. After <code>ready</code> the buffer changes only when one of these happens:</p>
 <ul>
   <li><b>Degraded.</b> When a group's servable share falls under the floor set at the approve (a pyramid was evicted or lost), the timeline says so and the worker stages the missing datasets again from the cache.</li>
-  <li><b>Idle.</b> No consumer for <code>idle.hours</code> (default 72) moves the spec to <code>idle</code>; <i>Keep</i> returns it to ready. After <code>retire_after_days</code> (default 14) more days without a draw the keeper retires the buffer and its space is reclaimed.</li>
-  <li><b>Revoked.</b> <i>Revoke the ticked</i> removes single datasets from the serving buffer; <i>Retire</i> releases all of it.</li>
-  <li><b>A new round.</b> <i>Plan</i> with the same or an edited spec builds a buffer with a new id, reusing what is in the cache. The Buffers tab marks the earlier buffer superseded.</li>
+  <li><b>Idle.</b> No consumer for <code>idle.hours</code> (default 72) moves the buffer to <code>idle</code>; <i>Keep</i> returns it to ready. After <code>retire_after_days</code> (default 14) more days without a draw the keeper retires the version and its space is reclaimed.</li>
+  <li><b>Revoked.</b> <i>Revoke the ticked</i> removes single datasets from the serving version; <i>Retire</i> releases all of it.</li>
+  <li><b>A new version.</b> <i>Plan a new version</i> builds one with a new id, reusing what is in the cache. A training run that should use it is given the new id.</li>
 </ul>
 
 <h2>Symptoms and their causes</h2>
@@ -129,17 +144,17 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><th>symptom</th><th>cause</th><th>what to do</th></tr>
 <tr><td>the buttons are greyed out: "Sent: waiting for its workflow to answer"</td><td>the click reached the round, which has not written its next stage yet</td><td>wait; the buttons come back with the answer, or after a minute if a worker is away</td></tr>
 <tr><td>"… was not delivered", with a <i>Retry</i></td><td>the action did not reach the workflow engine: the service could not reach Temporal</td><td>press <i>Retry</i>, which sends the same action again; if it keeps failing, the workers or Temporal are down</td></tr>
-<tr><td>a button is refused: the stage does not accept it</td><td>the spec moved to another stage after the page drew its buttons, or a round is in progress</td><td>read the stage on the page; a round in progress takes only <i>Cancel the round</i></td></tr>
+<tr><td>a button is refused: the stage does not accept it</td><td>the buffer moved to another stage after the page drew its buttons, or a round is in progress</td><td>read the stage on the page; a round in progress takes only its cancel</td></tr>
 <tr><td><i>Approve</i> refused: the subject has changed</td><td>a newer plan or board was posted after the page showed the one you read</td><td>read the newest entry, then approve again</td></tr>
 <tr><td>"The registry says a round is in progress, but its workflow is …"</td><td>the run ended without writing its last stage</td><td><i>Cancel the round</i> settles it</td></tr>
-<tr><td>no weighting group reached <code>ready.min_fraction</code></td><td>every dataset of every group failed or is still waiting</td><td>the board names the failures; edit the spec or prepare the datasets, then <i>Plan</i> again</td></tr>
-<tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td>tick it on the Datasets tab and <b>Prepare</b>, or prepare what a new buffer's plan needs; then a new round later</td></tr>
-<tr><td><code>BufferNotApproved</code> (409 buffer not approved)</td><td>the round is staged but not approved</td><td>press <i>Approve</i> on the spec's page (it is listed under <i>Needs you</i>)</td></tr>
-<tr><td><code>BufferNotApproved</code> (409 buffer needs a human)</td><td>the buffer's latest event is <code>needs-human</code>: a degraded rebuild or a round that stopped</td><td>read the newest entry of the spec's timeline; the buffer serves again once the round writes <code>approved</code> or <code>ready</code></td></tr>
+<tr><td>no weighting group reached <code>ready.min_fraction</code></td><td>every dataset of every group failed or is still waiting</td><td>the board names the failures; change the definition or prepare the datasets, then continue from step 3 again</td></tr>
+<tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td>tick it on step 3 of the buffer, or on the Datasets tab, and prepare it; then plan again</td></tr>
+<tr><td><code>BufferNotApproved</code> (409 buffer not approved)</td><td>the round is staged but not approved</td><td>press <i>Approve and serve</i> on step 5 of the buffer (it is listed under <i>Needs you</i>)</td></tr>
+<tr><td><code>BufferNotApproved</code> (409 buffer needs a human)</td><td>the buffer's latest event is <code>needs-human</code>: a degraded rebuild or a round that stopped</td><td>read the newest entry of the buffer's timeline; the version serves again once the round writes <code>approved</code> or <code>ready</code></td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorised to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
-<tr><td>410 buffer retired</td><td>the buffer was retired: by <i>Retire</i>, by the keeper, or by a new round</td><td>use the id of the newest round (the Buffers tab marks older rounds superseded)</td></tr>
+<tr><td>410 buffer retired</td><td>the buffer was retired: by <i>Retire</i>, by the keeper, or by a new round</td><td>use the id the buffer is serving now: the Buffers tab and step 6 name it</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
-<tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td>the cleaner finds it within the hour and says on the <i>Cleaner</i> tab what it saw and did. By hand: <i>Cancel the round</i> on its page; if that gets no answer, <i>Force stop</i>, then run it again</td></tr>
+<tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td>the cleaner finds it within the hour and says on the <i>Cleaner</i> tab what it saw and did. By hand: <i>Cancel the round</i>, under <i>More</i> on its page; if that gets no answer, <i>Force stop</i>, then run it again</td></tr>
 <tr><td>a line under the top bar says a restart is owed, or a schedule has stopped</td><td>the cleaner found something wrong with the installation; the rounds behind it are left alone until it clears</td><td>do what the line says on the host (<code>pixi run mia restart …</code>)</td></tr>
 <tr><td><code>blocked</code> (a dataset) or <code>needs-human</code> (a buffer, a request) whose entry starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then press the button again</td></tr>
 <tr><td><code>blocked</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a round that saves its crops repairs it</td></tr>
@@ -150,12 +165,13 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><th>word</th><th>meaning</th></tr>
 <tr><td>dataset, record</td><td>one entry of the catalog: a published dataset with its files, licence, modality and annotations described. The code and the catalog say <em>record</em> for the entry and its id; the pages say <em>dataset</em>.</td></tr>
 <tr><td>prepared</td><td>a dataset with an approved reader and verified sample crops, produced by the preparation pipeline. Only prepared datasets enter a plan.</td></tr>
-<tr><td>spec, buffer, round</td><td>a spec is the YAML you save and run; a buffer is one served pool of crops built from it. A spec runs one round at a time; each round builds a buffer with a new id.</td></tr>
-<tr><td>stage, timeline</td><td>a spec, a dataset and a preparation request are each in one stage at a time, and the stage decides which buttons are offered. The timeline is the list of everything that happened to it, newest first.</td></tr>
+<tr><td>buffer, definition, version, round</td><td>a buffer is what you define, prepare and serve; its definition is the YAML text that says what goes in and how crops come out. A round plans and sources the buffer; a buffer runs one round at a time, and each round that reaches its plan makes a version with an id of its own. A training run names a version's id.</td></tr>
+<tr><td>selected, in this version, on disk</td><td>a dataset is <em>selected</em> when the definition admits it and its tick is on; <em>in this version</em> when a plan holds it; <em>on disk</em> when its data is staged and can be drawn from.</td></tr>
+<tr><td>stage, timeline</td><td>a buffer, a dataset and a preparation request are each in one stage at a time, and the stage decides which buttons are offered. The timeline is the list of everything that happened to it, newest first.</td></tr>
 <tr><td>weighting group</td><td>the datasets that share the first key of <code>weighting.over</code>, a modality for instance. <code>min_fraction</code> and the floors are per group.</td></tr>
 <tr><td>staged</td><td>converted: a dataset's volumes rewritten once as immutable OME-Zarr pyramids in the shared cache, reused by every buffer that needs the same geometry and plan.</td></tr>
-<tr><td>crop, level</td><td>a crop is one training window, served at each pyramid level the spec lists, all centred on the same point: level 1 is full resolution, level 2 half, and so on.</td></tr>
-<tr><td>split</td><td>train, val or test. Volumes are assigned by the spec's fractions and seed; a record in <code>holdout_ids</code> is all test.</td></tr>
+<tr><td>crop, level</td><td>a crop is one training window, served at each pyramid level the definition lists, all centred on the same point: level 1 is full resolution, level 2 half, and so on.</td></tr>
+<tr><td>split</td><td>train, val or test. Volumes are assigned by the definition's fractions and seed; a record in <code>holdout_ids</code> is all test.</td></tr>
 <tr><td>keeper</td><td>the background pass that watches quotas, idle buffers and lost pyramids. It is the only thing that deletes.</td></tr>
 <tr><td>cleaner</td><td>the background pass that looks for stuck rounds and what rounds left behind. Each thing it finds is a case on the <i>Cleaner</i> tab: a short row (the subject, the kind of problem, a status, how many steps are done) that opens into what the problem means, what the cleaner found and did, what it needs from a person when it could not resolve it, and under <i>Job logs</i> the records (conversation and cluster logs) of the round's jobs and of its own diagnosis. Its actions are in a timeline as <code>cleaner</code>.</td></tr>
 <tr><td>GitHub mark</td><td>a link to the GitHub issue that holds a copy of a timeline. The copy is for reading: nothing done to the issue reaches the system.</td></tr>
