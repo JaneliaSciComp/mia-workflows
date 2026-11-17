@@ -105,6 +105,11 @@ def _rollover_due() -> bool:
     return workflow.info().is_continue_as_new_suggested()
 
 
+def _head_link(pr: PrUpdate) -> str:
+    """A snippet PR's head as an entry names it: a link to that commit in the PR, the bare sha of a PR with no url."""
+    return f"[`{pr.head_sha[:7]}`]({pr.url}/commits/{pr.head_sha})" if pr.url else f"`{pr.head_sha}`"
+
+
 def _parse_time(iso: str | None) -> datetime | None:
     """Parse an ISO-8601 timestamp as UTC; None if missing or malformed."""
     if iso is None:
@@ -1465,8 +1470,8 @@ class MiaDataDataset:
         results = self._results()
         if results and state.pass_stage != "testing":  # every head tested is a pass of its own
             if state.pass_stage and not state.result:
-                self._found(f"The snippet PR has a new head, `{head}`.")
-            await self._stage("testing", f"making the sample crops at the snippet PR's head `{head}`")
+                self._found(f"The snippet PR has a new head, {_head_link(pr)}.")
+            await self._stage("testing", f"making the sample crops at the snippet PR's head {_head_link(pr)}")
         elif not results and state.stage != "testing":
             await self._stage("testing")
         await self._act("set_crop_status", head, "pending", None)

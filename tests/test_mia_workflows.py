@@ -1272,6 +1272,7 @@ async def test_revision_limit(env):
     assert m.stages == ["matching", "developing", "testing", "testing", "failed"]
     first, second = (r for r in m.of("result") if r[2] is None)
     assert (first[0], second[0]) == ("testing", "testing") and H1 in first[1] and H2 in second[1]
+    assert f"head [`{H2[:7]}`]({PR_URL}/commits/{H2})" in m.of("set_stage")[3][1]  # the start links the commit
     assert first[3] == [f"/w/i7-e11/crop-{H1}-1", f"/w/i7-e11/verify-{H1}-1"] and first[4]
     assert [r[2] for r in m.of("result")][-1] is None  # no pass is open at the limit: `failed` stands alone
 
