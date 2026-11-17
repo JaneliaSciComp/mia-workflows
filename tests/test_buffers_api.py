@@ -2118,6 +2118,29 @@ def test_a_preparation_request_is_filed_and_run_in_one_post(tmp_path):
     assert act(s, "/prep/1/actions", {"action": "go"})[0] == 404
 
 
+def test_a_request_is_filed_for_a_buffer_and_listed_under_it(tmp_path):
+    """Step 3 of a buffer files a request that names the buffer; the step lists the requests that name it."""
+    s, _gateway = _acting(tmp_path)
+    buffer = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]["number"]
+    mine = act(s, "/prep", {"spec": PREP_TEXT, "key": "mine", "buffer": buffer})[1]["number"]
+    other = act(s, "/prep", {"spec": PREP_TEXT, "key": "other"})[1]["number"]
+    assert call(s, "GET", f"/subjects/prep/prep-{mine}")[1]["data"] == {"spec": PREP_TEXT, "buffer": buffer}
+    assert call(s, "GET", f"/subjects/prep/prep-{other}")[1]["data"] == {"spec": PREP_TEXT}
+    listed = call(s, "GET", "/subjects/prep", {"buffer": str(buffer)})[1]["subjects"]
+    assert [row["number"] for row in listed] == [mine]
+    paged_rows = call(s, "GET", "/subjects/prep", {"buffer": str(buffer), "limit": "10"})[1]
+    assert (paged_rows["total"], [row["number"] for row in paged_rows["subjects"]]) == (1, [mine])
+    assert len(call(s, "GET", "/subjects/prep")[1]["subjects"]) == 2
+    assert call(s, "GET", "/subjects/prep", {"buffer": "x"})[0] == 422
+
+
+def test_a_request_names_only_a_buffer_that_exists(tmp_path):
+    s, gateway = _acting(tmp_path)
+    status, out, _ = act(s, "/prep", {"spec": PREP_TEXT, "buffer": 12345})
+    assert status == 422 and "no buffer #12345" in out["error"]
+    assert s.ledger.find_subjects(kind="prep") == [] and gateway.sent == []
+
+
 def test_needs_names_the_actions_that_were_not_delivered(tmp_path):
     s, gateway = _acting(tmp_path)
     gateway.fail = "Temporal is away"

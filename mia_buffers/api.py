@@ -318,6 +318,7 @@ class SpecBody(_Strict):
     plan_first: bool = False
     key: str | None = None
     approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person ticked
+    buffer: int | None = None  # a preparation request: the number of the buffer whose Prepare step filed it
 
 
 class RefusalBody(_Strict):
@@ -1051,6 +1052,10 @@ class BufferService:
         page = self._page_of(query, SUBJECT_SORTS)
         holds = self.ledger.shelved()
         subjects = [self._subject_view(row, holds) for row in self.ledger.find_subjects(kind=kind)]
+        if (owner := query.get("buffer")) is not None:  # the requests a buffer's Prepare step filed
+            if not owner.isdecimal():
+                raise HttpError(422, f"buffer must be a buffer's number, got {owner!r}")
+            subjects = [view for view in subjects if (view.get("data") or {}).get("buffer") == int(owner)]
         if page is None:
             return 200, {"subjects": subjects}, {}
         rows, total = paged(subjects, page, SUBJECT_SORTS, _subject_haystack)
@@ -1392,6 +1397,8 @@ class BufferService:
             records = load_prep_text(parsed.spec).records
         except SpecError as error:
             raise HttpError(422, f"not a preparation request: {error}") from None
+        if parsed.buffer is not None and not self.ledger.find_subjects(kind="buffer", number=parsed.buffer):
+            raise HttpError(422, f"no buffer #{parsed.buffer} for this request to belong to")
         go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, approve_hosts=parsed.approve_hosts)
         needed = partial(self._needed, request=records)
         repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
@@ -1399,7 +1406,8 @@ class BufferService:
             subject = self.ledger.find_subjects(kind="prep", number=repeat["number"])[0]
         else:
             self._check_hosts(go, needed, "prep", None)
-            subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec})
+            owner = {} if parsed.buffer is None else {"buffer": parsed.buffer}
+            subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec, **owner})
         return self._act_on(subject, go, self._actor(headers, go), {"spec": parsed.spec}, needed)
 
     def _prep_action(self, number: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
