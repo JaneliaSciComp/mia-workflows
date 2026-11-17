@@ -679,26 +679,19 @@ class Ledger:
             )
             return self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))[0]
 
-    def _set_subject(self, kind: str, number: int, column: str, value: object) -> dict | None:
+    def _set_subject(self, kind: str, number: int, column: str, value: object, *, revise: bool = False) -> dict | None:
         with self._transaction() as db:
             db.execute(
-                f"UPDATE subjects SET {column} = ?, updated = ? WHERE kind = ? AND number = ?",
-                (value, time.time(), kind, number),
+                f"UPDATE subjects SET {column} = ?, revision = revision + ?, updated = ? WHERE kind = ? AND number = ?",
+                (value, int(revise), time.time(), kind, number),
             )
             found = self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))
         return found[0] if found else None
 
-    def spec_has_buffer(self, number: int) -> bool:
-        """Whether a round of the buffer spec with this number has created its buffer (ids are `i<number>-e<go>`)."""
-        with self._lock:
-            return (
-                self._db.execute("SELECT 1 FROM buffers WHERE id LIKE ? LIMIT 1", (f"i{number}-e%",)).fetchone()
-                is not None
-            )
-
-    def set_subject_data(self, kind: str, number: int, data: dict) -> dict | None:
-        """Replace what the subject carries (a buffer spec's text); None when there is no such subject."""
-        return self._set_subject(kind, number, "data", json.dumps(data))
+    def set_subject_data(self, kind: str, number: int, data: dict, *, revise: bool = False) -> dict | None:
+        """Replace what the subject carries (a buffer's definition text); None when there is no such subject.
+        `revise` raises the revision, so an action decided on the text as it was is refused."""
+        return self._set_subject(kind, number, "data", json.dumps(data), revise=revise)
 
     def set_subject_issue(self, kind: str, number: int, issue: int) -> dict | None:
         """The mirror's write-back: the GitHub issue it opened for the subject."""

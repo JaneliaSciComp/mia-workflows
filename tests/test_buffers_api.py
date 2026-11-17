@@ -1978,7 +1978,7 @@ def test_every_spec_posted_is_a_new_one_and_names_may_repeat(tmp_path):
     status, out, _ = act(s, "/specs", {"spec": SPEC_TEXT})
     first = out["subject"]
     assert status == 200 and (first["key"], first["name"], first["stage"]) == (SPEC_NAME, SPEC_NAME, "new")
-    assert first["data"] == {"spec": SPEC_TEXT, "name": SPEC_NAME} and first["frozen"] is False
+    assert first["data"] == {"spec": SPEC_TEXT, "name": SPEC_NAME} and "frozen" not in first
     assert gateway.sent == []  # saved, not run
     status, action, _ = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go", "plan_first": True, "key": "c1"})
     assert status == 202 and action["payload"] == {"spec": SPEC_TEXT, "plan_first": True}
@@ -1998,26 +1998,108 @@ def test_every_spec_posted_is_a_new_one_and_names_may_repeat(tmp_path):
     assert len(s.ledger.find_subjects(kind="buffer")) == 2
 
 
-def test_a_spec_is_edited_until_it_has_a_buffer_and_frozen_after(tmp_path):
+def test_a_go_takes_a_changed_text_after_a_buffer_was_built_unless_it_serves(tmp_path):
     s, gateway = _acting(tmp_path)
     number = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go", "plan_first": True})[1]["number"]
     _stage(s, "buffer", number, "plan-review")
     renamed = SPEC_TEXT.replace(f"name: {SPEC_NAME}", "name: another-name") + "# tuned\n"
     status, action, _ = act(s, SPEC_ACTIONS, {"action": "go", "spec": renamed, "plan_first": True})  # edit, plan again
     assert status == 202 and action["payload"] == {"spec": renamed, "plan_first": True}
-    subject = call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]  # the same spec under its new name
-    assert (subject["number"], subject["name"], subject["frozen"]) == (number, "another-name", False)
+    subject = call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]  # the same buffer under its new name
+    assert (subject["number"], subject["name"]) == (number, "another-name") and "frozen" not in subject
     assert subject["data"] == {"spec": renamed, "name": "another-name"}
     worker(s, "PUT", f"/buffers/i{number}-e3", CFG)  # the round was approved: its buffer exists
     _stage(s, "buffer", number, "ready")
-    assert call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]["frozen"] is True
     sent = len(gateway.sent)
     status, out, _ = act(s, SPEC_ACTIONS, {"action": "go", "spec": renamed + "# again\n"})
-    assert status == 409 and "clone" in out["error"] and len(gateway.sent) == sent
-    assert s.ledger.subject("buffer", SPEC_NAME)["data"]["spec"] == renamed
-    assert act(s, SPEC_ACTIONS, {"action": "go", "spec": renamed})[0] == 202  # the text it has: a run again
-    _stage(s, "buffer", number, "ready")
-    assert act(s, SPEC_ACTIONS, {"action": "go"})[1]["payload"] == {"spec": renamed}
+    assert status == 409 and "serving" in out["error"] and len(gateway.sent) == sent  # a serving buffer is fixed
+    assert act(s, SPEC_ACTIONS, {"action": "go"})[0] == 202  # the text it has is planned again
+    _stage(s, "buffer", number, "retired")
+    again = renamed + "# again\n"
+    assert act(s, SPEC_ACTIONS, {"action": "go", "spec": again})[0] == 202  # built a buffer once, changed all the same
+    assert call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]["data"]["spec"] == again
+
+
+def test_an_edit_stores_the_text_and_the_name_and_says_so_in_the_timeline(tmp_path):
+    """`edit` is settled by buffer-api: the definition and its name change, the stage does not, no workflow hears."""
+    s, gateway = _acting(tmp_path)
+    saved = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]
+    assert "edit" in saved["actions"]
+    renamed = SPEC_TEXT.replace(f"name: {SPEC_NAME}", "name: another-name")
+    edit = {"action": "edit", "spec": renamed, "revision": saved["revision"], "key": "e1"}
+    status, action, _ = act(s, SPEC_ACTIONS, edit)
+    assert status == 202 and (action["action"], action["state"], action["payload"]) == (
+        "edit",
+        "sent",
+        {"spec": renamed},
+    )
+    subject = call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]
+    assert (subject["stage"], subject["name"], subject["data"]) == (
+        "new",
+        "another-name",
+        {"spec": renamed, "name": "another-name"},
+    )
+    assert subject["revision"] > saved["revision"] and gateway.sent == []
+    entries = call(s, "GET", f"/timeline/buffer/{saved['number']}")[1]["entries"]
+    assert len(entries) == 1 and entries[0]["body"].startswith("**Action:** `edit` by `page`")
+    assert f"```yaml\n{renamed}```" in entries[0]["body"]
+    assert act(s, SPEC_ACTIONS, edit)[1]["id"] == action["id"]  # the same click again
+    assert len(call(s, "GET", f"/timeline/buffer/{saved['number']}")[1]["entries"]) == 1
+
+
+def test_an_edit_that_is_not_a_spec_or_is_stale_changes_nothing(tmp_path):
+    s, _gateway = _acting(tmp_path)
+    saved = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]
+    stored = lambda: call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]  # noqa: E731
+    assert act(s, SPEC_ACTIONS, {"action": "edit"})[0] == 422  # no text
+    assert act(s, SPEC_ACTIONS, {"action": "edit", "spec": "name: [not a spec"})[0] == 422
+    assert act(s, SPEC_ACTIONS, {"action": "edit", "spec": PREP_TEXT})[0] == 422
+    status, out, _ = act(
+        s, SPEC_ACTIONS, {"action": "edit", "spec": SPEC_TEXT + "# x\n", "revision": saved["revision"] - 1}
+    )
+    assert status == 409 and "changed since it was shown" in out["error"]
+    assert stored()["data"] == saved["data"] and stored()["revision"] == saved["revision"]
+    assert call(s, "GET", f"/timeline/buffer/{saved['number']}")[1]["entries"] == []
+
+
+@pytest.mark.parametrize("stage", ["planning", "plan-review", "sourcing", "staged", "ready", "idle"])
+def test_an_edit_is_refused_while_a_round_is_open_or_the_buffer_serves(tmp_path, stage):
+    s, _gateway = _acting(tmp_path)
+    saved = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]
+    _stage(s, "buffer", saved["number"], stage)
+    status, out, _ = act(s, SPEC_ACTIONS, {"action": "edit", "spec": SPEC_TEXT + "# x\n"})
+    assert status == 409 and f"is at `{stage}`" in out["error"]
+    assert call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]["data"]["spec"] == SPEC_TEXT
+
+
+@pytest.mark.parametrize("stage", ["new", "retired", "needs-human", "cancelled"])
+def test_an_edit_is_taken_wherever_a_buffer_rests(tmp_path, stage):
+    s, _gateway = _acting(tmp_path)
+    saved = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]
+    if stage != "new":
+        _stage(s, "buffer", saved["number"], stage)
+    assert act(s, SPEC_ACTIONS, {"action": "edit", "spec": SPEC_TEXT + "# x\n"})[0] == 202
+    subject = call(s, "GET", f"/subjects/buffer/{quote(SPEC_NAME, safe='')}")[1]
+    assert (subject["stage"], subject["data"]["spec"]) == (stage, SPEC_TEXT + "# x\n")
+
+
+def test_the_buffers_list_names_the_version_being_served(tmp_path):
+    """The list's `serving` is the id a training run names: the buffer's newest version whose latest event serves."""
+    s, _gateway = _acting(tmp_path)
+    number = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]["number"]
+    other = act(s, "/specs", {"spec": SPEC_TEXT})[1]["subject"]["number"]
+    listed = lambda: {row["number"]: row["serving"] for row in call(s, "GET", "/subjects/buffer")[1]["subjects"]}  # noqa: E731
+    assert listed() == {number: None, other: None}
+    for version, kinds in (
+        (f"i{number}-e3", ["created", "approved", "retired"]),
+        (f"i{number}-e7", ["created", "ready"]),
+    ):
+        worker(s, "PUT", f"/buffers/{version}", CFG)
+        for kind in kinds:
+            worker(s, "POST", f"/buffers/{version}/events", {"kind": kind})
+    assert listed() == {number: f"i{number}-e7", other: None}
+    worker(s, "POST", f"/buffers/i{number}-e7/events", {"kind": "retired"})
+    assert listed() == {number: None, other: None}
 
 
 def test_a_spec_is_parsed_for_the_page(tmp_path):

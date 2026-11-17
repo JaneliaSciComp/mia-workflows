@@ -837,8 +837,8 @@ def test_a_lifecycle_marks_the_step_a_round_is_working_at() -> None:
 
 
 def test_every_button_that_asks_for_something_says_what_it_does() -> None:
-    """A button's tooltip says what pressing it does. Every action a stage table offers has one (a spec's go,
-    revoke and dropped have controls of their own, which carry theirs), and so has every other such button."""
+    """A button's tooltip says what pressing it does. Every action a stage table offers has one (a buffer's go,
+    edit, revoke and dropped have controls of their own, which carry theirs), and so has every other such button."""
     from mia_buffers.config import PREP_STAGE_ACTIONS
     from mia_buffers.config import STAGE_ACTIONS as BUFFER_ACTIONS
     from mia_data.config import STAGE_ACTIONS as DATASET_ACTIONS
@@ -848,7 +848,7 @@ def test_every_button_that_asks_for_something_says_what_it_does() -> None:
         " Object.keys(BUTTON_HELP)]);",
         {"actions.js": "ACTION_HELP, BUTTON_HELP"},
     )
-    own_control = {"buffer": {"go", "revoke", "dropped"}}
+    own_control = {"buffer": {"go", "revoke", "dropped", "edit"}}
     for kind, table in (("dataset", DATASET_ACTIONS), ("buffer", BUFFER_ACTIONS), ("prep", PREP_STAGE_ACTIONS)):
         offered = set().union(*(actions for _, actions in table.values())) - own_control.get(kind, set())
         assert offered <= set(covered[kind]), (kind, offered - set(covered[kind]))
