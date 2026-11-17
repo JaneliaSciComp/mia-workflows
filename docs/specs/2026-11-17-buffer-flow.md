@@ -1,6 +1,9 @@
 # MIA: a buffer is one flow — Spec
 
-**Status:** v0.3 · 2026-11-17 · draft, not approved. v0.2 settled what a builder's read of v0.1 asked. v0.3
+**Status:** v0.4 · 2026-11-17 · draft, not approved. v0.4 takes in an architecture review of v0.3 (2026-11-17),
+read for one thing: that this flow can later be upgraded to a moving window without being changed. It adds the
+four nouns (§3.1), what stopping does to training, the stopped version's space and its recovery (§3.6), and
+§3.9: what this flow keeps open for the window and what the window's own spec must define. v0.2 settled what a builder's read of v0.1 asked. v0.3
 (user, 2026-11-17): datasets that wait for a person when the buffer starts serving join the next version
 (§3.6); what is fixed about a serving buffer is what it is, not what is on disk, so a buffer may be larger
 than the disk (§3.9). Brainstormed with the user 2026-11-17; a clickable picture of
@@ -28,9 +31,9 @@ missing, plan, source, serve. At every step one button moves it forward and one 
   the person goes on, and can always go on with what is prepared at that moment.
 - A buffer can be changed at any step until it serves. A serving buffer is fixed. Serving can be stopped at any
   time, and a stopped buffer can be changed again.
-- What is fixed is what the version is: its definition, its pool of datasets and their weights, its planned
-  crops, its val and test lists. What is on disk at a moment is not. A buffer whose plan is larger than the
-  disk serves a moving window of its plan (§3.9), and every step of the flow holds for such a buffer.
+- What is fixed is what the version is: its definition, its pool of datasets and their weights, and its planned
+  crops (the candidates the plan chose). What is on disk at a moment is not. A buffer whose plan is larger than
+  the disk will serve a moving window of its plan, and nothing in this flow has to change for that (§3.9).
 - A changed buffer that serves again is a new version with a new id. Consumers name the id.
 
 **Non-goals**
@@ -46,7 +49,9 @@ missing, plan, source, serve. At every step one button moves it forward and one 
 
 **Anti-goals**
 
-- A serving version whose definition, pool, planned crops or lists change because a person clicked something.
+- A serving version whose definition, pool or planned crops change because a person clicked something.
+- Storage deciding what a training run sees without anyone being told: where what is on disk differs from the
+  plan, the page says so.
 - A flow that assumes a version is wholly on disk before it serves, or ever.
 - Any route, client call or workflow that finds a buffer by its name.
 - A step whose way forward is not one obvious button.
@@ -64,13 +69,17 @@ of its stage:
 | Step | Shows | Forward | Back | Stage of the registry |
 | --- | --- | --- | --- | --- |
 | 1 Define | Controls and YAML as two tabs of one pane. Under it, a narrow column with *Datasets that fit* and *Prepared*, then *Weight share by modality* and *Heaviest datasets*. | Next: the N datasets | (the list) | none before the save; a resting stage after |
-| 2 Datasets | Every dataset the definition admits, with its state and weight and a tick *In buffer*. Where the others left, behind a toggle. | Save buffer and continue (first time); Next: prepare | Change the definition | as step 1 |
+| 2 Datasets | Every dataset the definition admits, with its state and weight and a tick *Selected*. Where the others left, behind a toggle. | Save buffer and continue (first time); Next: prepare | Change the definition | as step 1 |
 | 3 Prepare | The fitting datasets that are not prepared, a tick each, *Prepare selected*; the requests this buffer filed and where each dataset is. | Continue with N prepared datasets | Datasets | `new`, `stopped`, `cancelled`, `needs-human`, `retired` |
 | 4 Plan | The plan: pool, weights, crops, bytes to fetch, its staged size against the disk limit, hosts to approve. | Run: fetch and stage | Prepare more datasets | `planning`, `plan-review` |
 | 5 Source | The sourcing board, then the wait for an approve. | Approve and serve | Change the buffer (cancels the jobs) | `sourcing`, `staged` |
-| 6 Serve | Version and id, how much of the plan is on disk now, usage, consumers, the line to paste into a training script, earlier versions. | (none) | Stop serving | `ready`, `idle` |
+| 6 Serve | Version and id, how much of the plan is on disk now, the planned mix beside the mix on disk, usage, consumers, the line to paste into a training script, earlier versions. | (none) | Stop serving | `ready`, `idle` |
 
 A saved buffer at a resting stage opens at step 3: that is where it waits for the person.
+
+**Three words, kept apart everywhere on the page.** A dataset is *selected* when the definition admits it and
+its tick is on (steps 1 to 3). It is *in this version* when the version's plan holds it (steps 4 to 6). It is
+*on disk now* when its data is staged and can be drawn from (steps 5 and 6). No label says "in the buffer".
 
 Below the step, on every step, is the buffer's timeline as the subject view shows it today.
 
@@ -78,7 +87,7 @@ Below the step, on every step, is the buffer's timeline as the subject view show
 belongs and never beside the forward button:
 
 - A stopped buffer shows one line above steps 1 to 3: which version is stopped, how many fitting datasets were
-  prepared since it was planned, and the buttons *Serve it again* and *Retire* (§3.6).
+  prepared since it was planned, and the buttons *Serve version N again* and *Retire* (§3.6).
 - *Keep* is on step 6 of an idle buffer, in the line that says no consumer has drawn.
 - `dropped` is on step 5, in the row of the dataset that waits for its files. It has no place on step 6 (§3.6).
 - Clone, Shelve or Unshelve and the force stop are in a *More* menu at the heading, which offers only what the
@@ -91,6 +100,16 @@ belongs and never beside the forward button:
 A buffer in the list is a subject of kind `buffer`, as today's spec is: a number, a stage, a timeline, and the
 definition text in its data. What today's code calls a buffer (the row a round creates when sourcing starts, with
 volumes and events) is a **version** of it.
+
+Four things are kept apart, and the last two are not this spec's to build:
+
+- **Buffer:** the editable intent. A subject and its definition text.
+- **Version:** a fixed population and recipe: the datasets, weights and planned crops of one plan, under one id.
+- **Residency:** which of a version's data is on disk now.
+- **Training run:** one consumer's progress through a version.
+
+Residency and a run's progress get state of their own with the moving window (§3.9). Nothing in this spec
+stores either: no stage, version event or id says what is on disk or how far a consumer is.
 
 - The **number** identifies the buffer on the page and in the action routes: `POST /specs/<number>/actions`
   for every buffer.
@@ -117,7 +136,7 @@ The search box may still find buffers by a word of their name: that is a search,
 | `idle` | waiting | `keep`, `edit` (the name only), `unserve`, `stop` |
 | `stopped` | done | `edit`, `go`, `approve`, `retire` |
 | `retired` | done | `edit`, `go` |
-| `needs-human` | stuck | `edit`, `go` |
+| `needs-human` | stuck | `edit`, `go`, `approve`, `retire` |
 | `cancelled` | done | `edit`, `go` |
 
 - **`stopped`** (new): the buffer has a version that is not serving and whose volumes are kept.
@@ -126,6 +145,8 @@ The search box may still find buffers by a word of their name: that is a search,
   that does not answer.
 - `ready` and `idle` no longer take `go`, `revoke`, `retire` or (`ready`) `dropped` from a person: a serving buffer is fixed, and the
   way to change or retire it starts with `unserve`.
+- `approve` and `retire` at `needs-human` act on a stopped version the buffer still holds (§3.6) and are refused
+  when it holds none.
 - Shelving stays beside the table as it is; a `stopped` buffer has no round open, so it takes `shelve`.
 
 ### 3.3 Saving and editing the definition
@@ -184,18 +205,40 @@ On steps 1 to 3 a change clears the ticks of the later steps: they are done agai
 At `ready` and `idle` every earlier step can be opened and none can be changed; the page shows the controls
 disabled with a line that says why. The one button is *Stop serving*.
 
-`unserve` asks the workflow to stop serving: it writes the buffer event `stopped` on the version (not in
-`SERVING`, so consumers are refused with `409 buffer stopped`), keeps its volumes registered, and sets the stage
-`stopped`. From there:
+**Stopping interrupts training.** A consumer of a stopped version gets `409 buffer stopped` on its next request,
+and `BufferDataset` raises it (`BufferNotApproved`): a run does not wait, it fails. So *Stop serving* asks first.
+It names the consumers that drew in the last minutes, says their runs will fail until a version serves again, and
+says that a changed buffer comes back under another id, which each run must be given. Replacing a version is not
+a seamless deployment and the page does not suggest it is.
 
-- **Serve again unchanged:** `approve` at `stopped` writes `ready` on the same version. buffer-api refuses it
-  when the stored definition is not the one that version was built from (§3.3: the name aside).
+`unserve` asks the workflow to stop serving: it writes the buffer event `stopped` on the version (not in
+`SERVING`), keeps its volumes registered, so what is on disk stays, and sets the stage `stopped`. From there:
+
+- **Serve it again:** `approve` at `stopped` writes `ready` on the same version, and the buffer's definition is
+  that version's again. When the definition was edited since, the page says before it sends the approve that the
+  edits are discarded.
 - **Change it:** `edit`, then `go`. The round plans and sources a new version (§3.7) while the stopped one stays
-  as it is. When the new version serves, the stopped one is retired. If the round is cancelled or fails, the
-  buffer rests at `stopped` again, not at `cancelled` or `needs-human`: the old version can still serve. The
-  round's result entry and the step it ended at say what happened, and the round's own unfinished version is
-  retired as a failed round's is today.
+  as it is. When the new version serves, the stopped one is retired.
+  - Cancelled, the buffer rests at `stopped` again, not at `cancelled`.
+  - Failed, it rests at `needs-human` as every failed round does, so it is listed under *Needs you*. The buffer
+    still holds the stopped version: `approve` there serves it again with its own definition, `retire` releases
+    it. The failed round's own unfinished version is retired as a failed round's is today.
 - **Retire:** `retire` at `stopped` releases the version's staged data, as retire does today.
+
+**Space for the replacement.** The stopped version holds its data until the replacement serves, and a changed
+recipe may reuse little of it, so both may not fit. Step 4 of a stopped buffer shows what the stopped version
+holds, what the new plan needs (less what it reuses, where that is known), and what the staged limit
+(`quota.staged_bytes`) leaves. buffer-api makes the same check when the approve at `plan-review` arrives:
+
+- They fit together, or there is no limit: the round runs and the stopped version is kept until the new one
+  serves.
+- They do not: the approve is refused unless it carries `release`. The forward button then reads *Release
+  version N and run*: the stopped version is retired first and cannot be served again without staging it anew.
+  The step says that its space is free only once the keeper may evict it (`quota.hold_hours`).
+
+`# ponytail:` the check is advisory. Nothing reserves the space, so two buffers can pass it at once. A hard limit
+over all buffers, with reservations taken before stage jobs run, comes with the moving window (§3.9) and goes
+behind this same check.
 
 The line of a stopped buffer says how many fitting datasets were prepared since the stopped version was
 planned; step 4 says which datasets the new plan adds and takes out against it. Whether a dataset's staged
@@ -212,9 +255,13 @@ version is. A planned dataset that is not staged at that moment falls on one of 
 - **It waits for a person** (`waiting-drop`: files someone copies in; `waiting-dataset`): it is dropped from this
   version, with an entry that names it, and joins the next version if it is ready by then. `dropped` is not
   accepted at `ready`.
-- **It waits for space or a lock** (`blocked`, `waiting-lock`): it stays in the version. It is part of the plan
-  that is not on disk yet, and is staged when it can be, with no click. This is the moving window of §3.9 and
-  the one way the staged data of a serving version grows.
+- **It waits for space or a lock** (`blocked`: the raw cache is at its quota; `waiting-lock`): it stays in the
+  version. It is part of the plan that is not on disk yet, and is staged when it can be, with no click. This is
+  the one way the data of a serving version grows, and where the moving window of §3.9 starts from.
+
+While part of a version is not on disk, crops are drawn from what is: the mix a consumer gets follows the disk,
+not the plan's weights. Step 6 shows both mixes. Val and test lists behave as they do today: a list grows at
+its end as datasets arrive and is never reordered, so it is not complete when serving starts.
 
 ### 3.7 Versions and ids
 
@@ -238,7 +285,7 @@ version is. A planned dataset that is not staged at that moment falls on one of 
 - The rules of the page hold: no build step, modules import downward only, no token, action routes checked
   against the stage table, a job's or record's text inserted as text.
 
-### 3.9 A buffer larger than the disk
+### 3.9 A buffer larger than the disk, now and with a moving window
 
 The case this flow must hold for, and a common one: a diverse buffer over many datasets whose plan needs far more
 staged data than the disk allows, say 1 PB planned against 100 TB. Such a buffer stages up to the limit and
@@ -246,26 +293,51 @@ serves; as its consumers use what is staged, that data is evicted and the next p
 pipeline trains on millions of samples through a small, temporary amount of disk, and the disk must be large
 enough that replacements arrive as fast as they are used.
 
-Today a serving version holds a reference to every volume it registered, the keeper evicts only rows nothing
-references, and a dataset that does not fit under the quota stays `blocked`. So the window does not move yet.
-Making it move is a design of its own (the keeper, the round's work while serving, the sampler, the ledger of what
-was used) and is not built by this spec. What this spec does for it:
+**Now.** A serving version holds a reference to every volume it registered, the keeper evicts only rows nothing
+references, and a dataset that does not fit stays `blocked`. Until the window is built, a version larger than the
+disk serves what fits, and the rest waits for space that only another buffer's retirement frees. Step 4 says so in
+those words and step 6 shows the planned mix beside the mix on disk. Nothing rotates, and nothing is hidden.
 
-- **Words.** "Fixed" and "version" are about the plan, never about the bytes on disk (§1, §3.6).
-- **The approve does not wait for the whole plan.** It is offered when no job is left that can run now, as the
-  `staged` stage means today; the datasets that wait for space stay planned (§3.6).
-- **Step 4** shows the plan's staged size against the limit of the staged root, and when it is larger says that
-  the buffer will serve a window of that size at a time.
-- **Step 5** counts against what can be staged now, not against the whole plan.
-- **Step 6** shows how much of the plan is on disk now and which datasets are on disk, waiting for space, or used
-  and evicted. For a buffer that fits, this reads: all of the plan is on disk.
-- **Stop serving** keeps what is on disk at that moment; serving again goes on from there.
-- **The stage table** leaves the round free to stage and release data of its version while `ready`: these are
-  the workflow's and the keeper's doings, not actions, as the rebuild of a lost volume is today.
+**What this flow settles so that the window is added without changing it.**
 
-Questions for the window's own spec, not answered here: whether the window walks a fixed plan or draws new crops
-as it goes; what "used" means with several consumers; the unit that is evicted; how val and test lists stay
-readable; what a consumer gets when refill falls behind; how the raw cache and the staged root share the limit.
+| This flow | Why the window leaves it alone |
+| --- | --- |
+| A version is a population and a recipe under an opaque id (§3.1, §3.7). | The window changes residency, never the version: ids, routes and a consumer's `buffer=` stay. |
+| The approve does not wait for the whole plan; `staged` means nothing more can run now (§3.6). | A version larger than the disk is approved the same way. |
+| No stage, event or id stores residency or a run's progress (§3.1). | Both get state of their own; the stage table is not touched. |
+| The page reads what is on disk through one read: on disk, waiting, the two mixes (§2). | The window changes what is behind that read; step 6 gains numbers, not structure. |
+| This spec adds no deletion. The keeper alone deletes, and `delete_volume` stays for a revoke and a retire. | Eviction from a serving version is a new operation of the keeper. It is not `delete_volume`, which drops the volume's frozen rows. |
+| One version of a buffer serves at a time (§3.7). | There is one population per buffer to walk. |
+| Stop serving keeps what is on disk (§3.6). | A stopped window resumes from where it was. |
+| The replacement's space is a check with a stated policy (§3.6). | Reservations go behind the same check. |
+| The consumer's contract is today's: 409 when stopped, `BufferEmpty` when nothing can be drawn. | Waiting for refill is added to the client; nothing here promised it. |
+
+**What the window's own spec must define.** From the review; this spec settles only the first sentence of 1.
+
+1. **Sampling.** The population is the plan's fixed candidates: the window never serves a crop the plan did not
+   choose. Open: one traversal, drawing with replacement (today's sampler), or a bounded number of repeats; over
+   what span the weights are kept (a batch, a window, a pass, a run); whether progress is shared by consumers or
+   kept per training run; what is served when part of the mix is not on disk. The delivered mix is measured
+   beside the planned one.
+2. **Read lifetime, apart from sampling progress.** A draw is not evidence that data may be deleted: the client
+   queues crop descriptors and reads their files later, and a loader prefetches. Outstanding reads need a lease
+   or the like, also for a client that crashed; the keeper deletes on that evidence; an artifact shared by
+   buffers counts every buffer and reader that needs it.
+3. **Evaluation independent of residency.** Which crops are in a val or test list, and their order, do not depend
+   on what is on disk; their data is pinned, or staged again by a stated rule; eviction never removes a list's
+   rows.
+4. **Capacity.** A hard limit on staged space over all buffers, with reservations taken before stage jobs run
+   (today `check_quota` guards the raw cache only), and space set aside for builds, reads and evaluation.
+5. **Throughput and underflow.** Refill is queueing, download, staging, checking and saving, and the window
+   absorbs the variation of all of it. Step 6 then shows the time until the data on disk is used up, refill
+   latency and throughput, the time consumers starved, unique samples against repeats, and the delivered mix.
+   What a consumer gets when refill falls behind is defined before the feature is called ready.
+6. **Reproducing against replaying.** A version id reproduces a population. Replaying a run's sequence needs
+   state of the run.
+
+**Its proof** is a small integration scenario, not stage transitions alone: a plan several times the disk, two
+independent training runs, a slow reader, a client that crashes, evaluation during eviction, and a replacement
+version that reuses little. It checks the sampling mix, read safety, recovery and capacity.
 
 ## 4. Decided by the user (2026-11-17)
 
@@ -289,15 +361,24 @@ an untick that writes `select.exclude.ids`; `stopped` is a stage; earlier versio
 buffer served again keeps its id; Retire is on the stopped buffer. The mockup first showed ids as
 `b<number>-v<n>`; §3.7 keeps today's ids instead, which is the author's call.
 
+10. This flow must be upgradable to the moving window; the architecture review of 2026-11-17 is the guide to
+    what the window needs (§3.9).
+
 This replaces the ruling of 2026-11-16 that a spec is frozen once it has a buffer and is changed by cloning.
 
 ## 5. The author's calls
 
 - The action is named `unserve` and `edit` is settled by buffer-api alone (§3.2, §3.3).
 - A saved buffer at rest opens at step 3 (§2); the step is derived from the stage, nothing stores it.
-- `approve` at `stopped` is refused once the definition changed (§3.6).
-- A cancelled or failed round of a stopped buffer returns it to `stopped` (§3.6). Such a failure is not listed
-  under *Needs you* and the cleaner does not retry it: the person who pressed Continue sees it on the step.
+- `approve` at `stopped` serves the stopped version and puts its definition back; edits made since are
+  discarded after the page said so (§3.6).
+- A cancelled round of a stopped buffer returns it to `stopped`; a failed one rests at `needs-human`, listed
+  under *Needs you*, where `approve` and `retire` then act on the version still held (§3.6).
+- A replacement keeps the stopped version when both fit and needs the person to release it when they do not;
+  the check is advisory until the window brings reservations (§3.6).
+- Stop serving asks first and names the consumers it will interrupt (§3.6).
+- A version fixes the plan's candidates, so the window never serves crops outside them (§3.9).
+- Val and test lists are promised only as they behave today (§3.6).
 - The keeper retires a `stopped` version like an idle one (§3.6).
 - Ids keep today's form and the version number is a count of the versions that served (§3.7): a new id form
   would have to exist from the go, when planning already writes under it, and would number every plan.
@@ -322,6 +403,8 @@ This replaces the ruling of 2026-11-16 that a spec is frozen once it has a buffe
   buffer's versions (a spec's buffers are found by the id prefix `i<number>-e` today, which still holds).
 - The workflow changes (`unserve`, `approve` and `go` at `stopped`, a round of a stopped buffer that ends
   without serving) behind `workflow.patched`, with re-recorded replay fixtures.
+- The one read behind step 6 (on disk, waiting, the planned mix and the mix on disk); `GET /buffers/<id>/status`
+  and the asset rows may be enough.
 - The cleaner's rules against the new table: it sends `cancel`, `stop` and `go`.
 - The wording of every button, refusal and timeline entry beyond what the mockup shows.
 
@@ -331,6 +414,8 @@ This replaces the ruling of 2026-11-16 that a spec is frozen once it has a buffe
   and not find them released or deleted.
 - A pool change moves every dataset's share of `sampling.crops`, and the plan digest holds the rounded share:
   what step 5 calls reused comes from what sourcing found, never from which datasets were added.
+- How soon a released version's data is free: the keeper evicts rows nothing references only after
+  `quota.hold_hours`, and a blocked fetch may wait that long.
 - The name enters no digest (spec hash, plan digest, artifact id), so a rename restages nothing.
 - The plan can say its staged size before sourcing (sparse staging writes only the planned crops' chunks). If
   it cannot, step 4 shows the bytes to fetch and says the staged size is not known yet.
@@ -345,7 +430,7 @@ Each slice works on its own and is shipped with its tests.
 2. **Editing.** The `edit` action; the frozen rule goes; Back from steps 4 and 5 cancels.
 3. **Stop serving.** `unserve`, `stopped`, serve again, retire from stopped; `ready` and `idle` stop taking `go`,
    `revoke`, `retire` and `dropped`; the approve at `staged` drops the datasets that wait for a person; the
-   keeper's rule; what steps 4 to 6 say about the disk.
+   keeper's rule; the question before a stop; the space check at Run; what steps 4 to 6 say about the disk.
 4. **Versions.** One serving version, the replaced-by message, the versions list with its numbers, action
    routes by number.
 
@@ -358,9 +443,12 @@ built, since both change what the round does while a version serves.
   `revision` refused.
 - `edit`: stores text and name, refuses what is not a spec, refused at every stage a round is in progress or
   serving.
-- `unserve` then a consumer draw is 409; `approve` at `stopped` serves the same id; an edit makes that approve
-  a refusal; `go` from `stopped` serves a new id and retires the old; that round cancelled or failed rests at
-  `stopped` with the old version still able to serve.
+- `unserve` then a consumer draw is 409; `approve` at `stopped` serves the same id, and after an edit also puts
+  that version's definition back; `go` from `stopped` serves a new id and retires the old; that round cancelled
+  rests at `stopped`, failed at `needs-human` and is listed under *Needs you*, and from both the old version
+  serves again.
+- A stopped version and a new plan that do not fit the staged limit together: the approve at `plan-review` is
+  refused, and with `release` retires the stopped version first.
 - The approve at `staged` with one dataset waiting for a drop and one blocked on quota: the first is dropped
   with its entry and a later `dropped` is refused; the second stays planned and is staged when space allows.
 - A name-only `edit` at `ready` is accepted and the served id is unchanged; any other `edit` there is refused.

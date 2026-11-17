@@ -112,7 +112,7 @@ body.nonotes .dn{display:none}
 </head>
 <body>
 <div class="mockbar">
-  <b>MOCKUP</b> revision 7 · fake data, nothing is sent · jump to:
+  <b>MOCKUP</b> revision 8 · fake data, nothing is sent · jump to:
   <span id="jump"></span>
   <label style="margin-left:auto"><input type="checkbox" id="notes" checked> design notes</label>
 </div>
@@ -143,7 +143,7 @@ body.nonotes .dn{display:none}
   <div class="viewhead"><h2><span id="bufName"></span> <span class="small mono" id="bufNumber"></span> <span class="pill" id="savedPill"></span></h2><button class="btn" title="What is not a step: Clone, Shelve, Force stop. Only what the stage accepts is offered.">More ▾</button></div>
   <ol class="steps" id="steps"></ol>
   <p class="small stageline" id="stageLine"></p>
-  <div class="notice" id="stoppedNote" hidden><span id="stoppedText"></span> <button class="btn" id="serveAgain" style="margin-left:8px">Serve it again</button> <button class="btn danger" id="retire">Retire</button></div>
+  <div class="notice" id="stoppedNote" hidden><span id="stoppedText"></span> <button class="btn" id="serveAgain" style="margin-left:8px"></button> <button class="btn danger" id="retire">Retire</button></div>
   <div class="notice" id="lockNote" hidden>This buffer is serving, so nothing about it can change. Stop serving to change it. <button class="btn" data-go="serve" style="margin-left:8px">Go to Serve</button></div>
 
   <!-- 1 define -->
@@ -193,11 +193,12 @@ body.nonotes .dn{display:none}
   <!-- 2 datasets -->
   <div data-step="datasets">
     <p id="dsSummary"></p>
-    <table><thead><tr><th style="width:80px">In buffer</th><th>Dataset</th><th>Modality</th><th>Dims</th><th>State</th><th class="num">Weight</th></tr></thead><tbody id="dsRows"></tbody></table>
+    <table><thead><tr><th style="width:80px">Selected</th><th>Dataset</th><th>Modality</th><th>Dims</th><th>State</th><th class="num">Weight</th></tr></thead><tbody id="dsRows"></tbody></table>
     <div class="dn"><b>Design notes</b><ul>
       <li>This is where the buffer is saved. Before that it exists only in this browser tab.</li>
       <li>The table can also hold "where datasets leave" (the datasets that do not fit, and the rule that removed each) behind a toggle.</li>
       <li>Your ruling: a buffer can be changed at any step until it serves. A change here or in step 1 clears the ticks of the steps after it: they are done again from the new definition.</li>
+      <li>Three words are kept apart on every step: a dataset is <i>selected</i> here, <i>in this version</i> once a plan holds it (steps 4 to 6), and <i>on disk now</i> when it is staged (steps 5 and 6).</li>
       <li><i>My guess:</i> taking a dataset out is unticking it here. That writes <code>select.exclude.ids</code> in the definition (the spec has it today), so "revoke" is one more edit of the definition and shows in the YAML tab.</li>
     </ul></div>
     <div class="footer"><button class="btn" data-go="define">← Change the definition</button>
@@ -236,10 +237,11 @@ body.nonotes .dn{display:none}
       <li>"Staged size" compares the plan with the disk limit. A plan larger than the limit is not an error: the blue line says the buffer will serve a window (open <i>all-3d-diverse</i> and go to step 4).</li>
       <li>Same as today's plan-review, reached by a button instead of a go. Run is today's approve at the plan, with the host approval dialog.</li>
       <li>Going back to any earlier step drops this plan; the next Continue plans again with the definition and the prepared datasets of that moment.</li>
+      <li>A stopped version keeps its data until its replacement serves. The blue line says whether both fit under the limit. When they do not, the forward button becomes "Release version N and run" (stop <i>all-3d-diverse</i>, then go to step 4).</li>
       <li>For a buffer that served before, the blue line says what the new plan adds and takes out. What is staged again is known only when sourcing runs, so step 5 says it per dataset.</li>
     </ul></div>
     <div class="footer"><button class="btn" data-go="prepare">← Prepare more datasets</button>
-      <div class="right"><span class="small">Nothing is fetched until you press Run.</span><button class="btn primary" data-go="source">Run: fetch and stage →</button></div></div>
+      <div class="right"><span class="small">Nothing is fetched until you press Run.</span><button class="btn primary" data-go="source" id="runPlan">Run: fetch and stage →</button></div></div>
   </div>
 
   <!-- 5 source -->
@@ -262,16 +264,19 @@ body.nonotes .dn{display:none}
       <div class="tile"><div class="label">Version</div><div class="value" id="sVersion"></div><div class="sub mono" id="sId"></div></div>
       <div class="tile"><div class="label">Serving</div><div class="value">since 14:02</div><div class="sub">approved by you</div></div>
       <div class="tile"><div class="label">Datasets</div><div class="value" id="sPool"></div><div class="sub">in this version's plan</div></div>
-      <div class="tile"><div class="label">Consumers</div><div class="value">0</div><div class="sub">none has drawn yet</div></div>
+      <div class="tile"><div class="label">Consumers</div><div class="value" id="sRuns"></div><div class="sub" id="sRunsSub"></div></div>
     </div>
     <div class="card" style="margin-bottom:14px"><h2>On disk now</h2><div class="sub" id="diskSub"></div>
-      <div class="progress" style="max-width:none"><i id="diskBar"></i></div><div class="small" id="diskCounts"></div></div>
+      <div class="progress" style="max-width:none"><i id="diskBar"></i></div><div class="small" id="diskCounts"></div>
+      <table style="margin-top:8px;max-width:560px"><thead><tr><th>Mix by modality</th><th class="num">Planned</th><th class="num">On disk now</th></tr></thead><tbody id="mixRows"></tbody></table>
+      <p class="small" id="windowLater" style="margin-top:8px"></p></div>
     <div class="card" style="margin-bottom:14px"><h2>Use it</h2><div class="sub">From a training script:</div>
       <pre class="mono" style="margin:0" id="snippet"></pre></div>
     <div class="dn"><b>Design notes</b><ul>
       <li>Your ruling: a serving buffer is fixed. Every earlier step can be looked at and none can be changed. The one button is Stop serving.</li>
       <li>Fixed means the plan: the definition, the datasets and their weights, the planned crops, the val and test lists. It does not mean the bytes on disk. Open <i>all-3d-diverse</i> from the list for a buffer ten times larger than the disk: "On disk now" is its moving window. How the window moves is a design of its own; these are the numbers it has to produce.</li>
-      <li>Stop serving keeps the staged data, refuses consumers, and puts the buffer back at step 3 with steps 1 to 3 editable: untick datasets, take in newly prepared ones, change the definition, then go forward to serve a new version. The blue line of a stopped buffer offers Serve it again (while nothing changed) and Retire.</li>
+      <li>Stopping interrupts training: a consumer's next request fails, it does not wait. Stop serving therefore asks first and names the runs it will break.</li>
+      <li>Stop serving keeps the staged data, refuses consumers, and puts the buffer back at step 3 with steps 1 to 3 editable: untick datasets, take in newly prepared ones, change the definition, then go forward to serve a new version. The blue line of a stopped buffer offers "Serve version N again" (which puts that version's definition back, after asking, if you changed it) and Retire.</li>
             <li>Your ruling: each time a changed buffer is served it is a new version with its own id. Scripts ask for the id; the name is only a label and the service never looks a buffer up by it.</li>
       <li>The id keeps today's form (<code>i&lt;buffer number&gt;-e&lt;go&gt;</code>); "version 2" is a count shown beside it. An earlier version stays on the buffer's page to look at (its definition, datasets and lists), and a script that asks for it is told it was stopped and which version replaced it.</li>
       <li><i>My guess:</i> a buffer stopped and served again with no change keeps its version and id.</li>
@@ -389,7 +394,7 @@ function showDatasets() {
   $("dsSummary").innerHTML = `<b>${f.length}</b> datasets fit this definition: <b>${prepared().length}</b> prepared, ${f.filter(d => d.state === "in progress").length} in progress, ${f.filter(d => d.state === "not prepared").length} not prepared, ${f.filter(d => d.state === "failed").length} failed.` + (C.exclude.size ? ` ${C.exclude.size} taken out by you.` : "");
   $("dsRows").innerHTML = matching().map(d => {
     const kept = !C.exclude.has(d.id);
-    return `<tr><td><input type="checkbox" data-keep="${d.id}" ${kept ? "checked" : ""} aria-label="in the buffer"></td><td class="mono">${d.id}</td><td>${d.mod}</td><td>${d.dims}</td><td>${kept ? pill(d) : '<span class="pill">taken out</span>'}</td><td class="num">${w.has(d.id) ? pct(w.get(d.id)) : "—"}</td></tr>`;
+    return `<tr><td><input type="checkbox" data-keep="${d.id}" ${kept ? "checked" : ""} aria-label="selected"></td><td class="mono">${d.id}</td><td>${d.mod}</td><td>${d.dims}</td><td>${kept ? pill(d) : '<span class="pill">taken out</span>'}</td><td class="num">${w.has(d.id) ? pct(w.get(d.id)) : "—"}</td></tr>`;
   }).join("");
   $("save").textContent = B.saved ? "Next: prepare →" : "Save buffer and continue →";
   $("saveHint").textContent = B.saved ? "Saved." : "Saving creates the buffer; nothing runs yet.";
@@ -411,7 +416,10 @@ function prepTicks() {
 function showPlan() {
   const p = weights(prepared()), fresh = p.filter(d => d.fresh).length;
   $("planDiff").hidden = !B.stopped;
-  $("planDiff").textContent = `Compared with what was served: ${fresh} datasets added, ${C.exclude.size} taken out. Step 5 shows which datasets are staged again.`;
+  $("planDiff").textContent = `Compared with what was served: ${fresh} datasets added, ${C.exclude.size} taken out. Step 5 shows which datasets are staged again. ` + (B.big
+    ? `Version ${B.version} holds 100 TB on disk and the limit is 100 TB: the new version does not fit beside it. Releasing version ${B.version} means it cannot be served again without staging it anew, and its space is free after the keeper's hold of 48 hours.`
+    : `Version ${B.version} holds 180 GB on disk; the new version fits beside it, so version ${B.version} is kept until the new one serves.`);
+  $("runPlan").textContent = B.stopped && B.big ? `Release version ${B.version} and run →` : "Run: fetch and stage →";
   $("pPool").textContent = B.big ? "1,412" : p.length;
   $("planDisk").hidden = !B.big;
   $("pFetch").textContent = B.big ? "3.4 PB" : "212 GB"; $("pFetchSub").textContent = B.big ? "raw files, fetched as the window moves" : "7 datasets not in the raw cache";
@@ -420,10 +428,10 @@ function showPlan() {
 }
 function showSource() {
   const p = prepared(), done = B.sourced ? p.length : Math.floor(p.length * 0.6);
-  $("srcSummary").innerHTML = `<b>${done} of ${p.length}</b> datasets are in the buffer.` + (B.sourced ? " Waiting for your approve." : " 4 jobs running.");
+  $("srcSummary").innerHTML = `<b>${done} of ${p.length}</b> datasets of this version are on disk.` + (B.sourced ? " Waiting for your approve." : " 4 jobs running.");
   $("srcBar").style.width = `${100 * done / (p.length || 1)}%`;
   $("srcRows").innerHTML = p.map((d, i) => {
-    const state = i < done ? ["ok", "in the buffer"] : i < done + 4 ? ["busy", i % 2 ? "fetching" : "staging"] : ["", "queued"];
+    const state = i < done ? ["ok", "on disk"] : i < done + 4 ? ["busy", i % 2 ? "fetching" : "staging"] : ["", "queued"];
     return `<tr><td class="mono">${d.id}</td><td><span class="pill ${state[0]}">${state[1]}</span></td><td>${state[1] === "queued" ? "" : "<a href='#'>job record</a>"}</td></tr>`;
   }).join("");
   $("toServe").disabled = !B.sourced; $("srcFinish").hidden = B.sourced;
@@ -433,11 +441,11 @@ function showServe() {
   $("sPool").textContent = B.big ? "1,412" : prepared().length;
   $("diskSub").textContent = B.big ? "100 TB of the plan's 1.0 PB: a moving window." : "All of the plan is on disk.";
   $("diskBar").style.width = B.big ? "10%" : "100%";
-  $("diskCounts").textContent = B.big
-    ? "142 datasets on disk · 1,094 waiting for space · 176 used and evicted · brought in 1.9 TB/h, used 1.4 TB/h"
-    : `${prepared().length} datasets on disk · none waiting for space`;
-  $("lateNote").textContent = `${late} datasets that fit are still being prepared. To take them in once they are done, stop serving.`;
-  $("lateNote").hidden = !late;
+  $("diskCounts").textContent = B.big ? "142 datasets on disk · 1,270 waiting for space" : `${prepared().length} datasets on disk · none waiting for space`;
+  const mix = B.big ? [["EM", 38, 71], ["light-sheet", 31, 29], ["confocal", 19, 0], ["X-ray CT", 12, 0]] : [["brightfield", 43, 43], ["confocal", 29, 29], ["light-sheet", 16, 16], ["EM", 13, 13]];
+  $("mixRows").innerHTML = mix.map(([m, planned, disk]) => `<tr><td>${m}</td><td class="num">${planned}%</td><td class="num">${disk === planned ? `${disk}%` : `<span class="pill warn">${disk}%</span>`}</td></tr>`).join("");
+  $("windowLater").textContent = B.big ? "Until the moving window is built, this version serves what is on disk and the rest waits for space: training sees the mix on the right, not the planned one. With the window, this card also shows the time until the data on disk is used up, refill latency and throughput, the time consumers starved, unique samples against repeats, and the delivered mix." : "";
+  $("sRuns").textContent = B.big ? "2" : "0"; $("sRunsSub").textContent = B.big ? "drew in the last 10 minutes" : "none has drawn yet";
   $("sVersion").textContent = `${B.version}`; $("sId").textContent = `id ${idOf(B.number, B.version)}`;
   $("snippet").textContent = `from mia_buffers.client import BufferDataset\ntrain = BufferDataset("http://buffer-api.example.org:8765", buffer="${idOf(B.number, B.version)}", split="train")  # the id of version ${B.version}, never the name`;
 }
@@ -466,7 +474,7 @@ function edited() { B.reached = STEPS.indexOf(B.step); B.changed = true; strip()
 function stoppedLine() {
   $("stoppedNote").hidden = !B.stopped || STEPS.indexOf(B.step) > 2;
   $("stoppedText").textContent = `Version ${B.version} is stopped; its staged data is kept. ${fits().filter(d => d.fresh).length} datasets prepared since it was planned are marked new and join at the next plan.`;
-  $("serveAgain").disabled = B.changed; $("serveAgain").title = B.changed ? "The buffer changed since this version: plan it to serve a new version" : "";
+  $("serveAgain").textContent = `Serve version ${B.version} again`;
 }
 function go(step) {
   const index = STEPS.indexOf(step);
@@ -516,11 +524,19 @@ document.querySelector(".panetabs").addEventListener("click", e => {
   for (const p of document.querySelectorAll("[data-pane]")) p.hidden = p.dataset.pane !== tab;
 });
 $("stopServe").onclick = () => {
+  const runs = B.big ? "2 training runs drew from this version in the last 10 minutes (gpu-node-14, gpu-node-22). Their next request fails with 409, and they do not wait." : "No training run drew from this version in the last 10 minutes.";
+  if (!confirm(`Stop serving version ${B.version}?\n\n${runs}\n\nWhat is on disk is kept. If you change the buffer, it comes back as a new version under another id, which every training run has to be given.`)) return;
   for (const d of CATALOG) if (d.state === "in progress") Object.assign(d, { state: "prepared", fresh: true }); // the mock's "prepared since"
   Object.assign(B, { serving: false, stopped: true, changed: false, sourced: false, reached: 2 });
+  B.served = { ...C, dims: new Set(C.dims), exclude: new Set(C.exclude) }; // the definition the stopped version ran
   go("prepare");
 };
-$("serveAgain").onclick = () => { B.resume = true; B.sourced = true; go("serve"); };
+$("serveAgain").onclick = () => {
+  if (B.changed && !confirm(`Serve version ${B.version} again?\n\nThe buffer's definition goes back to that version's. The changes you made since are discarded.`)) return;
+  if (B.served) Object.assign(C, B.served, { dims: new Set(B.served.dims), exclude: new Set(B.served.exclude) });
+  showControls(); $("yaml").value = toYaml();
+  B.resume = true; B.sourced = true; go("serve");
+};
 $("srcFinish").onclick = () => { B.sourced = true; showSource(); };
 $("notes").onchange = e => document.body.classList.toggle("nonotes", !e.target.checked);
 $("jump").innerHTML = `<button data-jump="list">Buffers</button> ` + STEPS.map((s, i) => `<button data-jump="${s}">${i + 1} ${TITLES[s]}</button>`).join(" ");
