@@ -40,6 +40,7 @@ NOT_REGISTERED_RE = re.compile(r"not registered", re.IGNORECASE)
 ENTRY_NOISE_RE = re.compile(r"(?s:<!--.*?-->)|^\*\*(Stage|Result|Folders|Jobs):\*\*[^\n]*$", re.MULTILINE)
 SEEN_CHARS = 600  # how much of a stop's own words a case quotes
 # what a stop says, by the remedy it calls for (spec §4.5); the first that matches decides
+BUDGET_RE = re.compile(r"root budget: (.*?max_\w+ \S+)")  # the refusal of `Ledger.reserve`, to its cap
 HOSTS_RE = re.compile(r"host not allowed: ([^)\n]+)")
 RECORD_GAP_RE = re.compile(r"match blocked:")
 REVISION_LIMIT_RE = re.compile(r"revision limit", re.IGNORECASE)
@@ -271,6 +272,7 @@ def stop_rule(item: dict, said: str, since: float) -> str | None:
             return "autodev's run failed"
         return None
     for rule, pattern in (
+        ("budget used up", BUDGET_RE),  # first: its numbers read like a passing cause's
         ("host not approved", HOSTS_RE),
         ("record gap", RECORD_GAP_RE),
         ("revision limit", REVISION_LIMIT_RE),
@@ -339,6 +341,11 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         if any(case["data"].get("commit") == commit for case in earlier):  # once per commit
             return [{"do": "diagnose"}]
         return [{"do": "go"}]
+    if rule == "budget used up":
+        refusal = BUDGET_RE.search(found["seen"])
+        named = refusal.group(1) if refusal else "see its page"
+        text = f"its budget is used up ({named}): raise that cap (`autonomy.root`) and restart the workers, then run it again"
+        return [{"do": "needs", "text": text}]
     if rule == "host not approved":
         hosts = HOSTS_RE.search(found["seen"])
         named = hosts.group(1).strip() if hosts else "see its page"

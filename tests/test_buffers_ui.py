@@ -1425,7 +1425,8 @@ def test_a_jobs_record_is_shown_as_text_never_as_markup() -> None:
 
 def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() -> None:
     """`#job/<address>` is the whole remainder after `#job/`, slashes and all, and the page reads `/jobs/<address>`
-    (a read route); a 404 is a job that left no record."""
+    (a read route); a 404 is a job that left no record. A round's job links the subject its round is of: the
+    number in its address, looked up, in the kind its service and round say."""
     assert (
         has("job: viewJob")
         and has('const arg = decoded(rest.join("/"))')
@@ -1433,21 +1434,35 @@ def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() 
         and has('id="jobBody"')
     )
     assert ("GET", "/jobs/x") in requested_paths() and resolve("GET", f"/jobs/{JOB_ADDRESS}") == "read"
-    found, missing = run_js(
+    found = run_js(
         "globalThis.location = { hash: '#job/issue-12/i12-e345/match-1' };\n"
-        "const asked = [], out = [];\n"
-        "for (const answer of input) {\n"
-        "  globalThis.fetch = async path => { asked.push(path); return { ...answer, text: async () => answer.body }; };\n"
+        "const asked = [], out = [], body = $('jobBody');\n"
+        "for (const answer of input.answers) {\n"
+        "  const lookup = { ok: true, status: 200, body: JSON.stringify(input.lookup) };\n"
+        "  globalThis.fetch = async path => { asked.push(path);\n"
+        "    const sent = path.startsWith('/lookup') ? lookup : answer; return { ...sent, text: async () => sent.body }; };\n"
         "  await viewJob('issue-12/i12-e345/match-1');\n"
-        "  out.push({ asked: asked.pop(), text: textOf(document.getElementById('jobBody')) });\n"
+        "  out.push({ asked: asked.splice(0), text: textOf(body), html: html(body) });\n"
         "}\n"
-        "print(out);",
-        {"job.js": "viewJob"},
-        [
-            {"ok": True, "status": 200, "body": json.dumps({"request": {"name": "match"}})},
-            {"ok": False, "status": 404, "statusText": "Not Found", "body": '{"error": "no record for this job"}'},
-        ],
+        "print([...out, subjectOf({}, 'issue-12/p12-e3/plan-1'), subjectOf({}, 'cleaner/case-1/diagnose-0')]);",
+        {"job.js": "viewJob, subjectOf", "dom.js": "$"},
+        {
+            "answers": [
+                {"ok": True, "status": 200, "body": json.dumps({"service": "mia-data", "request": {"name": "match"}})},
+                {"ok": False, "status": 404, "statusText": "Not Found", "body": '{"error": "no record for this job"}'},
+            ],
+            # issue numbers repeat across the kinds: the job's own kind is the one linked
+            "lookup": {
+                "subjects": [
+                    {"kind": "buffer", "number": 12, "key": "spec-a"},
+                    {"kind": "dataset", "number": 12, "key": "ds a"},
+                ]
+            },
+        },
     )
-    assert found["asked"] == missing["asked"] == f"/jobs/{JOB_ADDRESS}"
-    assert found["text"].startswith("match" + JOB_ADDRESS + "This job is still running")
+    found, missing, request, cleaner = found
+    assert found["asked"] == [f"/jobs/{JOB_ADDRESS}", "/lookup?q=12"] and missing["asked"] == [f"/jobs/{JOB_ADDRESS}"]
+    assert found["text"].startswith("match" + JOB_ADDRESS + "dataset ds aThis job is still running")
+    assert '<a href="#datasets/ds%20a">ds a</a>' in found["html"] and "spec-a" not in found["text"]
     assert missing["text"] == "match-1No record for this job."
+    assert (request, cleaner) == ({"kind": "prep", "number": 12}, None)

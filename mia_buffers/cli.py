@@ -22,7 +22,7 @@ from autodev.auth import bot_login
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from mia_core.fs import require_local_dir, require_secret_file
 from mia_core.registry import Registry, RegistryError, read_token, report_worker
-from mia_data.cli import _gh, _github_clients
+from mia_data.cli import _gh, _github_clients, _mirror_gh
 from mia_data.jobspec import harness_env, harness_pin
 
 from .config import PREP_STAGES, STAGES, load_config
@@ -109,11 +109,12 @@ def _register(args: argparse.Namespace) -> int:
 
 
 async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int:
-    """Run the Temporal workers until SIGTERM: one for the workflows and short activities, one for the job waits."""
+    """Run the Temporal workers until SIGTERM: one for the workflows and short activities, one for the job waits,
+    one for the mirror's passes."""
     from temporalio.worker import Worker
 
     from autodev.jobs import CsubJobs
-    from mia_data.mirror import Mirror
+    from mia_data.mirror import Mirror, mirror_worker
     from mia_data.workflows import MiaMirror
 
     from .activities import Activities
@@ -134,14 +135,16 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     labels = {"buffer": (cfg.label, STAGES), "prep": (cfg.prep_label, PREP_STAGES)}
     openers = {"buffer": buffer_issue(cfg), "prep": prep_issue(cfg)}  # a subject created on the page has no issue
     pages = {"buffer": spec_page(cfg), "prep": request_page(cfg)}
-    mirror = Mirror(clients[0], activities.registry, bot, labels, openers, pages)
+    mirror_gh = _mirror_gh(cfg, clients[0])
+    mirror = Mirror(mirror_gh, activities.registry, bot, labels, openers, pages)
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
         workflows=[MiaBuffer, MiaCacheKeeper, MiaCleaner, MiaPrep, MiaMirror],
-        activities=[*activities.all(), mirror.mirror],
+        activities=activities.all(),
         max_concurrent_activities=8,
     )
+    mirror_passes = mirror_worker(client, cfg.mirror_queue, mirror.mirror)
     await_worker = Worker(
         client, task_queue=cfg.await_queue, activities=[activities.await_job], max_concurrent_activities=20
     )
@@ -149,18 +152,18 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     assert task is not None  # we are inside the worker coroutine
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
     print(
-        f"worker up as {bot}: {cfg.temporal.address} ns={cfg.temporal.namespace} queues {cfg.task_queue}, {cfg.await_queue}"
+        f"worker up as {bot}: {cfg.temporal.address} ns={cfg.temporal.namespace} queues {cfg.task_queue}, {cfg.await_queue}, {cfg.mirror_queue}"
     )
     # the code this worker's activities were loaded from: the cleaner says when a restart is owed
     report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log))
     try:
-        async with main_worker, await_worker:
+        async with main_worker, await_worker, mirror_passes:
             await asyncio.Event().wait()
     except asyncio.CancelledError:
         print("worker shutting down")
     finally:
         report.cancel()
-        for gh in clients:
+        for gh in (*clients, mirror_gh):
             await gh.aclose()
     return 0
 

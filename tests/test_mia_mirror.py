@@ -4,6 +4,7 @@ activity mocked."""
 
 import asyncio
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from temporalio import activity
@@ -13,8 +14,8 @@ from temporalio.worker import Worker
 
 from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
-from mia_data.config import STAGES
-from mia_data.mirror import Mirror
+from mia_data.config import STAGES, Config
+from mia_data.mirror import WRITE_GAP_S, Mirror, mirror_worker
 from mia_data.workflows import MiaMirror
 from tests.mia_helpers import FakeGH, registry_for
 
@@ -99,7 +100,8 @@ async def test_a_kick_during_a_pass_runs_another_pass():
     env = await WorkflowEnvironment.start_time_skipping()
     try:
         queue = f"tq-{uuid.uuid4()}"
-        async with Worker(env.client, task_queue=queue, workflows=[MiaMirror], activities=[mirror]):
+        workflows = Worker(env.client, task_queue=queue, workflows=[MiaMirror])
+        async with workflows, mirror_worker(env.client, f"{queue}-mirror", mirror):
             handle = await env.client.start_workflow(
                 "MiaMirror", args=["dataset", 7], id="mirror/dataset/7", task_queue=queue, start_signal="kick"
             )
@@ -110,6 +112,43 @@ async def test_a_kick_during_a_pass_runs_another_pass():
     finally:
         await env.shutdown()
     assert passes == [("dataset", 7)] * 2
+
+
+async def test_passes_run_one_at_a_time_on_the_mirror_queue_and_take_no_slot_of_the_rounds():
+    """Incident 2026-11-16: 154 datasets started at once, and their mirrors, asleep in the GitHub throttle, held
+    every activity slot of the worker their rounds needed."""
+    running, most = 0, 0
+
+    @activity.defn(name="mirror")
+    async def mirror(kind: str, number: int) -> int:
+        nonlocal running, most
+        running += 1
+        most = max(most, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+        return 0
+
+    env = await WorkflowEnvironment.start_time_skipping()
+    try:
+        queue = f"tq-{uuid.uuid4()}"
+        # the workflows' worker has no mirror activity: a pass can only run on the mirror's queue
+        workflows = Worker(env.client, task_queue=queue, workflows=[MiaMirror])
+        async with workflows, mirror_worker(env.client, f"{queue}-mirror", mirror):
+            handles = [
+                await env.client.start_workflow(
+                    "MiaMirror", args=["dataset", number], id=f"mirror/dataset/{number}-{queue}", task_queue=queue
+                )
+                for number in range(6)
+            ]
+            await asyncio.gather(*(handle.result() for handle in handles))
+    finally:
+        await env.shutdown()
+    assert most == 1
+
+
+def test_the_mirror_writes_slowly_enough_to_stay_under_githubs_hourly_limit():
+    assert 3600 / WRITE_GAP_S <= 400  # GitHub stops an account at 500 content-creating requests an hour
+    assert Config.mirror_queue.fget(SimpleNamespace(deployment="mia-data")) == "mia-data-mirror"
 
 
 # --- a subject started from the page has no issue: the mirror opens one (spec webapp-actions §7 step 1) ---

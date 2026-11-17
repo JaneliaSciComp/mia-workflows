@@ -362,6 +362,7 @@ export const VERDICT_KIND = { approve: "pool", reject: "warn", escalate: "" };
 // ---- addresses: a subject's own page by kind, and the view and tab its address belongs to
 export const SUBJECT_VIEWS = { datasets: "dataset", requests: "prep" }; // #datasets/<record>, #requests/<key>; a buffer: flow.js
 export const SUBJECT_TAB = { datasets: "datasets", requests: "datasets" };
+export const KIND_WORDS = { dataset: "dataset", buffer: "buffer", prep: "request" };
 export const SUBJECT_HASH = {
   dataset: key => "#datasets/" + encodeURIComponent(key),
   buffer: key => "#buffer/" + encodeURIComponent(key),

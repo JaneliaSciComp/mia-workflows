@@ -714,6 +714,22 @@ async def test_publish_crops_into_dataset_folder(tmp_path):
         await t.a.publish_crops(1, "i1-e100", str(cw), [v], SNIP_SHA)
 
 
+async def test_publish_crops_saves_the_overlays_of_the_approved_head(tmp_path):
+    """A round that tested two snippet heads has a verify job per head, each with an overlay per crop id: the
+    saved overlay is the one drawn for the crops being saved, whichever head's name sorts first."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    rejected, approved = "f" * 40, "0" * 40
+    for head in (rejected, approved):
+        vw = Path(await t.a.prepare_job(1, ROUND, f"verify-{head}", 1, None))
+        (vw / "preview" / "c1").mkdir(parents=True)
+        (vw / "preview" / "c1" / "overlay.png").write_bytes(b"overlay at " + head.encode())
+    cw = Path(await t.a.prepare_job(1, ROUND, f"crop-{approved}", 1, None))
+    await t.a.publish_crops(1, ROUND, str(cw), [_crop(cw, "c1", 0)], SNIP_SHA)
+    saved = t.cfg.paths.storage_root / "lm-human-rec-1" / "c1" / "overlay.png"
+    assert saved.read_bytes() == b"overlay at " + approved.encode()
+
+
 async def test_read_verify_reports_the_lowered_n(tmp_path):
     t = _setup(tmp_path)
     ws, cw = tmp_path / "vws", tmp_path / "cws"

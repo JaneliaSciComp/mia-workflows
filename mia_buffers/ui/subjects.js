@@ -12,6 +12,7 @@ import {
   num,
   stagePill,
   statePill,
+  KIND_WORDS,
   SUBJECT_HASH,
   when,
 } from "./dom.js";
@@ -325,7 +326,6 @@ export async function viewFind(text) {
 }
 
 // ---- Needs you: everything that waits on a person, with the button that answers it (spec webapp-actions §8.2)
-const KIND_WORDS = { dataset: "dataset", buffer: "buffer", prep: "request" };
 const NEEDS_KINDS = [
   ["", "All"],
   ["dataset", "Datasets"],
