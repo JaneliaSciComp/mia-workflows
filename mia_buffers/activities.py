@@ -40,8 +40,8 @@ from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
+from mia_data.binding import granted_hosts, missing_hosts
 from mia_data.binding import hosts as job_hosts
-from mia_data.binding import missing_hosts
 from mia_data.catalog import dataset_folder
 from mia_data.config import round_open
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
@@ -1003,16 +1003,21 @@ class Activities:
         shutil.copyfile(source, dest)
         digest = hashlib.sha256(dest.read_bytes()).hexdigest()
         url_hosts = sorted({host for url in urls if (host := (urlsplit(url).hostname or "").lower())})
-        manual = any(url.startswith("manual://") for url in urls) or bool(
-            missing_hosts(url_hosts, await asyncio.to_thread(self.probe))
-        )
+        patterns = await asyncio.to_thread(self.probe)
+        manual = any(url.startswith("manual://") for url in urls) or bool(missing_hosts(url_hosts, patterns))
         staged, artifact, refused = await self._staged_before(round_id, record)
         if manual:
             drops = [list(pair) for pair in drop_names(urls)]
             return BindingInfo(True, str(dest), digest, [], drops, staged=staged, artifact=artifact, refused=refused)
-        return BindingInfo(
-            True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged, artifact=artifact, refused=refused
-        )
+        # the hosts the dataset's rounds were refused and a person approved since (redirect targets, mostly);
+        # buffer-api unreachable: none, and a job that needs one says `host_not_allowed`
+        try:
+            granted = granted_hosts(await asyncio.to_thread(self.registry.refused_hosts, record), patterns)
+        except RegistryError as error:
+            activity.logger.warning("%s: registry unavailable, no refused hosts granted: %s", record, error)
+            granted = []
+        hosts = sorted({*job_hosts(urls, self.cfg), *granted})
+        return BindingInfo(True, str(dest), digest, hosts, staged=staged, artifact=artifact, refused=refused)
 
     async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str, str]:
         """(found, artifact id, refused): found when buffer-api's registry holds an `ok` pyramid under this artifact

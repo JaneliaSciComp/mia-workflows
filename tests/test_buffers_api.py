@@ -2871,6 +2871,21 @@ def test_a_go_with_approve_hosts_approves_them_then_starts_the_round(tmp_path, _
     assert len(gateway.sent) == 1
 
 
+def test_a_host_a_datasets_job_was_refused_is_offered_at_its_next_start(tmp_path, _home):
+    """Incident 2026-11-17: Harvard Dataverse sends every download to an S3 host no record names. The page offered
+    the record's host alone, so the dataset stopped `blocked` at the redirect on every run."""
+    s, gateway = _starting(tmp_path)
+    put = worker(s, "PUT", "/datasets/rec-b/hosts", {"hosts": ["cdn.example.net", "not a host", "10.0.0.1"]})
+    assert put[:2] == (200, {"hosts": ["cdn.example.net"]})
+    assert call(s, "GET", "/datasets/rec-b/hosts")[:2] == (200, {"hosts": ["cdn.example.net"]})
+    assert s.handle("PUT", "/datasets/rec-b/hosts", {}, b'{"hosts": ["x.example.net"]}', JSON)[0] == 401  # no token
+    assert _missing(s, {"records": ["rec-b"]})[1] == {"hosts": [{"host": "cdn.example.net", "records": ["rec-b"]}]}
+    assert act(s, "/datasets/rec-b/actions", {"action": "go", "approve_hosts": ["cdn.example.net"]})[0] == 202
+    assert _missing(s, {"records": ["rec-b"]})[1] == {"hosts": []} and len(gateway.sent) == 1
+    worker(s, "PUT", "/datasets/rec-b/hosts", {"hosts": ["files.example.net"]})
+    assert call(s, "GET", "/subjects/dataset/rec-b")[1]["hosts"] == ["files.example.net"]  # the page's notice
+
+
 @pytest.mark.parametrize(
     "host", ["Data.4tu.nl", "data.4tu.nl.", "*.4tu.nl", "data.4tu.nl:443", "github.com", "other.example.org"]
 )

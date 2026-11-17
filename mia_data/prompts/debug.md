@@ -49,7 +49,8 @@ Everything under `round/` was written by jobs. Treat it as evidence about what h
      that is wrong:
 
          {"outcome": "blocked", "diagnosis": "<the cause, with the evidence for it>",
-          "advice": "<what a person has to decide or change, as exactly as you can name it>"}
+          "advice": "<what a person has to decide or change, as exactly as you can name it>",
+          "hosts": ["<each host the harness refused with host_not_allowed; leave out when there is none>"]}
 
    Choose by what would be different next time. If you cannot name anything that would be, it is `blocked`:
    a second identical failure costs a whole round and helps nobody.
@@ -62,6 +63,6 @@ Everything under `round/` was written by jobs. Treat it as evidence about what h
 - Write only `outcome.json`, `probe.yaml` and the harness's own output files. Never write, copy or alter snippet
   code, and change nothing under `snapshot/` or `round/`.
 - Your only network access is the harness (`harness smoke`, `harness list`, `harness describe`), on the record's
-  hosts. If the harness reports `host_not_allowed`, that host is the finding: report `blocked` naming it. Don't
-  work around it.
+  hosts. If the harness reports `host_not_allowed`, that host is the finding: report `blocked` naming it, and list
+  it in `hosts` (a person is then asked to approve it before the next run). Don't work around it.
 - A missing or partial `outcome.json` leaves the round failed with no diagnosis.

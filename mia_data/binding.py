@@ -105,6 +105,12 @@ def hosts(urls: list[str], cfg: Config) -> list[str]:
     return network_hosts(urls, cfg.network)
 
 
+def granted_hosts(refused: list[str], patterns: list[str]) -> list[str]:
+    """Of the hosts a dataset's jobs were refused, those the csub policy allows by now: a person approved them,
+    so the dataset's next jobs may reach them. Never a GitHub host."""
+    return [host for host in refused if not is_github_host(host) and not missing_hosts([host], patterns)]
+
+
 def network_hosts(urls: list[str], network: NetworkCfg) -> list[str]:
     """`hosts` over a network block alone."""
     url_hosts = {host for url in urls if (host := _host(url))}

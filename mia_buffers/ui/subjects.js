@@ -83,6 +83,17 @@ const gapsNotice = gaps =>
     ...mdInline(gaps.join("; ")),
     ". Start is offered once a catalog sync brings a record that has it; nothing has to be done here.",
   );
+// Hosts a job of the dataset was refused that nobody approved yet (`hosts` on its subject): a redirect target,
+// mostly. The start dialog lists them with the record's own.
+const hostsNotice = hosts =>
+  el(
+    "div",
+    { class: "notice" },
+    el("b", {}, "A host is not approved. "),
+    "Its jobs were refused ",
+    ...mdInline(hosts.map(host => `\`${host}\``).join(", ")),
+    ": press Run again and check what its jobs may download from.",
+  );
 // A shelved subject (spec shelved-subjects): who set it aside, when and why. Its only button is Unshelve.
 export const shelvedNotice = hold =>
   el(
@@ -219,6 +230,7 @@ export async function viewSubject(kind, key, refresh) {
   parts.push(actionBar(subject, redraw), undelivered(subject, timeline?.actions || [], redraw));
   if (subject.shelved) parts.push(shelvedNotice(subject.shelved));
   if (gaps.length) parts.push(gapsNotice(gaps));
+  if (subject.hosts?.length && subject.actions.includes("go")) parts.push(hostsNotice(subject.hosts));
   parts.push(...cards);
   if (kind === "prep")
     parts.push(

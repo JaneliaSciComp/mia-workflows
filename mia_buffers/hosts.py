@@ -61,7 +61,7 @@ class HostCheck:
             return "is this deployment's own host"
         return None
 
-    def _group(self, hosts_by_record: dict[str, list[str]]) -> Needed:
+    def group(self, hosts_by_record: dict[str, list[str]]) -> Needed:
         """Host -> the sorted ids of the records that need it, leaving out every host that cannot be approved."""
         needed: dict[str, list[str]] = {}
         for record, hosts in hosts_by_record.items():
@@ -70,16 +70,18 @@ class HostCheck:
                     needed.setdefault(host, []).append(record)
         return {host: sorted(records) for host, records in sorted(needed.items())}
 
-    def for_records(self, records: dict[str, dict]) -> Needed:
-        """Hosts each catalog record's URLs need (record id -> catalog record), without the hosts that are never
-        approved; a record whose hosts cannot be computed (a GitHub URL) contributes nothing."""
+    def for_records(self, records: dict[str, dict], refused: dict[str, list[str]] | None = None) -> Needed:
+        """Hosts each catalog record's URLs need (record id -> catalog record) and those its jobs were refused
+        (`refused`: record id -> hosts), without the hosts that are never approved; a record whose hosts cannot
+        be computed (a GitHub URL) contributes nothing."""
         hosts_by_record = {}
         for record_id, record in records.items():
             try:
-                hosts_by_record[record_id] = network_hosts(record_urls(record), self.network)
+                named = network_hosts(record_urls(record), self.network)
+                hosts_by_record[record_id] = [*named, *(refused or {}).get(record_id, [])]
             except (ValueError, AttributeError, TypeError):
                 continue
-        return self._group(hosts_by_record)
+        return self.group(hosts_by_record)
 
     def for_bindings(self, folders: dict[str, str]) -> Needed:
         """Hosts each published binding's URLs need (record id -> its folder under storage_root), without the hosts
@@ -101,7 +103,7 @@ class HostCheck:
                     hosts_by_record[record_id] = network_hosts(urls, self.network)
             except (ValueError, yaml.YAMLError, AttributeError, TypeError):
                 continue
-        return self._group(hosts_by_record)
+        return self.group(hosts_by_record)
 
     def pool(self, round_id: str) -> list[str]:
         """Ids of the in_pool rows of the round's plan.json; ValueError when it cannot be read as a plan."""

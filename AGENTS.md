@@ -116,8 +116,10 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   what `dom.js` does. What a job or a record wrote is inserted as text, never parsed as HTML.
 - **Only a person's click approves a host.** Brokers read `<csub.policy_dir>/broker.toml`, generated from the operator's
   `csub.base_policy` plus `approved-hosts.jsonl`, which buffer-api alone appends to, on a start action, with hosts
-  that run's jobs need (records' URL hosts, bindings' too if the record names them, redirect targets, package hosts;
-  never an IP or the deployment's own host); nothing writes the operator's `broker.toml`. `policy_dir` is under home,
+  that run's jobs need (records' URL hosts, bindings' too if the record names them, redirect targets, package hosts,
+  the hosts a dataset's jobs were refused; never an IP or the deployment's own host); nothing writes the operator's
+  `broker.toml`. A job that is refused a host notes it for its dataset; noting approves nothing, and the dataset's
+  jobs get the host only once the policy allows it. `policy_dir` is under home,
   apart from every directory a worker sandbox binds read-write, and its `broker.toml` is not the base policy file.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.

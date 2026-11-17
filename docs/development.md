@@ -481,7 +481,8 @@ sandbox bypasses its proxy for loopback names, and inside it they point at the s
 host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the hosts
 the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request) or its
 saved bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
-pool), their `network.redirect_hosts` targets and the package hosts. Checked hosts travel as `approve_hosts` on a
+pool), their `network.redirect_hosts` targets, the package hosts, and for a dataset the hosts its jobs were refused
+(below). Checked hosts travel as `approve_hosts` on a
 dataset's `go`, filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other
 action carrying a non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender,
 accepts only hosts that run needs (never a GitHub host, an IP literal or the host of `service.url` or
@@ -489,8 +490,15 @@ accepts only hosts that run needs (never a GitHub host, an IP literal or the hos
 on every request, so an approved host needs no restart: the next job sees it. Every generation checks that `policy_dir`
 is under home, apart from every read-write sandbox mount, and that its `broker.toml` is not the base policy file.
 Withdrawing an approval is a hand edit: remove the host's lines, then `mia up` (or the next approval) regenerates. A
-redirect target still needs `network.redirect_hosts`, and a pattern or a host wanted before any run is added to the base
-policy by hand. `mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
+pattern or a host wanted before any run is added to the base policy by hand.
+
+A host nobody could name before the run, a redirect target mostly, is learned from the refusal. A dataset job that the
+harness refuses a host (`host_not_allowed` in `smoke.json` or the crop job's `report.json`, or `hosts` in a match or
+debug agent's `outcome.json`) has it noted for its dataset (`PUT /datasets/<record>/hosts`, worker token; the `kv` row
+`refused_hosts`). From then on it is one of the hosts the dataset's runs need: the dataset's page says so, and its next
+start (or a request's that names it) lists the host to check. A noted host the policy allows is granted to every job of
+that dataset that reaches any host (`with_hosts` in `submit`; a buffer's fetch and stage jobs through `read_binding`),
+and to no other dataset's. `network.redirect_hosts` names such targets ahead of the first refusal. `mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
 names its `agent.allow_hosts` plus the hosts its issue names, where the policy allows them
 (`autodev.agent.agent_hosts`); a job that would need more than csub's 64 is not started and its round fails saying so. An issue names hosts with `<!-- autodev: hosts a.org b.org -->` in its body
 (`hosts_marker`), and only when a bot of `github.trusted_bots` opened it: a dataset round writes there the hosts

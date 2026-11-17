@@ -49,7 +49,7 @@ from mia_core.untrusted import write_atomic as write_atomic
 
 from . import catalog
 from . import publish as crop_publish
-from .binding import check_binding, hosts, record_gaps, record_urls
+from .binding import check_binding, granted_hosts, hosts, record_gaps, record_urls
 from .config import HUMAN_LABELS, STAGE_SENTENCES, STAGES, dataset_state, round_open
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
@@ -70,6 +70,7 @@ from .jobspec import (
     smoke_job,
     snapshot,
     verify_job,
+    with_hosts,
 )
 from .models import (
     ADVISERS,
@@ -115,6 +116,13 @@ if TYPE_CHECKING:
     from .config import Config
 
 log = logging.getLogger(__name__)
+
+
+def _refused_host(report: dict) -> object:
+    """The host a harness report says the job was refused (`host_not_allowed`: {host, chain}), or None."""
+    refused = report.get("host_not_allowed")
+    return refused.get("host") if isinstance(refused, dict) else None
+
 
 TEST_PR_RE = re.compile(r"i0-e(\d+)-[0-9a-f]{7}")  # `mia-data test-pr`'s round id: PR <n> at a head, no data issue
 ROUND_RE = re.compile(rf"i\d+-e\d+|{TEST_PR_RE.pattern}")
@@ -376,6 +384,19 @@ class Activities:
 
     def _pins(self, round_id: str) -> Pins:
         return Pins(**json.loads((self._round_dir(round_id) / "pins.json").read_text()))
+
+    async def _note_refused(self, round_id: str, hosts: object) -> None:
+        """Tell the registry which hosts a job of a dataset round was refused, best effort: the dataset's next
+        start asks a person to approve them. `hosts` is what a job left: anything but host names is dropped."""
+        named = [host.lower() for host in (hosts if isinstance(hosts, list) else [hosts]) if isinstance(host, str)]
+        if not named:
+            return
+        try:
+            record = self._pins(round_id).record
+        except (OSError, ValueError, TypeError):
+            return  # ponytail: a PR head's test round lies elsewhere and tells nobody; its match round did
+        put = functools.partial(self.registry.add_refused_hosts, record, named[:20])
+        await asyncio.to_thread(best_effort, put, f"refused hosts of {record}", log)
 
     def _round_workspace(self, issue: int, round_id: str) -> Path:
         """work_root/issue-<n>/<round>, the parent of the round's job workspaces; a test-pr round's is
@@ -928,6 +949,7 @@ class Activities:
         outcome = _job_json(self._job_workspace(issue, round_id, workspace), "outcome.json")
         if not isinstance(outcome, dict) or outcome.get("outcome") not in ("rerun", "blocked"):
             return DebugResult("failed", "the debugging agent left no readable outcome.json")
+        await self._note_refused(round_id, outcome.get("hosts"))
         return DebugResult(
             outcome["outcome"],
             self._clean(_text(outcome.get("diagnosis"), 6000)) or "(the debugging agent gave no diagnosis)",
@@ -994,17 +1016,19 @@ class Activities:
     @activity.defn(name="submit")
     @mia_permanent_errors
     async def submit(self, key: str, kind: str, args: JobArgs) -> str:
-        """Build the job (the builders refuse a moved harness pin), refuse hosts a fresh `csub probe` doesn't
-        allow, and submit at most once per key. Returns the job id."""
+        """Build the job (the builders refuse a moved harness pin), let it reach the hosts the dataset's jobs were
+        refused that a person approved since, refuse hosts a fresh `csub probe` doesn't allow, and submit at most
+        once per key. Returns the job id."""
         from csub import CsubError  # pixi-only dependency, imported where used (as autodev does)
 
         patterns = await asyncio.to_thread(self.probe)
+        refused = await asyncio.to_thread(self.registry.refused_hosts, args.pins.record)
         snapshot_dir = (
             await self._snapshot(args.sha or args.pins.snippets_commit) if kind in ("smoke", "crop") else None
         )
 
         def build() -> JobSpec:
-            spec = self._spec(kind, args, snapshot_dir)
+            spec = with_hosts(self._spec(kind, args, snapshot_dir), granted_hosts(refused, patterns))
             check_hosts_allowed(spec, patterns)
             return spec
 
@@ -1070,6 +1094,7 @@ class Activities:
         if not isinstance(outcome, dict):
             return MatchResult("failed", "outcome.json is missing, unreadable or not a JSON object")
         kind = outcome.get("outcome")
+        await self._note_refused(round_id, outcome.get("hosts"))
         if kind in ("blocked", "failed"):
             return MatchResult(kind, _text(outcome.get("reason")) or f"the match agent reported {kind}, with no reason")
         if kind == "needs_snippet":
@@ -1153,6 +1178,7 @@ class Activities:
         if not isinstance(report, dict):
             return SmokeResult(False, errors=["smoke.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")
+        await self._note_refused(Path(workspace).parent.name, _refused_host(report))
         return SmokeResult(
             report.get("ok") is True,
             report.get("eligible") is True,
@@ -1209,6 +1235,7 @@ class Activities:
             verified = []
         crop_report = _job_json(crop_workspace, "crops/report.json") if crop_workspace else None
         crop_report = crop_report if isinstance(crop_report, dict) else {}
+        await self._note_refused(Path(workspace).parent.name, _refused_host(crop_report))
 
         def count(key: str) -> int | None:
             value = crop_report.get(key)

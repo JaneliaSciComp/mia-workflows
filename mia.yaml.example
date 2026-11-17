@@ -87,7 +87,8 @@ limits:
   fetch_attempts: 4
 
 # Hosts the sandbox lets jobs reach. `package_hosts` are the package indexes every job may use.
-# `redirect_hosts` is filled from the redirect probe: exact hosts, no patterns.
+# `redirect_hosts` names hosts a data host redirects to (exact hosts, no patterns) ahead of a run; one it does not
+# name is offered for approval on the dataset's page after the first job that was refused it.
 network:
   package_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, repo.prefix.dev]
   redirect_hosts: {}

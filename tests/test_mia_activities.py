@@ -304,6 +304,23 @@ async def test_submit_refuses_host_missing_from_probe(tmp_path):
     assert e.value.non_retryable and "data.example.org" in str(e.value) and t.csub.submitted == []
 
 
+async def test_a_refused_host_is_noted_and_the_datasets_jobs_reach_it_once_the_policy_allows_it(tmp_path):
+    """Incident 2026-11-17: a redirect target no record names. What a job was refused is the dataset's to ask
+    for; its jobs get it when a person approved it, and only then."""
+    t = _setup(tmp_path)  # the policy allows *.example.org
+    blocked = {"outcome": "blocked", "reason": "refused", "hosts": ["cdn.example.org", "CDN.Elsewhere.net", 7]}
+    _, ws = await _match_ws(t, blocked)
+    assert (await t.a.read_match(str(ws))).outcome == "blocked"
+    (ws / "smoke.json").write_text(json.dumps({"host_not_allowed": {"host": "s3.example.org", "chain": ["a", "b"]}}))
+    await t.a.read_smoke(str(ws))
+    assert t.a.registry.refused_hosts("rec-1") == ["cdn.elsewhere.net", "cdn.example.org", "s3.example.org"]
+    await t.a.submit(job_key(1, ROUND, "match", 1), "match", JobArgs(str(ws), ROUND, await t.a.admit(1, "99")))
+    (job,) = t.csub.submitted
+    assert {"cdn.example.org", "s3.example.org", "data.example.org"} <= set(job["allow_hosts"])
+    assert "cdn.elsewhere.net" not in job["allow_hosts"]  # nobody approved it
+    assert "cdn.example.org" in job["env"]["MIA_HARNESS_ALLOWED_HOSTS"].split(",")
+
+
 async def test_submit_match_once(tmp_path):
     t = _setup(tmp_path)
     assert await _submit_match(t) == "777" == await _submit_match(t)
