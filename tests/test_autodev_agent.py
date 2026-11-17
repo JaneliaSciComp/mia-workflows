@@ -14,6 +14,7 @@ from autodev.activities import Activities
 from autodev.agent import (
     AgentJobs,
     csub_client,
+    cut_off,
     hosts_marker,
     issue_hosts,
     job_script,
@@ -76,6 +77,19 @@ def test_read_result_tolerates_garbage(tmp_path):
     (tmp_path / "result.json").write_text(json.dumps({"result": "x" * 50000, "total_cost_usd": "free"}))
     text, cost = read_result(tmp_path)
     assert len(text) < 20100 and text.endswith("(truncated)") and cost is None
+
+
+def test_cut_off_is_claude_codes_own_error_and_nothing_else(tmp_path):
+    for result, said in (
+        ({"is_error": True, "result": "Not logged in · Please run /login"}, "Not logged in · Please run /login"),
+        ({"is_error": True, "result": "the tests fail"}, ""),  # the agent's own failure
+        ({"is_error": False, "result": "I could not log in to the FTP server; Please run /login"}, ""),
+        (["is_error"], ""),
+    ):
+        (tmp_path / "result.json").write_text(json.dumps(result))
+        assert cut_off(tmp_path) == said
+    (tmp_path / "result.json").unlink()
+    assert cut_off(tmp_path) == ""
 
 
 def test_log_tail_reads_claude_and_job_stderr(tmp_path):

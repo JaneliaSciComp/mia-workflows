@@ -111,6 +111,9 @@ class JobOutcome:
     job_id: str
     state: str  # csub/LSF state: DONE | EXIT | UNKNOWN
     exit_code: int | None = None
+    # Claude Code's own error when it ended the agent's session (a login that lapsed, an API error): the agent
+    # did not fail at its work, and the same round may pass when run again. "" when the agent ended by itself.
+    cut_off: str = ""
 
 
 @dataclass

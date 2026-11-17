@@ -35,7 +35,7 @@ from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import TooManyHostsError, issue_hosts, judge_dir, log_tail, read_result, render_prompt
+from .agent import TooManyHostsError, cut_off, issue_hosts, judge_dir, log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
@@ -282,7 +282,11 @@ class Activities:
 
     @activity.defn(name="await_agent")
     async def await_agent(self, request: AwaitInput) -> JobOutcome:
-        return await self.jobs.wait(request.job_id, request.workspace, activity.heartbeat)
+        """Wait for the job; a failed one says whether Claude Code ended the agent's session (`cut_off`)."""
+        outcome = await self.jobs.wait(request.job_id, request.workspace, activity.heartbeat)
+        if outcome.exit_code not in (0, None):
+            outcome.cut_off = self._clean(await asyncio.to_thread(cut_off, Path(request.workspace.dir)))
+        return outcome
 
     @activity.defn(name="publish_round")
     @permanent_errors
