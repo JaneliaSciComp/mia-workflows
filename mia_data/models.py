@@ -46,6 +46,10 @@ class AutodevLook:
     working: bool  # the issue has `snippets:working`: an agent round is running
     stopped: bool  # the issue is closed or has `snippets:needs-human`
     last_word: str  # autodev's last comment on the issue or the PR: one line, cut and neutralized
+    # the agent's summary of autodev's newest round that changed nothing (cut and neutralized), and when autodev
+    # posted it (ISO time); "" when no round ended so
+    answer: str = ""
+    answer_at: str = ""
 
 
 @dataclass
@@ -119,6 +123,9 @@ class DatasetState:
     result: str = ""  # what the open pass found
     result_binding: bool = False  # whether its result entry shows the round's binding
     waiting_since: str | None = None  # when the round last heard from autodev while it waits for it (ISO time)
+    # when a reviewer's comments went to the snippet PR as a revision request (ISO time); None once a head or
+    # autodev's answer came back for it
+    revised_at: str | None = None
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:

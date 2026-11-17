@@ -28,7 +28,7 @@ import yaml
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from autodev.activities import PERMANENT_CSUB, permanent_errors
+from autodev.activities import NO_COMMITS, PERMANENT_CSUB, permanent_errors
 from autodev.agent import hosts_marker
 from autodev.jobs import JobSpec
 from mia_core import autonomy
@@ -134,6 +134,9 @@ LOG_BYTES = 64 << 10  # the end of a job's stdout and stderr
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
+# the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
+NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
+MARKER_RE = re.compile(r"(?s)<!--.*?-->")
 CROP_STATUS = {
     "pending": "test crops running",
     "success": "test crops passed",
@@ -1548,7 +1551,8 @@ class Activities:
     async def autodev_look(self, snippet_issue: int, pr: int | None) -> AutodevLook:
         """What a round that waits for autodev finds when it looks itself, whatever the poller told it: the PR
         (`pr`, the one the round follows, else the open one on the issue's branch), whether an agent round is
-        running or autodev has stopped, and the last comment autodev left on the issue or the PR."""
+        running or autodev has stopped, the last comment autodev left on the issue or the PR, and the summary of
+        its newest round that changed nothing."""
         gh = self.gh_snippets
         issue = await gh.get_issue(int(snippet_issue))
         labels = {label["name"] for label in issue.get("labels", [])}
@@ -1563,11 +1567,17 @@ class Activities:
             if (comment.get("user") or {}).get("login") == self.bot and ours not in (comment.get("body") or "")
         ]
         last = max(said, key=lambda comment: comment.get("created_at") or "", default=None)
+        unchanged = [comment for comment in said if NO_COMMITS_RE.match(comment.get("body") or "")]
+        answer = max(unchanged, key=lambda comment: comment.get("created_at") or "", default=None)
         return AutodevLook(
             pr,
             "snippets:working" in labels,
             issue.get("state") == "closed" or "snippets:needs-human" in labels,
             _text(self._clean(" ".join((last.get("body") or "").split())), 400) if last else "",
+            _text(self._clean(NO_COMMITS_RE.sub("", MARKER_RE.sub("", answer["body"]), count=1).strip()), 1500)
+            if answer
+            else "",
+            str(answer.get("created_at") or "") if answer else "",
         )
 
     @activity.defn(name="set_crop_status")

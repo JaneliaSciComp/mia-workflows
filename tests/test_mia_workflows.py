@@ -1245,6 +1245,31 @@ async def test_a_look_acts_on_a_pr_the_round_was_not_told_of_and_review_is_not_t
         assert m.stages[-1] == "review" and m.of("autodev_look") == [(100, None)]
 
 
+async def test_a_revision_autodev_answers_without_a_new_head_comes_back_to_review_with_the_answer(env):
+    """Incident 2026-11-17 (empiar-10017): a reviewer asked whether the repeated rows of a crop are in the data.
+    They are, so no new head could come: the round has to show autodev's answer and ask for the verdict again."""
+    said = "The rows repeat in the source file.\nNothing to change."
+    quiet = AutodevLook(5, False, False, "")
+    m = Mocks(outcome="needs_snippet", look=quiet, pr_now=head(H1))
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await reject_review(h, m, eid="12")
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        assert m.stages[-1] == "developing"  # autodev has not answered yet
+        m.look = AutodevLook(5, False, False, "", said, "2999-01-01T00:00:00Z")
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        answered = [r[1] for r in m.of("result") if r[0] == "developing"][-1]
+        assert "autodev changed nothing" in answered and "> The rows repeat in the source file.\n> Nothing" in answered
+        assert len([a for a in m.jobs() if a.n_crops]) == 1  # the same crops: no new set was made
+        await env.sleep(LOOK)
+        assert m.stages[-1] == "review"  # the answer is shown once
+        await approve_review(h, m, eid="13", dt=3)
+        await idle(h, m, "merging")
+    assert pr_comments(m)[-1] == f"/approve {H1}"
+
+
 async def test_a_merge_that_does_not_come_ends_the_round(env):
     said = "Approved, but merging failed: Pull Request has merge conflicts"
     m = Mocks(outcome="needs_snippet", look=AutodevLook(5, False, False, said), pr_now=head(H1))

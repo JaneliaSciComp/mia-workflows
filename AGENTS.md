@@ -73,7 +73,10 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   looks at the snippets issue itself every 15 minutes (`autodev_look`, `_look` in `mia_data/workflows.py`) and
   ends `blocked` when autodev stopped or `limits.autodev_quiet_hours` passed with no agent round running; the
   poller's `pr_update` only makes it faster. autodev says a stop with the `needs-human` label, never a comment
-  alone. A new wait on something outside the round gets the same: a look and a limit.
+  alone. A reviewer's revision request that autodev answers with a round of no commits brings no new head: the
+  look takes the dataset back to `review` with autodev's answer as the pass's result (`_answered`). An agent
+  job Claude Code itself cut off (a lapsed login, an API error) is run once more by autodev before it stops.
+  A new wait on something outside the round gets the same: a look and a limit.
 - **The cleaner asks, like anyone, and service problems come first.** `MiaCleaner` (the buffers worker's `sweep`;
   rules in `mia_buffers/cleaner.py`) names what is wrong with the installation before it looks at a subject, and
   leaves alone every subject behind a finding: it never cancels or re-runs what waits on a worker that is down or

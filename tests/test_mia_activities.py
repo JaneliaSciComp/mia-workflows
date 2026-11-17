@@ -1353,3 +1353,17 @@ async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp
     assert (look.pr, look.working, look.stopped) == (80, True, False)
     assert look.last_word.startswith("round 2 pushed xxx") and len(look.last_word) == 400
     assert (await t.a.autodev_look(72, 80)).pr == 80  # the PR the round follows is not looked up again
+    assert (look.answer, look.answer_at) == ("", "")  # no round of autodev's ended without commits
+    summary = (
+        "### snippets: round 3 made no commits · $1.48\n\nThe rows repeat in the source file.\n\nNothing to change."
+    )
+    t.snip.comments[80].append(
+        {
+            "created_at": "2026-11-14T23:30:00Z",
+            "user": {"login": "bot"},
+            "body": summary + "\n\n<!-- snippets: round x-3 -->",
+        }
+    )
+    look = await t.a.autodev_look(72, 80)
+    assert look.answer == "The rows repeat in the source file.\n\nNothing to change."
+    assert look.answer_at == "2026-11-14T23:30:00Z"

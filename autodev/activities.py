@@ -136,11 +136,14 @@ summary is the first comment.
 {cfg.marker("pr")}"""
 
 
+NO_COMMITS = "made no commits"  # how a round summary names a round that changed nothing; mia-data reads it
+
+
 def render_summary(
     cfg: Config, round_number: int, branch: str, head_sha: str | None, summary: str, cost: float | None
 ) -> str:
     """The comment posted after each round: what was pushed, what it cost, and the agent's own summary."""
-    what = f"pushed `{head_sha[:12]}` to `{branch}`" if head_sha else "made no commits"
+    what = f"pushed `{head_sha[:12]}` to `{branch}`" if head_sha else NO_COMMITS
     cost_text = f" · ${cost:.2f}" if cost is not None else ""
     return f"### {cfg.deployment}: round {round_number} {what}{cost_text}\n\n{summary}"
 

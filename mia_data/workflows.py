@@ -1369,7 +1369,8 @@ class MiaDataDataset:
 
     async def _look(self) -> bool:
         """The round looks at autodev itself; True when that ended the round. A PR is acted on as it is now (a
-        head, a merge or a stop the round was not told of). Otherwise the round ends `blocked`, with autodev's
+        head, a merge or a stop the round was not told of). A revision request autodev answered without a new
+        head goes back to review (`_answered`). Otherwise the round ends `blocked`, with autodev's
         last comment, when autodev stopped before it opened a PR, or when `limits.autodev_quiet_hours` passed
         with nothing from it and no agent round running."""
         state = self.state
@@ -1377,6 +1378,8 @@ class MiaDataDataset:
         before = (state.stage, len(state.tests))
         if look.pr and await self._on_pr(look.pr):
             return True
+        if await self._answered(look):
+            return False
         where = f"mia-snippets issue #{state.snippet_issue}" + (f" (PR #{look.pr})" if look.pr else "")
         said = f' Its last comment: "{look.last_word}"' if look.last_word else ""
         if look.stopped and not look.pr:
@@ -1389,6 +1392,27 @@ class MiaDataDataset:
             await self._finish("blocked", f"{where}: nothing from autodev for {hours:g} h.{said}")
             return True
         return False
+
+    async def _answered(self, look: AutodevLook) -> bool:
+        """Whether autodev answered the reviewer's comments without changing the snippet: its round after the
+        revision request made no commits, and it is at rest. Then no new head will come: the answer is this
+        pass's result, and the same crops go back to review for a verdict made with it."""
+        state = self.state
+        asked, answered = _parse_time(state.revised_at), _parse_time(look.answer_at or None)
+        if not (asked and answered and answered > asked) or look.working or look.stopped:
+            return False
+        if state.stage != "developing" or not (state.pr and state.tests and state.tests[-1].ok):
+            return False
+        state.revised_at = None
+        pr = await self._act("pr_state", state.pr, result_type=PrUpdate)
+        quoted = "\n".join(f"> {line}" for line in look.answer.splitlines())
+        self._found(f"autodev changed nothing in the snippet. Its answer to your comments:\n\n{quoted}")
+        await self._stage(
+            "review",
+            "autodev answered your comments without changing the snippet; the same crops wait for your verdict",
+            extra=f"**Snippet PR:** {pr.url or f'#{pr.pr}'}\n",
+        )
+        return True
 
     async def _approve_pr(self, event: LabelEvent) -> None:
         """The reviewer approved the PR head's set: `/approve <head>` tells autodev to merge it. The merge wakes
@@ -1414,6 +1438,7 @@ class MiaDataDataset:
         brings its crops back to review."""
         state = self.state
         await self._assess("reject", event, ("pr_head", state.tests[-1].sha))
+        state.revised_at = workflow.now().isoformat()
         feedback = await self._feedback(event)
         await self._act(
             "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} {event.event_id}", "snippets"
@@ -1466,6 +1491,7 @@ class MiaDataDataset:
         still current moves the stage to `review` (spec §14); a failing one goes to the PR as `/revise`, so autodev
         fixes it. Pre-§14 histories made `test_n` test crops and moved to `pr-ready`."""
         state, head = self.state, pr.head_sha
+        state.revised_at = None  # a head came: whatever was asked for, this is autodev's answer
         loop = workflow.patched("review-loop")
         results = self._results()
         if results and state.pass_stage != "testing":  # every head tested is a pass of its own
