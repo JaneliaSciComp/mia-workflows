@@ -29,7 +29,9 @@ sets `MIA_SERVICE` for you.
   evictions). `autonomy` is per request (what every job of one root adds up to) plus the operator's switches:
   `pause` (`mia pause` and `mia resume` edit it in place, comments kept; every worker re-reads the file before each
   job), `quarantine_days`, and the `root` caps a request may spend in all (`max_usd`, `max_fetch_bytes`, `max_jobs`,
-  `max_concurrent_jobs`, `max_days`).
+  `max_concurrent_jobs`, `max_days`). `max_usd` is money paid: an agent job is reserved at its per-run cap and
+  settled at the cost Claude Code reports for it (`JobDone.cost_usd`, list price), both times
+  `autonomy.price_factor`; a job whose cost nobody read keeps its reservation as its cost.
 
 ## The four checks
 

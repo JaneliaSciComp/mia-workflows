@@ -698,7 +698,7 @@ class MiaDataDataset:
                 raise asyncio.CancelledError from error
             raise
         if budgeted:  # the crop job is the one that downloads: its bytes count against the root's max_fetch_bytes
-            await self._settle(key, done.bytes_fetched if kind == "crop" else 0)
+            await self._settle(key, done.bytes_fetched if kind == "crop" else 0, done.cost_usd)
         return done
 
     async def _reserve(self, key: str, kind: str, usd: float) -> None:
@@ -718,13 +718,13 @@ class MiaDataDataset:
             await workflow.sleep(timedelta(minutes=min(poll_minutes * 2**tries, 30)))
             tries += 1
 
-    async def _settle(self, key: str, fetched_bytes: int = 0) -> None:
-        """Close the job's reservation with what it downloaded; an accounting write that fails is logged, never
-        the round's end."""
+    async def _settle(self, key: str, fetched_bytes: int = 0, usd: float | None = None) -> None:
+        """Close the job's reservation with what it cost (None when nobody knows: a job that never ended, or no
+        agent's) and downloaded; an accounting write that fails is logged, never the round's end."""
         assert self.state.pins
         try:
             await self._act(
-                "settle", self.state.pins.root, key, None, fetched_bytes, budget=timedelta(minutes=10), cleanup=True
+                "settle", self.state.pins.root, key, usd, fetched_bytes, budget=timedelta(minutes=10), cleanup=True
             )
         except ActivityError as error:
             workflow.logger.warning("issue #%d: settle %s failed: %s", self.state.issue, key, error_message(error))

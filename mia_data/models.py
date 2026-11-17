@@ -68,6 +68,7 @@ class JobDone:
     state: str
     exit_code: int | None
     bytes_fetched: int = 0  # what a crop job says it downloaded (its report.json); 0 for any other job
+    cost_usd: float | None = None  # what Claude Code says an agent job cost, at list price; None: no agent, or unknown
 
 
 @dataclass

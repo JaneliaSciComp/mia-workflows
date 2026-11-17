@@ -617,6 +617,7 @@ def test_what_no_rule_covers_is_diagnosed_and_only_the_menu_is_carried_out(world
 
 
 def test_a_diagnosis_that_proposes_nothing_says_what_a_person_must_do(world):
+    world.activities.cfg.autonomy.price_factor = 0.1  # here a dollar Claude Code counts costs ten cents
     number = world.dataset()
     world.sweep()
     world.answer({"diagnosis": "the dataset has no labels at all", "cause": "data", "remedies": [], "needs": "drop it"})
@@ -627,6 +628,8 @@ def test_a_diagnosis_that_proposes_nothing_says_what_a_person_must_do(world):
         entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Cleaner:**" in entry["body"]
     ]
     assert "Diagnosis (data): the dataset has no labels at all Needs a person: drop it" in said  # once, in one entry
+    spent = call(world.service, "GET", "/budgets")[1]["budgets"]  # the job counted 0.5
+    assert [row["spent_usd"] for row in spent if row["root"].startswith("cleaner-")] == [pytest.approx(0.05)]
     assert cleaner_actions(world, number) == []
 
 

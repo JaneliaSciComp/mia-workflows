@@ -14,6 +14,7 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import time
@@ -691,24 +692,27 @@ class Activities:
 
     @activity.defn(name="reserve")
     async def reserve(self, root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
-        """Charge a job to its root before it launches; a refusal names the cap. Without a root there is no
-        budget to check."""
+        """Charge a job to its root before it launches; a refusal names the cap. `usd` is the most Claude Code
+        may count for the job, booked as what that costs here (`autonomy.price_factor`). Without a root there is
+        no budget to check."""
         if not root:
             return Reservation(True, "no budget")
-        caps = self.cfg.autonomy.caps()
-        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
+        caps, paid = self.cfg.autonomy.caps(), usd * self.cfg.autonomy.price_factor
+        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, paid, caps)
         ok = bool(out.get("ok"))
         return Reservation(ok, "" if ok else str(out.get("reason", "")), wait=bool(out.get("wait")) and not ok)
 
     @activity.defn(name="settle")
     async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
-        """Close the job's reservation with what it cost and moved; an accounting write never fails a round."""
+        """Close the job's reservation with what it cost and moved: `usd` is Claude Code's count, booked as what
+        that costs here (`autonomy.price_factor`); with None the reservation stands as the cost. An accounting
+        write never fails a round."""
         if not root:
             return
-        registry = self.registry
+        registry, paid = self.registry, None if usd is None else usd * self.cfg.autonomy.price_factor
         await asyncio.to_thread(
             best_effort,
-            lambda: registry.settle(root, reservation_id, usd=usd, fetched_bytes=fetched_bytes),
+            lambda: registry.settle(root, reservation_id, usd=paid, fetched_bytes=fetched_bytes),
             f"settle {reservation_id}",
             log,
         )
@@ -1012,14 +1016,16 @@ class Activities:
     async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
         """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock.
         A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3). The answer
-        carries what a crop job downloaded, which its reservation is settled with."""
+        carries what a crop job downloaded and what an agent job cost, which its reservation is settled with."""
         heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
         try:
             outcome = await self.jobs.wait(job_id, workspace, heartbeat)
         except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
             raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
         fetched = await asyncio.to_thread(_bytes_fetched, workspace)
-        return JobDone(outcome.job_id, outcome.state, outcome.exit_code, fetched)
+        cost = (await asyncio.to_thread(read_claude_json, Path(workspace)))[1]
+        known = cost is not None and math.isfinite(cost) and cost >= 0  # the job's own file: a real cost or nothing
+        return JobDone(outcome.job_id, outcome.state, outcome.exit_code, fetched, cost if known else None)
 
     @activity.defn(name="kill_job")
     async def kill_job(self, job_id: str) -> None:

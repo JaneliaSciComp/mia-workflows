@@ -418,7 +418,8 @@ class Mocks:
                 self.await_failures -= 1
                 raise ApplicationError("worker died mid-await")
             state, code = turn(self.states, ws.rsplit("/", 1)[1].rsplit("-", 1)[0], ("DONE", 0))  # by kind
-            return JobDone(job_id, state, code, 4096)  # every job claims a download; only the crop job's counts
+            cost = 0.75 if "/match-" in ws else None  # an agent job says what it cost
+            return JobDone(job_id, state, code, 4096, cost)  # every job claims a download; only the crop job's counts
 
         return [await_job]
 
@@ -1760,6 +1761,7 @@ async def test_every_job_is_reserved_against_the_root_and_settled(env):
     assert [a[0] for a in m.of("reserve")] == [PINS.root] * 3 and m.of("reserve")[0][3] == 5.0  # the agent's cap
     assert [a[1] for a in m.of("settle")] == [a[1] for a in m.of("reserve")]  # one settle per reservation
     assert [a[3] for a in m.of("settle")] == [0, 4096, 0]  # the crop job's download is charged to the root
+    assert [a[2] for a in m.of("settle")] == [0.75, None, None]  # and the agent's cost, where a job had an agent
     assert m.names().index("reserve") < m.names().index("submit")
 
 

@@ -858,6 +858,10 @@ async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path):
     for report, fetched in (({"bytes_fetched": 4096}, 4096), ({"bytes_fetched": "lots"}, 0), ([], 0)):
         (crops / "report.json").write_text(json.dumps(report))  # a crop job's report: untrusted, a count or nothing
         assert (await env.run(t.a.await_job, "j4", str(tmp_path / "crop-ws"))).bytes_fetched == fetched
+    for counted, cost in ((0.76, 0.76), (-1, None), (float("inf"), None), ("free", None)):
+        result = {"result": "done", "total_cost_usd": counted}  # an agent job's claude.json: untrusted as well
+        (tmp_path / "crop-ws" / "claude.json").write_text(json.dumps(result))
+        assert (await env.run(t.a.await_job, "j5", str(tmp_path / "crop-ws"))).cost_usd == cost
     locks.release("raw", "rec-1", "me")
     with pytest.raises(ApplicationError) as info:  # the lock is gone: the wait fails, never retried
         await env.run(t.a.await_job, "j3", "/w", ["raw", "rec-1", "me"])
@@ -924,6 +928,21 @@ async def test_reserve_and_settle_charge_the_root(tmp_path, token_server):  # no
     await t.a.settle("o/data#7", "mia-7-i7-e11-match-1", usd=1.0)
     assert t.a.registry.budget("o/data#7")["spent_usd"] == 1.0
     assert (await t.a.reserve("", "k", "match", 5.0)) == Reservation(True, "no budget")
+
+
+async def test_a_budget_books_what_is_paid_not_what_claude_code_counts(tmp_path, token_server):  # noqa: F811
+    """Incident 2026-11-16: 20 match runs that cost $1.92 were booked at $100, their reservations at list price,
+    and the request's other 134 datasets were refused."""
+    t = _setup(tmp_path)
+    t.a.registry = Registry(token_server, "t")
+    t.cfg.autonomy.price_factor = 0.1
+    assert (await t.a.reserve("o/data#7", "match-1", "match", 5.0)).ok
+    assert t.a.registry.budget("o/data#7")["reserved_usd"] == pytest.approx(0.5)
+    await t.a.settle("o/data#7", "match-1", usd=1.0)  # what Claude Code counted
+    assert t.a.registry.budget("o/data#7")["spent_usd"] == pytest.approx(0.1)
+    assert (await t.a.reserve("o/data#7", "match-2", "match", 5.0)).ok
+    await t.a.settle("o/data#7", "match-2")  # nobody read its cost: its reservation stands
+    assert t.a.registry.budget("o/data#7")["spent_usd"] == pytest.approx(0.6)
 
 
 async def test_paused_reads_the_manifest_fresh(tmp_path, monkeypatch):

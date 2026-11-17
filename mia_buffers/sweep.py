@@ -655,7 +655,8 @@ class Sweep:
                 raise Refused(f"it was diagnosed {self.rules.max_remedies} times in seven days")
             attempt = len(data["steps"])
             root = f"cleaner-{datetime.fromtimestamp(self.now, UTC).date().isoformat()}"
-            reservation, usd = f"case-{case['id']}-{attempt}", self.cfg.judge.max_budget_usd
+            reservation = f"case-{case['id']}-{attempt}"
+            usd = self.cfg.judge.max_budget_usd * self.cfg.autonomy.price_factor  # what its cap costs here
             caps = {"max_usd": self.rules.max_usd_per_day}
             held = await self._ask(self.registry.reserve, root, reservation, "diagnose", usd, caps)
             if not held.get("ok"):
@@ -680,7 +681,8 @@ class Sweep:
             return None
         await jobs.wait(job["id"], job["workspace"], lambda state: None)  # it is over: this writes its record
         answer, cost, _ = read_claude_json(Path(job["workspace"]))
-        await self._ask(self.registry.settle, job["root"], job["reservation"], usd=cost)
+        paid = None if cost is None else cost * self.cfg.autonomy.price_factor
+        await self._ask(self.registry.settle, job["root"], job["reservation"], usd=paid)
         del data["diagnosis_job"]
         outcome = parse_outcome(answer)
         if outcome is None:
