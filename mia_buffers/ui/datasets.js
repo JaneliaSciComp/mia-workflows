@@ -193,9 +193,9 @@ export function viewDatasetList(_arg, params) {
           if (x.raw) pills.append(" ", assetPill(x.raw.state));
           if (x.staged) pills.append(" ", pill("staged", "pool"));
           if (x.quarantined) pills.append(" ", assetPill("quarantined"));
-          // what the record lacks, whatever buffer asks for it: each is a filter of this list
-          // (a missing voxel size is not marked as a warning: a buffer may assume one)
-          const lacking = (x.lacks || []).map(name => pill(`no ${name}`, name === "voxel size" ? "" : "warn"));
+          // what the record lacks, whatever buffer asks for it: each is a filter of this list, and each is
+          // marked, also a missing voxel size that a buffer may assume
+          const lacking = (x.lacks || []).map(name => pill(`no ${name}`, "warn"));
           pills.append(...lacking.flatMap(node => [" ", node]));
           if (x.gaps?.length)
             pills.append(

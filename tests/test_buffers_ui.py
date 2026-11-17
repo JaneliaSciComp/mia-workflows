@@ -894,7 +894,7 @@ def test_the_datasets_list_flags_and_filters_what_a_record_lacks() -> None:
     links there for the datasets its plan could not place."""
     datasets = squeezed(FILES["datasets.js"])
     assert has('const DS_FILTER = { state: "", modality: "", dims: "", licence: "", lacks: "" };', datasets)
-    assert has('(x.lacks || []).map(name => pill(`no ${name}`, name === "voxel size" ? "" : "warn"))', datasets)
+    assert has('(x.lacks || []).map(name => pill(`no ${name}`, "warn"))', datasets)  # every lack is marked
     assert has('name === "lacks" ? "lacks…"', datasets)
     assert ("GET", "/catalog/datasets") in requested_paths()
     # step 2 of a buffer counts them and sends the person to Datasets; it never lists them
