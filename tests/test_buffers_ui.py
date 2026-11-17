@@ -370,7 +370,7 @@ def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
         " ...(needsShelved ? { shelved: 1 } : {}) }))",
         view,
     )
-    assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffer specs"], ["prep", "Requests"]')
+    assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffers"], ["prep", "Requests"]')
     assert has('.toggles .btn[aria-pressed="true"]')
 
 
@@ -576,14 +576,14 @@ def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
 def test_a_buffer_is_always_planned_first() -> None:
     """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
     assert not has("Show me the plan first") and not has("first.checked")
-    assert count("plan_first: true") == 2  # New buffer, and a spec's own page
+    assert count("plan_first: true") == 1  # the one place a buffer's plan is asked for
     assert has('subject.stage === "plan-review" ? "Run"')
 
 
 def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     """A click is not shown as the old stage's buttons again: while the subject says an action is `asked`, every
     button that would send an action is disabled, and a reload that started earlier never paints over a later one."""
-    assert count("disabled: !!subject.asked") == 4 and has("disabled: !!x.asked")
+    assert count("disabled: !!subject.asked") == 3 and has("disabled: !!x.asked")  # the bar, a drop, a revoke
     assert has("waiting for its workflow to answer")
     assert has("turn !== subjectTurn")
 
@@ -822,7 +822,7 @@ def test_a_subjects_page_says_where_it_stands_with_its_lifecycle_alone() -> None
     in the row under its name, and a table names a subject's stage, not a status word."""
     assert not has("subjectFacts") and not has("waiting on you") and not has('"workflow " +')
     assert not has("statePill(subject.status)") and not has('statePill(x.status), " ", x.stage')
-    assert count("stagePill(x.stage)") == 3  # the specs, the requests and Needs you
+    assert count("stagePill(x.stage)") == 2  # the requests and Needs you; a buffer's row says its step
     assert has("subjectLinks(subject, entries)")
 
 
@@ -995,6 +995,28 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
     assert "sampling.patch.c" in differs and "name" not in differs and "select.where.license.in" not in differs
 
 
+def test_a_buffer_is_one_page_and_the_tabs_name_no_spec_and_no_preparation() -> None:
+    """The Buffers tab lists buffers, each opening its own page of six steps; there is no list of specs, no list
+    of every round's buffer and no Preparation tab. The requests stay reachable from Datasets."""
+    index, flow = FILES["index.html"], squeezed(FILES["flow.js"])
+    assert 'data-tab="preparation"' not in index and 'data-view="designer"' not in index
+    assert all(f'data-step="{step}"' in index for step in ("define", "datasets", "prepare", "plan", "source", "serve"))
+    assert has('el("a", { href: "#preparation"', squeezed(FILES["datasets.js"]))
+    assert count('pageOf("/subjects/buffer", "subjects")') == 1 and not has('source: pageOf("/buffers", "buffers"),')
+    assert has('el("a", { class: "btn primary", href: "#buffers/new" }, "New buffer")')
+    assert not has("Buffer specs") and not has("specControls")
+    # an old address of a buffer's page still opens it
+    assert not has('"#specs/"') and has('if (name === "specs" && rest.length)')
+    assert has('buffer: key => "#buffer/" + encodeURIComponent(key)')
+    assert "/#buffer/" in (UI_DIR.parent / "mirror.py").read_text()
+    # the strip, and what is not a step
+    assert has("stripOf(subject?.stage, step)", flow) and has("stepToShow(subject.stage, asked)", flow)
+    assert has('el("summary", { class: "btn" }, "More")', flow) and has("actionBar(subject, redraw, ", flow)
+    assert has("timelineCard(entries)", flow) and has("shelvedNotice(subject.shelved)", flow)
+    # the stream redraws the buffer's page, not a subject's
+    assert has("if (onScreen.redraw) onScreen.redraw();") and has("onScreen.redraw = null;")
+
+
 def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:
     """Unticking a dataset writes its id to `select.exclude.ids`. A reason beside it, or an excluded path, is
     something no control shows: specDiff names it, so the page keeps the text."""
@@ -1020,14 +1042,19 @@ def test_a_stage_opens_at_its_step() -> None:
     Prepare, where a saved buffer rests. A hash may ask for a step already passed, never one ahead."""
     from mia_buffers.config import STAGE_ACTIONS
 
-    steps, at, shown, words, can = run_js(
+    steps, at, shown, words, can, strips = run_js(
         "print([STEPS, Object.fromEntries(input.stages.map(stage => [stage, stepOf(stage)])),\n"
         "  input.asks.map(([stage, asked]) => stepToShow(stage, asked)),\n"
-        "  input.subjects.map(statusWord), input.subjects.map(editable).concat(editable(null))]);",
-        {"steps.js": "STEPS, stepOf, stepToShow, statusWord, editable"},
+        "  input.subjects.map(statusWord), input.subjects.map(editable).concat(editable(null)),\n"
+        "  input.strips.map(([stage, shown]) => stripOf(stage, shown).map(item => item.state).join(' '))]);",
+        {"steps.js": "STEPS, stepOf, stepToShow, statusWord, editable, stripOf"},
         {
             "stages": list(STAGE_ACTIONS),
-            "asks": [["plan-review", "serve"], ["plan-review", "define"], ["ready", "bogus"], ["new", None]],
+            "asks": [
+                ["plan-review", "serve"], ["plan-review", "define"], ["ready", "bogus"], ["new", None],
+                [None, "prepare"], [None, "datasets"], [None, None],
+            ],  # fmt: skip
+            "strips": [["plan-review", "plan"], ["plan-review", "define"], [None, "define"], ["ready", "serve"]],
             "subjects": [
                 {"stage": "new", "status": "not started", "actions": ["edit", "go"]},
                 {"stage": "plan-review", "status": "waiting", "actions": ["approve"]},
@@ -1047,7 +1074,12 @@ def test_a_stage_opens_at_its_step() -> None:
     }  # fmt: skip
     for stage, (status, _actions) in STAGE_ACTIONS.items():  # a round in progress is never shown as resting
         assert (at[stage] == "prepare") == (status not in ("working", "waiting") and stage not in ("ready",)), stage
-    assert shown == ["plan", "define", "serve", "prepare"]
+    # a buffer that is not saved (no stage) has its first two steps and opens at the first
+    assert shown == ["plan", "define", "serve", "prepare", "define", "datasets", "define"]
+    assert strips == [
+        "done done done here ahead ahead", "here done done done ahead ahead", "here done ahead ahead ahead ahead",
+        "done done done done done here",
+    ]  # fmt: skip
     assert words == [
         "saved, not started", "waits for you", "working", "serving", "serving", "needs you", "retired", "shelved",
     ]  # fmt: skip
@@ -1212,7 +1244,7 @@ def test_a_jobs_record_is_shown_as_text_never_as_markup() -> None:
 def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() -> None:
     """`#job/<address>` is the whole remainder after `#job/`, slashes and all, and the page reads `/jobs/<address>`
     (a read route); a 404 is a job that left no record."""
-    assert has("job: viewJob") and has('let arg = rest.join("/")') and has('data-view="job"') and has('id="jobBody"')
+    assert has("job: viewJob") and has('const arg = decoded(rest.join("/"))') and has('data-view="job"') and has('id="jobBody"')
     assert ("GET", "/jobs/x") in requested_paths() and resolve("GET", f"/jobs/{JOB_ADDRESS}") == "read"
     found, missing = run_js(
         "globalThis.location = { hash: '#job/issue-12/i12-e345/match-1' };\n"

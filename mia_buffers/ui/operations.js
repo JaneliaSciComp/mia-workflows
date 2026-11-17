@@ -472,7 +472,7 @@ export async function viewPreparation() {
   root.replaceChildren(
     card(
       "Preparation requests",
-      "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a new buffer's plan. Open one for its datasets, to cancel it or to run it again.",
+      "A request prepares a set of datasets under one budget. File one from Datasets (tick datasets, Prepare) or from a buffer's Prepare step. Open one for its datasets, to cancel it or to run it again.",
       pagedTable("requests", {
         source: pageOf("/subjects/prep", "subjects"),
         sort: "updated",

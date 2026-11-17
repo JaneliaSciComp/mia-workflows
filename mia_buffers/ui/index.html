@@ -14,14 +14,13 @@
   <nav class="tabs" aria-label="Views">
     <a href="#needs" data-tab="needs">Needs you</a>
     <a href="#datasets" data-tab="datasets">Datasets</a>
-    <a href="#preparation" data-tab="preparation">Preparation</a>
     <a href="#buffers" data-tab="buffers">Buffers</a>
     <a href="#cache" data-tab="cache">Cache</a>
     <a href="#cleaner" data-tab="cleaner">Cleaner</a>
     <a href="#decisions" data-tab="decisions">Decisions</a>
     <a href="#docs" data-tab="docs">Docs</a>
   </nav>
-  <input type="search" class="lookup" id="lookup" placeholder="#234, issue URL, record, spec" aria-label="Find a dataset, buffer spec or request by issue number, issue URL or name">
+  <input type="search" class="lookup" id="lookup" placeholder="#234, issue URL, record, buffer" aria-label="Find a dataset, buffer or request by issue number, issue URL or name">
   <button type="button" class="btn" id="theme" aria-label="Toggle light or dark theme" title="Switch between the light and the dark theme">theme</button>
 </header>
 <div class="banner" id="down" role="alert"></div>
@@ -29,10 +28,12 @@
 <noscript><p class="notice">This page needs JavaScript: every number on it comes from the service's routes.</p></noscript>
 
 <section data-view="datasets" hidden><div id="datasetsBody"></div></section>
-<section data-view="designer" hidden>
+<section data-view="buffer" class="subject" hidden>
   <p><a href="#buffers">← all buffers</a></p>
-  <h2>New buffer</h2>
-  <p class="small">Describe the buffer with the controls; the plan below shows which datasets it would draw from. Only prepared datasets enter a buffer: prepare the ones that fit first.</p>
+  <div id="bufferHead"></div>
+  <ol class="steps" id="bufferSteps" aria-label="The steps of this buffer"></ol>
+  <div id="bufferNotes"></div>
+  <div data-step="define" hidden>
   <div id="dsEmpty" class="empty" hidden>No catalog synced; run <code>mia-buffers catalog sync</code>.</div>
   <div id="dsBody">
   <details class="filterbox" id="filterBox" open>
@@ -92,6 +93,14 @@
     <div id="planTable"></div>
   </section>
   </div>
+  </div>
+  <div data-step="datasets" id="datasetsStep" hidden></div>
+  <div data-step="prepare" id="prepareStep" hidden></div>
+  <div data-step="plan" id="planStep" hidden></div>
+  <div data-step="source" id="sourceStep" hidden></div>
+  <div data-step="serve" id="serveStep" hidden></div>
+  <div class="stepfoot" id="bufferFoot"></div>
+  <div id="bufferTimeline"></div>
 </section>
 
 <section data-view="needs" class="subject" hidden><div id="needsBody"></div></section>
