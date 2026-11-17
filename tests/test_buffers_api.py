@@ -2363,6 +2363,23 @@ def catalog_service(tmp_path):
 HEMIBRAIN = "janelia-hemibrain-v1-2-fib-sem-connectome"
 
 
+def test_catalog_datasets_filters_by_what_a_record_lacks(tmp_path):
+    """The Datasets list flags what each record lacks and filters by one of them, or by any."""
+    s = svc(tmp_path)
+    records = [{"path": p, "record": r} for p, r in load_records(FIXTURE_CATALOG)]
+    bare = next(item for item in records if U937 in item["path"])
+    for array in bare["record"]["technical"]["arrays"]:
+        array.pop("shape", None)
+    assert call(s, "PUT", f"/records/{REF_A}", payload={"records": records})[0] == 200
+    out = call(s, "GET", "/catalog/datasets", {"lacks": "array shape"})[1]
+    assert U937 in [row["id"] for row in out["rows"]] and all("array shape" in row["lacks"] for row in out["rows"])
+    assert out["facets"]["lacks"]["array shape"] == out["total"] < len(records)  # counted over the whole catalog
+    assert out["facets"]["lacks"]["anything"] >= out["total"]
+    anything = call(s, "GET", "/catalog/datasets", {"lacks": "anything"})[1]
+    assert anything["total"] == out["facets"]["lacks"]["anything"] and all(row["lacks"] for row in anything["rows"])
+    assert call(s, "GET", "/catalog/datasets", {"lacks": "patience"})[0] == 422
+
+
 def test_catalog_datasets_joins_each_record_with_what_the_registry_knows(tmp_path):
     assert call(svc(tmp_path / "empty"), "GET", "/catalog/datasets")[:2] == (404, {"error": "no catalog synced"})
     s = catalog_service(tmp_path)

@@ -574,6 +574,15 @@ function renderDesigner() {
         )
       : [el("li", { class: "empty" }, "No prepared dataset fits yet.")]),
   );
+  // datasets the planner could not place because of their record: counted here, listed and dealt with under Datasets
+  $("recordLacks").replaceChildren(
+    ...(m.record_lacks
+      ? [
+          `${plural(m.record_lacks, "dataset")} the filters admit ${m.record_lacks === 1 ? "is" : "are"} left out because of what the catalog record lacks (an array shape, a voxel size). `,
+          el("a", { href: "#datasets?lacks=anything" }, "See what records lack, under Datasets"),
+        ]
+      : []),
+  );
   // the datasets a person took out: the planner drops them before the table, so they are listed here to put back
   const out = [...C.exclude].sort();
   $("takenOut").replaceChildren(
@@ -637,7 +646,7 @@ export function showDesigner() {
         {
           class: "inline",
           title:
-            "Also list what the definition's filters admit but cannot use: the patch does not fit the dataset, or its record gives no array shape or voxel size. They are counted under Where datasets leave.",
+            "Also list the datasets the filters admit whose arrays the patch does not fit. They are counted under Where datasets leave.",
         },
         others,
         " also list the datasets that do not fit",

@@ -33,7 +33,8 @@ import { specFromDatasets } from "./designer.js";
 import { stageOf } from "./buffers.js";
 
 // ---- datasets: every dataset of the catalog with what the registry knows about it, one page at a time
-const DS_FILTER = { state: "", modality: "", dims: "", licence: "" };
+// `lacks`: what the catalog record lacks whatever buffer asks for it (an array shape, a voxel size, a data URL)
+const DS_FILTER = { state: "", modality: "", dims: "", licence: "", lacks: "" };
 const CHOSEN = new Set(),
   SETTLED = new Set(); // the ticked datasets, and those of them that are prepared or in a round
 export const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging", "debugging"]); // the stages of a round under way or at review
@@ -74,7 +75,9 @@ export function viewDatasetList(_arg, params) {
   const filters = () => Object.fromEntries(Object.entries(DS_FILTER).filter(([, value]) => value));
   const selects = Object.fromEntries(
     Object.keys(DS_FILTER).map(name => {
-      const select = el("select", { "aria-label": `filter by ${name}` });
+      const select = el("select", {
+        "aria-label": name === "lacks" ? "filter by what the catalog record lacks" : `filter by ${name}`,
+      });
       select.addEventListener("change", () => {
         DS_FILTER[name] = select.value;
         list.reload(true);
@@ -88,7 +91,7 @@ export function viewDatasetList(_arg, params) {
       const values = Object.entries(facets?.[name] || {});
       if (DS_FILTER[name] && !values.some(([value]) => value === DS_FILTER[name])) values.push([DS_FILTER[name], 0]);
       select.replaceChildren(
-        el("option", { value: "" }, `any ${name}`),
+        el("option", { value: "" }, name === "lacks" ? "lacks…" : `any ${name}`),
         ...values.map(([value, n]) => el("option", { value }, `${value} (${num(n)})`)),
       );
       select.value = DS_FILTER[name];
@@ -182,13 +185,18 @@ export function viewDatasetList(_arg, params) {
       {
         key: "state",
         label: "state",
-        title: 'preparation, then the raw cache\'s state, then "staged" when a pyramid of it exists',
+        title:
+          'preparation, then the raw cache\'s state, then "staged" when a pyramid of it exists, then what its catalog record lacks',
         cell: x => {
           const state = x.state === "shelved" && x.reason ? pill("shelved", "", [{ t: x.reason }]) : statePill(x.state);
           const pills = el("span", { class: "pills" }, state);
           if (x.raw) pills.append(" ", assetPill(x.raw.state));
           if (x.staged) pills.append(" ", pill("staged", "pool"));
           if (x.quarantined) pills.append(" ", assetPill("quarantined"));
+          // what the record lacks, whatever buffer asks for it: each is a filter of this list
+          // (a missing voxel size is not marked as a warning: a buffer may assume one)
+          const lacking = (x.lacks || []).map(name => pill(`no ${name}`, name === "voxel size" ? "" : "warn"));
+          pills.append(...lacking.flatMap(node => [" ", node]));
           if (x.gaps?.length)
             pills.append(
               " ",

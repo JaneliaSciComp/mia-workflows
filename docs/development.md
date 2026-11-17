@@ -921,7 +921,9 @@ Each tab is one kind of thing, and each thing has one page:
   a row (or on the subject's page) takes it off the list with a reason; the *Shelved* toggle lists those, each with
   its reason and *Unshelve*.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
-  download, staged artifacts and buffers; filters by state, modality, dims and licence. Every row has a tick (the
+  download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
+  (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, or `anything`; `record_row` names them,
+  whatever buffer asks, and the row shows each as a pill). Every row has a tick (the
   header's and *Select all* tick the page that is showing). While something is ticked, a box says how many datasets are
   selected and offers *Prepare* and *Create buffer*. The ticked are prepared in one request (one
   `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a definition that
@@ -942,7 +944,9 @@ Each tab is one kind of thing, and each thing has one page:
     into the controls by `POST /specs/parse`; what it holds that no control shows (`specDiff`) makes the controls
     read-only. It is run through `POST /plan` with `page` (debounced 300 ms) for the numbers, the charts and one
     page of rows. Step 2's table asks for the rows that fit (`page.fit_only`), which is the number step 1 counts; the
-    rows the selection admits but the patch or the record keeps out are listed only on request. Unticking a
+    rows the selection admits but the patch does not fit are listed only on request, and the rows the planner could
+    not place because of their record (`RECORD_LACKS_GROUPS`) never: the step counts them (`summary.record_lacks`)
+    and links to `#datasets?lacks=anything`. Unticking a
     dataset adds its id to `select.exclude.ids`. Step 2's button saves a new
     buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
     `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition

@@ -888,6 +888,20 @@ def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> N
     assert not _glob(patterns, "datasets/2D/confocal/not-u937.yaml") and not _glob(patterns, "datasets/u937.yaml.bak")
 
 
+def test_the_datasets_list_flags_and_filters_what_a_record_lacks() -> None:
+    """A dataset whose record lacks something every buffer needs (an array shape, a voxel size, a data URL) says so
+    in its row, and the list filters by one of them or by any. An address can name the filter: a buffer's step 2
+    links there for the datasets its plan could not place."""
+    datasets = squeezed(FILES["datasets.js"])
+    assert has('const DS_FILTER = { state: "", modality: "", dims: "", licence: "", lacks: "" };', datasets)
+    assert has('(x.lacks || []).map(name => pill(`no ${name}`, name === "voxel size" ? "" : "warn"))', datasets)
+    assert has('name === "lacks" ? "lacks…"', datasets)
+    assert ("GET", "/catalog/datasets") in requested_paths()
+    # step 2 of a buffer counts them and sends the person to Datasets; it never lists them
+    assert has('href: "#datasets?lacks=anything"', squeezed(FILES["designer.js"]))
+    assert has("m.record_lacks", squeezed(FILES["designer.js"]))
+
+
 def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked() -> None:
     """With nothing ticked the list offers Select all and Clear selection and says nothing more. With a tick, a
     box of its own colour says how many datasets are selected and offers Prepare and Create buffer."""

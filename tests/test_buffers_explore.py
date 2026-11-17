@@ -146,20 +146,81 @@ def test_the_plan_summary_counts_over_every_row() -> None:
 
 def test_the_plan_rows_are_joined_sorted_and_cut() -> None:
     view = plan_view(PLAN, DATASETS, "p256-l1-2", ALL)
-    assert [row["id"] for row in view["rows"]] == ["a", "b", "c", "d", "e"] and view["total"] == 5  # the plan's order
+    assert [row["id"] for row in view["rows"]] == ["a", "b", "c", "d"] and view["total"] == 4  # the plan's order
     by_decision = plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, "decision", False, ""))
-    assert [row["id"] for row in by_decision["rows"]] == ["a", "b", "e", "d", "c"]  # the pool, then the planner's rules
+    assert [row["id"] for row in by_decision["rows"]] == ["a", "b", "d", "c"]  # the pool, then the planner's rules
     first = view["rows"][0]
     assert (first["title"], first["licence"], first["issue"], first["staged_here"]) == ("Alpha", "CC0-1.0", 7, True)
     assert first["fits"] and first["in_pool"] and first["decision"]["group"] == "pool"
     assert view["rows"][2]["title"] == "" and view["rows"][2]["raw"] is None  # a record the registry knows nothing of
     page = plan_view(PLAN, DATASETS, "p256-l1-2", Page(2, 2, "dataset", False, ""))
-    assert [row["id"] for row in page["rows"]] == ["c", "d"] and page["total"] == 5
+    assert [row["id"] for row in page["rows"]] == ["c", "d"] and page["total"] == 4
     assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "beta"))["rows"]] == [
         "b"
     ]
     fit = plan_view(PLAN, DATASETS, "p256-l1-2", ALL, fit_only=True)
     assert [row["id"] for row in fit["rows"]] == ["a", "b", "c"] and fit["summary"]["fitting"] == 3
+
+
+def test_a_dataset_row_names_what_its_record_lacks() -> None:
+    """What a record lacks is the same for every buffer: a data URL (no round can run), an array shape or a voxel
+    size (no plan can place a crop in it without assuming). The Datasets list flags each and filters by it."""
+    import copy
+
+    from mia_buffers.explore import facets, record_row
+    from mia_buffers.plan import load_records
+    from tests.test_buffers_plan import CATALOG
+
+    path, whole = next((p, r) for p, r in load_records(CATALOG) if "u937" in p)
+    assert record_row(path, whole)["lacks"] == []
+
+    def changed(edit) -> list[str]:
+        record = copy.deepcopy(whole)
+        edit(record)
+        return record_row(path, record)["lacks"]
+
+    def no_shapes(record: dict) -> None:
+        for array in record["technical"]["arrays"]:
+            array.pop("shape", None)
+
+    def no_voxels(record: dict) -> None:
+        record["imaging"]["voxel_size_nm"] = {}
+
+    def no_urls(record: dict) -> None:
+        record["data"] = {}
+        record["technical"].pop("sample", None)
+        for array in record["technical"]["arrays"]:
+            array["path_pattern"] = "file.tif"
+
+    assert changed(no_shapes) == ["array shape"] and changed(no_voxels) == ["voxel size"]
+    assert changed(lambda record: (no_shapes(record), no_voxels(record))) == ["array shape", "voxel size"]
+    assert "data URL" in changed(no_urls)
+    assert record_row(path, {"id": "x", "technical": "not a mapping"})["lacks"] == ["readable record"]
+    assert record_row(None, {"id": "gone"})["lacks"] == []  # in no synced catalog: nothing is known of its record
+    rows = [{"lacks": []}, {"lacks": ["array shape"]}, {"lacks": ["array shape", "voxel size"]}]
+    plain = {name: None for name in ("state", "modality", "dims", "licence")}
+    counts = facets([{**plain, **row} for row in rows])["lacks"]
+    assert counts == {"anything": 2, "array shape": 2, "voxel size": 1}
+
+
+def test_a_dataset_whose_record_lacks_something_is_not_listed_in_a_buffers_plan() -> None:
+    """Buffer creation lists the datasets a definition can use and, on request, those its patch does not fit. A
+    dataset the planner could not place because of its record (no array shape, no voxel size, unreadable) is a
+    matter for the Datasets list: it is counted, never listed."""
+    lacking = {"e": "record unreadable"}
+    listed = plan_view(PLAN, DATASETS, "p256-l1-2", ALL)
+    assert [row["id"] for row in listed["rows"]] == ["a", "b", "c", "d"] and listed["total"] == 4
+    assert listed["summary"]["record_lacks"] == len(lacking) == 1
+    fitting = plan_view(PLAN, DATASETS, "p256-l1-2", ALL, fit_only=True)
+    assert [row["id"] for row in fitting["rows"]] == ["a", "b", "c"]
+    for reason in ("no array shape", "voxel size unknown"):
+        plan = {
+            **PLAN,
+            "rows": [
+                dict(row, fit={"ok": False, "reason": reason}) if row["id"] == "d" else row for row in PLAN["rows"]
+            ],
+        }
+        assert [row["id"] for row in plan_view(plan, DATASETS, "p256-l1-2", ALL)["rows"]] == ["a", "b", "c"], reason
 
 
 def test_the_plan_can_list_only_what_is_left_to_prepare() -> None:

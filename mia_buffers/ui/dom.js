@@ -95,6 +95,10 @@ export const PILL_HELP = {
   "footprint too large":
     "The coarsest crop (patch size times the largest pyramid level) is bigger than the dataset's largest array.",
   "too few z slices": "The 3D patch's z extent is deeper than the dataset's largest array.",
+  "no voxel size":
+    "The catalog record gives no voxel size. A buffer takes this dataset only when its definition allows assuming one (sampling.assume_voxel_size).",
+  "no data URL": "The catalog record names no URL a job could fetch its files from, so no round can run.",
+  "no readable record": "The catalog record could not be read.",
   "voxel size unknown":
     "The record gives no voxel size and the definition does not allow assuming one (sampling.assume_voxel_size).",
   "not prepared":
