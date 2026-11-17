@@ -21,6 +21,7 @@ import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
 import { actionBar, askHosts, BUTTON_HELP, onScreen, prepareButton, sendAction, undelivered } from "./actions.js";
 import { poolTable, servableText, stageOf } from "./buffers.js";
 import {
+  baseRevision,
   changed,
   definition,
   ensureDefinition,
@@ -32,6 +33,7 @@ import {
   setOnDesign,
   showDesigner,
   startOver,
+  unsavedFor,
 } from "./designer.js";
 import { shelvedNotice, timelineCard } from "./subjects.js";
 
@@ -64,7 +66,8 @@ async function leave(subject, step, button) {
       forgetNew();
       saved = out.subject;
     } else if (changed() && !lockReason(subject)) {
-      const edit = { action: "edit", spec: definition(), revision: subject.revision, key: newKey() };
+      // the revision the change was made at: an edit over someone else's newer one is refused
+      const edit = { action: "edit", spec: definition(), revision: baseRevision(), key: newKey() };
       await api(`/specs/${encodeURIComponent(subject.key)}/actions`, {
         method: "POST",
         headers: JSON_HEADERS,
@@ -420,9 +423,7 @@ function prepareFoot(subject, plan, redraw) {
       : nextLink(subject),
   );
 }
-async function prepareStep(pane, subject, redraw, wanted) {
-  await ensureDefinition(subject);
-  if (!wanted()) return;
+function prepareStep(pane, subject, redraw, wanted) {
   if (ticked.key !== subject.key) Object.assign(ticked, { key: subject.key, chosen: new Set() });
   const chosen = ticked.chosen;
   let startable = new Set(); // what a request could start: it fits, is not prepared, is in no round, its record can run
@@ -444,7 +445,8 @@ async function prepareStep(pane, subject, redraw, wanted) {
     );
   };
   const left = async state => {
-    // the plan of the definition, narrowed to what is left to prepare; its summary is over the whole plan
+    // the plan of the stored definition, which is what a round runs, narrowed to what is left to prepare; its
+    // summary is over the whole plan
     let out = null;
     const page = {
       limit: state.limit,
@@ -458,7 +460,7 @@ async function prepareStep(pane, subject, redraw, wanted) {
       out = await api("/plan", {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify({ spec: definition(), page }),
+        body: JSON.stringify({ spec: subject.data.spec, page }),
       });
     } catch (e) {
       banner(`The plan of this definition failed (${e.status || "network error"}): ${e.message}`);
@@ -511,6 +513,14 @@ async function prepareStep(pane, subject, redraw, wanted) {
     ],
   });
   pane.replaceChildren(
+    unsavedFor(subject.key)
+      ? el(
+          "div",
+          { class: "notice" },
+          "Steps 1 and 2 hold a change of this buffer that is not saved. What is shown here, and what Continue plans, is the saved definition. ",
+          el("a", { href: stepHash(subject, "define") }, "Go to the change"),
+        )
+      : "",
     counts,
     el("div", { class: "progress" }, bar),
     card(
@@ -691,7 +701,6 @@ async function serveStep(pane, subject, redraw, wanted) {
         )
       : null,
     subject.actions.includes("revoke") ? revokeCard(subject, board, redraw) : null,
-    versionsCard(subject),
   ];
   pane.replaceChildren(...parts.filter(Boolean));
   foot(
@@ -741,7 +750,8 @@ function draw(subject, step, entries, run, actions, redraw) {
     () => drawn === turn,
     entries,
   );
-  $("bufferTimeline").replaceChildren(...(subject ? [timelineCard(entries)] : []));
+  // under every step: the buffer's versions (also when it rests after a round that failed) and its timeline
+  $("bufferTimeline").replaceChildren(...(subject ? [versionsCard(subject), timelineCard(entries)] : []));
 }
 
 // `key`: the buffer's, or null for one that is not saved yet. `asked`: the step the address names, if any.

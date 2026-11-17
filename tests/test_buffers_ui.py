@@ -1045,7 +1045,7 @@ def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
     assert has("C.exclude.add(x.id);", designer) and has("C.exclude.delete(id);", designer)
     # saving: a new subject and no action; a saved buffer's change is an edit that names the revision it was made at
     assert has("body: JSON.stringify({ spec: definition() })", flow) and has('api("/specs", {', flow)
-    assert has('{ action: "edit", spec: definition(), revision: subject.revision, key: newKey() }', flow)
+    assert has('{ action: "edit", spec: definition(), revision: baseRevision(), key: newKey() }', flow)
 
 
 def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() -> None:
@@ -1079,6 +1079,116 @@ def test_steps_four_to_six_are_the_rounds_own_buttons_and_back_is_a_cancel() -> 
     # step 6: the id a training run names, never the buffer's name
     assert has('buffer="${version.id}"', flow) and has("versionsCard(subject)", flow)
     assert count("plan_first: true") == 1  # one place builds a plan's go: step 3 and "Plan a new version" share it
+
+
+DESIGNER_STUB = """
+// the service, as the designer reaches it: /specs/parse answers the parsed spec of a known text (of any other, the
+// fallback's: the text the controls write for it), /plan an empty plan
+const { S } = await import(input.api);
+S.ref = "a".repeat(40);
+globalThis.fetch = async (path, options) => {
+  const body = JSON.parse(options.body);
+  const answer = path === "/plan" ? { rows: [], total: 0, summary: {} } : { spec: input.parsed[body.spec] || input.fallback };
+  return { ok: true, status: 200, text: async () => JSON.stringify(answer) };
+};
+const later = ms => new Promise(done => setTimeout(done, ms));
+"""
+
+
+def designer(body: str, texts: dict[str, str]) -> Any:
+    """Run `body` over designer.js with its controls bound and the service stubbed; `texts` name the definitions
+    the stub can parse (`input.texts.<name>`)."""
+    from mia_buffers.spec import load_spec_text
+
+    def parsed(text: str) -> dict:
+        return load_spec_text(text).model_dump(mode="json", by_alias=True, exclude={"warnings"})
+
+    return run_js(
+        DESIGNER_STUB + "bindControls();\n" + body,
+        {"designer.js": "bindControls, ensureDefinition, definition, changed, baseRevision, showDesigner"},
+        {
+            "api": (UI_DIR / "api.js").as_uri(),
+            "texts": texts,
+            "parsed": {text: parsed(text) for text in texts.values()},
+            "fallback": parsed(next(iter(texts.values()))),
+        },
+    )
+
+
+def _definitions() -> dict[str, str]:
+    by_hand = (Path(__file__).parent / "fixtures" / "buffers" / "spec.yaml").read_text()
+    return {"first": by_hand, "second": by_hand.replace("name: ", "name: other-", 1)}
+
+
+def test_a_definition_changed_elsewhere_is_not_overwritten_by_an_edit_made_before_it() -> None:
+    """Two tabs. While a person changes a buffer's definition, a redraw brings a newer stored text (someone
+    else's edit). What they typed is kept, and it keeps the revision it was made at: the service refuses their
+    save. A definition nobody is changing follows the stored one, with its revision."""
+    kept, moved, followed = designer(
+        "const at = (revision, text) => ({ key: 'a', revision, actions: ['edit'], data: { spec: text } });\n"
+        "await ensureDefinition(at(1, input.texts.first));\n"
+        "const name = document.getElementById('specName');\n"
+        "name.value = 'typed here'; name.fire('change');\n"  # the person changes a control
+        "await ensureDefinition(at(2, input.texts.second));\n"  # the other tab's edit arrives
+        "const kept = [changed(), definition().includes('typed here'), baseRevision()];\n"
+        "await ensureDefinition(at(3, definition()));\n"  # this page's own text is the stored one now
+        "const moved = [changed(), baseRevision()];\n"
+        "await ensureDefinition(at(4, input.texts.second));\n"  # nobody is typing: the stored text is shown
+        "print([kept, moved, [changed(), definition() === input.texts.second, baseRevision()]]);",
+        _definitions(),
+    )
+    assert kept == [True, True, 1] and moved == [False, 3] and followed == [False, True, 4]
+    assert has("revision: baseRevision()", squeezed(FILES["flow.js"]))
+
+
+def test_a_redraw_leaves_a_number_being_typed_alone() -> None:
+    """A crop count is taken when its field is left. A redraw of the step (the stream, the poll) before that does
+    not put the old number back into the field."""
+    typed = designer(
+        "const field = document.getElementById('cropsTrain');\n"
+        "field.value = '25000';\n"  # typed, the field not left yet
+        "showDesigner();\n"
+        "print(field.value);",
+        _definitions(),
+    )
+    assert typed == "25000"
+
+
+def test_yaml_typed_into_one_buffer_never_lands_in_the_next_one_opened() -> None:
+    """The YAML tab is read after a pause in typing. Opening another buffer within that pause drops the read: the
+    buffer opened shows its own definition, unchanged."""
+    shown = designer(
+        "const at = (key, text) => ({ key, revision: 1, actions: ['edit'], data: { spec: text } });\n"
+        "await ensureDefinition(at('a', input.texts.first));\n"
+        "const box = document.getElementById('specText');\n"
+        "box.value = input.texts.second; box.fire('input');\n"  # typed into a's YAML tab
+        "await ensureDefinition(at('b', input.texts.first));\n"  # b is opened before the pause ends
+        "await later(700);\n"
+        "print([definition() === input.texts.first, changed()]);",
+        _definitions(),
+    )
+    assert shown == [True, False]
+
+
+def test_prepare_plans_what_is_stored_and_the_versions_are_under_every_step() -> None:
+    """Step 3's numbers and its way forward are of the stored definition, which is what the round will run, not of
+    a change that was made on steps 1 and 2 and not saved. A buffer's versions are listed under every step: after a
+    round that failed or was cancelled the buffer rests at Prepare, and its versions are still one click away."""
+    flow = squeezed(FILES["flow.js"])
+    prepare = flow[flow.index("functionprepareStep(") : flow.index("//----step4")]
+    assert has("JSON.stringify({ spec: subject.data.spec, page })", prepare) and "definition()" not in prepare
+    assert "ensureDefinition" not in prepare
+    assert has("[versionsCard(subject), timelineCard(entries)]", flow) and count("versionsCard(subject)", flow) == 1
+
+
+def test_the_page_says_buffer_and_definition_and_explains_nothing_by_its_past() -> None:
+    """What a person reads names a buffer and its definition, a dataset is selected, in a version or on disk, and
+    no comment says how the page once was."""
+    assert not re.search(r"in the buffer\b", FILES["index.html"], re.I)
+    assert not has("the definition's buffers") and not re.search(r"before it was|used to be", PAGE)
+    service = (UI_DIR.parent / "api.py").read_text()
+    for said in ('f"no buffer spec', 'f"not a buffer spec', 'f"buffer spec {key!r}'):
+        assert said not in service, said
 
 
 def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:

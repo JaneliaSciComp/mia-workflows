@@ -1238,7 +1238,7 @@ class BufferService:
             raise HttpError(422, "give records, prep or spec")
         subject = self.ledger.subject("buffer", spec)
         if subject is None:
-            raise HttpError(404, f"no buffer spec {spec!r}")
+            raise HttpError(404, f"no buffer {spec!r}")
         rounds = [
             entry["round"]
             for entry in self.ledger.timeline("buffer", subject["number"])
@@ -1303,7 +1303,7 @@ class BufferService:
         try:
             return load_spec_text(text).name
         except SpecError as error:
-            raise HttpError(422, f"not a buffer spec: {error}") from None
+            raise HttpError(422, f"not a buffer's definition: {error}") from None
 
     def _new_spec(self, text: str) -> dict:
         """A new buffer subject holding this text. Its name is the spec's and need not be unique: the first
@@ -1355,7 +1355,7 @@ class BufferService:
         actor = self._actor(headers, parsed)
         subject = self.ledger.subject("buffer", key)
         if subject is None:
-            raise HttpError(404, f"no buffer spec {key!r}")
+            raise HttpError(404, f"no buffer {key!r}")
         if parsed.action == "edit":
             return self._edit(subject, parsed, actor)
         payload: dict = {}
@@ -1363,7 +1363,7 @@ class BufferService:
             stored = subject["data"].get("spec")
             text = parsed.spec if parsed.spec is not None else stored
             if not text:
-                raise HttpError(422, f"buffer spec {key!r} has no spec text to run: send one")
+                raise HttpError(422, f"buffer {key!r} has no definition to run: send one as `spec`")
             name = self._spec_name(text)
             if text != stored and subject["stage"] in ("ready", "idle"):
                 raise HttpError(409, f"buffer {key!r} is serving and does not change: clone it")

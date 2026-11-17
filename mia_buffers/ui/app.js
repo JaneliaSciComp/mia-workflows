@@ -114,7 +114,7 @@ function route() {
     }
   };
   const arg = decoded(rest.join("/"));
-  // an address a buffer's page had before it was one page of six steps
+  // #specs/<key> is another address of a buffer's page
   if (name === "specs" && rest.length) return location.replace(SUBJECT_HASH.buffer(arg));
   // a buffer's page: #buffer/<key>[/<step>], and #buffers/new[/<step>] for one that is not saved yet
   const fresh = name === "buffers" && rest[0] === "new",

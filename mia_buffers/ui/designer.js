@@ -99,6 +99,7 @@ let TEXT = null; // the definition as text, while it is not what the controls wr
 let LOST = []; // what TEXT holds that no control shows: while it holds any, the controls are read-only
 let INVALID = null; // why the YAML tab's text is not a definition
 let SAVED = null; // the stored text of the saved buffer being shown; null for a buffer that is not saved
+let REVISION = null; // the revision of the saved buffer at which SAVED was read: what a change of it is made at
 let LOADED = null; // whose definition this is: a saved buffer's key, "new" for one not saved, null for none yet
 let LOCKED = false; // the buffer cannot change now: a round is open, it serves, or it is shelved
 let onDesign = () => {}; // told whenever the definition or its plan changed (the page redraws the step's footer)
@@ -116,13 +117,16 @@ export const problem = () =>
         ? `the service refused this definition: ${S.planError.message.split("\n")[0]}`
         : null;
 export const planSummary = () => S.plan?.summary || null;
+// the revision a save of this definition names: the service refuses it when the buffer has moved since
+export const baseRevision = () => REVISION;
 export function setOnDesign(fn) {
   onDesign = fn;
 }
 
 const parseSpec = async text =>
   (await api("/specs/parse", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ spec: text }) })).spec;
-let readSeq = 0;
+let readSeq = 0,
+  typing = 0; // the pause after a keystroke in the YAML tab, before the service reads the text
 // Take `text` as the definition: the controls get its values as the service parsed it, and what they cannot show
 // is found by parsing the definition the controls would write for it. Text that is no definition changes nothing
 // but `INVALID`.
@@ -175,6 +179,8 @@ function showAll() {
 }
 // Open a definition: a saved buffer's text, or (null) a new one from the defaults and `preset`.
 async function openDefinition(text, preset) {
+  clearTimeout(typing); // what was typed into the definition shown before is not this one's
+  readSeq += 1;
   Object.assign(C, defaults(), preset || {});
   TEXT = null;
   LOST = [];
@@ -191,16 +197,24 @@ export async function ensureDefinition(subject) {
     stored = subject ? subject.data?.spec || "" : null;
   if (LOADED !== key) {
     LOADED = key;
+    REVISION = subject?.revision ?? null;
     return openDefinition(stored);
   }
-  if (stored == null || stored === SAVED) return;
-  if (definition() === stored) {
-    SAVED = stored; // this page's own change, now stored
+  if (stored == null) return;
+  if (stored === SAVED || definition() === stored) {
+    // the same definition (a stage moved), or this page's own change, now stored
+    SAVED = stored;
+    REVISION = subject.revision;
     return;
   }
-  if (changed()) return; // stored text moved under an edit: the save will be refused by its revision
+  // The stored text moved under a change being made here. The change stays, with the revision it was made at:
+  // the service refuses its save, so it never overwrites what someone else stored.
+  if (changed()) return;
+  REVISION = subject.revision;
   return openDefinition(stored);
 }
+// whether the definition shown is this saved buffer's, with a change that is not stored
+export const unsavedFor = key => LOADED === key && changed();
 // The buffer can change now, or not (a round is open, it serves, it is shelved).
 export function setLocked(locked) {
   LOCKED = locked;
@@ -408,7 +422,6 @@ export function bindControls() {
       showText();
     });
   // the YAML tab: after a pause in typing the service reads the text, and the controls follow
-  let typing = 0;
   $("specText").addEventListener("input", () => {
     clearTimeout(typing);
     const typed = $("specText").value;
@@ -602,7 +615,10 @@ export function showDesigner() {
   $("dsEmpty").hidden = !!S.ref;
   $("dsBody").hidden = !S.ref;
   if (!S.ref) return;
-  showAll();
+  // the controls already show the definition (they are set when one is opened or read): a redraw leaves them, and
+  // a number being typed in one, alone
+  showText();
+  showLock();
   if (planTable) return planTable.reload();
   const fit = el("input", { type: "checkbox" });
   fit.addEventListener("change", () => {
