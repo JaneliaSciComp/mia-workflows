@@ -82,7 +82,7 @@ export const ACTION_HELP = {
     keep: "Keep this idle buffer: it goes back to ready instead of being retired.",
     retire: "Release the buffer's staged data: training jobs are refused from then on, and the space can be reclaimed.",
     cancel: "Stop the round in progress: its cluster jobs are killed and its buffer is retired.",
-    stop: "For a run that does not answer Cancel: the workflow is terminated and the spec's buffers are retired. A cluster job already running is not killed.",
+    stop: "For a run that does not answer Cancel: the workflow is terminated and the buffer's versions are retired. A cluster job already running is not killed.",
   },
   prep: {
     ...SHELF_HELP,

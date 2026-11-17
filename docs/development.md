@@ -370,20 +370,29 @@ the reason.
 | subject | routes | actions |
 |---|---|---|
 | dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*, at `review` *Restart*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
-| buffer spec (`#specs/<key>`) | `POST /specs`, `POST /specs/<key>/actions` | `go` (*Plan*), `approve` (*Run* at the plan, *Approve* at the board), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel`, `stop` |
+| buffer (`#buffer/<key>`) | `POST /specs`, `POST /specs/<key>/actions` | `edit` with `spec`, `go` (*Continue* on step 3, *Plan a new version*), `approve` (*Run* at the plan, *Approve and serve* at `staged`), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel` (also the way back from steps 4 and 5), `stop` |
 | preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go`, `cancel`, `stop` |
 
-`POST /specs` with `{spec}` saves a buffer spec as a new subject, every time: a spec's `name` is a label and
-need not be unique (the first subject of a name has it as its key, a later one `buffer-<number>`; the subject's
-view carries `name`). With `action: go` it also runs it, and `plan_first: true` makes it a round that waits at the
-plan (the workflow's `plan` signal). A `go` to `/specs/<key>/actions` runs the text the spec holds; it may carry a
-changed `spec` until a round of the spec has created its buffer (`frozen` in the view), and is refused with a 409
-after that: a change to a spec that has built a buffer is a new spec. On the spec's page *Edit* (until then) and
-*Clone* open New buffer with the controls set from the spec, read through `POST /specs/parse` (the spec as the
-service parses it, defaults filled in); what the controls cannot hold keeps the spec's own text in the box. The page always sends `plan_first`, so a round a person starts stops at its
-plan and the approve there is the button *Run*. The go's payload is the spec text, the round runs exactly that
-(`admit` reads the action), and its timeline entry shows it. `POST /prep` with `{spec}` files a preparation
-request as a new subject `prep-<number>` and runs it.
+`POST /specs` with `{spec}` saves a buffer as a new subject, every time, at `new`: the `name` in its definition
+(the text the code calls its spec) is a label and need not be unique (the first subject of a name has it as its
+key, a later one `buffer-<number>`; the subject's view carries `name`). With `action: go` it also runs it, and
+`plan_first: true` makes it a round that waits at the plan (the workflow's `plan` signal).
+
+The definition changes in two ways. `edit` (with `spec`) replaces it where the buffer rests (`new`, `retired`,
+`needs-human`, `cancelled`: the stage table says so): buffer-api stores the text and its name, raises the
+subject's revision and writes the timeline entry itself, and no workflow hears of it. A `go` to
+`/specs/<key>/actions` runs the text the buffer holds, or a changed `spec` sent with it, which is stored once the
+stage takes the go; a buffer that serves (`ready`, `idle`) is fixed, and a changed text there is a 409. The page
+reads a definition into its controls through `POST /specs/parse` (the spec as the service parses it, defaults
+filled in). The page always sends `plan_first`, so a round a person starts stops at its plan and the approve there
+is the button *Run*. The go's payload is the spec text, the round runs exactly that (`admit` reads the action),
+and its timeline entry shows it.
+
+`POST /prep` with `{spec}` files a preparation request as a new subject `prep-<number>` and runs it. With
+`buffer: <number>` (a buffer's Prepare step) the request's data names that buffer, and `GET
+/subjects/prep?buffer=<number>` lists a buffer's requests; `MiaPrep` and the request's budget are the same either
+way. `GET /subjects/buffer` adds `serving` to each buffer: the id of the version consumers draw from now, or null.
+`POST /plan` with `page.to_prepare` answers only the rows that fit and are not prepared.
 
 - `cancel` ends a round in progress (`planning`, `plan-review`, `sourcing`, `staged`; a request at `requested`; a
   dataset from `matching` to `merging`): its dataset tasks are cancelled, every cluster job it waits on is killed by
@@ -881,14 +890,16 @@ above it in this table, never in a circle:
 
 | module | |
 |---|---|
-| `spec.js` | the YAML the page writes (a buffer spec, a preparation request); no DOM |
+| `spec.js` | the YAML the page writes (a buffer's definition, a preparation request) and reads back into the controls; no DOM |
+| `steps.js` | a buffer's six steps: which step a stage is, which step an address may show, the list's words; no DOM |
 | `dom.js` | nodes built from text (never parsed HTML), numbers and times, links and addresses, pills, the tooltip, cards, a lifecycle's line |
 | `api.js` | the page's one `fetch`, the banner its errors go to, and what the service said at boot |
 | `table.js` | a table paged by the server |
 | `markdown.js` | a timeline entry's markdown as DOM nodes, and its gist as one line |
 | `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
 | `job.js` | a job's record, every value of it inserted as text |
-| `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views |
+| `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views; `designer.js` is steps 1 and 2 of a buffer (its definition and that definition's plan) |
+| `flow.js` | a buffer's page: its heading, the strip of steps, the step shown with its way back and forward, steps 3 to 6, the timeline |
 | `app.js` | the Docs view, health, the stream, hash routing and boot |
 
 Every file is sent with `Cache-Control: no-cache`, so a browser never runs the modules of two deployments
@@ -906,19 +917,36 @@ Each tab is one kind of thing, and each thing has one page:
   download, staged artifacts and buffers; filters by state, modality, dims and licence. Every row has a tick (the
   header's and *Select all* tick the page that is showing). While something is ticked, a box says how many datasets are
   selected and offers *Prepare* and *Create buffer*. The ticked are prepared in one request (one
-  `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a spec that
+  `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a definition that
   selects exactly them (`specFromDatasets`: one `*/<id>.yaml` glob per dataset in `select.paths`). `#datasets?state=<state>` opens the list with a filter set.
 - **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`,
   its timeline, `/decisions?record=`, `/assets/staged?record=` and `/buffers?record=`: its record, preparation,
   crops, decisions, cache, buffers, buttons and timeline.
-- **Preparation** reads `/subjects/prep`: the requests. A request's page lists its datasets
-  (`/catalog/datasets?request=<number>`: the records its stored spec names).
-- **Buffers** reads `/subjects/buffer` (specs) and `/buffers`. **New buffer** (`#buffers/new`) is the designer:
-  its controls are a spec, run through `POST /plan` with `page` (debounced 300 ms) for the funnel, the charts and
-  one page of the plan's rows. A spec's page (`#specs/<key>`) has its buttons, its text with *Plan again*, *Edit* and *Clone*, its timeline and
-  its buffers; a
-  buffer's page reads `/buffers/<id>/status`, `/events`, `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
-- **A lifecycle** tops the page of a dataset, a spec, a request and a buffer: the kind's stages as boxes and arrows
+- **Preparation requests** (`#preparation`, a link on the Datasets view; it has no tab) reads `/subjects/prep`. A
+  request's page lists its datasets (`/catalog/datasets?request=<number>`: the records its stored spec names).
+- **Buffers** reads `/subjects/buffer`: one row per buffer, with its step, what it is doing and the id it serves.
+- **A buffer's page** (`#buffer/<key>`, `#buffer/<key>/<step>`; `#buffers/new` for one that is not saved yet; an old
+  `#specs/<key>` redirects) is `flow.js`: a heading (name, stage, *More* for what is not a step), the strip of six
+  steps, the step shown, and the timeline. `steps.js` says which step a stage is: a stage a round works or waits
+  at is the step of that work, and every stage a buffer rests at is Prepare. An address may ask for a step already
+  passed, never one ahead. Each step draws a footer with the one way back and the one way forward.
+  - *Define* and *Datasets* are `designer.js`. The definition is one text: what the controls write
+    (`toSpecYaml`), or, while the YAML tab holds a text the controls did not write, that text (`TEXT`), read back
+    into the controls by `POST /specs/parse`; what it holds that no control shows (`specDiff`) makes the controls
+    read-only. It is run through `POST /plan` with `page` (debounced 300 ms) for the numbers, the charts and one
+    page of rows. Unticking a fitting dataset adds its id to `select.exclude.ids`. Step 2's button saves a new
+    buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
+    `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
+    someone is changing (`ensureDefinition`).
+  - *Prepare* lists the plan's rows that are left to prepare (`page.to_prepare`), ticks only what a request could
+    start (`summary.to_prepare`), files the request with `buffer`, and lists the buffer's requests. Its way
+    forward is the one `go` a buffer gets from the page (`planRound`).
+  - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the
+    version's page) and *Files are in place*; *Serve* the version's id, the line a training script pastes, the
+    revoke card and the buffer's versions. The way back from Plan and Source is a `cancel`.
+- **A version's page** (`#buffers/<id>`: one round's buffer) reads `/buffers/<id>/status`, `/events`,
+  `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
+- **A lifecycle** tops the page of a dataset, a request and a version: the kind's stages as boxes and arrows
   with the current one filled. The stages are `lines` of `/meta`, which is each stage table in its own order
   without the stages a round can end in from any step (`failed`, `blocked`, `needs-human`, `cancelled`); those
   hang under the step the round stopped at. Under it one line says what the newest timeline entry says and

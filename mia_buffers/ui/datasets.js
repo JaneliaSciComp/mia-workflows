@@ -516,7 +516,7 @@ export function datasetCards(d) {
           { key: "buffer", label: "buffer", cell: b => bufferLink(b.id) },
           {
             key: "spec",
-            label: "spec",
+            label: "buffer",
             cell: b => (b.spec ? el("a", { href: SUBJECT_HASH.buffer(b.spec) }, b.spec) : b.config?.spec_name || ""),
           },
           { label: "in its pool", cell: b => statePill(b.board?.status) },

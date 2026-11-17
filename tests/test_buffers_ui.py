@@ -1044,7 +1044,7 @@ def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
     assert has('$("kpisFit").replaceChildren(tile("Datasets that fit"', designer)
     assert has("C.exclude.add(x.id);", designer) and has("C.exclude.delete(id);", designer)
     # saving: a new subject and no action; a saved buffer's change is an edit that names the revision it was made at
-    assert has('body: JSON.stringify({ spec: definition() })', flow) and has('api("/specs", {', flow)
+    assert has("body: JSON.stringify({ spec: definition() })", flow) and has('api("/specs", {', flow)
     assert has('{ action: "edit", spec: definition(), revision: subject.revision, key: newKey() }', flow)
 
 
@@ -1075,7 +1075,7 @@ def test_steps_four_to_six_are_the_rounds_own_buttons_and_back_is_a_cancel() -> 
     assert has('sendAction(subject, { action: "cancel", key: newKey() }, redraw)', flow) and has("if (!confirm(", flow)
     assert has("droppedNotices(subject, board, redraw)", flow) and has("poolTable(version.id", flow)
     # the plan is shown as the round wrote it, as text
-    assert has('/^# Plan for /.test(entry.body)', flow) and has("markdown(plan.body", flow)
+    assert has("/^# Plan for /.test(entry.body)", flow) and has("markdown(plan.body", flow)
     # step 6: the id a training run names, never the buffer's name
     assert has('buffer="${version.id}"', flow) and has("versionsCard(subject)", flow)
     assert count("plan_first: true") == 1  # one place builds a plan's go: step 3 and "Plan a new version" share it
@@ -1091,7 +1091,10 @@ def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> N
 
     by_hand = (Path(__file__).parent / "fixtures" / "buffers" / "spec.yaml").read_text()
     plain = parsed(by_hand)
-    reasoned = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {"x": "blurry"}}}}
+    reasoned = {
+        **plain,
+        "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {"x": "blurry"}}},
+    }
     ticked = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {}}}}
     ids, differs = run_js(
         "print([[...fromSpec(input.reasoned).exclude], specDiff(input.reasoned, input.ticked)]);",
@@ -1115,8 +1118,13 @@ def test_a_stage_opens_at_its_step() -> None:
         {
             "stages": list(STAGE_ACTIONS),
             "asks": [
-                ["plan-review", "serve"], ["plan-review", "define"], ["ready", "bogus"], ["new", None],
-                [None, "prepare"], [None, "datasets"], [None, None],
+                ["plan-review", "serve"],
+                ["plan-review", "define"],
+                ["ready", "bogus"],
+                ["new", None],
+                [None, "prepare"],
+                [None, "datasets"],
+                [None, None],
             ],  # fmt: skip
             "strips": [["plan-review", "plan"], ["plan-review", "define"], [None, "define"], ["ready", "serve"]],
             "subjects": [
@@ -1308,7 +1316,12 @@ def test_a_jobs_record_is_shown_as_text_never_as_markup() -> None:
 def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() -> None:
     """`#job/<address>` is the whole remainder after `#job/`, slashes and all, and the page reads `/jobs/<address>`
     (a read route); a 404 is a job that left no record."""
-    assert has("job: viewJob") and has('const arg = decoded(rest.join("/"))') and has('data-view="job"') and has('id="jobBody"')
+    assert (
+        has("job: viewJob")
+        and has('const arg = decoded(rest.join("/"))')
+        and has('data-view="job"')
+        and has('id="jobBody"')
+    )
     assert ("GET", "/jobs/x") in requested_paths() and resolve("GET", f"/jobs/{JOB_ADDRESS}") == "read"
     found, missing = run_js(
         "globalThis.location = { hash: '#job/issue-12/i12-e345/match-1' };\n"

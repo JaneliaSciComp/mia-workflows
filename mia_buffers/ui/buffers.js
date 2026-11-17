@@ -250,17 +250,17 @@ async function viewBuffer(root, id, refresh) {
       el("h2", {}, id),
       el(
         "div",
-        { class: "links" }, // its spec and the spec's issue, then this round's own folders
+        { class: "links" }, // its buffer and the buffer's issue, then this round's own folders
         spec
           ? el(
               "span",
               {},
-              "spec ",
+              "buffer ",
               el(
                 "a",
                 {
                   href: SUBJECT_HASH.buffer(spec.key),
-                  title: "the spec this buffer was built from: its buttons and its timeline",
+                  title: "the buffer this version belongs to: its steps and its timeline",
                 },
                 spec.name || spec.key,
               ),
@@ -307,7 +307,7 @@ async function viewBuffer(root, id, refresh) {
             { class: "notice" },
             "Staged, waiting for ",
             el("b", {}, "Approve"),
-            " on its spec's page: the approve serves what the pool shows as servable, partial or not; consumers are refused until then.",
+            " on its buffer's page: the approve serves what the pool shows as servable, partial or not; consumers are refused until then.",
           )
         : null,
       !status && evs.length
@@ -316,7 +316,7 @@ async function viewBuffer(root, id, refresh) {
             { class: "notice" },
             "Not sourced yet: a buffer is registered when sourcing starts, after ",
             el("b", {}, "Run"),
-            " on its spec's page. Until then it has only its events.",
+            " on its buffer's page. Until then it has only its events.",
           )
         : null,
       !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
@@ -349,10 +349,10 @@ async function viewBuffer(root, id, refresh) {
           status
             ? kv([
                 [
-                  "spec",
+                  "buffer",
                   spec ? el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.name || spec.key) : cfg.spec_name,
                 ],
-                ["spec hash", code(cfg.spec_hash, 12)],
+                ["definition hash", code(cfg.spec_hash, 12)],
                 ["catalog commit", code(cfg.catalog_ref, 12)],
                 ["pyramid levels", (cfg.levels || []).join(", ")],
                 ["patch size (px)", num(cfg.patch)],

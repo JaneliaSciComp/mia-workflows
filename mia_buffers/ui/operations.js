@@ -222,7 +222,7 @@ const RULE_HELP = {
   ],
   "frozen run": [
     "Workflow run is frozen",
-    "The run's workflow task fails every time, so the run cannot take a step. The cleaner force-stops it, ends its cluster jobs and runs it again. A buffer's run is left to a person, because stopping it retires the spec's buffers.",
+    "The run's workflow task fails every time, so the run cannot take a step. The cleaner force-stops it, ends its cluster jobs and runs it again. A buffer's run is left to a person, because stopping it retires the definition's buffers.",
   ],
   "activity retrying": [
     "A step keeps failing",

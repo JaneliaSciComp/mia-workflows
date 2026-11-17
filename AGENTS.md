@@ -43,7 +43,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there.
   buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`
   and, for a run that cannot answer one, `stop` (a dataset at `debugging` also the `go` of its next round). Any
-  action may name the `revision` it was decided at and is refused once the subject moved.
+  action may name the `revision` it was decided at and is refused once the subject moved. A buffer's `edit`
+  (a changed definition, where the buffer rests) is in the table too, and buffer-api carries it out itself.
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
 - **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
