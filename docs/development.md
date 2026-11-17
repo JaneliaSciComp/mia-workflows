@@ -339,7 +339,12 @@ none, posts each entry not yet posted as a comment, in order, once (the entry's 
 pass that died before its write-back, `PUT /timeline/<kind>/<number>/<seq>`, finds its comment again), then
 leaves the subject's stage as the issue's only stage label. It retries without limit, so GitHub being slow or
 away only delays the issue; nothing reads the issue back. mia-data's worker runs the mirror for datasets,
-mia-buffers' for buffers and requests. buffer-api therefore needs to reach Temporal: it uses `temporal.address`
+mia-buffers' for buffers and requests. The pass (the `mirror` activity) runs on a task queue of its own,
+`<task queue>-mirror`, whose worker takes one pass at a time (`mirror_worker`), through a GitHub client of its
+own that sends one write every `WRITE_GAP_S` (9 s: 400 an hour, under GitHub's 500 content-creating requests an
+hour). A rate-limit answer holds every request of that client for as long as GitHub says, else a minute that
+doubles with each such answer in a row up to 15. So a burst of entries reaches GitHub over hours, and the
+rounds' activities never wait behind a pass. buffer-api therefore needs to reach Temporal: it uses `temporal.address`
 of its own service block, its own namespace and task queue for buffers and requests, and for datasets the
 namespace and name of the service whose `app` is `mia-data`. It connects on first use, so it starts and serves
 with Temporal away; a kick that fails is logged, and a start kicks every subject that has an entry not yet

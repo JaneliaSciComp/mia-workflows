@@ -1595,8 +1595,10 @@ class MiaDataPoll:
 class MiaMirror:
     """Copy one subject's timeline and stage to its GitHub issue (spec webapp-actions §7). buffer-api starts it,
     or signals `kick` when it is already running, each time the subject is written. One pass posts everything
-    that is new; a kick that arrives during a pass asks for one more. The activity is retried without limit, so
-    GitHub being away only delays the issue; no round waits for this workflow."""
+    that is new; a kick that arrives during a pass asks for one more. The pass runs on the mirror's own task
+    queue (`<task queue>-mirror`), where one runs at a time and writes slowly, so it may wait long for its turn
+    and may sit out a rate limit. It is retried without limit, so GitHub being away only delays the issue; no
+    round waits for this workflow."""
 
     def __init__(self) -> None:
         self.kicks = 0
@@ -1613,7 +1615,8 @@ class MiaMirror:
             await workflow.execute_activity(
                 "mirror",
                 args=[kind, number],
-                start_to_close_timeout=timedelta(minutes=5),
+                task_queue=workflow.info().task_queue + "-mirror",
+                start_to_close_timeout=timedelta(minutes=30),  # a pass that sits out a 15-minute rate limit ends
                 retry_policy=RetryPolicy(maximum_interval=timedelta(minutes=10)),
                 result_type=int,
             )
