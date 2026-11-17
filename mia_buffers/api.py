@@ -1797,8 +1797,16 @@ class BufferService:
         return 200, self._put_report("cleaner", body), {}
 
     def _cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The cleaner's last sweep, without what a restart since has settled: a worker that started on other
+        code after the sweep is not the one the sweep found on old code, so that finding is left out. Whether
+        the new one owes a restart too is the next sweep's to say."""
         report = self.ledger.kv("cleaner")
-        return (200, *JSON_NULL) if report is None else (200, report, {})
+        if report is None:
+            return 200, *JSON_NULL
+        swept, workers = report.get("at") or 0, self.ledger.kv("workers") or {}
+        restarted = {f"restart {service}" for service, row in workers.items() if (row.get("since") or 0) > swept}
+        findings = [finding for finding in report.get("findings") or [] if finding.get("id") not in restarted]
+        return 200, {**report, "findings": findings}, {}
 
     def _put_report(self, name: str, body: bytes) -> dict:
         """Store a scheduled pass's last report whole under `name` (`at` added when absent)."""

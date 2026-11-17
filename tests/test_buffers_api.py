@@ -1167,11 +1167,14 @@ def test_the_cleaners_report_and_the_workers_commits(tmp_path):
     s, _ = _acting(tmp_path)
     assert call(s, "GET", "/cleaner")[:2] == (200, b"null")
     assert call(s, "PUT", "/cleaner", payload={"findings": []})[0] == 401
-    stored = worker(s, "PUT", "/cleaner", {"findings": [{"id": "restart mia-data", "text": "a restart is owed"}]})[1]
+    owed, paused = {"id": "restart mia-data", "text": "a restart is owed"}, {"id": "pause", "text": "paused"}
+    stored = worker(s, "PUT", "/cleaner", {"findings": [owed, paused]})[1]
     assert call(s, "GET", "/cleaner")[1] == stored and isinstance(stored["at"], float)
     assert call(s, "GET", "/workers")[1] == {"workers": {}}
     assert call(s, "PUT", "/workers/mia-data", payload={"commit": "abc"})[0] == 401
     assert worker(s, "PUT", "/workers/mia-data", {"commit": "abc", "code": "d1"})[1]["commit"] == "abc"
+    # the worker started on other code after the sweep: the restart the sweep found owed is not shown any more
+    assert call(s, "GET", "/cleaner")[1]["findings"] == [paused]
     assert worker(s, "PUT", "/workers/mia-buffers", {"commit": None})[0] == 200
     first = call(s, "GET", "/workers")[1]["workers"]["mia-data"]
     again = worker(s, "PUT", "/workers/mia-data", {"commit": "abd", "code": "d1"})[1]  # a commit of docs: same code
