@@ -31,7 +31,7 @@ async def test_a_spec_and_a_request_created_on_the_page_get_their_issue(tmp_path
     (title, body, _), (prep_title, prep_body, _) = gh.created
     lines = body.splitlines()
     assert title == "EM pool / v2" and lines[0] == f"<!-- mia-buffers: subject buffer {spec['number']} -->"
-    assert "read-only log" in lines[1] and "http://127.0.0.1:8765/#specs/EM%20pool%20%2F%20v2" in lines[1]
+    assert "read-only log" in lines[1] and "http://127.0.0.1:8765/#buffer/EM%20pool%20%2F%20v2" in lines[1]
     assert prep_title == f"Prepare 2 records ({request['key']})"
     assert prep_body.startswith(f"<!-- mia-buffers: subject prep {request['number']} -->")
     assert f"/#requests/{request['key']}" in prep_body and f"```yaml\n{PREP_TEXT}```" in prep_body
