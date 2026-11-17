@@ -62,7 +62,7 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.1)}
 .btn.primary:disabled{background:transparent;border-color:var(--axis);color:var(--muted)}
 /* a buffer's page: the strip of its six steps (the one shown filled, the ones that can be opened checked), what
-   is not a step behind More, and under the step its one way back and its one way forward */
+   is not a step behind Actions…, and under the step its one way back and its one way forward */
 .steps{list-style:none;display:flex;flex-wrap:wrap;padding:0;margin:0 0 12px;counter-reset:step}
 .steps li{counter-increment:step;display:flex;align-items:center;gap:8px;padding:6px 14px 6px 10px;border:1px solid var(--axis);border-right-width:0;font-size:13.5px;color:var(--muted);background:var(--surface)}
 .steps li:first-child{border-radius:8px 0 0 8px}

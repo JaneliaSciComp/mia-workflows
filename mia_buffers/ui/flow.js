@@ -47,7 +47,7 @@ const goTo = (subject, step) => {
 // Why a saved buffer's definition cannot change now, or null when it can (one that is not saved always can).
 function lockReason(subject) {
   if (editable(subject)) return null;
-  if (subject.shelved) return "This buffer is shelved: unshelve it, under More, to change it.";
+  if (subject.shelved) return "This buffer is shelved: unshelve it, under Actions, to change it.";
   if (stepOf(subject.stage) === "serve") return "This buffer is serving, so its definition is fixed.";
   return "A round is in progress: the definition cannot change until the round ends or is cancelled.";
 }
@@ -88,6 +88,28 @@ async function leave(subject, step, button) {
   goTo(saved, step);
 }
 
+// The menu under Actions…: the actions the buffer accepts now, and Clone, which asks nothing of the service.
+function menu(subject, redraw, skip) {
+  const bar = actionBar(subject, redraw, skip);
+  bar.append(
+    el(
+      "button",
+      {
+        type: "button",
+        class: "btn",
+        title: BUTTON_HELP.clone,
+        onclick: async () => {
+          await ensureDefinition(subject);
+          keepAsNew();
+          location.hash = "#buffers/new";
+        },
+      },
+      "Clone",
+    ),
+  );
+  return bar;
+}
+
 // ---- the heading: the name, where it stands, its links, and what can be asked of it that is not a step
 function head(subject, redraw, skip) {
   const name = subject ? subject.name || subject.key : "New buffer";
@@ -97,26 +119,7 @@ function head(subject, redraw, skip) {
       { class: "viewhead" },
       el("h2", {}, name, " ", subject ? stagePill(subject.stage) : pill("not saved", "")),
       subject
-        ? el(
-            "details",
-            { class: "more" },
-            el("summary", { class: "btn" }, "More"),
-            actionBar(subject, redraw, skip),
-            el(
-              "button",
-              {
-                type: "button",
-                class: "btn",
-                title: BUTTON_HELP.clone,
-                onclick: async () => {
-                  await ensureDefinition(subject);
-                  keepAsNew();
-                  location.hash = "#buffers/new";
-                },
-              },
-              "Clone",
-            ),
-          )
+        ? el("details", { class: "more" }, el("summary", { class: "btn" }, "Actions…"), menu(subject, redraw, skip))
         : null,
     ),
     subject
@@ -170,7 +173,7 @@ function notes(subject, entries, run, actions, redraw) {
       el(
         "div",
         { class: "notice" },
-        `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round (under More) to settle it.`,
+        `The registry says a round is in progress, but its workflow is ${(run.status || "not there").toLowerCase()}. Cancel the round (under Actions) to settle it.`,
       ),
     );
   parts.push(undelivered(subject, actions, redraw));
@@ -675,7 +678,7 @@ async function serveStep(pane, subject, redraw, wanted) {
       ? el(
           "div",
           { class: "notice" },
-          "No consumer has drawn for a while. Keep, under More, returns it to ready; otherwise the keeper retires it.",
+          "No consumer has drawn for a while. Keep, under Actions, returns it to ready; otherwise the keeper retires it.",
         )
       : null,
     version
