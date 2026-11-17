@@ -116,6 +116,33 @@ export function viewBuffers(id, refresh) {
     }),
   );
 }
+// A version's datasets, one row each: on disk (`servable`), fetching with its job, staging, blocked by quota,
+// waiting for its files, failed with the reason. `levelsKey`: the folder of its staged pyramids (jobspec.levels_key).
+export const poolTable = (id, levelsKey) =>
+  pagedTable("buffer-pool:" + id, {
+    source: pageOf(`/buffers/${encodeURIComponent(id)}/datasets`, "datasets"),
+    sort: "dataset",
+    empty: "No dataset in the pool yet.",
+    cols: [
+      { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) },
+      { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
+      {
+        label: "files",
+        title: "the dataset's saved crops",
+        cell: x => folderLink(S.meta.roots?.storage_root, x.folder),
+      },
+      {
+        label: "staged",
+        title: "the staged artifact this buffer draws from",
+        cell: x => folderLink(S.meta.roots?.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)),
+      },
+      { label: "preview", cell: x => thumb(x) },
+      { key: "status", label: "status", cell: x => statePill(x.status) },
+      { label: "reason", wrap: true, cell: x => x.reason || "" },
+      { key: "job", label: "job", cell: x => (x.job ? el("code", {}, x.job) : "") },
+      { key: "updated", label: "updated", cell: x => when(x.updated_at) },
+    ],
+  });
 function sparkline(days) {
   if (!days.length) return el("div", { class: "empty" }, "No draw recorded yet.");
   const W = 560,
@@ -374,30 +401,7 @@ async function viewBuffer(root, id, refresh) {
         ? card(
             "Dataset pool",
             "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.",
-            pagedTable("buffer-pool:" + id, {
-              source: pageOf(`/buffers/${e}/datasets`, "datasets"),
-              sort: "dataset",
-              empty: "No dataset in the pool yet.",
-              cols: [
-                { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) },
-                { label: "issue", cell: x => ghIcon(meta.datasets_repo, x.issue) },
-                {
-                  label: "files",
-                  title: "the dataset's saved crops",
-                  cell: x => folderLink(roots.storage_root, x.folder),
-                },
-                {
-                  label: "staged",
-                  title: "the staged artifact this buffer draws from",
-                  cell: x => folderLink(roots.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)),
-                },
-                { label: "preview", cell: x => thumb(x) },
-                { key: "status", label: "status", cell: x => statePill(x.status) },
-                { label: "reason", wrap: true, cell: x => x.reason || "" },
-                { key: "job", label: "job", cell: x => (x.job ? el("code", {}, x.job) : "") },
-                { key: "updated", label: "updated", cell: x => when(x.updated_at) },
-              ],
-            }),
+            poolTable(id, levelsKey),
           )
         : null,
       status

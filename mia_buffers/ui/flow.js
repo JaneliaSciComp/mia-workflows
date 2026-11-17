@@ -17,9 +17,9 @@ import {
 } from "./dom.js";
 import { api, banner, JSON_HEADERS, load, newKey, S } from "./api.js";
 import { pagedTable, pageOf } from "./table.js";
-import { gist, mdInline } from "./markdown.js";
-import { actionBar, BUTTON_HELP, onScreen, prepareButton, sendAction, undelivered } from "./actions.js";
-import { servableText, stageOf } from "./buffers.js";
+import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
+import { actionBar, askHosts, BUTTON_HELP, onScreen, prepareButton, sendAction, undelivered } from "./actions.js";
+import { poolTable, servableText, stageOf } from "./buffers.js";
 import {
   changed,
   definition,
@@ -276,7 +276,6 @@ const versionsCard = subject =>
   );
 
 // ---- the steps. Each draws its pane; `turnOf()` tells a step that loaded something whether it is still wanted.
-const waiting = text => pane => pane.replaceChildren(el("div", { class: "empty" }, text));
 // the footer of a step: on the left the way back, on the right a line on where things stand and the way forward
 function foot(back, hint, forward) {
   $("bufferFoot").replaceChildren(
@@ -340,6 +339,43 @@ const designed = footer => async (_pane, subject, _redraw, wanted) => {
   showDesigner();
   footer(subject);
 };
+// The go that plans a buffer. It always stops at its plan: the Run there starts the jobs.
+function planRound(subject, redraw) {
+  const go = { action: "go", plan_first: true, revision: subject.revision, key: newKey() };
+  sendAction(subject, go, redraw);
+}
+// On a step the buffer has passed: the way on is the step of its stage.
+const nextLink = subject =>
+  el(
+    "a",
+    { class: "btn primary", href: SUBJECT_HASH.buffer(subject.key) },
+    `Next: ${STEP_TITLES[stepOf(subject.stage)].toLowerCase()}`,
+  );
+const backLink = (subject, step) => el("a", { class: "btn", href: stepHash(subject, step) }, `← ${STEP_TITLES[step]}`);
+// The way back from a round in progress: it asks, then cancels the round, and the buffer rests where it can change.
+const cancelBack = (subject, redraw) =>
+  el(
+    "button",
+    {
+      type: "button",
+      class: "btn",
+      title: BUTTON_HELP.back,
+      disabled: !subject.actions.includes("cancel") || !!subject.asked,
+      onclick: e => {
+        if (
+          !confirm(
+            "Go back to change the buffer? The round in progress is cancelled: its cluster jobs are killed and the work so far is not kept.",
+          )
+        )
+          return;
+        e.target.disabled = true;
+        sendAction(subject, { action: "cancel", key: newKey() }, redraw);
+      },
+    },
+    "← Change the buffer (cancels this round)",
+  );
+const approval = subject => ({ action: "approve", revision: subject.revision, key: newKey() });
+
 // ---- step 3: the fitting datasets that are not prepared, the requests this buffer filed, and the way on.
 // The buffer waits here for as long as the person likes; the way on takes what is prepared at that moment.
 const ticked = { key: null, chosen: new Set() }; // the ticks of the buffer shown: they outlast the page's redraws
@@ -374,19 +410,14 @@ function prepareFoot(subject, plan, redraw) {
             disabled: !!blocker || !!subject.asked,
             onclick: e => {
               e.target.disabled = true;
-              const go = { action: "go", plan_first: true, revision: subject.revision, key: newKey() };
-              sendAction(subject, go, redraw);
+              planRound(subject, redraw);
             },
           },
           subject.asked?.action === "go"
             ? "Planning…"
             : `Continue with ${num(prepared)} prepared ${prepared === 1 ? "dataset" : "datasets"}`,
         )
-      : el(
-          "a",
-          { class: "btn primary", href: SUBJECT_HASH.buffer(subject.key) },
-          `Next: ${STEP_TITLES[stepOf(subject.stage)].toLowerCase()}`,
-        ),
+      : nextLink(subject),
   );
 }
 async function prepareStep(pane, subject, redraw, wanted) {
@@ -526,27 +557,176 @@ async function prepareStep(pane, subject, redraw, wanted) {
   offer();
   prepareFoot(subject, null, redraw);
 }
+// ---- step 4: the plan as the round wrote it, and the Run that starts the jobs
+function planStep(pane, subject, redraw, _wanted, entries) {
+  const here = stepOf(subject.stage) === "plan",
+    planning = subject.stage === "planning";
+  const plan = planning ? null : [...entries].reverse().find(entry => /^# Plan for /.test(entry.body));
+  pane.replaceChildren(
+    planning
+      ? el(
+          "div",
+          { class: "notice" },
+          "The definition is being resolved against the catalog and the prepared datasets. The plan appears here when it is ready.",
+        )
+      : plan
+        ? card(
+            "The plan",
+            "As the round wrote it: the datasets in this version, their weights and crops.",
+            el("div", { class: "md" }, ...markdown(plan.body, cropsOf(plan.body, {}))),
+          )
+        : el("div", { class: "empty" }, "This round's plan is not in the timeline."),
+  );
+  let checking = false; // a click while the host check or its dialog is open starts nothing
+  foot(
+    here ? cancelBack(subject, redraw) : backLink(subject, "prepare"),
+    here ? (planning ? "Planning…" : "Nothing is fetched until you press Run.") : null,
+    here
+      ? el(
+          "button",
+          {
+            type: "button",
+            class: "btn primary",
+            title: BUTTON_HELP.run,
+            disabled: subject.stage !== "plan-review" || !!subject.asked,
+            onclick: e => {
+              if (checking) return;
+              checking = true;
+              askHosts({ spec: subject.key }, hosts => {
+                e.target.disabled = true;
+                const run = { ...approval(subject), ...(hosts.length ? { approve_hosts: hosts } : {}) };
+                sendAction(subject, run, redraw);
+              }).finally(() => {
+                checking = false;
+              });
+            },
+          },
+          subject.asked?.action === "approve" ? "Starting…" : "Run: fetch and stage",
+        )
+      : nextLink(subject),
+  );
+}
+// ---- step 5: the datasets of this version as they are fetched and staged, then the approve that serves it
+async function sourceStep(pane, subject, redraw, wanted) {
+  const { version, board } = await newestVersion(subject);
+  if (!wanted()) return;
+  const here = stepOf(subject.stage) === "source",
+    onDisk = board.filter(d => d.status === "servable").length,
+    cfg = version?.config || {},
+    bar = el("i");
+  bar.style.width = `${board.length ? (100 * onDisk) / board.length : 0}%`;
+  pane.replaceChildren(
+    el(
+      "p",
+      {},
+      el("b", {}, `${num(onDisk)} of ${num(board.length)}`),
+      " datasets of this version are on disk.",
+      subject.stage === "staged" ? " No job is left to run: it waits for your approve." : "",
+    ),
+    el("div", { class: "progress" }, bar),
+    ...droppedNotices(subject, board, redraw),
+    version
+      ? card(
+          "The datasets of this version",
+          "One row per dataset of the plan: on disk (servable), fetching with its job, staging, blocked by quota, waiting for its files, or failed with the reason.",
+          poolTable(version.id, cfg.patch && cfg.levels?.length ? `p${cfg.patch}-l${cfg.levels.join("-")}` : null),
+        )
+      : el("div", { class: "empty" }, "Sourcing has not started."),
+  );
+  foot(
+    here ? cancelBack(subject, redraw) : backLink(subject, "plan"),
+    here ? (subject.stage === "staged" ? "The approve serves what is on disk now." : "Jobs are running.") : null,
+    here
+      ? el(
+          "button",
+          {
+            type: "button",
+            class: "btn primary",
+            title: BUTTON_HELP.serve,
+            disabled: subject.stage !== "staged" || !!subject.asked,
+            onclick: e => {
+              e.target.disabled = true;
+              sendAction(subject, approval(subject), redraw);
+            },
+          },
+          subject.asked?.action === "approve" ? "Approving…" : "Approve and serve",
+        )
+      : nextLink(subject),
+  );
+}
+// ---- step 6: the version being served, by the id a training run names
+async function serveStep(pane, subject, redraw, wanted) {
+  const { version, board } = await newestVersion(subject);
+  if (!wanted()) return;
+  const url = S.meta.service_url || location.origin;
+  const parts = [
+    subject.stage === "idle"
+      ? el(
+          "div",
+          { class: "notice" },
+          "No consumer has drawn for a while. Keep, under More, returns it to ready; otherwise the keeper retires it.",
+        )
+      : null,
+    version
+      ? card(
+          "The version being served",
+          "A training run names this id. The buffer's name is a label: nothing looks a buffer up by it.",
+          el(
+            "p",
+            {},
+            "id ",
+            el("code", {}, version.id),
+            " · ",
+            el(
+              "a",
+              { href: "#buffers/" + encodeURIComponent(version.id) },
+              "its events, datasets, volumes, consumers and usage",
+            ),
+          ),
+          el(
+            "pre",
+            { class: "snippet" },
+            `from mia_buffers.client import BufferDataset\ntrain = BufferDataset("${url}", buffer="${version.id}", split="train")`,
+          ),
+        )
+      : null,
+    subject.actions.includes("revoke") ? revokeCard(subject, board, redraw) : null,
+    versionsCard(subject),
+  ];
+  pane.replaceChildren(...parts.filter(Boolean));
+  foot(
+    backLink(subject, "source"),
+    "Serving.",
+    subject.actions.includes("go")
+      ? el(
+          "button",
+          {
+            type: "button",
+            class: "btn",
+            title: BUTTON_HELP.planAgain,
+            disabled: !!subject.asked,
+            onclick: e => {
+              if (!confirm("Plan a new version of this buffer over the datasets that are prepared now?")) return;
+              e.target.disabled = true;
+              planRound(subject, redraw);
+            },
+          },
+          "Plan a new version",
+        )
+      : null,
+  );
+}
 const STEP_VIEWS = {
   define: designed(defineFoot),
   datasets: designed(datasetsFoot),
   prepare: prepareStep,
-  plan: waiting("The plan of this round."),
-  source: async (pane, subject, redraw, wanted) => {
-    const { board } = await newestVersion(subject);
-    if (wanted()) pane.replaceChildren(...droppedNotices(subject, board, redraw));
-  },
-  serve: async (pane, subject, redraw, wanted) => {
-    const { board } = await newestVersion(subject);
-    if (wanted())
-      pane.replaceChildren(
-        ...(subject.actions.includes("revoke") ? [revokeCard(subject, board, redraw)] : []),
-        versionsCard(subject),
-      );
-  },
+  plan: planStep,
+  source: sourceStep,
+  serve: serveStep,
 };
 
 function draw(subject, step, entries, run, actions, redraw) {
-  head(subject, redraw, ["go", "revoke"]);
+  head(subject, redraw, ["go", "revoke", "approve"]); // each has its own button on a step
   strip(subject, step);
   if (subject) notes(subject, entries, run, actions, redraw);
   else $("bufferNotes").replaceChildren();
@@ -559,6 +739,7 @@ function draw(subject, step, entries, run, actions, redraw) {
     subject,
     redraw,
     () => drawn === turn,
+    entries,
   );
   $("bufferTimeline").replaceChildren(...(subject ? [timelineCard(entries)] : []));
 }

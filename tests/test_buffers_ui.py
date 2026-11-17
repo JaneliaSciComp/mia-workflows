@@ -582,7 +582,9 @@ def test_a_buffer_is_always_planned_first() -> None:
 def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     """A click is not shown as the old stage's buttons again: while the subject says an action is `asked`, every
     button that would send an action is disabled, and a reload that started earlier never paints over a later one."""
-    assert count("disabled: !!subject.asked") == 3 and has("disabled: !!x.asked")  # the bar, a drop, a revoke
+    # the bar, a drop, a revoke, a new plan; the forward and back buttons of a step add the stage to theirs
+    assert count("disabled: !!subject.asked") == 4 and has("disabled: !!x.asked")
+    assert count("|| !!subject.asked") == 4  # the plan of step 3, Run, Approve and serve, the way back
     assert has("waiting for its workflow to answer")
     assert has("turn !== subjectTurn")
 
@@ -735,9 +737,10 @@ def test_the_hosts_dialog_works_as_it_runs() -> None:
 
 
 def test_a_second_click_during_the_host_check_starts_nothing() -> None:
-    """Both start buttons hold a flag from the click until `askHosts` settles."""
-    assert count("if (checking) return;") == 2 and count("checking = true;") == 2
-    assert count("checking = false; })") == 2
+    """Every start button (a subject's bar, Prepare, a buffer's Run) holds a flag from the click until `askHosts`
+    settles."""
+    assert count("if (checking) return;") == 3 and count("checking = true;") == 3
+    assert count("checking = false; })") == 3
 
 
 def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
@@ -1059,6 +1062,23 @@ def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() 
     assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
     assert count("plan_first: true") == 1 and has("title: BUTTON_HELP.plan", flow)  # every plan stops for its Run
     assert has("disabled: !!blocker || !!subject.asked", flow)
+
+
+def test_steps_four_to_six_are_the_rounds_own_buttons_and_back_is_a_cancel() -> None:
+    """Plan, Source and Serve are the round's stages. Forward is the approve of that stage (the first after the
+    host check); back from Plan and Source asks, then cancels the round; Serve names the version by its id."""
+    flow = squeezed(FILES["flow.js"])
+    assert has("askHosts({ spec: subject.key }, hosts =>", flow)
+    assert has("...(hosts.length ? { approve_hosts: hosts } : {})", flow)
+    assert has('{ action: "approve", revision: subject.revision, key: newKey() }', flow)
+    assert has('disabled: subject.stage !== "staged" || !!subject.asked', flow)  # Approve and serve
+    assert has('sendAction(subject, { action: "cancel", key: newKey() }, redraw)', flow) and has("if (!confirm(", flow)
+    assert has("droppedNotices(subject, board, redraw)", flow) and has("poolTable(version.id", flow)
+    # the plan is shown as the round wrote it, as text
+    assert has('/^# Plan for /.test(entry.body)', flow) and has("markdown(plan.body", flow)
+    # step 6: the id a training run names, never the buffer's name
+    assert has('buffer="${version.id}"', flow) and has("versionsCard(subject)", flow)
+    assert count("plan_first: true") == 1  # one place builds a plan's go: step 3 and "Plan a new version" share it
 
 
 def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:

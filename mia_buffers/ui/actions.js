@@ -10,6 +10,12 @@ import { api, banner, JSON_HEADERS, newKey, S } from "./api.js";
 // action bar, by kind and action; a function where the stage changes what the action means.
 export const BUTTON_HELP = {
   plan: "Plan this buffer over the datasets that are prepared now. The round stops at its plan: nothing is downloaded until you press Run.",
+  run: "Accept the plan and start the jobs: its datasets are downloaded and staged, then the round stops for your approval.",
+  serve:
+    "Serve this version as the table shows it. The share each weighting group has now becomes the floor it is judged against.",
+  back: "Cancel the round in progress, so that the buffer can be changed. Its cluster jobs are killed and the work so far is not kept.",
+  planAgain:
+    "Plan this buffer again over the datasets that are prepared now. The version being served keeps serving until the new one is approved.",
   save: "Save this definition as a new buffer. Nothing runs yet: the next step prepares its datasets.",
   saveChanges: "Store the changed definition of this buffer. Nothing runs.",
   startOver: "Drop what is entered here and start from the defaults.",

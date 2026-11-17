@@ -93,6 +93,7 @@ fieldset.lock:disabled{opacity:.6}
 /* how far something is: a filled bar */
 .progress{height:8px;border-radius:4px;background:var(--grid);overflow:hidden;margin:6px 0 14px;max-width:520px}
 .progress i{display:block;height:100%;width:0;background:var(--s3)}
+pre.snippet{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--axis);border-radius:6px;background:var(--bg)}
 .more{position:relative}
 .more summary{list-style:none}
 .more summary::-webkit-details-marker{display:none}
