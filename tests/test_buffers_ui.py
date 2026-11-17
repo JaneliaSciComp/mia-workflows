@@ -1154,6 +1154,27 @@ def test_a_redraw_leaves_a_number_being_typed_alone() -> None:
     assert typed == "25000"
 
 
+def test_step_two_lists_the_datasets_that_fit_and_the_others_only_when_asked() -> None:
+    """Step 1 counts the datasets that fit, and step 2's table is those datasets. A dataset the patch does not fit,
+    or whose record has no array shape, is counted where datasets leave and is listed only once the person asks."""
+    asked, shown = designer(
+        "const pages = [];\n"
+        "const service = globalThis.fetch;\n"
+        "globalThis.fetch = async (path, options) => {\n"
+        "  if (path === '/plan') pages.push(JSON.parse(options.body).page);\n"
+        "  return service(path, options);\n"
+        "};\n"
+        "showDesigner(); await later(50);\n"
+        "const others = walk(document.getElementById('planTable')).find(node => node.tag === 'input' && node.attrs.type === 'checkbox');\n"
+        "others.checked = true; others.fire('change'); await later(50);\n"
+        "print([pages.map(page => page.fit_only), textOf(document.getElementById('planTable'))]);",
+        _definitions(),
+    )
+    assert asked == [True, False]
+    assert "also list the datasets that do not fit" in shown
+    assert "The datasets that fit this definition" in FILES["index.html"]
+
+
 def test_yaml_typed_into_one_buffer_never_lands_in_the_next_one_opened() -> None:
     """The YAML tab is read after a pause in typing. Opening another buffer within that pause drops the read: the
     buffer opened shows its own definition, unchanged."""

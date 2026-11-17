@@ -941,7 +941,9 @@ Each tab is one kind of thing, and each thing has one page:
     (`toSpecYaml`), or, while the YAML tab holds a text the controls did not write, that text (`TEXT`), read back
     into the controls by `POST /specs/parse`; what it holds that no control shows (`specDiff`) makes the controls
     read-only. It is run through `POST /plan` with `page` (debounced 300 ms) for the numbers, the charts and one
-    page of rows. Unticking a fitting dataset adds its id to `select.exclude.ids`. Step 2's button saves a new
+    page of rows. Step 2's table asks for the rows that fit (`page.fit_only`), which is the number step 1 counts; the
+    rows the selection admits but the patch or the record keeps out are listed only on request. Unticking a
+    dataset adds its id to `select.exclude.ids`. Step 2's button saves a new
     buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
     `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
     someone is changing (`ensureDefinition`).

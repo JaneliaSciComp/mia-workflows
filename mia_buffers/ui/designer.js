@@ -322,7 +322,7 @@ function chips(container, values, set, onchange) {
 let planTimer = 0,
   planSeq = 0,
   planTable = null,
-  fitOnly = false;
+  fitOnly = true; // step 2 lists the datasets that fit; the ones that do not, only when asked
 function schedulePlan(ms) {
   clearTimeout(planTimer);
   planTimer = setTimeout(() => {
@@ -620,9 +620,10 @@ export function showDesigner() {
   showText();
   showLock();
   if (planTable) return planTable.reload();
-  const fit = el("input", { type: "checkbox" });
-  fit.addEventListener("change", () => {
-    fitOnly = fit.checked;
+  const others = el("input", { type: "checkbox" });
+  others.checked = !fitOnly;
+  others.addEventListener("change", () => {
+    fitOnly = !others.checked;
     planTable.reload(true);
   });
   planTable = pagedTable("plan", {
@@ -630,9 +631,20 @@ export function showDesigner() {
     cols: PLAN_COLS,
     sort: "decision",
     search: "search id, title, modality, licence",
-    tools: [el("label", { class: "inline" }, fit, " fitting only")],
-    empty: "The definition admits no dataset.",
-    rowAttrs: x => ({ class: x.in_pool ? "" : "out" }),
+    tools: [
+      el(
+        "label",
+        {
+          class: "inline",
+          title:
+            "Also list what the definition's filters admit but cannot use: the patch does not fit the dataset, or its record gives no array shape or voxel size. They are counted under Where datasets leave.",
+        },
+        others,
+        " also list the datasets that do not fit",
+      ),
+    ],
+    empty: "No dataset fits this definition.",
+    rowAttrs: x => ({ class: x.fits ? "" : "out" }),
   });
   $("planTable").replaceChildren(planTable);
 }
