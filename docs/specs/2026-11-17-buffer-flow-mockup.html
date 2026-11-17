@@ -112,7 +112,7 @@ body.nonotes .dn{display:none}
 </head>
 <body>
 <div class="mockbar">
-  <b>MOCKUP</b> revision 6 · fake data, nothing is sent · jump to:
+  <b>MOCKUP</b> revision 7 · fake data, nothing is sent · jump to:
   <span id="jump"></span>
   <label style="margin-left:auto"><input type="checkbox" id="notes" checked> design notes</label>
 </div>
@@ -223,14 +223,17 @@ body.nonotes .dn{display:none}
   <!-- 4 plan -->
   <div data-step="plan">
     <div class="notice" id="planDiff" hidden></div>
+    <div class="notice" id="planDisk" hidden>This plan is larger than the disk. The buffer stages up to the limit and serves; data that was used is evicted and the next part of the plan is brought in, so it serves 100 TB of the plan at a time.</div>
     <div class="kpis">
       <div class="tile"><div class="label">Datasets in the plan</div><div class="value" id="pPool"></div><div class="sub">prepared when the plan ran</div></div>
       <div class="tile"><div class="label">Crops</div><div class="value" id="pCrops"></div><div class="sub">train · val · test</div></div>
-      <div class="tile"><div class="label">To fetch</div><div class="value">212 GB</div><div class="sub">7 datasets not in the raw cache</div></div>
+      <div class="tile"><div class="label">To fetch</div><div class="value" id="pFetch"></div><div class="sub" id="pFetchSub"></div></div>
+      <div class="tile"><div class="label">Staged size</div><div class="value" id="pStaged"></div><div class="sub" id="pStagedSub"></div></div>
       <div class="tile"><div class="label">Hosts to approve</div><div class="value">2</div><div class="sub">ticked when you press Run</div></div>
     </div>
     <table><thead><tr><th>Dataset</th><th>Modality</th><th class="num">Weight</th><th class="num">Train crops</th><th>Raw cache</th></tr></thead><tbody id="planRows"></tbody></table>
     <div class="dn"><b>Design notes</b><ul>
+      <li>"Staged size" compares the plan with the disk limit. A plan larger than the limit is not an error: the blue line says the buffer will serve a window (open <i>all-3d-diverse</i> and go to step 4).</li>
       <li>Same as today's plan-review, reached by a button instead of a go. Run is today's approve at the plan, with the host approval dialog.</li>
       <li>Going back to any earlier step drops this plan; the next Continue plans again with the definition and the prepared datasets of that moment.</li>
       <li>For a buffer that served before, the blue line says what the new plan adds and takes out. What is staged again is known only when sourcing runs, so step 5 says it per dataset.</li>
@@ -258,13 +261,16 @@ body.nonotes .dn{display:none}
     <div class="kpis">
       <div class="tile"><div class="label">Version</div><div class="value" id="sVersion"></div><div class="sub mono" id="sId"></div></div>
       <div class="tile"><div class="label">Serving</div><div class="value">since 14:02</div><div class="sub">approved by you</div></div>
-      <div class="tile"><div class="label">Datasets</div><div class="value" id="sPool"></div><div class="sub">all staged</div></div>
+      <div class="tile"><div class="label">Datasets</div><div class="value" id="sPool"></div><div class="sub">in this version's plan</div></div>
       <div class="tile"><div class="label">Consumers</div><div class="value">0</div><div class="sub">none has drawn yet</div></div>
     </div>
+    <div class="card" style="margin-bottom:14px"><h2>On disk now</h2><div class="sub" id="diskSub"></div>
+      <div class="progress" style="max-width:none"><i id="diskBar"></i></div><div class="small" id="diskCounts"></div></div>
     <div class="card" style="margin-bottom:14px"><h2>Use it</h2><div class="sub">From a training script:</div>
       <pre class="mono" style="margin:0" id="snippet"></pre></div>
     <div class="dn"><b>Design notes</b><ul>
       <li>Your ruling: a serving buffer is fixed. Every earlier step can be looked at and none can be changed. The one button is Stop serving.</li>
+      <li>Fixed means the plan: the definition, the datasets and their weights, the planned crops, the val and test lists. It does not mean the bytes on disk. Open <i>all-3d-diverse</i> from the list for a buffer ten times larger than the disk: "On disk now" is its moving window. How the window moves is a design of its own; these are the numbers it has to produce.</li>
       <li>Stop serving keeps the staged data, refuses consumers, and puts the buffer back at step 3 with steps 1 to 3 editable: untick datasets, take in newly prepared ones, change the definition, then go forward to serve a new version. The blue line of a stopped buffer offers Serve it again (while nothing changed) and Retire.</li>
             <li>Your ruling: each time a changed buffer is served it is a new version with its own id. Scripts ask for the id; the name is only a label and the service never looks a buffer up by it.</li>
       <li>The id keeps today's form (<code>i&lt;buffer number&gt;-e&lt;go&gt;</code>); "version 2" is a count shown beside it. An earlier version stays on the buffer's page to look at (its definition, datasets and lists), and a script that asks for it is told it was stopped and which version replaced it.</li>
@@ -297,7 +303,7 @@ const CATALOG = Array.from({ length: 56 }, (_, i) => ({
 }));
 
 const C = { name: "em-and-lightsheet-3d", dims: new Set(["3D", "3D+t"]), ann: false, patch: 256, T: 0.5, train: 100000, val: 2000, test: 2000, exclude: new Set() };
-const B = { saved: false, step: "define", reached: 0, sourced: false, serving: false, stopped: false, number: 213, version: 1 };
+const B = { saved: false, step: "define", reached: 0, sourced: false, serving: false, stopped: false, number: 213, version: 1, big: false };
 
 const matching = () => CATALOG.filter(d => C.dims.has(d.dims) && (!C.ann || d.annotated)); // before the person's own exclusions
 const fits = () => matching().filter(d => !C.exclude.has(d.id));
@@ -406,7 +412,10 @@ function showPlan() {
   const p = weights(prepared()), fresh = p.filter(d => d.fresh).length;
   $("planDiff").hidden = !B.stopped;
   $("planDiff").textContent = `Compared with what was served: ${fresh} datasets added, ${C.exclude.size} taken out. Step 5 shows which datasets are staged again.`;
-  $("pPool").textContent = p.length; $("pCrops").textContent = `${num(C.train)} · ${num(C.val)} · ${num(C.test)}`;
+  $("pPool").textContent = B.big ? "1,412" : p.length;
+  $("planDisk").hidden = !B.big;
+  $("pFetch").textContent = B.big ? "3.4 PB" : "212 GB"; $("pFetchSub").textContent = B.big ? "raw files, fetched as the window moves" : "7 datasets not in the raw cache";
+  $("pStaged").textContent = B.big ? "1.0 PB" : "180 GB"; $("pStagedSub").textContent = B.big ? "10 times the 100 TB limit" : "fits: the limit is 100 TB"; $("pCrops").textContent = `${num(C.train)} · ${num(C.val)} · ${num(C.test)}`;
   $("planRows").innerHTML = p.sort((a, b) => b.weight - a.weight).map((d, i) => `<tr><td class="mono">${d.id}</td><td>${d.mod}</td><td class="num">${pct(d.weight)}</td><td class="num">${num(Math.round(d.weight * C.train))}</td><td>${i % 4 === 1 ? '<span class="pill">to fetch</span>' : '<span class="pill ok">cached</span>'}</td></tr>`).join("");
 }
 function showSource() {
@@ -421,7 +430,12 @@ function showSource() {
 }
 function showServe() {
   const late = fits().filter(d => d.state === "in progress").length;
-  $("sPool").textContent = prepared().length;
+  $("sPool").textContent = B.big ? "1,412" : prepared().length;
+  $("diskSub").textContent = B.big ? "100 TB of the plan's 1.0 PB: a moving window." : "All of the plan is on disk.";
+  $("diskBar").style.width = B.big ? "10%" : "100%";
+  $("diskCounts").textContent = B.big
+    ? "142 datasets on disk · 1,094 waiting for space · 176 used and evicted · brought in 1.9 TB/h, used 1.4 TB/h"
+    : `${prepared().length} datasets on disk · none waiting for space`;
   $("lateNote").textContent = `${late} datasets that fit are still being prepared. To take them in once they are done, stop serving.`;
   $("lateNote").hidden = !late;
   $("sVersion").textContent = `${B.version}`; $("sId").textContent = `id ${idOf(B.number, B.version)}`;
@@ -431,6 +445,7 @@ const SHOW = { define: showStats, datasets: showDatasets, prepare: showPrepare, 
 
 // ---- the shell: the list, the strip, moving between steps
 const ROWS = [
+  ["all-3d-diverse", "serve", "ok", "serving · 100 TB of 1.0 PB on disk", 1412, 5000000, "1 hour ago"],
   ["lightsheet-3d-v2", "serve", "ok", "serving", 31, 250000, "2 days ago"],
   ["em-membranes", "source", "busy", "working · 12 of 18 staged", 18, 100000, "12 minutes ago"],
   ["confocal-nuclei", "prepare", "you", "waits for you · 9 of 22 prepared", 22, 50000, "yesterday"],
@@ -473,7 +488,7 @@ function go(step) {
 }
 function openBuffer(name, step, saved, stopped = false) {
   if (name) C.name = name;
-  Object.assign(B, { saved, stopped, reached: STEPS.indexOf(step), sourced: step === "serve", serving: step === "serve" });
+  Object.assign(B, { saved, stopped, reached: STEPS.indexOf(step), sourced: step === "serve", serving: step === "serve", big: C.name === "all-3d-diverse" });
   showControls(); $("yaml").value = toYaml(); go(step);
 }
 document.addEventListener("click", e => {
