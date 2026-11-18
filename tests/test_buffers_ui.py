@@ -350,14 +350,6 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
     assert has('$("down").replaceChildren(') and has("setInterval(checkHealth, HEALTH_MS)")
 
 
-def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
-    from mia_data.config import STAGES, round_open
-
-    stages = run_js("print([...ROUND_OPEN]);", {"datasets.js": "ROUND_OPEN"})
-    assert stages == [stage for stage in STAGES if round_open(stage)]
-    assert has('row.state !== "prepared" && !ROUND_OPEN.has(row.stage)')
-
-
 def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
     view = squeezed(FILES["subjects.js"][FILES["subjects.js"].index("function viewNeeds(") :])
     assert (
@@ -943,6 +935,31 @@ def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
     assert has('buffer: "Buffer workflow:"')
 
 
+def test_a_request_filed_from_either_list_gives_every_checked_dataset_a_round() -> None:
+    """The Datasets list and a buffer's Prepare step file the same request: it says `again`, so a checked dataset
+    that is prepared or at review gets a new round too. The buffer's request also names its buffer."""
+    sent = run_js(
+        "const { S } = await import(input.api);\n"
+        "S.ref = 'a'.repeat(40); S.meta = { catalog_repo: 'o/catalog' };\n"
+        "const posts = [];\n"
+        "globalThis.fetch = async (path, options) => {\n"
+        "  if (path === '/prep') posts.push(JSON.parse(options.body));\n"
+        "  const answer = path === '/prep' ? { number: 5 } : { hosts: [] };\n"
+        "  return { ok: true, status: 200, text: async () => JSON.stringify(answer) };\n"
+        "};\n"
+        "for (const owner of [undefined, 7]) {\n"
+        "  const box = document.createElement('span');\n"
+        "  prepareButton(box, ['u937', 'bcss'], null, null, 'Prepare', owner);\n"
+        "  walk(box).find(node => node.tag === 'button').fire('click');\n"
+        "  await new Promise(done => setTimeout(done, 20));\n"
+        "}\n"
+        "print(posts.map(post => [post.spec.includes('\\nagain: true\\n'), post.buffer ?? null]));",
+        {"actions.js": "prepareButton"},
+        {"api": (UI_DIR / "api.js").as_uri()},
+    )
+    assert sent == [[True, None], [True, 7]]
+
+
 def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> None:
     """Every row of the Datasets list has a check, prepared or not. The checked that still need it can be prepared
     in one request, and all of them can open New buffer as a spec that selects exactly them: each by a glob on
@@ -1133,16 +1150,19 @@ def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
 
 
 def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() -> None:
-    """Prepare lists the fitting datasets that are not prepared and the requests this buffer filed. A request
-    filed there names the buffer and leaves the person on the step. The way forward plans over whatever is
-    prepared now, and always stops at the plan."""
+    """Prepare lists the datasets that fit, each with a check as on the Datasets list, and the requests this
+    buffer filed. A request filed there names the buffer and leaves the person on the step. The way forward plans
+    over whatever is prepared now, and always stops at the plan."""
     flow, actions = squeezed(FILES["flow.js"]), squeezed(FILES["actions.js"])
-    assert has("to_prepare: true", flow)
+    assert has("fit_only: true", flow) and not has("to_prepare: true", flow)
     assert has('pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number }))', flow)
     assert has("...(owner == null ? {} : { buffer: owner })", actions)
     assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
-    # only what a request could start can be checked: the plan's own list, not every row
-    assert has("startable.has(x.id)", flow)
+    # any row can be checked, prepared or at review too; one button checks what is left to prepare
+    assert has("select: { chosen, id: x => x.id, onchange: offer }", flow)
+    assert has("left = m?.to_prepare || [];", flow) and has("for (const id of left) chosen.add(id);", flow)
+    # both lists file the same request: every checked dataset gets a round
+    assert has('"again: true\\n" +', actions) and not has("again == null", actions)
     assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
     assert count("plan_first: true") == 1 and has("title: BUTTON_HELP.plan", flow)  # every plan stops for its Run
     assert has("disabled: !!blocker || !!subject.asked", flow)

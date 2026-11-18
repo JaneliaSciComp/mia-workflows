@@ -2639,8 +2639,6 @@ def test_plan_paged_answers_a_page_and_the_numbers_over_the_whole_plan(tmp_path)
     assert row["title"].startswith("Dataset of confocal") and row["licence"] == "CC-BY-4.0"
     only = call(s, "POST", "/plan", payload={"spec": text, "page": {"prepared_only": True}})[1]
     assert [r["id"] for r in only["rows"]] == [U937] and only["summary"]["fitting"] == 1
-    left = call(s, "POST", "/plan", payload={"spec": text, "page": {"to_prepare": True}})[1]
-    assert [r["id"] for r in left["rows"]] == summary["to_prepare"] and left["summary"]["fitting"] == len(fitting)
     assert call(s, "POST", "/plan", payload={"spec": text, "page": {"sort": "nope"}})[0] == 422
     assert call(s, "POST", "/plan", payload={"spec": text, "page": {"limit": 500}})[0] == 422
     assert call(s, "POST", "/plan", payload={"spec": text, "page": {"oops": 1}})[0] == 422

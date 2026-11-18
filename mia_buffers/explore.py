@@ -323,7 +323,6 @@ def plan_view(
     page: Page,
     *,
     fit_only: bool = False,
-    to_prepare: bool = False,
     prepared_only: bool = False,
     raw_cached: bool = False,
     staged_geom: bool = False,
@@ -332,7 +331,6 @@ def plan_view(
     The three registry toggles narrow the rows and the summary's numbers; the funnel is the plan's own and
     ignores them. `fit_only` and the page's search narrow only the rows and, the search, the datasets to prepare:
     a request takes a bounded number, and the search is how a person prepares a large plan in parts.
-    `to_prepare` narrows the rows alone to the datasets that fit and are not prepared: a buffer's Prepare step.
     A row whose record lacks what a plan needs (`RECORD_LACKS_GROUPS`) is counted (`record_lacks`) and never listed."""
     rows = []
     for row in sorted(plan["rows"], key=lambda row: row["path"]):
@@ -411,8 +409,6 @@ def plan_view(
     }
     listed = [row for row in rows if row["decision"]["group"] not in RECORD_LACKS_GROUPS]
     summary["record_lacks"] = len(rows) - len(listed)
-    shown = [row for row in listed if row["fits"]] if fit_only or to_prepare else listed
-    if to_prepare:
-        shown = [row for row in shown if row.get("prepared") != "prepared"]
+    shown = [row for row in listed if row["fits"]] if fit_only else listed
     found, matched = paged(shown, page, PLAN_SORTS, _plan_haystack)
     return {"rows": found, "total": matched, "summary": summary}

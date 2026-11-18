@@ -199,7 +199,6 @@ class PlanPage(_Strict):
     dir: str = "asc"
     q: str = ""
     fit_only: bool = False
-    to_prepare: bool = False  # only the rows that fit and are not prepared
     prepared_only: bool = False
     raw_cached: bool = False
     staged_geom: bool = False
@@ -2170,7 +2169,6 @@ class BufferService:
             staged_as,
             page,
             fit_only=asked.fit_only,
-            to_prepare=asked.to_prepare,
             prepared_only=asked.prepared_only,
             raw_cached=asked.raw_cached,
             staged_geom=asked.staged_geom,

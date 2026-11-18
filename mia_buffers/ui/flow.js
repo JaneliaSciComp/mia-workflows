@@ -382,7 +382,7 @@ const cancelBack = (subject, redraw) =>
   );
 const approval = subject => ({ action: "approve", revision: subject.revision, key: newKey() });
 
-// ---- step 3: the fitting datasets that are not prepared, the requests this buffer filed, and the way on.
+// ---- step 3: the datasets that fit, each with a check, the requests this buffer filed, and the way on.
 // The buffer waits here for as long as the person likes; the way on takes what is prepared at that moment.
 const ticked = { key: null, chosen: new Set() }; // the checks of the buffer shown: they outlast the page's redraws
 // Why the planner would refuse this plan (`plan`: what POST /plan answered), or null when a round of it would run.
@@ -429,7 +429,7 @@ function prepareFoot(subject, plan, redraw) {
 function prepareStep(pane, subject, redraw, wanted) {
   if (ticked.key !== subject.key) Object.assign(ticked, { key: subject.key, chosen: new Set() });
   const chosen = ticked.chosen;
-  let startable = new Set(); // what a request could start: it fits, is not prepared, is in no round, its record can run
+  let left = []; // what is left to prepare: it fits, is not prepared, is in no round, its record can run
   const counts = el("p", {}, "planning…"),
     bar = el("i"),
     prepare = el("span", { class: "actions" });
@@ -442,13 +442,12 @@ function prepareStep(pane, subject, redraw, wanted) {
         chosen.clear();
         redraw();
       },
-      undefined,
       chosen.size > 1 ? `Prepare the ${num(chosen.size)} checked datasets` : "Prepare the checked dataset",
       subject.number,
     );
   };
-  const left = async state => {
-    // the plan of the stored definition, which is what a round runs, narrowed to what is left to prepare; its
+  const fitting = async state => {
+    // the plan of the stored definition, which is what a round runs, narrowed to the datasets that fit; its
     // summary is over the whole plan
     let out = null;
     const page = {
@@ -457,7 +456,7 @@ function prepareStep(pane, subject, redraw, wanted) {
       dir: state.dir,
       q: state.q,
       ...(state.sort ? { sort: state.sort } : {}),
-      to_prepare: true,
+      fit_only: true,
     };
     try {
       out = await api("/plan", {
@@ -472,8 +471,7 @@ function prepareStep(pane, subject, redraw, wanted) {
   };
   const seen = page => {
     const m = page.out?.summary;
-    startable = new Set(m?.to_prepare || []);
-    for (const id of chosen) if (!startable.has(id)) chosen.delete(id); // prepared, or started, since it was checked
+    left = m?.to_prepare || [];
     if (m) {
       counts.replaceChildren(
         el("b", {}, `${num(m.prepared || 0)} of ${num(m.fitting || 0)}`),
@@ -485,28 +483,13 @@ function prepareStep(pane, subject, redraw, wanted) {
     if (wanted() && page.out) prepareFoot(subject, page.out, redraw);
   };
   const table = pagedTable("to-prepare:" + subject.key, {
-    source: left,
+    source: fitting,
     onPage: seen,
     sort: "state",
     search: "search id, title, modality, licence",
-    empty: "Every dataset that fits is prepared.",
+    empty: "No dataset fits this definition.",
+    select: { chosen, id: x => x.id, onchange: offer },
     cols: [
-      {
-        label: "prepare",
-        title:
-          "check a dataset to prepare it; one that is in a round already, or whose record cannot run, has no checkbox",
-        cell: x => {
-          if (!startable.has(x.id)) return "";
-          const input = el("input", { type: "checkbox", "aria-label": "prepare " + x.id });
-          input.checked = chosen.has(x.id);
-          input.addEventListener("change", () => {
-            if (input.checked) chosen.add(x.id);
-            else chosen.delete(x.id);
-            offer();
-          });
-          return input;
-        },
-      },
       { key: "dataset", label: "dataset", cell: x => datasetLink(x.id) },
       { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
       { key: "modality", label: "modality", cell: x => x.modality_group || "" },
@@ -528,8 +511,8 @@ function prepareStep(pane, subject, redraw, wanted) {
     counts,
     el("div", { class: "progress" }, bar),
     card(
-      "Left to prepare",
-      "The datasets that fit this definition and are not prepared. Preparing them is one request, filed for this buffer; the buffer waits here meanwhile.",
+      "Datasets that fit",
+      "Every dataset that fits this definition. Check any of them: preparing the checked is one request, filed for this buffer, and each gets a new run, also one that is prepared or waits at review. The buffer waits here meanwhile.",
       el(
         "div",
         { class: "actions" },
@@ -538,13 +521,14 @@ function prepareStep(pane, subject, redraw, wanted) {
           {
             type: "button",
             class: "btn",
-            title: "Check every dataset that a request could start now.",
+            title:
+              "Check every dataset that is left to prepare: it is not prepared and in no round, and its record can run.",
             onclick: () => {
-              for (const id of startable) chosen.add(id);
+              for (const id of left) chosen.add(id);
               table.reload();
             },
           },
-          "Check all",
+          "Check what is left",
         ),
         prepare,
       ),

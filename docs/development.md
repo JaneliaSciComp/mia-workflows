@@ -437,7 +437,6 @@ and its timeline entry shows it.
 `buffer: <number>` (a buffer's Prepare step) the request's data names that buffer, and `GET
 /subjects/prep?buffer=<number>` lists a buffer's requests; `MiaPrep` and the request's budget are the same either
 way. `GET /subjects/buffer` adds `serving` to each buffer: the id of the version consumers draw from now, or null.
-`POST /plan` with `page.to_prepare` answers only the rows that fit and are not prepared.
 
 - `cancel` ends a round in progress (`planning`, `plan-review`, `sourcing`, `staged`; a request at `requested`; a
   dataset from `matching` to `merging`): its dataset tasks are cancelled, every cluster job it waits on is killed by
@@ -774,7 +773,7 @@ kind: preparation
 catalog: {repo: <owner/catalog>, ref: <40-hex commit>}
 records: [<record id>, ...]     # an explicit list, or
 select: {...}                   # the buffer spec's select block, run over the git catalog snapshot at catalog.ref
-again: false                    # optional; true also gives a new round to datasets that are prepared
+again: false                    # optional; true also gives a new round to datasets that are prepared or at review
 timeout_days: 14                # optional, default 14
 max_records: 25                 # optional; a request for more records must say so here (each is an agent run)
 ```
@@ -790,10 +789,10 @@ action carries, once.
 registry state. `cancelled`: a person cancelled it.
 
 **What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or shelved settles
-the record. A dataset that stopped (`needs-human`) is sent a `go`, and so is a prepared one when the request says
-`again`; its row is set to `in-progress` at once, so the request follows the new round instead of settling on
+the record. A dataset that stopped (`needs-human`) is sent a `go`, and so is a prepared one, or one whose crops wait for a
+review, when the request says `again`; its row is set to `in-progress` at once, so the request follows the new round instead of settling on
 what the last one left. A stopped dataset whose jobs were refused a host that no one approved yet is sent none
-(its note names the hosts, which Run again on its page lists to check). A dataset whose crops wait for a review is in a round, so it is left to it. Otherwise the dataset's
+(its note names the hosts, which Run again on its page lists to check). Without `again` a dataset whose crops wait for a review is in a round, so it is left to it. Otherwise the dataset's
 subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
 any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity
@@ -984,7 +983,7 @@ Each tab is one kind of thing, and each thing has one page:
   whatever buffer asks, and the row shows each as a pill). Every row has a check (the
   header's and *Select all* check the page that is showing). While something is checked, a box says how many datasets are
   selected and offers *Prepare* and *Create buffer*. The checked are prepared in one request (one
-  `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a definition that
+  `POST /prep` that says `again`, so a prepared dataset and one at review get a new round), or opened in New buffer as a definition that
   selects exactly them (`specFromDatasets`: one `*/<id>.yaml` glob per dataset in `select.paths`). `#datasets?state=<state>` opens the list with a filter set.
 - **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`,
   its timeline, `/decisions?record=`, `/assets/staged?record=` and `/buffers?record=`: its record, preparation,
@@ -1009,8 +1008,9 @@ Each tab is one kind of thing, and each thing has one page:
     buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
     `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
     someone is changing (`ensureDefinition`).
-  - *Prepare* lists the plan's rows that are left to prepare (`page.to_prepare`), checks only what a request could
-    start (`summary.to_prepare`), files the request with `buffer`, and lists the buffer's requests. Its way
+  - *Prepare* lists the plan's rows that fit (`page.fit_only`), each with a check as on the Datasets list;
+    *Check what is left* checks what is not prepared and in no round (`summary.to_prepare`). It files the request
+    with `buffer` and `again`, and lists the buffer's requests. Its way
     forward is the one `go` a buffer gets from the page (`planRound`).
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the
     version's page) and *Files are in place*; *Serve* the version's id, the line a training script pastes, the

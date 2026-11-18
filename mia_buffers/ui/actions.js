@@ -26,9 +26,7 @@ export const BUTTON_HELP = {
     "Withdraw the checked datasets from this buffer: their volumes are unregistered and their staged pyramids are quarantined. Nothing is deleted.",
   retry: "Send the same action again. It carries the same key, so it cannot run twice.",
   prepare:
-    "File one preparation request for these datasets: each one gets a run of the preparation workflow, and the request's page follows them.",
-  prepareTicked:
-    "File one preparation request for the checked datasets: each one gets a run of the preparation workflow, also one that is already prepared. One in a round is left to it.",
+    "File one preparation request for the checked datasets: each one gets a new run of the preparation workflow, also one that is already prepared or whose crops wait at review, which are dropped. One whose round is running is left to it.",
   specFrom:
     "Open New buffer on a definition that selects exactly these datasets. Only the prepared ones are in a plan; step 2 there says which fit.",
   clearSelection: "Uncheck every dataset.",
@@ -513,10 +511,9 @@ export function undelivered(subject, actions, after) {
 
 // ---- the Prepare button: a preparation request is posted to the service, which runs it
 const PREP_MAX = 200; // the most datasets one preparation request takes (mia_buffers.spec.MAX_PREP_RECORDS)
-// `again` (the Datasets list's checks): every checked dataset gets a round, also one that is prepared or that stopped;
-// its value is how many of them are prepared or in a round already. Without it only what is not prepared is asked for.
+// Every dataset of `all` gets a round (the request says `again`), also one that is prepared, stopped or at review.
 // `owner` (a buffer's Prepare step): the number of the buffer the request is filed for; the person stays on that step.
-export function prepareButton(container, all, blocker, done, again, text, owner) {
+export function prepareButton(container, all, blocker, done, text, owner) {
   // `text`: the button's word, where the count stands beside it
   // a request takes at most PREP_MAX datasets: a longer list is prepared in parts, the first PREP_MAX now
   const todo = all.slice(0, PREP_MAX),
@@ -539,7 +536,7 @@ export function prepareButton(container, all, blocker, done, again, text, owner)
       {
         type: "button",
         class: "btn",
-        ...(again == null ? { title: BUTTON_HELP.prepare } : { title: BUTTON_HELP.prepareTicked }),
+        title: BUTTON_HELP.prepare,
         onclick: async e => {
           if (checking) return;
           checking = true;
@@ -556,7 +553,7 @@ export function prepareButton(container, all, blocker, done, again, text, owner)
     // more than 25 records need the count written into the request: the button's label names it
     const yaml =
       toPrepYaml(todo, S.ref, S.meta.catalog_repo) +
-      (again == null ? "" : "again: true\n") +
+      "again: true\n" +
       (todo.length > 25 ? `max_records: ${todo.length}\n` : "");
     try {
       const action = await api("/prep", {

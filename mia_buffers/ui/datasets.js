@@ -35,10 +35,7 @@ import { stageOf } from "./buffers.js";
 // ---- datasets: every dataset of the catalog with what the registry knows about it, one page at a time
 // `lacks`: what the catalog record lacks whatever buffer asks for it (an array shape, a voxel size, a data URL)
 const DS_FILTER = { state: "", modality: "", dims: "", licence: "", lacks: "" };
-const CHOSEN = new Set(),
-  SETTLED = new Set(); // the checked datasets, and those of them that are prepared or in a round
-export const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging", "debugging"]); // the stages of a round under way or at review
-const PREPARABLE = row => row.state !== "prepared" && !ROUND_OPEN.has(row.stage);
+const CHOSEN = new Set(); // the checked datasets
 // the catalog the list is read from: its commit (linked into the catalog repo at that commit), how many datasets
 // it holds and when it was synced
 export const catalogLine = (catalog, repo) => {
@@ -110,23 +107,7 @@ export function viewDatasetList(_arg, params) {
     box.hidden = !CHOSEN.size;
     if (!CHOSEN.size) return;
     count.textContent = `${plural(CHOSEN.size, "dataset")} selected`;
-    prepareButton(
-      prepare,
-      [...CHOSEN],
-      null,
-      sent =>
-        sent.forEach(id => {
-          CHOSEN.delete(id);
-          SETTLED.delete(id);
-        }),
-      SETTLED.size,
-      "Prepare",
-    );
-  };
-  const ticked = (row, on) => {
-    if (on && !PREPARABLE(row)) SETTLED.add(row.id);
-    else SETTLED.delete(row.id);
-    showChosen();
+    prepareButton(prepare, [...CHOSEN], null, sent => sent.forEach(id => CHOSEN.delete(id)), "Prepare");
   };
   const selectAll = el(
     "button",
@@ -135,10 +116,7 @@ export function viewDatasetList(_arg, params) {
       class: "btn",
       title: "checks every dataset on this page",
       onclick: () => {
-        for (const row of TABLE_STATE.get("datasets").last?.rows || []) {
-          CHOSEN.add(row.id);
-          if (!PREPARABLE(row)) SETTLED.add(row.id);
-        }
+        for (const row of TABLE_STATE.get("datasets").last?.rows || []) CHOSEN.add(row.id);
         list.reload();
       },
     },
@@ -152,7 +130,6 @@ export function viewDatasetList(_arg, params) {
       title: BUTTON_HELP.clearSelection,
       onclick: () => {
         CHOSEN.clear();
-        SETTLED.clear();
         list.reload();
       },
     },
@@ -164,7 +141,7 @@ export function viewDatasetList(_arg, params) {
     search: "search id, title, modality, licence",
     tools: Object.values(selects),
     empty: "No dataset matches these filters.",
-    select: { chosen: CHOSEN, id: row => row.id, onchange: ticked },
+    select: { chosen: CHOSEN, id: row => row.id, onchange: showChosen },
     onPage: page => {
       fill(page.out.facets);
       showChosen();
