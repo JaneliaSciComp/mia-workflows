@@ -191,8 +191,8 @@ At `done` the page shows the saved set, who approved it and a **Reject** button 
    `prepared`, no plan and no request takes it, and buffers stop serving volumes staged from it;
 2. starts the rework of §4.1 with the person's reason, as a new round of the dataset.
 
-When the reworked set is saved, the dataset is `prepared` again and what was quarantined is repaired, as after
-any `go` that follows a revoke. The user's words: "revoke and start the rework".
+When the reworked set is saved, the dataset is `prepared` again; what that save releases from quarantine is
+§5.5's. The user's words: "revoke and start the rework".
 
 ### 5.3 What stays
 
