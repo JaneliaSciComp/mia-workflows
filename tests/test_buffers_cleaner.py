@@ -52,6 +52,16 @@ def test_a_queue_without_a_worker_skips_the_kinds_its_worker_runs():
     assert "worker mia-data" not in found
 
 
+def test_incident_2026_11_17_a_snippets_worker_on_old_code_owes_a_restart_and_holds_its_issues():
+    """The snippets worker ran the code of an earlier commit for seven hours: every agent job that ended in an
+    error failed its workflow task for good, four snippets issues read `working` with no job, and their
+    datasets read `developing`. A worker that says what it started on is compared like any other."""
+    old = {"commit": "a" * 40, "code": "0" * 16}
+    found = findings(workers={"snippets": old, "mia-data": {"commit": "c" * 40, "code": "b" * 40}})
+    assert list(found) == ["restart snippets"] and found["restart snippets"]["kinds"] == [SNIPPETS]
+    assert "mia restart snippets" in found["restart snippets"]["text"]
+
+
 def test_a_worker_on_another_commit_than_the_checkout_owes_a_restart():
     old = {"commit": "a" * 40, "code": "0" * 16}  # the code it loaded is not the checkout's (`b…`) any more
     found = findings(workers={"mia-data": old, "mia-buffers": {"commit": "c" * 40, "code": "b" * 40}})

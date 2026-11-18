@@ -132,3 +132,37 @@ async def test_apply_schedule_retries_a_server_that_is_still_starting_instead_of
     with pytest.raises(RPCError, match="shard status unknown"):  # still down after the last attempt: surfaces
         await apply_schedule(Client(), "autodev-x-poll", object(), attempts=3)
     assert Handle.deleted == 0
+
+
+async def test_an_autodev_worker_says_what_code_it_started_on():
+    """Incident 2026-11-17: the cleaner compares the code of every worker that reports, and the autodev workers
+    (this repo's and the snippets one) reported nothing, so one on old code was never named."""
+    import asyncio
+
+    from autodev.cli import report_code
+    from mia_core.checkout import code_digest, head_commit
+
+    calls = []
+
+    class Registry:
+        def put_worker(self, service, commit, code):
+            calls.append((service, commit, code))
+
+    report = report_code(Registry(), "snippets")
+    assert isinstance(report, asyncio.Task)
+    await report
+    assert calls == [("snippets", head_commit(), code_digest())]
+    assert report_code(None, "snippets") is None  # a deployment with no buffer-api has nobody to tell
+
+
+def test_every_worker_entry_point_reports_its_code():
+    """A worker that does not report is one the cleaner cannot see."""
+    import inspect
+
+    import autodev.cli
+    import mia_buffers.cli
+    import mia_data.cli
+
+    for module in (autodev.cli, mia_data.cli, mia_buffers.cli):
+        source = inspect.getsource(module)
+        assert "Worker(" in source and "report_worker(" in source, module.__name__
