@@ -1,6 +1,6 @@
 # MIA: the crop judge decides — Spec
 
-**Status:** v0.2 · 2026-11-17 · not approved, nothing built. Rests on the crop judge of the autonomous-gates
+**Status:** v0.2 · approved 2026-11-17 · nothing built (plan: `docs/plans/2026-11-17-judge-decides.md`). Rests on the crop judge of the autonomous-gates
 spec (`2026-11-09-autonomous-gates.md` §4.2, §9), on the action routes and stage tables of the webapp-actions
 spec, and on revocation (`data:revoke`, `docs/development.md`). §3 to §6 are the user's decisions of
 2026-11-17; §8 lists the calls that are the writer's and still the user's to change.
