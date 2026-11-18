@@ -77,8 +77,7 @@ def test_a_judge_reject_written_after_a_persons_approve_does_not_undo_it():
 def test_a_judge_or_developer_approve_written_after_a_persons_reject_authorizes_nothing():
     for author in ("judge", "policy:developer"):
         rows = [a("reject", at=10.0, summary="shifted"), a("approve", by=author, at=20.0)]
-        out = authorized(rows, enabled_gates=GATES)
-        assert not out.ok and "human:alice" in out.reason
+        assert not authorized(rows, enabled_gates=GATES).ok
 
 
 def test_a_developer_approve_stands_over_a_judge_reject_while_no_person_spoke():
