@@ -101,6 +101,10 @@ async def refuse_while_paused() -> None:
         raise ApplicationError(PAUSED, non_retryable=True)
 
 
+# What GitHub answers a merge with (405) when the base branch got a commit while it worked on the merge.
+BASE_MOVED = "Base branch was modified"
+
+
 def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
     """Decorator: turn GitHub 4xx errors and bad keys into non-retryable failures.
 
@@ -557,10 +561,15 @@ class Activities:
     @activity.defn(name="merge_pr")
     @permanent_errors
     async def merge_pr(self, request: MergeInput) -> MergeResult:
-        """Squash-merge the approved commit, then delete the branch and close the issue."""
+        """Squash-merge the approved commit, then delete the branch and close the issue. A merge GitHub refuses
+        because the base branch moved at that moment (`BASE_MOVED`: another pull request was merging) fails the
+        activity, so that it is tried again in seconds: nothing is wrong with the pull request, and no one is
+        told."""
         merged, message = await self.gh.merge_pr(request.pr, request.sha)
         if not merged and (await self.gh.get_pr(request.pr)).get("merged"):  # a retry after a merge that went through
             merged, message = True, "merged"
+        if not merged and BASE_MOVED in message:
+            raise ApplicationError(f"PR #{request.pr}: {BASE_MOVED}; the merge is tried again", type="BaseMoved")
         if merged:
             await self.gh.delete_branch(self.cfg.branch(request.issue))
             await self.gh.update_issue(request.issue, state="closed", state_reason="completed")

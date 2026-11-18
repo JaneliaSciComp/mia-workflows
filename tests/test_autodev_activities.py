@@ -16,6 +16,7 @@ from autodev.gitops import GitError, Mirror
 from autodev.models import (
     FailureInput,
     JudgeInput,
+    MergeInput,
     ObserveInput,
     PublishInput,
     RoundInput,
@@ -691,3 +692,35 @@ async def test_prepare_judge_diffs_a_revision_against_the_base_branch(tmp_path, 
     assert (judge_dir / "evidence" / "files" / "f.txt").exists() and (
         judge_dir / "evidence" / "files" / "g.txt"
     ).exists()
+
+
+@respx.mock
+async def test_a_merge_refused_because_the_base_moved_is_tried_again_and_no_one_is_told(tmp_path, gh):
+    """2026-11-18: two snippet pull requests merged at the same moment and GitHub answered one of them `405 Base
+    branch was modified`. autodev commented, labelled the issue needs-human and merged it two minutes later; by
+    then the dataset that waited for the merge had stopped as blocked. That answer says nothing about the pull
+    request: the activity fails so that Temporal runs it again, and the second try merges."""
+    answers = [
+        httpx.Response(405, json={"message": "Base branch was modified. Review and try the merge again."}),
+        httpx.Response(200, json={"merged": True}),
+    ]
+    merge = respx.put(f"{API}{R}/pulls/5/merge").mock(side_effect=answers)
+    respx.get(f"{API}{R}/pulls/5").mock(return_value=httpx.Response(200, json={"merged": False}))
+    gone = respx.delete(f"{API}{R}/git/refs/heads/autodev/issue-1").mock(return_value=httpx.Response(204))
+    closed = respx.patch(f"{API}{R}/issues/1").mock(return_value=httpx.Response(200, json={}))
+    activities = acts(tmp_path, gh)
+    with pytest.raises(ApplicationError) as refused:
+        await activities.merge_pr(MergeInput(1, 5, "a" * 40))
+    assert refused.value.type == "BaseMoved" and not refused.value.non_retryable
+    assert not gone.called and not closed.called  # nothing was reported or cleaned up for a merge that did not happen
+    assert (await activities.merge_pr(MergeInput(1, 5, "a" * 40))).merged
+    assert merge.call_count == 2 and gone.called and closed.called
+
+
+@respx.mock
+async def test_a_merge_refused_for_the_pull_requests_own_reason_is_still_reported(tmp_path, gh):
+    refusal = httpx.Response(405, json={"message": "Pull Request has merge conflicts"})
+    respx.put(f"{API}{R}/pulls/5/merge").mock(return_value=refusal)
+    respx.get(f"{API}{R}/pulls/5").mock(return_value=httpx.Response(200, json={"merged": False}))
+    result = await acts(tmp_path, gh).merge_pr(MergeInput(1, 5, "a" * 40))
+    assert not result.merged and "merge conflicts" in result.message
