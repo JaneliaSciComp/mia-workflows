@@ -1529,9 +1529,8 @@ class Activities:
         binding names: a reviewer rejected its crops and `draft["what_fails"]` is their comments (spec §14)."""
         gh, github_cfg, pins = self.gh_snippets, self.cfg.github, self._pins(round_id)
         if binding:
-            rounds, bound = self._round_dir(round_id).resolve().parent, Path(binding).resolve()
-            ours = bound.is_relative_to(rounds) and bound.relative_to(rounds).parts[0].startswith(f"i{int(issue)}-e")
-            if not ours:
+            rounds, given = self._round_dir(round_id).resolve().parent, Path(binding).resolve()
+            if not (given.is_relative_to(rounds) and given.relative_to(rounds).parts[0].startswith(f"i{int(issue)}-e")):
                 raise ValueError(f"binding {binding} is not one of this dataset's rounds'")
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
 

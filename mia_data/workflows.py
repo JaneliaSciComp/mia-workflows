@@ -1067,6 +1067,7 @@ class MiaDataDataset:
             self._found(state.result or "Ended: a new round was started.")  # while the debugger was still to run
             await self._flush()
         await self._begin_round(event)
+        assert state.pins and state.seed  # the round is admitted
         # a go with advice (the debugger's, the cleaner's after a diagnosis) starts from the match, whose agent
         # reads the advice: any other go resumes the PR
         advised = bool(snippet_issue and snippet_pr and event.actor in ADVISERS) and workflow.patched(
