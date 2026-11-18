@@ -99,6 +99,7 @@ from .models import (
     RoundLimits,
     SmokeResult,
     VerifyResult,
+    sets_view,
 )
 from .poll import run_poll
 from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
@@ -359,13 +360,28 @@ class Activities:
         return (await self._bot_comment(gh, number, marker) or await gh.comment(number, body)).get("html_url")
 
     async def _post(
-        self, issue: int, body: str, marker: str, *, round_id: str | None = None, stage: str | None = None
+        self,
+        issue: int,
+        body: str,
+        marker: str,
+        *,
+        round_id: str | None = None,
+        stage: str | None = None,
+        data: dict | None = None,
     ) -> None:
         """Write what a round has to say about its dataset: a stage, a text (once per marker), or both. It is the
         subject's stage and a timeline entry in the registry, a required write, and no GitHub call: the mirror
-        copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7)."""
+        copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7). `data` rides with a stage:
+        the keys of the subject's data it replaces."""
         write = functools.partial(
-            self.registry.append_entry, "dataset", issue, body=body, marker=marker, round_id=round_id, stage=stage
+            self.registry.append_entry,
+            "dataset",
+            issue,
+            body=body,
+            marker=marker,
+            round_id=round_id,
+            stage=stage,
+            data=data,
         )
         await asyncio.to_thread(write)
 
@@ -804,9 +820,15 @@ class Activities:
             result=self._clean(state.result),
             shown=self._shown(state) if state.pass_stage else "",
         )
+        view = sets_view(state, stage)  # which sets a verdict may name now: the page reads it with the stage
+        if view["held"]:
+            view["held"]["findings"] = [
+                {key: self._clean(str(value)) for key, value in finding.items()} for finding in view["held"]["findings"]
+            ]
         for body, marker_text, sets in entries:
             marker = self.cfg.marker(marker_text)
-            await self._post(issue, f"{body}\n{marker}", marker, round_id=round_id, stage=sets)
+            data = {"sets": view} if sets else None
+            await self._post(issue, f"{body}\n{marker}", marker, round_id=round_id, stage=sets, data=data)
 
     def _shown(self, state: DatasetState) -> str:
         """What goes under the result of the pass open in `state`: the round's binding when the result is about

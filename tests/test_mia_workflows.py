@@ -2110,6 +2110,31 @@ async def test_an_active_judges_authorized_approve_saves_the_set_with_no_person(
     assert "Approved by the crop judge." in next(r for r in m.of("result") if r[0] == "review")[1]
 
 
+async def test_the_saved_set_is_kept_with_the_dataset_across_rounds(env):
+    """spec judge-decides §5.4: a set holds together what a later verdict needs, and outlives its round."""
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+        saved = state.saved
+        assert saved.set_id == f"i7-e11:{state.tests[-1].test_id}" and saved.round_id == "i7-e11"
+        assert (saved.binding, saved.pins.record, saved.test.sha) == ("/s/binding-1.yaml", state.pins.record, SHA)
+        assert saved.test.approved_by == "alice" and state.held is None
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await idle(h, m, "review")
+        state = await h.query(MiaDataDataset.status)
+        assert state.round_id == "i7-e13" and state.saved == saved  # the next round leaves the saved set alone
+        assert state.tests[-1].test_id != saved.test.test_id or state.round_id != saved.round_id
+
+
+async def test_a_set_the_judge_approved_says_so(env):
+    m = Mocks(crop_judge="active", judge_result=GRANTED)
+    async with started(env, m) as h:
+        await idle(h, m, "done")
+        assert (await h.query(MiaDataDataset.status)).saved.test.approved_by == "judge"
+
+
 @pytest.mark.parametrize(
     "judged",
     [

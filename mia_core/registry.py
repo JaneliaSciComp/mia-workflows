@@ -137,10 +137,13 @@ class Registry:
         marker: str = "",
         round_id: str | None = None,
         stage: str | None = None,
+        data: dict | None = None,
     ) -> dict:
-        """Write a subject's stage, a timeline entry (once per marker), or both: {subject, entry}. 404: no such
-        subject."""
-        fields = {"body": body, "marker": marker, "round": round_id, "stage": stage}
+        """Write a subject's stage, a timeline entry (once per marker), or both: {subject, entry}. `data` rides
+        with either: the keys of the subject's data this write replaces. 404: no such subject."""
+        fields: dict[str, Any] = {"body": body, "marker": marker, "round": round_id, "stage": stage}
+        if data is not None:
+            fields["data"] = data
         return self.request("POST", f"/timeline/{quote(kind, safe='')}/{number}", json=fields)
 
     def timeline(self, kind: str, number: int) -> dict | None:

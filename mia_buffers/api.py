@@ -244,12 +244,14 @@ class AdoptBody(_Strict):
 
 
 class EntryBody(_Strict):
-    """One write of a round: a stage, a timeline entry (text with the marker that makes it once-only), or both."""
+    """One write of a round: a stage, a timeline entry (text with the marker that makes it once-only), or both.
+    `data` rides with either: keys of the subject's data that this write replaces (a dataset's `sets`)."""
 
     body: str = ""
     marker: str = ""
     round: str | None = None
     stage: str | None = None
+    data: dict | None = None
 
     @model_validator(mode="after")
     def _something_to_write(self) -> EntryBody:
@@ -1211,7 +1213,13 @@ class BufferService:
         if parsed.stage is not None and parsed.stage not in SUBJECT_RULES[kind]:
             raise HttpError(422, f"stage must be one of {list(SUBJECT_RULES[kind])}, got {parsed.stage!r}")
         written = self.ledger.append_entry(
-            kind, int(number), body=parsed.body, marker=parsed.marker, round_id=parsed.round, stage=parsed.stage
+            kind,
+            int(number),
+            body=parsed.body,
+            marker=parsed.marker,
+            round_id=parsed.round,
+            stage=parsed.stage,
+            data=parsed.data,
         )
         assert written is not None  # the subject was just found, and nothing deletes one
         self._asked.pop((kind, int(number)), None)  # the workflow wrote: whatever was asked of it is answered

@@ -1248,6 +1248,32 @@ async def test_read_judge_at_an_active_gate_grants_on_an_approve_and_on_nothing_
 # --- with buffer-api: a round writes the timeline, the mirror writes the issue (spec webapp-actions §6, §7) ---
 
 
+async def test_a_stage_write_tells_the_page_which_sets_a_verdict_may_name(tmp_path):
+    from mia_data.models import CropSet, Test
+
+    t = _setup(tmp_path)
+    pins = await t.a.admit(1, "99")
+    t.a.registry.adopt_subject("dataset", 1, "rec-1")
+    test = Test("abc", "t1", ok=True, gallery_prefix="galleries/rec-1/r/t1", approved_by="judge")
+    state = DatasetState(1, round_id=ROUND, pins=pins, tests=[test])
+    await t.a.set_stage(1, "review", state)
+    sets = t.ledger.subject("dataset", "rec-1")["data"]["sets"]
+    assert sets == {"review": f"{ROUND}:t1", "held": None, "saved": None}
+    findings = [{"item": "c1", "severity": "suspect", "note": "shifted <!-- x -->"}]
+    state.held = CropSet(f"{ROUND}:t1", ROUND, test, pins, sent_back_by="judge", worst="suspect", findings=findings)
+    state.saved = CropSet("i1-e5:t0", "i1-e5", test, pins)
+    await t.a.set_stage(1, "developing", state)
+    sets = t.ledger.subject("dataset", "rec-1")["data"]["sets"]
+    assert sets["review"] is None and sets["saved"] == {"set": "i1-e5:t0", "approved_by": "judge"}
+    assert sets["held"] == {
+        "set": f"{ROUND}:t1",
+        "by": "judge",
+        "worst": "suspect",
+        "findings": [{"item": "c1", "severity": "suspect", "note": "shifted &lt;!-- x -->"}],
+        "gallery": "galleries/rec-1/r/t1",
+    }
+
+
 def _with_service(t, tmp_path):
     """The ledger of the fixture's in-process service."""
     return t.ledger

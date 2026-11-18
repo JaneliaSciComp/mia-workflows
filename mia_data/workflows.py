@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         DEBUGGER,
         AssessmentWritten,
         AutodevLook,
+        CropSet,
         DatasetState,
         DebugResult,
         GalleryResult,
@@ -53,9 +54,12 @@ with workflow.unsafe.imports_passed_through():
         Test,
         VerifyResult,
         job_key,
+        set_id,
     )
 
 GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:revoke"
+JUDGE = "judge"  # the crop judge as the author of a verdict
+JUDGE_NAME = "the crop judge"  # ... and as a timeline entry names it
 CANCEL = "data:cancel"
 NO_ROUND = "there is no round in progress to cancel"
 ROUND_ENDED = "the round ended before the cancel reached it"
@@ -991,7 +995,7 @@ class MiaDataDataset:
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
         # after the gate opens, and a person's verdict that comes while the judge looks is acted on at once
         if self._judge_grants(await self._judged(test)):
-            test.approved_at = workflow.now().isoformat()
+            test.approved_at, test.approved_by = workflow.now().isoformat(), JUDGE
             self._found("Approved by the crop judge.")
             return await self._publish_set()
         await self._from_review()
@@ -1063,7 +1067,7 @@ class MiaDataDataset:
             written = await self._assess("approve", event, subject)
             if not written.authorized:
                 return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
-            state.tests[-1].approved_at = event.at
+            state.tests[-1].approved_at, state.tests[-1].approved_by = event.at, event.actor
             self._found(f"Approved by {event.actor}.")
             await self._publish_set()
         elif kind == "reject" and event:
@@ -1234,11 +1238,28 @@ class MiaDataDataset:
             result_type=dict,
         )
         state.published = True
+        if workflow.patched("judge-decides"):  # the saved set outlives its round; a set sent back is superseded
+            state.saved, state.held = self._set_of(test), None
         extra = (
             f"**Totals:** {len(published['published'])} crops saved this round ({verify.ok_count} verified); "
             f"{published['total']} in the dataset\n"
         )
         await self._finish("done", extra=extra)
+
+    def _set_of(self, test: Test) -> CropSet:
+        """The round's set `test` with what a later verdict on it needs (spec judge-decides §5.4)."""
+        state = self.state
+        assert state.round_id and state.pins  # a set is made by an admitted round
+        return CropSet(
+            set_id(state.round_id, test),
+            state.round_id,
+            test,
+            state.pins,
+            state.binding,
+            state.binding_hash,
+            state.pr,
+            state.snippet_issue,
+        )
 
     async def _produce(self) -> None:
         """Pre-I (spec §13): a second, production set after the approve. Replayed by histories that hold one; no
@@ -1468,7 +1489,7 @@ class MiaDataDataset:
     async def _pr_approved(self, test: Test, by: str, at: str) -> None:
         """The PR head's set is approved, by a person or by the crop judge: autodev is told to merge that head."""
         state = self.state
-        test.approved_at = at
+        test.approved_at, test.approved_by = at, JUDGE if by == JUDGE_NAME else by
         await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
         self._found(f"Approved by {by}: the crops at `{test.sha}`.")
         await self._stage(
@@ -1586,7 +1607,7 @@ class MiaDataDataset:
         if test.ok:
             # after the status and the stage: the required status never waits on it
             if self._judge_grants(await self._judged(test)) and shown and loop:
-                await self._pr_approved(test, "the crop judge", workflow.now().isoformat())
+                await self._pr_approved(test, JUDGE_NAME, workflow.now().isoformat())
         return current
 
     async def _merged(self, pr: PrUpdate) -> None:

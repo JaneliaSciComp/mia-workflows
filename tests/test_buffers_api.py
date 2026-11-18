@@ -1459,6 +1459,20 @@ def test_a_stage_and_an_entry_are_written_read_and_mirrored_back(tmp_path):
     assert call(s, "PUT", "/timeline/dataset/234/9", payload={"comment_url": None})[0] == 404
 
 
+def test_a_stage_write_can_carry_subject_data_which_a_later_write_without_any_leaves(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "data": {"name": "kept"}})
+    sets = {"review": "i234-e5:t1", "held": None, "saved": None}
+    status, out, _ = call(s, "POST", "/timeline/dataset/234", payload={"stage": "review", "data": {"sets": sets}})
+    assert status == 200 and out["subject"]["data"] == {"name": "kept", "sets": sets}
+    call(s, "POST", "/timeline/dataset/234", payload={"stage": "merging"})
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["data"] == {"name": "kept", "sets": sets}
+    held = {"review": None, "held": {"set": "i234-e5:t1", "by": "judge"}, "saved": None}
+    call(s, "POST", "/timeline/dataset/234", payload={"stage": "developing", "data": {"sets": held}})
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["data"]["sets"] == held  # replaced whole, not merged
+    assert call(s, "POST", "/timeline/dataset/234", payload={"data": {"sets": held}})[0] == 422  # data rides a write
+
+
 def test_timeline_writes_are_checked(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/subjects/dataset/1", payload={"key": "rec-a"})

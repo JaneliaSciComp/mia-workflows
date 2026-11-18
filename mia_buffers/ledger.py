@@ -601,15 +601,21 @@ class Ledger:
         marker: str = "",
         round_id: str | None = None,
         stage: str | None = None,
+        data: dict | None = None,
     ) -> tuple[dict, dict | None] | None:
         """Write a stage, an entry or both, in one transaction: (subject, entry), or None without such a subject.
         A `stage` always becomes the subject's and raises its revision. A `body` is appended once per marker: a
         second write with the marker (a retried activity, a stage entered twice in a round) returns the first
-        entry and appends nothing."""
+        entry and appends nothing. Each key of `data` replaces that key of the subject's data; the others stay."""
         key = (kind, number)
         with self._transaction() as db:
-            if not self._subjects(db, "WHERE kind = ? AND number = ?", key):
+            if not (found := self._subjects(db, "WHERE kind = ? AND number = ?", key)):
                 return None
+            if data:
+                db.execute(
+                    "UPDATE subjects SET data = ?, updated = ? WHERE kind = ? AND number = ?",
+                    (json.dumps({**found[0]["data"], **data}), time.time(), *key),
+                )
             if stage is not None:
                 db.execute(
                     "UPDATE subjects SET stage = ?, revision = revision + 1, updated = ? WHERE kind = ? AND number = ?",
