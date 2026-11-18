@@ -257,8 +257,9 @@ def _quiet(item: dict, where: str) -> dict | None:
 
 
 def stop_rule(item: dict, said: str, since: float) -> str | None:
-    """Which remedy a stop calls for, from what it said, the snippets issue it waited on (`party`) and when
-    the worker of its rounds started on its present commit (`worker`); None when no rule covers it."""
+    """Which remedy a stop calls for, from what it said, the hosts its jobs were refused (the subject's `hosts`),
+    the snippets issue it waited on (`party`) and when the worker of its rounds started on its present commit
+    (`worker`); None when no rule covers it."""
     party, worker = item.get("party") or {}, item.get("worker") or {}
     if item["subject"]["kind"] != "dataset":
         return None
@@ -271,6 +272,8 @@ def stop_rule(item: dict, said: str, since: float) -> str | None:
         if not party.get("pr") and RUN_FAILED_RE.search(words):
             return "autodev's run failed"
         return None
+    if any(host in said for host in item["subject"].get("hosts") or ()):  # a host its jobs were refused, unapproved
+        return "host not approved"
     for rule, pattern in (
         ("budget used up", BUDGET_RE),  # first: its numbers read like a passing cause's
         ("host not approved", HOSTS_RE),
@@ -348,7 +351,8 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         return [{"do": "needs", "text": text}]
     if rule == "host not approved":
         hosts = HOSTS_RE.search(found["seen"])
-        named = hosts.group(1).strip() if hosts else "see its page"
+        waiting = ", ".join(item["subject"].get("hosts") or ())  # what Run again lists to check
+        named = hosts.group(1).strip() if hosts else waiting or "see its page"
         text = f"approve the hosts its jobs need ({named}): press Run again on its page and check them"
         return [{"do": "needs", "text": text}]
     if rule == "record gap":
