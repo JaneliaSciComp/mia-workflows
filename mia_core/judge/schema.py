@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 
@@ -88,10 +89,18 @@ def parse_verdict(text: str) -> Verdict:
     raise ValueError(errors[-1] if errors else "empty message")
 
 
-def effective_verdict(verdict: Verdict, min_confidence: float, max_suspect: int | None = None) -> tuple[str, str]:
+def worst_finding(findings: Sequence[Finding]) -> str:
+    """The worst severity among the findings: `bad`, `suspect`, or "" when every one is `ok`."""
+    severities = {finding.severity for finding in findings}
+    return "bad" if "bad" in severities else "suspect" if "suspect" in severities else ""
+
+
+def effective_verdict(verdict: Verdict, min_confidence: float, suspect_rejects: bool = False) -> tuple[str, str]:
     """What policy makes of the judge's answer: (approve | reject | escalate, why). Low confidence abstains; any
-    `bad` finding rejects whatever the judge wrote (spec §4.2); a reject with no `bad` finding is an approve with
-    notes (the user's rule: serious issues only); more `suspect` findings than `max_suspect` reject too."""
+    `bad` finding rejects whatever the judge wrote (spec autonomous-gates §4.2). At a gate that sends a doubted
+    subject back for rework (`suspect_rejects`: the crops gate, spec judge-decides §3) one `suspect` finding
+    rejects too. A reject with nothing to show for it is an approve with notes (the user's rule: serious issues
+    only)."""
     if verdict.verdict == "escalate":
         return "escalate", "escalate"
     if verdict.confidence < min_confidence:
@@ -99,11 +108,11 @@ def effective_verdict(verdict: Verdict, min_confidence: float, max_suspect: int 
     bad = [finding.item for finding in verdict.findings if finding.severity == "bad"]
     if bad:
         return "reject", f"a bad finding: {', '.join(bad[:5])}"
+    suspect = [finding.item for finding in verdict.findings if finding.severity == "suspect"]
+    if suspect_rejects and suspect:
+        return "reject", f"a suspect finding: {', '.join(suspect[:5])}"
     if verdict.verdict == "reject":
         return "approve", "reject without a bad finding is treated as approve with notes"
-    suspects = sum(1 for finding in verdict.findings if finding.severity == "suspect")
-    if max_suspect is not None and suspects > max_suspect:
-        return "reject", f"{suspects} suspect findings, more than the cap of {max_suspect}"
     return "approve", "approve"
 
 

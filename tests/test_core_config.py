@@ -207,7 +207,7 @@ def test_judge_cfg_defaults_and_enabled_gates():
 
     cfg = JudgeCfg()
     assert cfg.model == "opus" and cfg.max_budget_usd == 2.0 and cfg.min_confidence == 0.6
-    assert cfg.crops.mode == "off" and cfg.review.mode == "off" and cfg.crops.max_suspect == 2
+    assert cfg.crops.mode == "off" and cfg.review.mode == "off" and cfg.crops.max_reworks == 1
     assert cfg.enabled_gates() == frozenset()
     assert JudgeCfg(crops={"mode": "shadow"}).on_gates() == frozenset({"crops"})
     assert JudgeCfg(crops={"mode": "shadow"}).enabled_gates() == frozenset()  # shadow authorizes nothing
@@ -249,3 +249,14 @@ def test_a_buffers_service_learns_where_the_snippets_service_keeps_its_job_recor
     manifest["services"]["snippets"]["paths"] = {"work_root": "/snips"}
     assert service_config(manifest, "buffers")["snippets_work_root"] == "/snips"
     assert "snippets_work_root" not in service_config(manifest, "mia-data")
+
+
+def test_max_suspect_in_a_config_is_refused_with_a_sentence():
+    import pytest
+    from pydantic import ValidationError
+
+    from mia_core.config import GateCfg
+
+    with pytest.raises(ValidationError, match="max_suspect is gone"):
+        GateCfg.model_validate({"mode": "active", "max_suspect": 3})
+    assert GateCfg.model_validate({"mode": "active", "max_reworks": 3}).max_reworks == 3

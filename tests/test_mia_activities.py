@@ -1172,12 +1172,12 @@ async def test_read_judge_reject_without_bad_is_approve(tmp_path):
         {
             "verdict": "reject",
             "confidence": 0.8,
-            "findings": [{"item": "c1", "severity": "suspect", "note": "dim"}],
+            "findings": [{"item": "c1", "severity": "ok", "note": "dim"}],
             "summary": "nits",
         },
     )
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
-    assert (out.verdict, out.effective) == ("reject", "approve") and out.assessment
+    assert (out.verdict, out.effective, out.worst) == ("reject", "approve", "") and out.assessment
     assert "`approve` (the judge said `reject`: reject without a bad finding" in out.comment
     _claude_json(ws, {"verdict": "approve", "confidence": 0.3, "findings": [], "summary": "unsure"})
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
@@ -1194,19 +1194,24 @@ async def test_limits_carry_the_judge_config(tmp_path):
         }
     )
     limits = await t.a.limits()
-    assert (limits.crop_judge, limits.judge_max_budget_usd) == ("shadow", 3.5)
+    assert (limits.crop_judge, limits.judge_max_budget_usd, limits.max_reworks) == ("shadow", 3.5, 1)
 
 
-async def test_read_judge_applies_the_suspect_cap(tmp_path):
+async def test_read_judge_rejects_a_crop_set_on_one_suspect_finding_and_says_the_worst(tmp_path):
     t = _setup(tmp_path)
     await t.a.admit(1, "99")
     cw, vw, verified = _judged_round(t)
     ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified, 1, "abc"))
     assert ws.name == "judge-crops-abc-1"
-    findings = [{"item": f"c{i}", "severity": "suspect", "note": "dim"} for i in range(3)]
+    findings = [{"item": "c0", "severity": "ok", "note": ""}, {"item": "c1", "severity": "suspect", "note": "shifted"}]
     _claude_json(ws, {"verdict": "approve", "confidence": 0.9, "findings": findings, "summary": "meh"})
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
-    assert out.effective == "reject" and "more than the cap of 2" in out.comment
+    assert (out.effective, out.worst, out.authorized) == ("reject", "suspect", False)
+    assert "a suspect finding: c1" in out.comment
+    findings.append({"item": "c2", "severity": "bad", "note": "header read as pixels"})
+    _claude_json(ws, {"verdict": "approve", "confidence": 0.9, "findings": findings, "summary": "meh"})
+    out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
+    assert (out.effective, out.worst) == ("reject", "bad")
 
 
 async def test_read_judge_at_an_active_gate_grants_on_an_approve_and_on_nothing_else(tmp_path, token_server):  # noqa: F811
@@ -1227,8 +1232,8 @@ async def test_read_judge_at_an_active_gate_grants_on_an_approve_and_on_nothing_
     out = await judged("a", "active")
     assert out.authorized and "Approved automatically" in out.comment
     assert t.a.registry.dataset("rec-1")["assessment"] == out.assessment  # the row names it, as a person's approve
-    capped = await judged("c", "active", [{"item": f"c{i}", "severity": "suspect", "note": "dim"} for i in range(3)])
-    assert capped.effective == "reject" and not capped.authorized and "A person's verdict decides." in capped.comment
+    doubted = await judged("c", "active", [{"item": "c0", "severity": "suspect", "note": "dim"}])
+    assert doubted.effective == "reject" and not doubted.authorized
 
 
 # --- with buffer-api: a round writes the timeline, the mirror writes the issue (spec webapp-actions §6, §7) ---

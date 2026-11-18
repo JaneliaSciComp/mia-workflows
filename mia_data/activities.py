@@ -38,7 +38,14 @@ from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge.evidence import build as build_evidence
 from mia_core.judge.evidence import evidence_digest, read_claude_json
 from mia_core.judge.policy import POLICY_VERSION, authorized, new_assessment
-from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
+from mia_core.judge.schema import (
+    Verdict,
+    effective_verdict,
+    parse_verdict,
+    prompt_text,
+    prompt_version,
+    worst_finding,
+)
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads as _loads
@@ -538,6 +545,7 @@ class Activities:
             cfg.limits.debug_cycles,
             cfg.limits.debug_wait_min,
             cfg.limits.autodev_quiet_hours,
+            cfg.judge.crops.max_reworks,
         )
 
     # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
@@ -635,8 +643,7 @@ class Activities:
             verdict = parse_verdict(text)
         except ValueError as error:
             verdict = Verdict("escalate", 0.0, (), f"unreadable verdict: {_text(str(error), 400)}")
-        max_suspect = self.cfg.judge.crops.max_suspect if gate == "crops" else None
-        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence, max_suspect)
+        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence, suspect_rejects=gate == "crops")
         findings = [
             {"item": self._clean(f.item), "severity": f.severity, "note": self._clean(f.note)} for f in verdict.findings
         ]
@@ -684,7 +691,16 @@ class Activities:
         if jobs := render_jobs(self._job_links([str(path)])):  # the entry that reports a job links its record
             comment += f"\n\n{jobs}"
         return JudgeResult(
-            verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings, granted
+            verdict.verdict,
+            effective,
+            verdict.confidence,
+            summary,
+            assessment_id,
+            cost,
+            comment,
+            findings,
+            granted,
+            worst_finding(verdict.findings),
         )
 
     def _granted(self, row: dict, round_id: str) -> bool:

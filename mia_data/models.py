@@ -217,6 +217,7 @@ class RoundLimits:
     autodev_quiet_hours: float = (
         2.0  # limits.autodev_quiet_hours: how long a round waits on an autodev that is not at work
     )
+    max_reworks: int = 1  # judge.crops.max_reworks: how often the crop judge may send a dataset's sets back
 
 
 @dataclass
@@ -280,3 +281,4 @@ class JudgeResult:
     comment: str = ""
     findings: list[dict] = field(default_factory=list)  # <= 64 of {"item", "severity", "note"}
     authorized: bool = False
+    worst: str = ""  # the worst finding's severity: "bad" | "suspect" | "" (every crop `ok`)
