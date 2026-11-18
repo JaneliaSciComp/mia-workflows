@@ -559,8 +559,18 @@ async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(
     )
     assert "**The reviewer's comments:**" in body and "the masks are &lt;!-- shifted" in body
     assert "**supersedes**" in body and "**The rejected binding:**" in body and "tiff-zip-member" in body
-    with pytest.raises(ApplicationError, match="not one of round"):
+    with pytest.raises(ApplicationError, match="not one of this dataset's rounds'"):
         await t.a.open_snippet_issue(1, ROUND, {}, None, str(tmp_path / "elsewhere.yaml"))
+    # the rework of a saved set is a round of its own that names the binding of the round that saved it
+    put_action(t, 100)
+    await t.a.admit(1, "100")
+    assert await t.a.open_snippet_issue(1, "i1-e100", {"what_fails": "shifted"}, None, str(binding)) == 101
+    assert "**The rejected binding:**" in t.snip.created[1][1]
+    other = t.a._round_dir(ROUND).parent / "i2-e7" / "binding-1.yaml"
+    other.parent.mkdir()
+    other.write_text(binding.read_text())
+    with pytest.raises(ApplicationError, match="not one of this dataset's rounds'"):
+        await t.a.open_snippet_issue(1, "i1-e100", {}, None, str(other))  # another dataset's round
 
 
 async def test_open_snippet_issue_reuses_the_remembered_issue_in_a_new_round(tmp_path):

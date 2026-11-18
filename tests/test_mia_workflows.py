@@ -1551,6 +1551,7 @@ CANCEL_HISTORY = HISTORY.with_name("dataset_history_cancel.json")
 AWAITED_HISTORY = HISTORY.with_name("dataset_history_b.json")
 RESULTS_HISTORY = HISTORY.with_name("dataset_history_r.json")
 VERDICT_HISTORY = HISTORY.with_name("dataset_history_v.json")
+DECIDES_HISTORY = HISTORY.with_name("dataset_history_j.json")
 
 
 def _scrub(obj):
@@ -1599,6 +1600,27 @@ async def test_replay_dataset_history_c(env):
             await idle(h, m, "done")
             LOCK_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("mia-raw-lock", LOCK_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def test_replay_dataset_history_j(env):
+    """A run under the `judge-decides` patch: the crop judge sends a matched set back, a person accepts that set
+    while its rework runs, and it is saved; then they reject the saved set, which is revoked and reworked.
+    Re-record this one alone, so the older fixtures keep their paths:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_j"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, True, False, ""))
+        async with started(env, m) as h:
+            await idle(h, m, "developing")
+            held = (await h.query(MiaDataDataset.status)).held
+            await h.signal(MiaDataDataset.approve, accept(held))
+            await idle(h, m, "done")
+            saved = (await h.query(MiaDataDataset.status)).saved
+            rejected = LabelEvent("reject", "31", "alice", "2999-01-01T00:00:00Z", saved.set_id)
+            await h.signal(MiaDataDataset.reject, rejected)
+            await idle(h, m, "developing")
+            DECIDES_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-judge-decides", DECIDES_HISTORY.read_text())
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 
@@ -2460,6 +2482,77 @@ async def test_a_save_that_fails_after_an_accept_rests_at_blocked_and_keeps_the_
         m.publish_error = None
         await h.signal(MiaDataDataset.approve, accept(held, eid="22"))  # and it can be sent again
         await idle(h, m, "done")
+
+
+async def saved_then_rejected(h, m):
+    """A matched set a person approved and that was saved, then their reject of the saved set; (saved, held)."""
+    await approve_review(h, m)
+    await idle(h, m, "done")
+    saved = (await h.query(MiaDataDataset.status)).saved
+    await h.signal(MiaDataDataset.reject, LabelEvent("reject", "31", "alice", "2999-01-01T00:00:00Z", saved.set_id))
+    await idle(h, m, "developing")
+    return saved, (await h.query(MiaDataDataset.status)).held
+
+
+async def test_rejecting_a_saved_set_revokes_it_and_starts_the_rework(env):
+    """spec judge-decides §5.2: "revoke and start the rework"."""
+    m = Mocks(look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        saved, held = await saved_then_rejected(h, m)
+        state = await h.query(MiaDataDataset.status)
+    names = m.names()
+    revoked = names.index("revoke_dataset")
+    assert revoked < names.index("admit", revoked) < names.index("open_snippet_issue")
+    assert m.of("revoke_dataset") == [("i7-e11", "alice", "31")]  # the saved set's own round
+    (asked,) = m.of("open_snippet_issue")
+    assert asked[:3] == ("i7-e31", None, "/s/binding-1.yaml")  # a round of its own, the rejected binding
+    assert asked[3]["what_fails"].startswith(f"Request: {saved.set_id}#31\n")
+    assert "the masks are shifted by one pixel" in asked[3]["what_fails"]
+    assert state.round_id == "i7-e31" and state.saved is None
+    assert (held.set_id, held.sent_back_by, held.round_id) == (saved.set_id, "alice", "i7-e11")
+    assert any("revoked" in a[0] and "alice" in a[0] for a in m.of("comment"))
+
+
+async def test_a_reject_that_names_another_set_than_the_saved_one_is_refused(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        await h.signal(MiaDataDataset.reject, LabelEvent("reject", "31", "alice", "2999-01-01T00:00:00Z", "i7-e0:zz"))
+        await until(lambda: m.of("refuse_label"))
+        assert m.stages[-1] == "done" and "revoke_dataset" not in m.names()
+        assert (await h.query(MiaDataDataset.status)).saved is not None
+
+
+async def test_accepting_the_revoked_set_again_saves_it_under_its_own_round(env):
+    """spec judge-decides §4.2, §5.5: the same set, accepted again, is saved again (which repairs by recipe)."""
+    m = Mocks(look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        saved, held = await saved_then_rejected(h, m)
+        await h.signal(MiaDataDataset.approve, accept(held, eid="41"))
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+    the_set = (f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")
+    assert m.of("publish_crops") == [the_set, the_set]
+    assert state.round_id == "i7-e11" and state.saved.set_id == saved.set_id and state.held is None
+    assert m.of("close_snippet_issue")[0][:2] == (100, None)
+
+
+async def test_the_developers_answer_to_a_reject_of_a_saved_set_brings_that_set_back_to_review(env):
+    m = Mocks(look=AutodevLook(None, False, False, ""))
+    async with started(env, m) as h:
+        saved, held = await saved_then_rejected(h, m)
+        m.look = answered(None, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        state = await h.query(MiaDataDataset.status)
+        assert state.round_id == "i7-e11" and state.tests[-1].test_id == saved.test.test_id
+        assert len(m.of("publish_crops")) == 1  # an answer to a person's reject never approves
+        await h.signal(
+            MiaDataDataset.approve, LabelEvent("approve", "51", "alice", "2999-02-01T00:00:00Z", saved.set_id)
+        )
+        await idle(h, m, "done")
+    assert len(m.of("publish_crops")) == 2 and m.of("publish_crops")[1][0] == f"/w/i7-e11/crop-{SHA}-1"
 
 
 async def test_max_reworks_zero_never_sends_back(env):

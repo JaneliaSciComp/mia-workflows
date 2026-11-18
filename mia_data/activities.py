@@ -1524,11 +1524,15 @@ class Activities:
         remembers as `snippet_issue` from an earlier round, while it is still open, else by this round's
         first-line marker on a retry. Returns the issue number.
 
-        With `binding` (one of this round's, from state_dir), the request is to supersede the snippets that
+        With `binding` (one of this dataset's rounds', from state_dir: this round's, or the binding a saved set
+        was approved with when that set is rejected later), the request is to supersede the snippets that
         binding names: a reviewer rejected its crops and `draft["what_fails"]` is their comments (spec §14)."""
         gh, github_cfg, pins = self.gh_snippets, self.cfg.github, self._pins(round_id)
-        if binding and not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
-            raise ValueError(f"binding {binding} is not one of round {round_id}'s")
+        if binding:
+            rounds, bound = self._round_dir(round_id).resolve().parent, Path(binding).resolve()
+            ours = bound.is_relative_to(rounds) and bound.relative_to(rounds).parts[0].startswith(f"i{int(issue)}-e")
+            if not ours:
+                raise ValueError(f"binding {binding} is not one of this dataset's rounds'")
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
 
         def ours(existing: dict, prefix: str) -> bool:  # filter by author: an outsider can copy the marker
