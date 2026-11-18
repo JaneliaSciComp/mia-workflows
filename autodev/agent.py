@@ -35,7 +35,7 @@ directory on branch `{branch}` at commit {base_sha}.
 # Issue: {title}
 
 {body}
-{discussion}{revision}
+{discussion}{revision}{evidence}
 # How to work
 
 - Read CLAUDE.md and README.md first, if present, and follow the repository's conventions.
@@ -83,9 +83,23 @@ def render_prompt(
         body=issue.get("body") or "(no description)",
         discussion=discussion,
         revision=revision,
+        evidence=(
+            f"\n# Evidence\n\nWhat this issue is about can be looked at, read-only, under `{folder}`.\n"
+            if (folder := evidence_folder(cfg, issue["number"])) is not None
+            else ""
+        ),
         protected=", ".join(cfg.github.protected_paths) or "(nothing)",
         no_change=NO_CHANGE_FILE,
     )
+
+
+def evidence_folder(cfg: Config, issue: int) -> Path | None:
+    """The folder of evidence left for this issue under `agent.evidence_dir`, when there is one: found by the
+    issue's number, never by a path an issue or a comment names. A link is not a folder of evidence."""
+    if cfg.agent.evidence_dir is None:
+        return None
+    folder = cfg.agent.evidence_dir / f"issue-{int(issue)}"
+    return folder if folder.is_dir() and not folder.is_symlink() else None
 
 
 def job_script(cfg: Config, base_sha: str) -> str:
@@ -294,7 +308,10 @@ class AgentJobs:
                 mem_mb=agent_cfg.mem_mb,
                 allow_hosts=agent_hosts(agent_cfg.allow_hosts, named_hosts, policy_hosts),
                 agent="claude",
-                ro_mounts=[mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts],  # Config guarantees ":ro"
+                ro_mounts=[
+                    *(mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts),  # Config guarantees ":ro"
+                    *([str(evidence)] if (evidence := evidence_folder(self.cfg, issue)) is not None else []),
+                ],
                 env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
                 prompt_file="prompt.md",
                 transcript_file=TRANSCRIPT_FILE,

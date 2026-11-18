@@ -1125,6 +1125,25 @@ async def test_prepare_judge_builds_evidence_without_reasons(tmp_path):
         await t.a.prepare_judge(1, ROUND, "review", str(cw), str(vw), verified)
 
 
+async def test_share_evidence_copies_what_the_judge_saw_to_the_snippets_issues_folder(tmp_path):
+    """spec judge-decides §4.1: the developer looks at what the judge saw; autodev mounts this folder read-only."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    cw, vw, verified = _judged_round(t)
+    ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified))
+    (tmp_path / "secret").write_text("token")
+    (ws / "evidence" / "leak.txt").symlink_to(tmp_path / "secret")  # a job could plant a link in its workspace
+    await t.a.share_evidence(1, ROUND, str(ws), 72, f"{ROUND}:t1")
+    await t.a.share_evidence(1, ROUND, str(ws), 72, f"{ROUND}:t1")  # a retry replaces the copy
+    shared = t.cfg.paths.work_root / "_evidence" / "issue-72" / f"{ROUND}-t1"
+    assert (shared / "question.md").read_text() == (ws / "evidence" / "question.md").read_text()
+    assert (shared / "c0" / "raw.png").is_file() and (shared / "c1" / "overlay.png").read_bytes() == b"ov"
+    assert not (shared / "leak.txt").exists() and not any(path.is_symlink() for path in shared.rglob("*"))
+    assert [path.name for path in shared.parent.iterdir()] == [f"{ROUND}-t1"]  # nothing left beside it
+    with pytest.raises(ApplicationError):
+        await t.a.share_evidence(1, ROUND, str(tmp_path / "elsewhere"), 72, f"{ROUND}:t1")
+
+
 def _claude_json(ws: Path, verdict: dict, cost=0.31):
     (ws / "claude.json").write_text(
         json.dumps({"result": json.dumps(verdict), "total_cost_usd": cost, "modelUsage": {"claude-opus-5-5": {}}})

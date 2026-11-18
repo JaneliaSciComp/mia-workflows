@@ -163,6 +163,39 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     assert spec["allow_hosts"] == ["pypi.org"] and spec["name"] == "autodev-7-r1" and "env" not in spec
 
 
+async def test_an_agent_job_reads_the_evidence_folder_of_its_own_issue_and_no_other(tmp_path):
+    """spec judge-decides §4.1: the folder is found by the issue's number under the configured directory, never
+    by a path an issue or a comment names."""
+    evidence = tmp_path / "evidence"
+    (evidence / "issue-8").mkdir(parents=True)  # another issue's
+    ws = Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7")
+    fake = FakeCsub()
+    j = _jobs(tmp_path, fake, evidence_dir=str(evidence))
+    await j.submit(7, K, 1, ws)
+    assert fake.submitted[0]["mounts"] == [{"path": ws.dir, "mode": "rw"}]  # none for this issue: no mount
+    (evidence / "issue-7").mkdir()
+    await j.submit(7, K, 2, ws)
+    assert fake.submitted[1]["mounts"] == [
+        {"path": ws.dir, "mode": "rw"},
+        {"path": str(evidence / "issue-7"), "mode": "ro"},
+    ]
+    (evidence / "issue-9").symlink_to(tmp_path)  # a link is not a folder of evidence
+    await j.submit(9, K, 1, ws)
+    assert fake.submitted[2]["mounts"] == [{"path": ws.dir, "mode": "rw"}]
+    plain = _jobs(tmp_path, FakeCsub())  # no evidence_dir configured: nothing is looked for
+    assert plain.cfg.agent.evidence_dir is None
+
+
+def test_the_prompt_names_the_evidence_folder_when_there_is_one(tmp_path):
+    evidence = tmp_path / "evidence"
+    cfg = make_cfg(tmp_path, agent={"evidence_dir": str(evidence)})
+    issue = {"number": 7, "title": "T", "body": "b"}
+    assert "evidence" not in render_prompt(cfg, issue, [], "autodev/issue-7", "abc", None, None).lower()
+    (evidence / "issue-7").mkdir(parents=True)
+    prompt = render_prompt(cfg, issue, [], "autodev/issue-7", "abc", None, None)
+    assert f"`{evidence / 'issue-7'}`" in prompt and "read-only" in prompt
+
+
 async def test_an_agent_job_names_its_configured_hosts_then_those_its_issue_names(tmp_path):
     """The broker's policy is the ceiling, never the list: a job gets the configured hosts and, of the hosts its
     issue names, those the policy allows."""

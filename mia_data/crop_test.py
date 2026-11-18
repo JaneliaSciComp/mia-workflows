@@ -44,8 +44,8 @@ def rework_request(findings: list[dict], request: str) -> str:
             "",
             *lines,
             "",
-            "Look into every finding before you change anything; the crops the judge saw are under `evidence/` when "
-            "that folder is there. Then end in one of two ways:",
+            "Look into every finding before you change anything; the crops the judge saw are in the read-only "
+            "evidence folder your instructions name, when there is one. Then end in one of two ways:",
             "",
             "1. The reader or its binding reads the data wrong: fix it and commit.",
             f"2. The crops are right as they are: make no commits and write `{NO_CHANGE_FILE}` in the current "

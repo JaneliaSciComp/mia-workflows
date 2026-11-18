@@ -288,6 +288,10 @@ class Mocks:
             rec("open_snippet_issue", round_id, snippet_issue, *([binding, draft] if binding else []))
             return 100
 
+        @activity.defn(name="share_evidence")
+        async def share_evidence(issue: int, round_id: str, ws: str, snippet_issue: int, name: str) -> None:
+            rec("share_evidence", round_id, ws, snippet_issue, name)
+
         @activity.defn(name="close_snippet_issue")
         async def close_snippet_issue(snippet_issue: int, pr: int | None, why: str) -> None:
             rec("close_snippet_issue", snippet_issue, pr, why)
@@ -392,6 +396,7 @@ class Mocks:
             admit,
             limits,
             close_snippet_issue,
+            share_evidence,
             set_stage,
             stage_result,
             comment,
@@ -2229,6 +2234,10 @@ async def test_an_active_judge_that_finds_a_suspect_crop_sends_a_matched_set_to_
     assert held.set_id == f"i7-e11:{held.test.test_id}" and held.binding == "/s/binding-1.yaml"
     assert held.findings == [{"item": "c1", "severity": "suspect", "note": "labels look shifted"}]
     assert (held.opened_issue, held.snippet_issue, state.reworks) == (True, 100, 1)
+    # the developer is shown what the judge saw: the judge's workspace, under the snippets issue it answers
+    (shared,) = m.of("share_evidence")
+    assert shared[0] == "i7-e11" and "judge" in shared[1] and shared[2:] == (100, held.set_id)
+    assert m.names().index("open_snippet_issue") < m.names().index("share_evidence")
     assert "assess" not in m.names() and "publish_crops" not in m.names()  # no person, and nothing saved
     assert "Sent back by the crop judge" in next(r for r in m.of("result") if r[0] == "review")[1]
 
@@ -2245,6 +2254,11 @@ async def test_an_active_judge_sends_a_pr_heads_set_back_once_and_then_leaves_it
         state = await h.query(MiaDataDataset.status)
         assert revisions(m) == [f"/revise Request: {state.held.request}\n" + revisions(m)[0].split("\n", 1)[1]]
         assert (state.held.test.sha, state.held.pr, state.held.opened_issue, state.reworks) == (H1, 5, False, 1)
+        assert m.of("share_evidence")[0][2:] == (100, state.held.set_id)  # before the request goes to the PR
+        assert (
+            m.names().index("share_evidence")
+            < [i for i, c in enumerate(m.calls) if c[0] == "comment" and c[1][0].startswith("/revise")][0]
+        )
         await wake(h, m, head(H2))
         await idle(h, m, "review")
         state = await h.query(MiaDataDataset.status)

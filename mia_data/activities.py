@@ -153,6 +153,7 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
 # the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
 NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
 MARKER_RE = re.compile(r"(?s)<!--.*?-->")
+EVIDENCE_FILE_BYTES = 64 << 20  # the largest file of the judge's evidence that is shared with the developer
 NO_CHANGE_RE = re.compile(r"<!-- \S+: no-change (\S+) -->")  # autodev's marker on a validated "nothing to change"
 CROP_STATUS = {
     "pending": "test crops running",
@@ -324,6 +325,7 @@ class Activities:
             self.publish_crops,
             self.refuse_label,
             self.close_snippet_issue,
+            self.share_evidence,
             self.read_feedback,
             self.open_snippet_issue,
             self.pr_state,
@@ -880,6 +882,35 @@ class Activities:
             return await self._comment_once(self.gh_snippets, issue, f"{body}\n\n{full_marker}", full_marker)
         await self._post(issue, f"{body}\n\n{full_marker}", full_marker)
         return None
+
+    @activity.defn(name="share_evidence")
+    @mia_permanent_errors
+    async def share_evidence(self, issue: int, round_id: str, workspace: str, snippet_issue: int, name: str) -> None:
+        """Copy what the crop judge saw (`<workspace>/evidence/`: the crops as PNGs, the record, the binding, the
+        verify report) to `<work_root>/_evidence/issue-<snippet_issue>/<name>/`, where autodev's agent for that
+        snippets issue reads it (spec judge-decides §4.1). Regular files only, each read as a job's output is
+        read; a copy that exists is replaced."""
+        source = self._job_workspace(issue, round_id, workspace) / "evidence"
+        folder = self.cfg.paths.work_root / "_evidence" / f"issue-{int(snippet_issue)}"
+        target = folder / re.sub(r"[^A-Za-z0-9._-]", "-", name)
+
+        def copy() -> None:
+            staging = folder / f".{target.name}.tmp"
+            shutil.rmtree(staging, ignore_errors=True)
+            for path in sorted(source.rglob("*")):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                data = read_untrusted(source, str(path.relative_to(source)), EVIDENCE_FILE_BYTES, binary=True)
+                if data is None:
+                    continue
+                copied = staging / path.relative_to(source)
+                copied.parent.mkdir(parents=True, exist_ok=True)
+                copied.write_bytes(data)
+            staging.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(target, ignore_errors=True)
+            staging.rename(target)
+
+        await asyncio.to_thread(copy)
 
     @activity.defn(name="close_snippet_issue")
     @mia_permanent_errors

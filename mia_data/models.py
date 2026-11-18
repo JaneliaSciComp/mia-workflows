@@ -94,6 +94,7 @@ class Test:
     verify_workspace: str | None = None
     approved_at: str | None = None  # the `data:approve` event's time, once a reviewer approved this set (spec §14)
     approved_by: str = ""  # who approved it: a person's actor, `judge`, or `policy:developer`
+    evidence: str = ""  # the crop judge's workspace for this set, once it looked: what it saw is under `evidence/`
 
 
 def set_id(round_id: str | None, test: Test) -> str:

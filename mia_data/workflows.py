@@ -1312,6 +1312,7 @@ class MiaDataDataset:
                 marker,
             )
             return None
+        test.evidence = workspace  # what the judge saw: shown to the developer if the set is sent back
         body = (
             f"The crop judge's {failed}; its verdict is recorded as an escalation.\n\n" if failed else ""
         ) + result.comment
@@ -1362,6 +1363,7 @@ class MiaDataDataset:
             await self._develop({"what_fails": feedback}, state.snippet_issue, binding=state.binding)
             return True
         state.revised_at = workflow.now().isoformat()
+        await self._share_evidence()
         await self._act(
             "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} judge {test.sha}", "snippets"
         )
@@ -1438,6 +1440,27 @@ class MiaDataDataset:
         held = self.state.held = self._set_of(test)
         held.sent_back_by, held.request = by, f"{held.set_id}{suffix}"
         return held
+
+    async def _share_evidence(self) -> None:
+        """Leave what the crop judge saw of the held set where the developer's job for the round's snippets issue
+        reads it (spec judge-decides §4.1). Nothing when the judge did not look at that set. Best effort: the
+        request goes out either way."""
+        state, held = self.state, self.state.held
+        if not (held and held.test.evidence and state.snippet_issue) or not workflow.patched("judge-decides"):
+            return
+        try:
+            await self._act(
+                "share_evidence",
+                state.issue,
+                held.round_id,
+                held.test.evidence,
+                state.snippet_issue,
+                held.set_id,
+                seconds=600,
+                budget=timedelta(minutes=30),
+            )
+        except ActivityError as error:
+            workflow.logger.warning("issue #%d: evidence not shared: %s", state.issue, error_message(error))
 
     async def _switch_to(self, held: CropSet, said: str) -> None:
         """Make the held set's round the dataset's again (`_restore`). When that is another round than the one in
@@ -1688,6 +1711,7 @@ class MiaDataDataset:
         )
         if state.held and state.held.opened_issue and state.held.snippet_issue is None:
             state.held.snippet_issue = state.snippet_issue  # the issue this send-back opened: an accept closes it
+        await self._share_evidence()
         source = "the crop judge's findings" if state.held and state.held.sent_back_by == JUDGE else "your comments"
         what = f"a snippet superseding the binding's, from {source}," if binding else "the snippet"
         await self._stage(
@@ -1884,6 +1908,7 @@ class MiaDataDataset:
         state.revised_at = workflow.now().isoformat()
         if workflow.patched("judge-decides"):
             self._hold(state.tests[-1], event.actor, f"#{event.event_id}")  # an approve can still name this set
+            await self._share_evidence()
         feedback = await self._feedback(event)
         await self._act(
             "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} {event.event_id}", "snippets"
