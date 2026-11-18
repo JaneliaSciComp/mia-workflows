@@ -1352,18 +1352,23 @@ class Activities:
         )
         if revoked:  # a new publication repairs a revocation (spec autonomous-gates §6.5)
             (dataset_dir / REVOKED_FILE).unlink(missing_ok=True)
-            await self._release_revoked(round_id, pins.record)
+            saved = read_untrusted(dataset_dir, "binding.yaml", crop_publish.MAX_INDEX_FILE, binary=True)
+            await self._release_revoked(round_id, pins.record, hashlib.sha256(saved or b"").hexdigest())
         return published
 
-    async def _release_revoked(self, round_id: str, record: str) -> None:
-        """After a repair: every quarantined staged artifact of the record gets a `policy:repair` approve (the newest
-        assessment, so buffers may reuse it) and its quarantine mark cleared. Best effort: the publication stands."""
+    async def _release_revoked(self, round_id: str, record: str, binding_hash: str) -> None:
+        """After a repair: each quarantined staged artifact of the record that was staged from the binding this
+        save wrote (`binding_hash`: the sha256 a buffer puts into the asset) gets a `policy:repair` approve (the
+        newest assessment, so buffers may reuse it) and its quarantine mark cleared. An artifact of any other
+        binding, or of none on record, was read by the recipe that was rejected and is immutable: it stays
+        quarantined, and buffers stage the record anew (spec judge-decides §5.5). Best effort: the publication
+        stands."""
         registry = self.registry
         try:
             assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
             for asset in assets:
                 data = asset.get("data") or {}
-                if not data.get("quarantined"):
+                if not data.get("quarantined") or data.get("binding_hash") != binding_hash:
                     continue
                 key, now = str(asset["key"]), time.time()
                 approve = new_assessment(

@@ -1047,7 +1047,7 @@ async def test_revoke_dataset_with_nothing_published_records_nothing(tmp_path, t
     assert not (folder / "revoked.json").exists() and registry.assessments() == [] and registry.dataset("rec-1") is None
 
 
-async def test_a_publication_after_a_revoke_releases_the_artifacts(tmp_path, token_server):  # noqa: F811
+async def test_a_save_after_a_revoke_releases_only_the_artifacts_staged_from_its_own_binding(tmp_path, token_server):  # noqa: F811
     from test_buffers_sync import write_prepared
 
     t = _setup(tmp_path)
@@ -1055,18 +1055,27 @@ async def test_a_publication_after_a_revoke_releases_the_artifacts(tmp_path, tok
     registry = t.a.registry = Registry(token_server, "t")
     folder = t.a._dataset_dir("i1-e11", t.a._pins("i1-e11"))
     write_prepared(folder, "rec-1")
-    registry.put_asset("staged", "art1", {"record": "rec-1", "state": "ready", "path": "/x", "bytes": 1})
-    await t.a.revoke_dataset(1, "i1-e11", "alice", "77")
-    assert registry.asset("staged", "art1")["quarantined"] is True
     binding = t.cfg.paths.state_dir / "rounds" / "i1-e11" / "binding-1.yaml"
     binding.write_text("record: rec-1\n")
+    saved_hash = hashlib.sha256(binding.read_bytes()).hexdigest()  # what a buffer hashes into its staged asset
+    staged = {"record": "rec-1", "state": "ready", "path": "/x", "bytes": 1}
+    registry.put_asset("staged", "art1", {**staged, "binding_hash": saved_hash})
+    registry.put_asset("staged", "art2", {**staged, "binding_hash": "another binding's"})  # the broken reader's
+    registry.put_asset("staged", "art3", staged)  # its recipe is unknown
+    await t.a.revoke_dataset(1, "i1-e11", "alice", "77")
+    assert all(registry.asset("staged", key)["quarantined"] is True for key in ("art1", "art2", "art3"))
     cw = Path(await t.a.prepare_job(1, "i1-e11", "crop", 1, None))
     await t.a.publish_crops(1, "i1-e11", str(cw), [_crop(cw, "c1", 0)], SNIP_SHA, str(binding))
     assert not (folder / "revoked.json").exists()
+    assert hashlib.sha256((folder / "binding.yaml").read_bytes()).hexdigest() == saved_hash
     art1 = registry.asset("staged", "art1")
     assert art1["quarantined"] is False and art1["repaired_by"] == "i1-e11"
     newest = registry.assessments(subject_kind="artifact", subject_ref="art1")[0]
     assert newest["verdict"] == "approve" and newest["by"] == "policy:repair"
+    # only the artifacts this save's own binding staged are released (spec judge-decides §5.5)
+    for key in ("art2", "art3"):
+        assert registry.asset("staged", key)["quarantined"] is True
+        assert [row["verdict"] for row in registry.assessments(subject_kind="artifact", subject_ref=key)] == ["reject"]
     assert t.a.dataset_fields(1, "i1-e11", "done")["state"] == "prepared"
 
 

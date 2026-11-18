@@ -222,9 +222,11 @@ whatever the buffer's workflow or the keeper have done yet. The keeper holds a q
 quarantined volumes, sends the `revoked` signal: the buffer unregisters those volumes, fails the dataset with the
 reason and serves on at its floor, or ends in needs-human below it (*Retire* stops it altogether). A board approve
 never writes over an artifact whose newest assessment is a reject: only a repair supersedes a revocation. A new
-`go` on the dataset that saves its crops removes `revoked.json`, writes a `policy:repair` approve on each
-quarantined artifact of the record and clears their quarantine marks, and the next stage write makes the row
-prepared again. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
+`go` on the dataset that saves its crops removes `revoked.json`, and the next stage write makes the row
+prepared again. The save repairs by recipe: a quarantined artifact that was staged from the binding the save
+wrote (the asset's `binding_hash`) gets a `policy:repair` approve and its quarantine mark cleared; an artifact
+of any other binding was read by the recipe that was rejected, stays quarantined, and the record is staged
+anew. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
 page's *Revoke the checked*; records not in the buffer are ignored), rejects and quarantines those records'
 artifacts and takes the keeper's `revoked` path at once.
 
