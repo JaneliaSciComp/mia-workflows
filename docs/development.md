@@ -479,6 +479,17 @@ long as one is away, with the `mia restart` that brings it back. Temporal rememb
 so a worker that stops is reported that long after; one that never started is reported at once.
 `GET /run/<kind>/<number>` is the Temporal status of a subject's latest run.
 
+**Restarts.** `mia restart` restarts the services and leaves Temporal running unless it is named. `mia down` stops
+the service that runs buffer-api last; `mia up` starts it first, and its worker only once buffer-api takes
+connections (`api_started`), so no worker runs against a registry that does not answer. A worker is stopped, not
+killed: `mia down` sends its process SIGTERM and waits for it (`drain`). The worker's task queues stop together
+(`mia_core.temporal.until_stopped`), a running activity gets `DRAIN` (10 s) to finish, and one still running then
+is cancelled and handed back to Temporal, which gives it to the next worker at once. A worker that dies any other
+way leaves each running activity to its timeout: a job wait three minutes (its heartbeat), a job submit two
+(`heartbeats`, `BEAT_TIMEOUT`), any other its `seconds`. The jobs on the cluster run on through all of it: a wait
+finds its job again by id, and a submit is at most once per key. An activity that a workflow gives a heartbeat
+timeout (`beats=True` in `_act`) carries `@heartbeats`; `tests/test_core_temporal.py` holds the two together.
+
 **Planning from outside.** `POST /plan` plans a spec against the synced catalog and the registry; datasets that
 are not `prepared` are out of the pool with the rule `not prepared`. The body is `{"spec": "<yaml text>"}`; read
 the spec from a file:

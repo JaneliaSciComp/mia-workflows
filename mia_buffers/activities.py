@@ -38,6 +38,7 @@ from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge import policy
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
+from mia_core.temporal import heartbeats
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
 from mia_data.binding import granted_hosts, missing_hosts
@@ -1081,6 +1082,7 @@ class Activities:
 
     @activity.defn(name="submit")
     @mia_permanent_errors
+    @heartbeats
     async def submit(self, key: str, args: StageJobArgs) -> str:
         """Build the stage job (snippets at the binding's commit, the round's building directory as `out`), refuse
         hosts a fresh `csub probe` doesn't allow, and submit at most once per key. Returns the job id; the staged
@@ -1323,6 +1325,7 @@ class Activities:
 
     @activity.defn(name="submit_fetch")
     @mia_permanent_errors
+    @heartbeats
     async def submit_fetch(self, key: str, args: FetchJobArgs) -> str:
         """Submit the fetch job at most once per key, hosts checked as `submit` does. Returns the job id; the raw
         asset row says `fetching` under it (best effort)."""

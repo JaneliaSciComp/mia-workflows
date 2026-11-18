@@ -22,6 +22,7 @@ from temporalio.worker import Worker
 
 from autodev.github import GitHub
 from mia_core.registry import Registry
+from mia_core.temporal import DRAIN
 
 from . import catalog
 from .config import Config
@@ -77,7 +78,9 @@ def mirror_worker(client: Client, task_queue: str, mirror: Callable[..., Awaitab
     """The worker of a mirror queue: the `mirror` activity alone, one pass at a time, so the passes of every
     subject write to GitHub in single file and a pass that waits (the write gap, a rate limit) holds up only
     other passes."""
-    return Worker(client, task_queue=task_queue, activities=[mirror], max_concurrent_activities=1)
+    return Worker(
+        client, task_queue=task_queue, activities=[mirror], max_concurrent_activities=1, graceful_shutdown_timeout=DRAIN
+    )
 
 
 class Mirror:

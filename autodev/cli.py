@@ -165,6 +165,8 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     long-running job waits."""
     from temporalio.worker import Worker
 
+    from mia_core.temporal import DRAIN, until_stopped
+
     from .activities import Activities
     from .agent import AgentJobs
     from .auth import bot_login, noreply_email, token_fn
@@ -191,9 +193,14 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         workflows=[IssueWorkflow, PollWorkflow],
         activities=activities.all(),
         max_concurrent_activities=8,
+        graceful_shutdown_timeout=DRAIN,
     )
     await_worker = Worker(
-        client, task_queue=f"{task_queue}-await", activities=[activities.await_agent], max_concurrent_activities=20
+        client,
+        task_queue=f"{task_queue}-await",
+        activities=[activities.await_agent],
+        max_concurrent_activities=20,
+        graceful_shutdown_timeout=DRAIN,
     )
     task = asyncio.current_task()
     assert task is not None  # we are inside the worker coroutine
@@ -209,7 +216,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     report = report_code(activities.registry, task_queue)
     try:
         async with main_worker, await_worker:
-            await asyncio.Event().wait()
+            await until_stopped(main_worker, await_worker)
     except asyncio.CancelledError:
         log.info("worker shutting down")
     finally:

@@ -27,6 +27,7 @@ from temporalio.exceptions import ActivityError, ApplicationError, CancelledErro
 
 with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
+    from mia_core.temporal import BEAT_TIMEOUT
 
     from .config import round_open
     from .crop_test import describe_failure, job_succeeded, judge, review_request, rework_request
@@ -271,8 +272,10 @@ class MiaDataDataset:
         budget: timedelta = timedelta(hours=6),
         result_type: Any = None,
         cleanup: bool = False,
+        beats: bool = False,
     ) -> Any:
-        """Run an activity with a per-attempt timeout and an overall retry budget.
+        """Run an activity with a per-attempt timeout and an overall retry budget. `beats`: the activity
+        heartbeats (`mia_core.temporal.heartbeats`), so a worker that died under it is noticed in BEAT_TIMEOUT.
 
         Transient failures retry until the budget runs out; activities raise a non-retryable
         ApplicationError for failures that a retry cannot fix.
@@ -295,6 +298,7 @@ class MiaDataDataset:
                 args=list(args),
                 start_to_close_timeout=timedelta(seconds=seconds),
                 schedule_to_close_timeout=budget,
+                heartbeat_timeout=BEAT_TIMEOUT if beats else None,
                 retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
                 result_type=result_type,
             )
@@ -753,6 +757,7 @@ class MiaDataDataset:
                 JobArgs(workspace, state.round_id, state.pins, **job_args),
                 seconds=600,
                 result_type=str,
+                beats=True,
             )
             if self._results() and not own_entry and workspace not in state.pass_jobs:
                 state.pass_jobs = [*state.pass_jobs, workspace]  # the pass's result links the job's record

@@ -82,8 +82,9 @@ def make_stack(tmp_path, managed=True, address="localhost:7233"):
 def fake(monkeypatch, tmp_path):
     """Records every subprocess.run; tmux sessions and Temporal health are simulated."""
     state = SimpleNamespace(calls=[], running=set(), healthy=False, namespace_rc=0, windows="  worker: alive\n")
-    state.worker_starts = True
+    state.worker_starts, state.api_starts, state.workers = True, True, ""  # workers: what pgrep finds
     monkeypatch.setattr(services, "worker_started", lambda svc, since: state.worker_starts)
+    monkeypatch.setattr(services, "api_started", lambda svc, endpoint: state.api_starts)
     for name in ("python", "csub-broker"):
         (tmp_path / name).write_text("#!/bin/sh\n")
         (tmp_path / name).chmod(0o755)
@@ -119,6 +120,8 @@ def fake(monkeypatch, tmp_path):
                     state.healthy = False
             elif argv[1] == "list-panes":
                 return subprocess.CompletedProcess(argv, 0, stdout="4242\n", stderr="")
+        elif isinstance(argv, list) and argv[0] == "pgrep":
+            return subprocess.CompletedProcess(argv, 0, stdout=state.workers, stderr="")
         elif isinstance(argv, list) and argv[0] == "/usr/bin/temporal":
             if argv[1:4] == ["operator", "cluster", "health"]:
                 rc = 0 if state.healthy else 1
@@ -541,6 +544,50 @@ def test_kill_waits_for_the_pane_process_group_to_exit(fake, monkeypatch):
     monkeypatch.setattr(services.time, "sleep", naps.append)
     assert services.kill("temporal") == 0
     assert polls == [4242, 4242] and naps == [0.1, 0.1]  # alive twice, then gone
+
+
+def test_kill_tells_the_worker_to_stop_and_waits_for_it_before_the_session_goes(fake, monkeypatch):
+    """A worker that is told to stop hands its running activities back to Temporal; one that dies with its
+    session leaves each to its timeout (2026-11-18: twelve job waits for three minutes, four submits for ten).
+    So the worker gets SIGTERM, alone of its session, and the session is killed once it has gone."""
+    fake.running.add("mia-data")
+    fake.workers = "777\n"
+    order, polls = [], []
+
+    def signalled(pid, sig):
+        order.append(("signal", pid, sig))
+        if sig == 0:
+            polls.append(pid)
+            if len(polls) > 2:  # alive twice, then gone
+                raise ProcessLookupError
+
+    monkeypatch.setattr(services.os, "kill", signalled)
+    monkeypatch.setattr(services.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+    assert services.kill("mia-data") == 0
+    asked = next(argv for argv, _ in fake.calls if argv[0] == "pgrep")
+    assert asked[:3] == ["pgrep", "-g", "4242"] and asked[-1] == r"^\S*python\S* -m \S+ worker$"
+    assert order[0] == ("signal", 777, services.signal.SIGTERM) and polls == [777, 777, 777]
+    calls = [argv[:2] for argv, _ in fake.calls]
+    assert calls.index(["pgrep", "-g"]) < calls.index(["tmux", "kill-session"])
+
+
+def test_a_worker_that_does_not_stop_is_killed_with_its_session(fake, monkeypatch, capsys):
+    fake.running.add("mia-data")
+    fake.workers = "777\n"
+    monkeypatch.setattr(services.os, "kill", lambda pid, sig: None)  # never goes
+    monkeypatch.setattr(services.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+    assert services.kill("mia-data") == 0 and tmux_calls(fake, "kill-session")
+    assert "has not stopped after 60 s" in capsys.readouterr().err
+
+
+def test_no_worker_starts_before_buffer_api_answers(tmp_path, fake, capsys):
+    """Every worker writes to buffer-api, its own too: the worker window opens once the service takes
+    connections, and a service that never does is reported instead."""
+    s = make_buffers_stack(tmp_path)
+    fake.api_starts = False
+    assert services.service_up(s.services["mia-buffers"], s, Temporal(s)) == 1
+    assert [c[c.index("-n") + 1] for c in tmux_calls(fake, "new-window")] == ["api"]
+    assert "buffer-api did not come up" in capsys.readouterr().err
 
 
 def test_up_refuses_a_missing_local_root_for_data_and_buffers(tmp_path, fake):

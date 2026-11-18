@@ -5,11 +5,14 @@ which runs on the host like the broker)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import getpass
 import importlib
 import os
 import shlex
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import time
@@ -52,14 +55,55 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
+DRAIN_WAIT_S = 60  # how long `down` waits for a worker to stop: its DRAIN, and the reports of what it hands back
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def worker_pids(groups: list[int]) -> list[int]:
+    """The worker processes (`python -m <app> worker`) in these process groups. The sandbox around one, whose
+    command line ends the same way, is not one: stopping it would take the proxy the worker reports through."""
+    if not groups:
+        return []
+    listed = subprocess.run(
+        ["pgrep", "-g", ",".join(str(pgid) for pgid in groups), "-f", r"^\S*python\S* -m \S+ worker$"],
+        capture_output=True,
+        text=True,
+    )
+    return [int(pid) for pid in listed.stdout.split() if pid.isdigit()]
+
+
+def drain(session: str, groups: list[int]) -> None:
+    """Tell the session's worker to stop and wait for it. On SIGTERM a worker takes no new task, lets its
+    running activities finish for `mia_core.temporal.DRAIN` and hands the rest back to Temporal, which gives
+    them to the next worker at once. A worker that is killed leaves each to its timeout, minutes later."""
+    pids = worker_pids(groups)
+    for pid in pids:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+    for _ in range(DRAIN_WAIT_S * 5):
+        if not any(_alive(pid) for pid in pids):
+            return
+        time.sleep(0.2)
+    print(f"{session}: its worker has not stopped after {DRAIN_WAIT_S} s; killing it", file=sys.stderr)
+
+
 def kill(session: str) -> int:
-    """Kill the session and wait for its processes to exit: tmux only delivers SIGHUP, and a Temporal server still
-    closing its SQLite database when `up` starts the next one makes that one fail with `database is locked`."""
+    """Stop the session's worker (`drain`), then kill the session and wait for its processes to exit: tmux only
+    delivers SIGHUP, and a Temporal server still closing its SQLite database when `up` starts the next one makes
+    that one fail with `database is locked`."""
     if not is_running(session):
         print(f"{session}: not running")
         return 0
     panes = _tmux("list-panes", "-s", "-t", f"={session}", "-F", "#{pane_pid}", capture_output=True).stdout
     groups = [int(pid) for pid in panes.split() if pid.isdigit()]  # each pane's command leads its process group
+    drain(session, groups)
     rc = _tmux("kill-session", "-t", f"={session}").returncode
     if rc == 0:
         for _ in range(300):
@@ -372,6 +416,21 @@ def ensure_policy(stack: Stack) -> Path:
 
 
 WORKER_START_S = 90  # how long `mia up` waits for a new worker's first poll
+API_START_S = 30  # ... and for buffer-api to take connections, before any worker that writes to it starts
+
+
+def api_started(svc: Service, endpoint: tuple[str, int]) -> bool:
+    """Wait until buffer-api takes connections. False when its window dies first or `API_START_S` pass."""
+    for _ in range(API_START_S * 5):
+        if "api" in dead_windows(svc.name):
+            return False
+        try:
+            socket.create_connection(endpoint, timeout=1).close()
+        except OSError:
+            time.sleep(0.2)
+        else:
+            return True
+    return False
 
 
 async def _polls_since(svc: Service, since: float) -> bool:
@@ -397,8 +456,8 @@ def worker_started(svc: Service, since: float) -> bool:
 
 
 def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
-    """Start one app service: broker + sandboxed worker in tmux, then apply its poll schedule, then wait for the
-    worker's first poll: 1 when it never comes. Temporal is started (managed) or verified (external) first.
+    """Start one app service: broker + sandboxed worker in tmux (buffer-api before the worker, which starts once
+    it answers), then apply its poll schedule, then wait for the worker's first poll: 1 when it never comes. Temporal is started (managed) or verified (external) first.
     Re-running on a live session only re-applies the schedule, so a run that failed partway is repaired by
     running it again; a session with a dead window is reported, not repaired."""
     cfg = svc.cfg
@@ -468,6 +527,14 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
         env_pairs = [f"{name}={value}" for name, value in svc.env().items()]
         api = shell("env", *env_pairs, PY, "-m", svc.app.module, "serve")
         new_window(svc.name, "api", f"{api} 2>&1 | tee -a {shell(svc.host / 'logs/api.log')}")
+        if not api_started(svc, endpoint):  # no worker starts on a registry that does not answer
+            print(
+                f"{svc.name}: NOT RUNNING: buffer-api did not come up in {API_START_S} s. Its last lines:",
+                file=sys.stderr,
+            )
+            print(last_lines(svc.name, "api"), file=sys.stderr)
+            print(f"{svc.name}: see `mia logs {svc.name} api`; then `mia restart {svc.name}`", file=sys.stderr)
+            return 1
     # cwd = the state dir, which sandbox-run.sh binds read-write; the repo (code + pixi env), config and secret
     # are read-only. The worker reaches Temporal through the sandbox's allowlist proxy.
     mounts: list[object] = ["--ro", PROJECT_DIR, "--ro", svc.config_path, "--ro", svc.secret]

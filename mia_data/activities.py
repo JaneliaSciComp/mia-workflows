@@ -48,6 +48,7 @@ from mia_core.judge.schema import (
 )
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
+from mia_core.temporal import heartbeats
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_core.untrusted import text as _text
@@ -1100,6 +1101,7 @@ class Activities:
 
     @activity.defn(name="submit")
     @mia_permanent_errors
+    @heartbeats
     async def submit(self, key: str, kind: str, args: JobArgs) -> str:
         """Build the job (the builders refuse a moved harness pin), let it reach what a person approved for its
         dataset beside its URLs' hosts (`granted_hosts`), refuse hosts a fresh `csub probe` doesn't allow, and submit at most

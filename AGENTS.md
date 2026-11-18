@@ -33,6 +33,12 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   fields with defaults; never rename or remove one. (`VerifyResult.n` keeps its name for this reason.)
 - **Workflow code is deterministic.** If `test_replay_*` fails, your change alters the commands a workflow issues
   and will break in-flight runs. Guard with `workflow.patched()` and re-record the fixture (see the guide).
+- **A worker is stopped, never killed, and every activity can run again.** `mia down` sends the worker SIGTERM
+  and waits; the worker hands its running activities back to Temporal (`mia_core.temporal`: `DRAIN`,
+  `until_stopped`), which gives them to the next worker at once. So an activity starts what it starts at most
+  once per key and finds what it waits for by id. One that a workflow gives a heartbeat timeout (`beats=True`
+  in `_act`) carries `@heartbeats`, never one without the other. buffer-api stops last and starts first, and
+  `mia restart` leaves Temporal alone unless it is named.
 - **No real paths or hostnames in tracked files.** `git diff | grep -n 'rokickik\|/nrs/'` must be empty.
 - **One config file.** Deployments read their block of `mia.yaml` (`MIA_SERVICE`, `MIA_CONFIG`); the per-app YAML
   files are deprecated. `paths.local_root` and a managed `temporal.state_dir` must be host-local disk.
