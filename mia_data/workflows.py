@@ -29,7 +29,7 @@ with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
 
     from .config import round_open
-    from .crop_test import describe_failure, job_succeeded, judge, rework_request
+    from .crop_test import describe_failure, job_succeeded, judge, review_request, rework_request
     from .models import (
         ADVISERS,
         DEBUGGER,
@@ -1080,6 +1080,10 @@ class MiaDataDataset:
             await self._assess("reject", event, subject)
             self._found(f"Rejected by {event.actor}: autodev is asked for a snippet that takes the comments in.")
             feedback = await self._feedback(event)
+            if workflow.patched("judge-decides"):  # the set stays acceptable, and the request can be answered
+                held = self._hold(state.tests[-1], event.actor, f"#{event.event_id}")
+                held.opened_issue = state.snippet_issue is None
+                feedback = review_request(feedback, held.request)
             await self._develop({"what_fails": feedback}, state.snippet_issue, binding=state.binding)
 
     async def _judged(self, test: Test) -> JudgeResult | None:
@@ -1218,9 +1222,8 @@ class MiaDataDataset:
             )
             return False
         state.reworks += 1
-        held = state.held = self._set_of(test)
-        held.sent_back_by, held.worst = JUDGE, judged.worst
-        held.request = f"{held.set_id}#{state.reworks}"
+        held = self._hold(test, JUDGE, f"#{state.reworks}")
+        held.worst = judged.worst
         held.findings = [finding for finding in judged.findings if finding.get("severity") != "ok"]
         feedback = rework_request(held.findings, held.request)
         self._found(
@@ -1300,6 +1303,57 @@ class MiaDataDataset:
             f"{published['total']} in the dataset\n"
         )
         await self._finish("done", extra=extra)
+
+    def _hold(self, test: Test, by: str, suffix: str) -> CropSet:
+        """`test`'s set was sent back for rework by `by` (the judge, or a person's actor): it is kept as the
+        dataset's held set, which an approve can still name (spec judge-decides §5.1), under a request id the
+        developer answers."""
+        held = self.state.held = self._set_of(test)
+        held.sent_back_by, held.request = by, f"{held.set_id}{suffix}"
+        return held
+
+    def _restore(self, held: CropSet) -> None:
+        """The held set's round becomes the state's again: what a verdict on that set acts on (its crops, its
+        binding, its pull request) is the set's own, whatever a later round or head left in the state."""
+        state = self.state
+        state.round_id, state.pins, state.binding, state.binding_hash = (
+            held.round_id,
+            held.pins,
+            held.binding,
+            held.binding_hash,
+        )
+        state.pr, state.snippet_issue, state.tests = held.pr, held.snippet_issue, [held.test]
+
+    async def _approve_held(self, by: str, at: str, said: str, found: str) -> None:
+        """The held set is approved by `by`, an author that is not a person (`policy:developer`: the developer
+        looked into the judge's doubts and found the crops right, spec judge-decides §4.2): the approval is
+        written as an assessment, and the set is saved, or its pull request's head merged, as after a person's
+        approve. `said` is the assessment's summary, `found` what the timeline says of it. A person's verdict on
+        the set, whenever it was given, outranks it (`authorized`)."""
+        state, held = self.state, self.state.held
+        assert held is not None  # the caller checked
+        kind, ref = ("pr_head", held.test.sha) if held.pr else ("crop_set", held.set_id)
+        written = await self._act(
+            "assess",
+            state.issue,
+            held.round_id,
+            "crops",
+            kind,
+            ref,
+            "approve",
+            by,
+            said,
+            seconds=300,
+            result_type=AssessmentWritten,
+        )
+        if not written.authorized:
+            return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
+        self._restore(held)
+        if held.pr:
+            return await self._pr_approved(held.test, "the developer's answer to the crop judge", at, by, found)
+        held.test.approved_at, held.test.approved_by = at, by
+        self._found(found)
+        await self._publish_set(held.test)
 
     def _set_of(self, test: Test) -> CropSet:
         """The round's set `test` with what a later verdict on it needs (spec judge-decides §5.4)."""
@@ -1430,6 +1484,9 @@ class MiaDataDataset:
             "back here for review",
         )
         await self._follow_pr()
+        if state.stage == "review" and not state.pr and state.held:
+            # the developer answered that nothing needs changing (`_answered`): the same set waits for a verdict
+            await self._from_review()
 
     async def _resume_pr(self, snippet_issue: int, pr_number: int) -> bool:
         """A `go` after a develop round stopped: pick its snippet PR up again if it is still open,
@@ -1501,7 +1558,9 @@ class MiaDataDataset:
         if look.pr and await self._on_pr(look.pr):
             return True
         if await self._answered(look):
-            return False
+            # the answer may have ended the round (a matched set was saved), or ended this wait for autodev (a
+            # matched set is back at review, where `_from_review` waits for the verdict)
+            return state.stage in (*STOPPED, "done") or (state.stage == "review" and not state.pr)
         where = f"mia-snippets issue #{state.snippet_issue}" + (f" (PR #{look.pr})" if look.pr else "")
         said = f' Its last comment: "{look.last_word}"' if look.last_word else ""
         if look.stopped and not look.pr:
@@ -1516,24 +1575,55 @@ class MiaDataDataset:
         return False
 
     async def _answered(self, look: AutodevLook) -> bool:
-        """Whether autodev answered the reviewer's comments without changing the snippet: its round after the
-        revision request made no commits, and it is at rest. Then no new head will come: the answer is this
-        pass's result, and the same crops go back to review for a verdict made with it."""
+        """Whether autodev answered a request for rework without changing the snippet, and it is at rest. Then no
+        new head will come, and the answer is this pass's result.
+
+        What counts as an answer depends on who asked and how (spec judge-decides §4.2). A person's revision
+        request on a pull request is answered by any round of autodev's that made no commits after it. The crop
+        judge's findings, and any request on an issue with no pull request, are answered only by autodev's
+        validated "nothing needs changing" for that very request (`look.no_change`): a round with no commits
+        alone says nothing about the crops.
+
+        What follows: a set the judge doubted (`suspect` findings only) is approved, as the developer found it
+        right; a set with a `bad` finding, and any set a person rejected, goes back to review with the answer,
+        for a person's verdict."""
         state = self.state
-        asked, answered = _parse_time(state.revised_at), _parse_time(look.answer_at or None)
-        if not (asked and answered and answered > asked) or look.working or look.stopped:
+        if look.working or look.stopped or state.stage != "developing" or not (state.tests and state.tests[-1].ok):
             return False
-        if state.stage != "developing" or not (state.pr and state.tests and state.tests[-1].ok):
+        held = state.held if workflow.patched("judge-decides") else None
+        validated = bool(held and held.request and look.no_change == held.request)
+        judged = bool(held and held.sent_back_by == JUDGE)
+        if state.pr:
+            asked, answered = _parse_time(state.revised_at), _parse_time(look.answer_at or None)
+            if not (asked and answered and answered > asked) or (judged and not validated):
+                return False
+        elif not validated:
             return False
         state.revised_at = None
-        pr = await self._act("pr_state", state.pr, result_type=PrUpdate)
         quoted = "\n".join(f"> {line}" for line in look.answer.splitlines())
-        self._found(f"autodev changed nothing in the snippet. Its answer to your comments:\n\n{quoted}")
-        await self._stage(
-            "review",
-            "autodev answered your comments without changing the snippet; the same crops wait for your verdict",
-            extra=f"**Snippet PR:** {pr.url or f'#{pr.pr}'}\n",
+        if held and judged and held.worst == "suspect":
+            found = (
+                "The developer looked into the crop judge's findings and changed nothing in the snippet: the "
+                f"crops are approved as they are. Its answer:\n\n{quoted}"
+            )
+            said = "the developer found the crops right as they are"
+            await self._approve_held("policy:developer", workflow.now().isoformat(), said, found)
+            return True
+        who = "the crop judge's findings" if judged else "your comments"
+        self._found(f"autodev changed nothing in the snippet. Its answer to {who}:\n\n{quoted}")
+        detail = (
+            "the crop judge found a bad crop and the developer says the crops are right as they are; the set "
+            "waits for your verdict"
+            if judged
+            else "autodev answered your comments without changing the snippet; the same crops wait for your verdict"
         )
+        extra = ""
+        if state.pr:
+            pr = await self._act("pr_state", state.pr, result_type=PrUpdate)
+            extra = f"**Snippet PR:** {pr.url or f'#{pr.pr}'}\n"
+        else:
+            state.snippet_issue = None  # that issue is answered and done with: a further reject opens a new one
+        await self._stage("review", detail, extra=extra)
         return True
 
     async def _approve_pr(self, event: LabelEvent) -> None:
@@ -1545,12 +1635,14 @@ class MiaDataDataset:
             return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
         await self._pr_approved(test, event.actor, event.at)
 
-    async def _pr_approved(self, test: Test, by: str, at: str) -> None:
-        """The PR head's set is approved, by a person or by the crop judge: autodev is told to merge that head."""
+    async def _pr_approved(self, test: Test, by: str, at: str, author: str = "", note: str = "") -> None:
+        """The PR head's set is approved, by a person, by the crop judge or (`author`: who the approval is
+        recorded as, when `by` only names it for the timeline; `note`: what else the timeline says of it) after
+        the developer's answer: autodev is told to merge that head."""
         state = self.state
-        test.approved_at, test.approved_by = at, JUDGE if by == JUDGE_NAME else by
+        test.approved_at, test.approved_by = at, author or (JUDGE if by == JUDGE_NAME else by)
         await self._act("comment", state.pr, f"/approve {test.sha}", f"approve {state.round_id} {test.sha}", "snippets")
-        self._found(f"Approved by {by}: the crops at `{test.sha}`.")
+        self._found(f"Approved by {by}: the crops at `{test.sha}`." + (f"\n\n{note}" if note else ""))
         await self._stage(
             "merging", f"the crops at `{test.sha}` are approved; autodev merges the snippet PR, then they are saved"
         )
@@ -1561,6 +1653,8 @@ class MiaDataDataset:
         state = self.state
         await self._assess("reject", event, ("pr_head", state.tests[-1].sha))
         state.revised_at = workflow.now().isoformat()
+        if workflow.patched("judge-decides"):
+            self._hold(state.tests[-1], event.actor, f"#{event.event_id}")  # an approve can still name this set
         feedback = await self._feedback(event)
         await self._act(
             "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} {event.event_id}", "snippets"

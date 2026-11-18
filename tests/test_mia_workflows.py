@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import os
 import uuid
@@ -1096,9 +1097,12 @@ async def test_reject_in_matched_review_asks_for_a_superseding_snippet(env):
         await idle(h, m, "done")
         st = await h.query(MiaDataDataset.status)
     assert m.stages == ["matching", "testing", "review", "developing", "testing", "review", "merging", "done"]
-    assert m.of("open_snippet_issue") == [
-        ("i7-e11", None, "/s/binding-1.yaml", {"what_fails": "alice wrote:\nthe masks are shifted by one pixel"})
-    ]
+    (asked,) = m.of("open_snippet_issue")
+    assert asked[:3] == ("i7-e11", None, "/s/binding-1.yaml")
+    # the comments, under a request the developer can answer with "the crops are right as they are"
+    assert asked[3]["what_fails"].splitlines()[0].startswith("Request: i7-e11:")
+    assert "alice wrote:\nthe masks are shifted by one pixel" in asked[3]["what_fails"]
+    assert m.of("open_snippet_issue") == [("i7-e11", None, "/s/binding-1.yaml", {"what_fails": asked[3]["what_fails"]})]
     assert "superseding" in m.of("set_stage")[3][1]
     assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]
     assert [(a.sha, a.trusted) for a in m.jobs() if a.n_crops] == [(PINS.snippets_commit, True), (H1, False)]
@@ -2236,6 +2240,115 @@ def test_the_rework_request_names_itself_and_lists_each_finding_on_a_line():
         "- c2 [bad]:",
     ]
     assert "no_change.json" in text and "make no commits" in text
+
+
+DOUBTED_BAD = dataclasses.replace(
+    DOUBTED, findings=[{"item": "c1", "severity": "bad", "note": "header read as pixels"}], worst="bad"
+)
+SAID = "**Nothing needs changing.** The answer to each finding:\n\n- c1: the label's own shift"
+
+
+def answered(pr, request):
+    """What a look finds once autodev validated a "nothing needs changing" for `request`."""
+    return AutodevLook(pr, False, False, "", SAID, "2999-01-01T00:00:00Z", no_change=request)
+
+
+async def sent_back_pr(env, h, m):
+    """The judge sent h1's set back as a revision request and autodev has not answered yet; the held set."""
+    await idle(h, m, "developing")
+    await wake(h, m, head(H1))
+    await until(lambda: revisions(m))
+    await idle(h, m, "developing")
+    await env.sleep(LOOK)
+    assert m.stages[-1] == "developing"
+    return (await h.query(MiaDataDataset.status)).held
+
+
+async def test_the_developers_nothing_to_change_approves_a_suspect_only_set(env):
+    """spec judge-decides §4.2: the judge doubted, the developer looked and found the crops right: saved."""
+    quiet = AutodevLook(5, False, False, "")
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"}, crop_judge="active", judge_result=DOUBTED, look=quiet)
+    async with started(env, m) as h:
+        held = await sent_back_pr(env, h, m)
+        m.look = answered(5, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "merging")
+        assert pr_comments(m)[-1] == f"/approve {H1}"
+        (assessed,) = m.of("assess")
+        assert assessed[1:5] == ("pr_head", H1, "approve", "policy:developer")
+        said = [r[1] for r in m.of("result") if r[0] == "developing"][-1]
+        assert "changed nothing" in said and "> - c1: the label's own shift" in said
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done")
+        assert (await h.query(MiaDataDataset.status)).saved.test.approved_by == "policy:developer"
+
+
+async def test_the_developers_nothing_to_change_on_a_bad_set_waits_for_a_person(env):
+    quiet = AutodevLook(5, False, False, "")
+    m = Mocks(outcome="needs_snippet", crop_judge="active", judge_result=DOUBTED_BAD, look=quiet)
+    async with started(env, m) as h:
+        held = await sent_back_pr(env, h, m)
+        m.look = answered(5, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        assert not m.of("assess") and "/approve" not in " ".join(pr_comments(m))
+        detail = m.of("set_stage")[-1][1]
+        assert "the crop judge found a bad crop" in detail and "waits for your verdict" in detail
+        await approve_review(h, m, eid="13", dt=3)
+        await idle(h, m, "merging")
+    assert pr_comments(m)[-1] == f"/approve {H1}"
+
+
+@pytest.mark.parametrize("no_change", ["", "i7-e11:another#1"])
+async def test_a_no_commit_round_without_a_validated_answer_approves_nothing(env, no_change):
+    """spec judge-decides §4.2: a round with no commits is not "right as they are"."""
+    quiet = AutodevLook(5, False, False, "")
+    m = Mocks(outcome="needs_snippet", crop_judge="active", judge_result=DOUBTED, look=quiet)
+    async with started(env, m) as h:
+        await sent_back_pr(env, h, m)
+        m.look = AutodevLook(
+            5, False, False, "", "could not reach the host", "2999-01-01T00:00:00Z", no_change=no_change
+        )
+        await env.sleep(LOOK)
+        assert m.stages[-1] == "developing" and not m.of("assess")
+        assert "/approve" not in " ".join(pr_comments(m))
+
+
+async def test_the_developers_answer_on_an_issue_with_no_pull_request_saves_a_suspect_only_matched_set(env):
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, False, False, ""))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        m.look = answered(None, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+    assert m.of("assess")[0][1:5] == ("crop_set", held.set_id, "approve", "policy:developer")
+    assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
+    assert state.saved.set_id == held.set_id and state.held is None
+
+
+async def test_an_answer_on_an_issue_with_no_pull_request_brings_a_persons_rejected_set_back_to_review(env):
+    """spec judge-decides §4.2: a developer's answer to a person's reject never approves; the person decides."""
+    m = Mocks(look=AutodevLook(None, False, False, ""))
+    async with started(env, m) as h:
+        await reject_review(h, m)
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        draft = m.of("open_snippet_issue")[0][3]
+        assert (held.sent_back_by, held.request) == ("alice", f"{held.set_id}#12")
+        assert draft["what_fails"].startswith(f"Request: {held.request}\n")
+        assert "the masks are shifted by one pixel" in draft["what_fails"]
+        await env.sleep(LOOK)
+        assert m.stages[-1] == "developing"
+        m.look = answered(None, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        assert [a[3] for a in m.of("assess")] == ["reject"] and "publish_crops" not in m.names()
+        assert (await h.query(MiaDataDataset.status)).snippet_issue is None  # that issue is answered and done with
+        await approve_review(h, m, eid="13", dt=3)
+        await idle(h, m, "done")
+    assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
 
 
 async def test_max_reworks_zero_never_sends_back(env):

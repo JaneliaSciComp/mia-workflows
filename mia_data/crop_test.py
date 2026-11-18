@@ -57,6 +57,28 @@ def rework_request(findings: list[dict], request: str) -> str:
     )
 
 
+def review_request(comments: str, request: str) -> str:
+    """What the developer is asked when a person rejects a set and no pull request carries the request: the
+    request's id, the person's comments, and one finding that stands for them, so that the developer can answer
+    "the crops are right as they are" the way it answers the judge (`rework_request`)."""
+    return "\n".join(
+        [
+            f"Request: {request}",
+            "",
+            "A reviewer rejected the sample crops this reader made. Their comments:",
+            "",
+            comments,
+            "",
+            "- the reviewer's comments [bad]: see above",
+            "",
+            "Fix the reader or its binding and commit. If the crops are right as they are, make no commits and "
+            f"write `{NO_CHANGE_FILE}` in the current directory, uncommitted: "
+            '`{"request": "<the id on the first line>", "findings": [{"item": "the reviewer\'s comments", '
+            '"answer": "<what you looked at and why it is not a defect>"}]}`.',
+        ]
+    )
+
+
 def judge(verify: VerifyResult, jobs: list[JobDone], needed: int | None = None) -> tuple[bool, list[str]]:
     """(passed, descriptions of failed jobs). A PR head's test crops (`needed` None) pass when both jobs succeeded
     and every crop verified. The dataset's own set (spec §13) passes when the crop job succeeded and at least
