@@ -181,6 +181,10 @@ export async function boot() {
     .sort((a, b) => (toEpoch(b.synced_at) || 0) - (toEpoch(a.synced_at) || 0));
   S.ref = S.catalogs[0]?.ref || null;
   window.addEventListener("hashchange", route);
+  // a click anywhere outside an open menu closes it
+  document.addEventListener("click", e => {
+    for (const menu of document.querySelectorAll("details.more[open]")) if (!menu.contains(e.target)) menu.open = false;
+  });
   // a click on the current tab changes no hash: reload the view by hand
   document.querySelectorAll("[data-tab]").forEach(a =>
     a.addEventListener("click", () => {

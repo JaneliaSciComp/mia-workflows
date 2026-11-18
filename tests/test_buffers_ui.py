@@ -1028,6 +1028,7 @@ def test_a_buffer_is_one_page_and_the_tabs_name_no_spec_and_no_preparation() -> 
     # the strip, and what is not a step
     assert has("stripOf(subject?.stage, step)", flow) and has("stepToShow(subject.stage, asked)", flow)
     assert has('el("summary", { class: "btn" }, "Actions…")', flow) and has("actionBar(subject, redraw, ", flow)
+    assert has("bar.prepend(", flow) and has('document.querySelectorAll("details.more[open]")')  # Clone first; closes
     assert has("timelineCard(entries)", flow) and has("shelvedNotice(subject.shelved)", flow)
     # the stream redraws the buffer's page, not a subject's
     assert has("if (onScreen.redraw) onScreen.redraw();") and has("onScreen.redraw = null;")

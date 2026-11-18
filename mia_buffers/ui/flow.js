@@ -88,10 +88,10 @@ async function leave(subject, step, button) {
   goTo(saved, step);
 }
 
-// The menu under Actions…: the actions the buffer accepts now, and Clone, which asks nothing of the service.
+// The menu under Actions…: Clone, which asks nothing of the service, then the actions the buffer accepts now.
 function menu(subject, redraw, skip) {
   const bar = actionBar(subject, redraw, skip);
-  bar.append(
+  bar.prepend(
     el(
       "button",
       {
