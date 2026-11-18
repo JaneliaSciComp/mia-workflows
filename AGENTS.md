@@ -42,7 +42,10 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
   `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there.
   buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`
-  and, for a run that cannot answer one, `stop` (a dataset at `debugging` also the `go` of its next round). Any
+  and, for a run that cannot answer one, `stop` (a dataset at `debugging` also the `go` of its next round; a
+  dataset whose set was sent back for rework also an `approve` of that set, and a `done` one a `reject` of its
+  saved set). A dataset's verdict names its `set`, and buffer-api refuses one for a set the stage does not let
+  it be about (`_names_its_set`). Any
   action may name the `revision` it was decided at and is refused once the subject moved. A buffer's `edit`
   (a changed definition, where the buffer rests) is in the table too, and buffer-api carries it out itself.
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the

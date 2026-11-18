@@ -23,6 +23,7 @@ class LabelEvent:
     event_id: str  # the action's id in the registry
     actor: str
     at: str  # ISO-8601, as buffer-api stored the action
+    set: str = ""  # a verdict: the set of crops it is about (`set_id`); "" from a sender that names none
 
 
 @dataclass
