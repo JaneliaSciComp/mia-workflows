@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mia_data.binding import check_binding, hosts, missing_hosts, record_urls
+from mia_data.binding import check_binding, granted_hosts, hosts, missing_hosts, network_hosts, record_urls
 from mia_data.models import Pins
 from tests.mia_helpers import make_cfg
 
@@ -100,8 +100,16 @@ def test_hosts_add_redirects_and_packages(tmp_path):
     )
     urls = B["raw"][0]["urls"] + ["s3://bucket/key", "https://DATA.broadinstitute.org/y"]
     assert hosts(urls, cfg) == ["bucket.s3.amazonaws.com", "cdn.broad.example", "data.broadinstitute.org", "pypi.org"]
-    with pytest.raises(ValueError):
-        hosts(["https://raw.githubusercontent.com/o/r/x"], cfg)
+    github = ["https://raw.githubusercontent.com/o/r/x", "https://github.com/o/r", "https://h.example.org/x"]
+    assert hosts(github, cfg) == ["h.example.org", "pypi.org"]  # a job's hosts never hold a GitHub one
+    assert "raw.githubusercontent.com" in network_hosts(github, cfg.network, raw_github=True)  # approvable
+    assert "github.com" not in network_hosts(github, cfg.network, raw_github=True)
+    noted = {"hosts": ["cdn.example.org", "raw.githubusercontent.com"], "approved": []}
+    allowed = ["*.example.org", "raw.githubusercontent.com"]
+    assert granted_hosts(noted, allowed) == ["cdn.example.org"]  # the policy allowing raw GitHub is not enough
+    approved = {"hosts": [], "approved": ["raw.githubusercontent.com", "github.com"]}
+    assert granted_hosts(approved, allowed) == ["raw.githubusercontent.com"]  # approved for this dataset
+    assert granted_hosts(approved, ["*.example.org"]) == []
 
 
 def test_missing_hosts():

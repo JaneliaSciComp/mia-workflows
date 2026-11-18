@@ -144,6 +144,20 @@ def read_result(round_dir: Path, limit: int = 20000) -> tuple[str, float | None]
     return text or "(empty summary)", cost if isinstance(cost, (int, float)) else None
 
 
+CUT_OFF_RE = re.compile(r"Not logged in|/login|OAuth|Invalid API key|API Error", re.IGNORECASE)
+
+
+def cut_off(round_dir: Path) -> str:
+    """Claude Code's own error when it, not the agent, ended the session: the error result in result.json that
+    names the login or the API, on one line; "" otherwise. Untrusted, like everything a job wrote."""
+    try:
+        data = json.loads(read_untrusted(Path(round_dir), "result.json", 1 << 20) or "")
+    except (ValueError, RecursionError):
+        return ""
+    said = data.get("result") if isinstance(data, dict) and data.get("is_error") is True else None
+    return " ".join(said.split())[:200] if isinstance(said, str) and CUT_OFF_RE.search(said) else ""
+
+
 def log_tail(round_dir: Path, lines: int = 40) -> str:
     """The last `lines` of claude.err and of the newest few csub job stderr files, for failure reports."""
     round_dir = Path(round_dir)

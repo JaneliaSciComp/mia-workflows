@@ -20,7 +20,7 @@ export const pageOf = (path, rowsKey, extra, quiet404) => async state => {
 };
 export const reloadTables = root => root.querySelectorAll(".paged").forEach(box => box.reload()); // a refresh that rebuilds nothing
 // cols: {key (the server's sort name; none: not sortable), label, num, wrap, title, cell}. `select`: {chosen (a Set), id, onchange}
-// adds a tick per row. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
+// adds a check per row. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
 export function pagedTable(
   id,
   { source, cols, empty, sort = null, dir = "asc", search = true, rowAttrs, tools = [], select, onPage },
@@ -50,11 +50,11 @@ export function pagedTable(
     return input;
   };
   const tickPage = page => {
-    // the header's tick: every row of this page, on or off
+    // the header's check: every row of this page, on or off
     const input = el("input", {
       type: "checkbox",
       "aria-label": "select every row of this page",
-      title: "tick or untick every row of this page",
+      title: "check or uncheck every row of this page",
     });
     input.checked = page.rows.length > 0 && page.rows.every(r => select.chosen.has(select.id(r)));
     input.addEventListener("change", () => {

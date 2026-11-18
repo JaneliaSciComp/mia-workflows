@@ -73,7 +73,10 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   looks at the snippets issue itself every 15 minutes (`autodev_look`, `_look` in `mia_data/workflows.py`) and
   ends `blocked` when autodev stopped or `limits.autodev_quiet_hours` passed with no agent round running; the
   poller's `pr_update` only makes it faster. autodev says a stop with the `needs-human` label, never a comment
-  alone. A new wait on something outside the round gets the same: a look and a limit.
+  alone. A reviewer's revision request that autodev answers with a round of no commits brings no new head: the
+  look takes the dataset back to `review` with autodev's answer as the pass's result (`_answered`). An agent
+  job Claude Code itself cut off (a lapsed login, an API error) is run once more by autodev before it stops.
+  A new wait on something outside the round gets the same: a look and a limit.
 - **The cleaner asks, like anyone, and service problems come first.** `MiaCleaner` (the buffers worker's `sweep`;
   rules in `mia_buffers/cleaner.py`) names what is wrong with the installation before it looks at a subject, and
   leaves alone every subject behind a finding: it never cancels or re-runs what waits on a worker that is down or
@@ -113,9 +116,14 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   what `dom.js` does. What a job or a record wrote is inserted as text, never parsed as HTML.
 - **Only a person's click approves a host.** Brokers read `<csub.policy_dir>/broker.toml`, generated from the operator's
   `csub.base_policy` plus `approved-hosts.jsonl`, which buffer-api alone appends to, on a start action, with hosts
-  that run's jobs need (records' URL hosts, bindings' too if the record names them, redirect targets, package hosts;
-  never an IP or the deployment's own host); nothing writes the operator's `broker.toml`. `policy_dir` is under home,
-  apart from every directory a worker sandbox binds read-write, and its `broker.toml` is not the base policy file.
+  that run's jobs need (records' URL hosts, bindings' too if the record names them, redirect targets, package hosts,
+  the hosts a dataset's jobs were refused; never an IP or the deployment's own host); nothing writes the operator's
+  `broker.toml`. A job that is refused a host notes it for its dataset; noting approves nothing, and the dataset's
+  jobs get the host only once the policy allows it; until then a request sends that dataset no `go` once it has
+  stopped, and the cleaner says which hosts wait. No job reaches a GitHub host, except that a person may approve
+  `raw.githubusercontent.com` for one dataset at a time: the policy allowing it grants it to no other dataset's
+  jobs. `policy_dir` is under home, apart from every directory a worker sandbox binds read-write, and its
+  `broker.toml` is not the base policy file.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.
 

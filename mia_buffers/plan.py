@@ -216,6 +216,19 @@ def _human_bytes(size: int) -> str:
     return f"{value:.1f} TB"
 
 
+def lacks_shape(f: Facts) -> bool:
+    """Whether the record's largest raw array has no extent along an axis a crop needs: no patch can be said to fit
+    an array whose shape the record does not give."""
+    largest = f.largest_raw
+    three_d = (f.dims or "").startswith("3D")
+    return (
+        largest is None
+        or largest.extent_y is None
+        or largest.extent_x is None
+        or (three_d and largest.extent_z is None)
+    )
+
+
 def fit(f: Facts, spec: Spec) -> Fit:
     """Whether the spec's coarsest crop fits this record's largest raw array, and whether its box is in nm."""
     patch = spec.patch_for(f.dims or "")
@@ -225,13 +238,9 @@ def fit(f: Facts, spec: Spec) -> Fit:
     footprint = (patch["y"] * scale, patch["x"] * scale)
     largest = f.largest_raw
     three_d = (f.dims or "").startswith("3D")
-    if (
-        largest is None
-        or largest.extent_y is None
-        or largest.extent_x is None
-        or (three_d and largest.extent_z is None)
-    ):
+    if largest is None or lacks_shape(f):
         return Fit(False, "no array shape", footprint, False)
+    assert largest.extent_y is not None and largest.extent_x is not None  # lacks_shape
     if footprint[0] > largest.extent_y or footprint[1] > largest.extent_x:
         return Fit(
             False,

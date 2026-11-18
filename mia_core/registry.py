@@ -106,6 +106,15 @@ class Registry:
     def dataset(self, record: str) -> dict | None:
         return self._lookup(f"/datasets/{quote(record, safe='')}")
 
+    def dataset_hosts(self, record: str) -> dict:
+        """What is held for the dataset alone: `hosts` its jobs were refused (its runs need them beside its
+        record's own) and `approved`, the hosts a person approved for it and no other dataset."""
+        return self.request("GET", f"/datasets/{quote(record, safe='')}/hosts")
+
+    def add_refused_hosts(self, record: str, hosts: list[str]) -> list[str]:
+        """Say that a job of the dataset was refused these hosts; the dataset's list after it."""
+        return self.request("PUT", f"/datasets/{quote(record, safe='')}/hosts", json={"hosts": hosts})["hosts"]
+
     def datasets(self, state: str | None = None) -> list[dict]:
         return self.request("GET", "/datasets", params={"state": state} if state else None)["datasets"]
 

@@ -57,11 +57,22 @@ def test_missing_groups_the_records_by_host(tmp_path):
     assert hosts.missing(hosts.for_records(records))["h.example.org"] == ["rec-a", "rec-b"]
 
 
-def test_a_record_naming_a_github_url_contributes_nothing(tmp_path):
-    records = {"rec-a": record("https://github.com/o/r/archive.zip"), "rec-b": record("https://h.example.org/b")}
-    needed = check(tmp_path).for_records(records)
-    assert needed["h.example.org"] == ["rec-b"]
-    assert "rec-a" not in {rec for recs in needed.values() for rec in recs}
+def test_a_records_github_urls_need_raw_github_alone_and_each_dataset_its_own_approval(tmp_path):
+    """Incident 2026-11-17: records with a file on GitHub failed every round with a ValueError. A job never gets
+    github.com; raw.githubusercontent.com can be approved, for one dataset at a time."""
+    hosts = check(tmp_path)
+    records = {
+        "rec-a": record("https://github.com/o/r/archive.zip"),
+        "rec-b": record("https://raw.githubusercontent.com/o/r/main/a.tif"),
+        "rec-c": record("https://raw.githubusercontent.com/o/s/main/c.tif"),
+    }
+    needed = hosts.for_records(records)
+    assert needed["raw.githubusercontent.com"] == ["rec-b", "rec-c"] and "github.com" not in needed
+    hosts.check(["raw.githubusercontent.com"], needed)
+    hosts.approve(["raw.githubusercontent.com"], by="page", kind="dataset", number=1)  # the policy allows it now
+    assert hosts.missing(needed, {"rec-b": ["raw.githubusercontent.com"]})["raw.githubusercontent.com"] == ["rec-c"]
+    both = {"rec-b": ["raw.githubusercontent.com"], "rec-c": ["raw.githubusercontent.com"]}
+    assert "raw.githubusercontent.com" not in hosts.missing(needed, both)
 
 
 def test_a_bindings_needs_skip_manual_bindings_unreadable_bindings_and_folders_outside_the_root(tmp_path):

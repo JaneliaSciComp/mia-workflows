@@ -187,8 +187,9 @@ def test_entry_text_and_the_last_person():
 # --- stopped rounds: which remedy a stop calls for (spec §4.5, the incidents of §2 B) ---
 
 
-def stopped(said, party=None, worker=None, earlier=(), minutes=120.0):
+def stopped(said, party=None, worker=None, earlier=(), minutes=120.0, hosts=()):
     evidence = item(status="stuck", stage="blocked", minutes=minutes, party=party)
+    evidence["subject"]["hosts"] = list(hosts)  # the hosts its jobs were refused that no one approved yet
     evidence["entries"][0]["body"] = f"**Result:** `data:developing`\n\n**blocked**: {said}"
     evidence |= {"worker": worker, "earlier": list(earlier), "retry_hours": CFG.retry_hours}
     found = sighting(evidence, CFG, NOW)
@@ -265,6 +266,19 @@ def test_what_only_a_person_can_settle_says_so():
     assert rule == "record gap" and step["do"] == "needs"
     assert stopped("crops job 9 ended EXIT (exit 140)") == ("time limit", [{"do": "diagnose"}])
     assert stopped("the crops do not match the annotation") == (None, [{"do": "diagnose"}])
+
+
+def test_a_match_that_was_refused_a_host_waits_for_the_host_not_for_its_record():
+    """Incident 2026-11-17: every URL of a record redirected to an S3 host the match agent's job was refused. Its
+    stop began `match blocked:` and quoted the harness, so the cleaner asked for a corrected catalog record."""
+    said = (
+        "match blocked: Add the host `s3.example.org` to the hosts this job may reach: all three zips redirect "
+        "there. `harness list` failed with `HostNotAllowed: host 's3.example.org' is not allowed`."
+    )
+    rule, (step,) = stopped(said, hosts=["cdn.example.org", "s3.example.org"])
+    assert rule == "host not approved" and step["do"] == "needs" and "cdn.example.org, s3.example.org" in step["text"]
+    assert stopped(said)[0] == "record gap"  # no host of its jobs waits: what is left is the record's
+    assert stopped("match blocked: no class is named", hosts=["s3.example.org"])[0] == "record gap"
 
 
 def test_a_round_its_budget_refused_is_left_to_a_person_and_not_diagnosed():

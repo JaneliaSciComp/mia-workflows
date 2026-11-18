@@ -66,7 +66,9 @@ class Mocks:
         judge=False,
         judge_state="DONE",
         judge_gate=None,
+        cut_offs=0,
     ):
+        self.cut_offs = cut_offs  # how many agent jobs lose their session before one runs to its end
         self.observe_failures, self.report_failures, self.reported = observe_failures, report_failures, 0
         self.observe_fatal = observe_fatal
         self.calls: list[tuple[str, object]] = []
@@ -174,6 +176,9 @@ class Mocks:
                 if self.judge_gate is not None:
                     await self.judge_gate.wait()
                 return JobOutcome(a.job_id, self.judge_state, 0 if self.judge_state == "DONE" else 1)
+            if self.cut_offs:  # Claude Code ended this agent's session
+                self.cut_offs -= 1
+                return JobOutcome(a.job_id, "EXIT", 1, "Not logged in · Please run /login")
             return JobOutcome(a.job_id, self.job_state, self.exit_code)
 
         return [await_agent]
@@ -221,6 +226,18 @@ async def test_no_commits_reports_failure(env):
     assert await run(env, m) == "failed"
     f = m.of("report_failure")[0]
     assert "no commits" in f.error and f.workspace.dir == "/w/round-1" and "observe" not in m.names()
+
+
+async def test_an_agent_cut_off_by_its_login_runs_the_round_once_more(env):
+    """Incident 2026-11-17 (snippets #95): the login lapsed under a revision agent six minutes into its work; the
+    job ended with no commits, and the issue stopped as `needs-human` over "Refusing to create empty bundle"."""
+    m = Mocks([snap(), snap(approved=True, checks="success")], cut_offs=1)
+    assert await run(env, m) == "merged"
+    assert [r.round for r in m.of("prepare")] == [1, 2] and "report_failure" not in m.names()
+    assert any("Not logged in" in c.body and "runs once more" in c.body for c in m.of("comment"))
+    m = Mocks([snap()], cut_offs=2)  # cut off again: that is a stop, and it says why
+    assert await run(env, m) == "failed"
+    assert [r.round for r in m.of("prepare")] == [1, 2] and "Not logged in" in m.of("report_failure")[0].error
 
 
 async def test_failed_job_reports_and_does_not_publish(env):

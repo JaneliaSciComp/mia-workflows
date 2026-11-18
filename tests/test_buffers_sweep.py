@@ -17,7 +17,7 @@ from mia_buffers.ledger import Ledger
 from mia_buffers.sweep import run_sweep
 from mia_core.jobrecord import write_submitted
 from mia_core.registry import Registry
-from tests.test_buffers_api import PREP_TEXT, REF_A, Gateway, act, call, worker
+from tests.test_buffers_api import PREP_TEXT, REF_A, SHAPE, Gateway, act, call, worker
 from tests.test_buffers_config import make_cfg
 
 HOURS = 3600.0
@@ -182,7 +182,7 @@ class World:
         records = [
             {
                 "path": f"{name}.yaml",
-                "record": {"id": name, "data": {"download_url": f"https://data.example.org/{name}.zip"}},
+                "record": {"id": name, "data": {"download_url": f"https://data.example.org/{name}.zip"}, **SHAPE},
             }
             for name in ("rec-a", "rec-b")
         ]
@@ -507,7 +507,12 @@ def test_a_record_gap_waits_for_a_person_and_runs_again_once_the_record_changed(
     )
     world.sweep()
     assert len(world.cases()) == 1  # nothing changed: nothing new
-    changed = {"id": "rec-a", "data": {"download_url": "https://data.example.org/rec-a.zip"}, "classes": ["nucleus"]}
+    changed = {
+        "id": "rec-a",
+        "data": {"download_url": "https://data.example.org/rec-a.zip"},
+        "classes": ["nucleus"],
+        **SHAPE,
+    }
     records = {"records": [{"path": "rec-a.yaml", "record": changed}]}
     assert worker(world.service, "PUT", f"/records/{'c' * 40}", records)[0] == 200
     world.sweep()
@@ -617,6 +622,7 @@ def test_what_no_rule_covers_is_diagnosed_and_only_the_menu_is_carried_out(world
 
 
 def test_a_diagnosis_that_proposes_nothing_says_what_a_person_must_do(world):
+    world.activities.cfg.autonomy.price_factor = 0.1  # here a dollar Claude Code counts costs ten cents
     number = world.dataset()
     world.sweep()
     world.answer({"diagnosis": "the dataset has no labels at all", "cause": "data", "remedies": [], "needs": "drop it"})
@@ -627,6 +633,8 @@ def test_a_diagnosis_that_proposes_nothing_says_what_a_person_must_do(world):
         entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Cleaner:**" in entry["body"]
     ]
     assert "Diagnosis (data): the dataset has no labels at all Needs a person: drop it" in said  # once, in one entry
+    spent = call(world.service, "GET", "/budgets")[1]["budgets"]  # the job counted 0.5
+    assert [row["spent_usd"] for row in spent if row["root"].startswith("cleaner-")] == [pytest.approx(0.05)]
     assert cleaner_actions(world, number) == []
 
 

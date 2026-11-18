@@ -60,7 +60,7 @@ export function toSpecYaml(c, ref, repo) {
     `      required: ${c.annRequired}`,
     `      source: ${sources.length === SRC.length ? "any" : `{in: ${flow(sources)}}`}`,
     `    min_size_voxels: ${c.minVox}`,
-    // a dataset unticked on the Datasets step
+    // a dataset unchecked on the Datasets step
     ...(c.exclude?.size ? ["  exclude:", `    ids: ${flow([...c.exclude].sort())}`] : []),
     "  dedup:",
     `    by: ${flow(c.dedup ? ["doi"] : [])}`,

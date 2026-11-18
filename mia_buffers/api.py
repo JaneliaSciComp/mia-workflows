@@ -25,34 +25,38 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
-from mia_core.hosts import PolicyError, generate_policy
+from mia_core.hosts import HOST_RE, PolicyError, generate_policy, is_ip_literal
 from mia_core.jobrecord import RECORDS_DIR
 from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
-from mia_data.binding import record_gaps
+from mia_data.binding import RAW_GITHUB
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
 from .dispatch import DispatchError, dispatcher_for
 from .explore import (
+    ANYTHING,
     DATASET_FILTERS,
     DATASET_SORTS,
+    LACKS,
     PLAN_SORTS,
     Page,
     dataset_haystack,
     dataset_row,
     facets,
+    lacks_filter,
     page_query,
     paged,
     plan_view,
     record_row,
+    start_gaps,
 )
 from .hosts import HostCheck, Needed
 from .jobspec import levels_key
@@ -310,7 +314,7 @@ class ActionBody(_Strict):
     plan_first: bool = False  # a buffer's go: stop at the plan and wait for an approve before staging anything
     records: list[str] = []  # a buffer's revoke: the records that leave it
     record: str | None = None  # dropped: the dataset whose files are in place
-    approve_hosts: list[str] = []  # a start action: hosts the run needs that the person ticked (spec host-approval §5)
+    approve_hosts: list[str] = []  # a start action: hosts the run needs that the person checked (spec host-approval §5)
 
 
 class SpecBody(_Strict):
@@ -320,7 +324,7 @@ class SpecBody(_Strict):
     action: Literal["go"] | None = None
     plan_first: bool = False
     key: str | None = None
-    approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person ticked
+    approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person checked
     buffer: int | None = None  # a preparation request: the number of the buffer whose Prepare step filed it
 
 
@@ -361,6 +365,10 @@ class TerminateBody(_Strict):
     id: str
     run_id: str
     reason: str
+
+
+class RefusedHostsBody(_Strict):
+    hosts: list[str] = Field(max_length=20)  # hosts a job of the dataset was refused (`host_not_allowed`)
 
 
 class WorkerBody(_Strict):
@@ -552,6 +560,8 @@ ROUTES = [
     ("GET", re.compile(r"^/catalog/datasets/([^/]+)$"), "catalog_dataset", "read"),
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
+    ("PUT", re.compile(r"^/datasets/([^/]+)/hosts$"), "put_refused_hosts", "worker"),
+    ("GET", re.compile(r"^/datasets/([^/]+)/hosts$"), "refused_hosts", "read"),
     ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
     ("GET", re.compile(r"^/gallery/i(\d+)-e(\d+)/([0-9a-f]{40})/([^/]+)/(raw|overlay)\.png$"), "gallery_png", "read"),
     ("GET", re.compile(r"^/jobs/(.+)$"), "job_record", "read"),
@@ -888,6 +898,24 @@ class BufferService:
             raise HttpError(404, f"no dataset row for {record}")
         return 200, row, {}
 
+    def _refused_hosts(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        """What is held for the dataset alone: the hosts its jobs were refused, and those a person approved for it
+        and no other dataset (`_approve_for`)."""
+        refused = (self.ledger.kv("refused_hosts") or {}).get(record, [])
+        return 200, {"hosts": refused, "approved": (self.ledger.kv("dataset_hosts") or {}).get(record, [])}, {}
+
+    def _put_refused_hosts(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A worker says which hosts a job of the dataset was refused (a redirect target, mostly). They join the
+        hosts the dataset's runs need, so its next start asks a person to approve them; a name that is no exact
+        hostname is dropped."""
+        parsed = _parse(RefusedHostsBody, body)
+        with self._lock:
+            refused = self.ledger.kv("refused_hosts") or {}
+            named = (host for host in parsed.hosts if HOST_RE.fullmatch(host) and not is_ip_literal(host))
+            refused[record] = sorted({*refused.get(record, []), *named})
+            self.ledger.put_kv("refused_hosts", refused)
+        return 200, {"hosts": refused[record]}, {}
+
     # --- datasets as the page shows them: a catalog record joined with what the registry knows ------
 
     def _dataset_rows(self) -> tuple[str, list[dict]]:
@@ -933,8 +961,9 @@ class BufferService:
         return _prep_records(found[0])
 
     def _catalog_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
-        """The Datasets list: one page of datasets, filtered by state, modality, dims, licence or a request's
-        records, with how many datasets have each filter value."""
+        """The Datasets list: one page of datasets, filtered by state, modality, dims, licence, what the record
+        lacks (`lacks`: one of `LACKS`, or `anything`) or a request's records, with how many datasets have each
+        filter value."""
         page = self._page_of({"limit": "50", **query}, DATASET_SORTS)
         assert page is not None
         ref, rows = self._dataset_rows()
@@ -945,6 +974,10 @@ class BufferService:
         for name in DATASET_FILTERS:
             if name in query:
                 rows = [row for row in rows if row[name] == query[name]]
+        if "lacks" in query:
+            if query["lacks"] not in (*LACKS, ANYTHING):
+                raise HttpError(422, f"lacks must be one of {[*LACKS, ANYTHING]}, got {query['lacks']!r}")
+            rows = lacks_filter(rows, query["lacks"])
         found, total = paged(rows, page, DATASET_SORTS, dataset_haystack)
         return 200, {"ref": ref, "rows": found, "total": total, "facets": counts}, {}
 
@@ -1009,7 +1042,7 @@ class BufferService:
 
     def _subject_view(self, row: dict, holds: dict[tuple[str, int], dict] | None = None) -> dict:
         """The row plus its name, its status word, the actions it accepts (`_rules`; sorted, for a stable page), its
-        hold when it is shelved, and `asked`: the action that was sent to its workflow and that the workflow has not
+        hold when it is shelved, a dataset's `hosts` (`_unapproved`), and `asked`: the action that was sent to its workflow and that the workflow has not
         answered yet. Until it does the stage is still the old one, and the page must not offer that stage's
         buttons as if nothing was clicked. `holds`: `Ledger.shelved()`, read once by a caller with many rows."""
         hold = (self.ledger.shelved() if holds is None else holds).get((row["kind"], row["number"]))
@@ -1017,15 +1050,28 @@ class BufferService:
         status, actions = self._rules(row, hold, gaps)
         asked = self._asking(row["kind"], row["number"])
         view = {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
+        if row["kind"] == "dataset":
+            view["hosts"] = self._unapproved(row["key"])
         view["name"] = (row.get("data") or {}).get("name") or row["key"]  # a buffer's name is not its key
         return view
 
+    def _unapproved(self, record: str) -> list[str]:
+        """The hosts the dataset's jobs were refused that the csub policy still lacks: its next start lists them
+        for a person to approve. All of them when the policy cannot be read."""
+        refused = (self.ledger.kv("refused_hosts") or {}).get(record, [])
+        if not refused or self.hosts is None:
+            return refused
+        try:
+            return sorted(self.hosts.missing(self.hosts.group({record: refused}), self.ledger.kv("dataset_hosts")))
+        except (OSError, ValueError):
+            return refused
+
     def _gaps(self, record: str) -> list[str]:
-        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for a round to run
-        (`record_gaps`); none for a record no synced catalog holds. Read from the catalog on every call, so a
-        record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
+        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for the dataset to
+        be started (`start_gaps`); none for a record no synced catalog holds. Read from the catalog on every call,
+        so a record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
         found = self._catalog_record(record)
-        return record_gaps(found) if found is not None else []
+        return start_gaps(found) if found is not None else []
 
     def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
         if kind not in SUBJECT_RULES:
@@ -1220,7 +1266,8 @@ class BufferService:
         request: list[str] | None = None,
     ) -> Needed:
         """The hosts the named catalog records, a request's records (`request`, or the request numbered `prep`)
-        or a buffer's planned pool need (host -> the record ids that need it). A named record no synced catalog
+        or a buffer's planned pool need (host -> the record ids that need it). A dataset needs its record's hosts
+        and those its jobs were refused. A named record no synced catalog
         holds is a 404; a request's contributes nothing (the worker refuses it). A buffer's host is one its
         published binding names that its record's synced catalog entry also names: a binding lies under a root a
         job can mount read-write."""
@@ -1228,12 +1275,13 @@ class BufferService:
             raise HttpError(503, "this service has no csub policy to check hosts against")
         if prep is not None:
             request = self._request_records(str(prep))
+        refused = self.ledger.kv("refused_hosts") or {}
         if request is not None:
-            return self.hosts.for_records(self._catalog_records(request))
+            return self.hosts.for_records(self._catalog_records(request), refused)
         if records is not None:
             if missing := [record for record in records if self._catalog_record(record) is None]:
                 raise HttpError(404, f"{missing[0]!r} is not a record of a synced catalog")
-            return self.hosts.for_records(self._catalog_records(records))
+            return self.hosts.for_records(self._catalog_records(records), refused)
         if spec is None:
             raise HttpError(422, "give records, prep or spec")
         subject = self.ledger.subject("buffer", spec)
@@ -1265,10 +1313,13 @@ class BufferService:
         needed = self._needed(**given)
         assert self.hosts is not None  # _needed answered 503 otherwise
         try:
-            absent = self.hosts.missing(needed)
+            absent = self.hosts.missing(needed, self.ledger.kv("dataset_hosts"))
         except (OSError, ValueError):  # a TOMLDecodeError is a ValueError
             raise HttpError(503, "the generated csub policy cannot be read: `mia up` regenerates it") from None
-        return 200, {"hosts": [{"host": host, "records": ids} for host, ids in sorted(absent.items())]}, {}
+        # `per_dataset`: approving it lets these datasets' jobs reach it and no other dataset's
+        scope = {RAW_GITHUB: {"per_dataset": True}}
+        rows = [{"host": host, "records": ids, **scope.get(host, {})} for host, ids in absent.items()]
+        return 200, {"hosts": rows}, {}
 
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
@@ -1543,6 +1594,20 @@ class BufferService:
             raise HttpError(422, str(error)) from None
         return True
 
+    def _approve_for(self, hosts: list[str], needed: Callable[[], Needed] | None) -> list[str]:
+        """Write down the approvals that hold for one dataset at a time: `raw.githubusercontent.com`, for each
+        record of the run that needs it. The policy allows that host to every job once it is approved anywhere;
+        a worker grants it only to jobs of a dataset named here. Returns the hosts newly approved for a record."""
+        if RAW_GITHUB not in hosts or needed is None:
+            return []
+        with self._lock:
+            approved = self.ledger.kv("dataset_hosts") or {}
+            new = [record for record in needed().get(RAW_GITHUB, []) if RAW_GITHUB not in approved.get(record, [])]
+            for record in new:
+                approved[record] = sorted({*approved.get(record, []), RAW_GITHUB})
+            self.ledger.put_kv("dataset_hosts", approved)
+        return [RAW_GITHUB] if new else []
+
     def _act_on(
         self,
         subject: dict,
@@ -1568,6 +1633,7 @@ class BufferService:
                 added = self.hosts.approve(parsed.approve_hosts, by=actor, kind=kind, number=number)
             except PolicyError as error:
                 raise HttpError(503, str(error)) from None
+            added = list(dict.fromkeys([*added, *self._approve_for(parsed.approve_hosts, needed)]))
             if added:
                 names = ", ".join(f"`{neutralize(host)}`" for host in added)
                 self.ledger.append_entry(
@@ -1789,8 +1855,16 @@ class BufferService:
         return 200, self._put_report("cleaner", body), {}
 
     def _cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The cleaner's last sweep, without what a restart since has settled: a worker that started on other
+        code after the sweep is not the one the sweep found on old code, so that finding is left out. Whether
+        the new one owes a restart too is the next sweep's to say."""
         report = self.ledger.kv("cleaner")
-        return (200, *JSON_NULL) if report is None else (200, report, {})
+        if report is None:
+            return 200, *JSON_NULL
+        swept, workers = report.get("at") or 0, self.ledger.kv("workers") or {}
+        restarted = {f"restart {service}" for service, row in workers.items() if (row.get("since") or 0) > swept}
+        findings = [finding for finding in report.get("findings") or [] if finding.get("id") not in restarted]
+        return 200, {**report, "findings": findings}, {}
 
     def _put_report(self, name: str, body: bytes) -> dict:
         """Store a scheduled pass's last report whole under `name` (`at` added when absent)."""

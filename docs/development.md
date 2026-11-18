@@ -29,7 +29,9 @@ sets `MIA_SERVICE` for you.
   evictions). `autonomy` is per request (what every job of one root adds up to) plus the operator's switches:
   `pause` (`mia pause` and `mia resume` edit it in place, comments kept; every worker re-reads the file before each
   job), `quarantine_days`, and the `root` caps a request may spend in all (`max_usd`, `max_fetch_bytes`, `max_jobs`,
-  `max_concurrent_jobs`, `max_days`).
+  `max_concurrent_jobs`, `max_days`). `max_usd` is money paid: an agent job is reserved at its per-run cap and
+  settled at the cost Claude Code reports for it (`JobDone.cost_usd`, list price), both times
+  `autonomy.price_factor`; a job whose cost nobody read keeps its reservation as its cost.
 
 ## The four checks
 
@@ -192,6 +194,13 @@ binding's set, or comments `/approve <head>` on the snippet PR. Anything else th
 or revoke queued while it looked, leaves the set to a person. `judge.review.mode: active` is refused by the
 config: nothing grants on the review judge's verdict.
 
+**A person's verdict never waits for the crop judge.** The judge runs as a task beside the round's (`_judged`,
+patch `verdict-first`): the round waits for its verdict or for a label, whichever comes first. A label is acted on
+at once; the judge's job runs on, its verdict is read as shadow whatever the mode (so it grants nothing after a
+person decided), and its assessment and entry are written. The round closes when they are (`_guard`), so a `go`
+sent before that starts its round then; a cancel kills the judge's job with the round's (`_cancel_round`), and no
+run rolls over while a judge looks (`_roll_due`).
+
 **Shadow never blocks.** With `judge.<gate>.mode: shadow` the judge runs on every live round (the crop judge after
 a passing set, the review judge after a pushed head), its assessment and comment are written, and the round goes
 on to the human gate: `authorized()` ignores a judge's approve for a gate that is not `active`, and a judge job
@@ -216,7 +225,7 @@ never writes over an artifact whose newest assessment is a reject: only a repair
 `go` on the dataset that saves its crops removes `revoked.json`, writes a `policy:repair` approve on each
 quarantined artifact of the record and clears their quarantine marks, and the next stage write makes the row
 prepared again. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
-page's *Revoke the ticked*; records not in the buffer are ignored), rejects and quarantines those records'
+page's *Revoke the checked*; records not in the buffer are ignored), rejects and quarantines those records'
 artifacts and takes the keeper's `revoked` path at once.
 
 **A stage pass writes its start and its result.** A round is a series of stage passes: every stage whose word in
@@ -472,16 +481,33 @@ sandbox bypasses its proxy for loopback names, and inside it they point at the s
 host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the hosts
 the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request) or its
 saved bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
-pool), their `network.redirect_hosts` targets and the package hosts. Ticked hosts travel as `approve_hosts` on a
+pool), their `network.redirect_hosts` targets, the package hosts, and for a dataset the hosts its jobs were refused
+(below). Checked hosts travel as `approve_hosts` on a
 dataset's `go`, filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other
 action carrying a non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender,
-accepts only hosts that run needs (never a GitHub host, an IP literal or the host of `service.url` or
+accepts only hosts that run needs (never a GitHub host but `raw.githubusercontent.com`, an IP literal or the host of `service.url` or
 `temporal.address`), appends, regenerates (503 if it cannot) and posts a timeline entry. A broker loads its policy file
 on every request, so an approved host needs no restart: the next job sees it. Every generation checks that `policy_dir`
 is under home, apart from every read-write sandbox mount, and that its `broker.toml` is not the base policy file.
 Withdrawing an approval is a hand edit: remove the host's lines, then `mia up` (or the next approval) regenerates. A
-redirect target still needs `network.redirect_hosts`, and a pattern or a host wanted before any run is added to the base
-policy by hand. `mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
+pattern or a host wanted before any run is added to the base policy by hand.
+
+A host nobody could name before the run, a redirect target mostly, is learned from the refusal. A dataset job that the
+harness refuses a host (`host_not_allowed` in `smoke.json` or the crop job's `report.json`, or `hosts` in a match or
+debug agent's `outcome.json`) has it noted for its dataset (`PUT /datasets/<record>/hosts`, worker token; the `kv` row
+`refused_hosts`). From then on it is one of the hosts the dataset's runs need: the dataset's page says so, and its next
+start (or a request's that names it) lists the host to check. A noted host the policy allows is granted to every job of
+that dataset that reaches any host (`with_hosts` in `submit`; a buffer's fetch and stage jobs through `read_binding`),
+and to no other dataset's. `network.redirect_hosts` names such targets ahead of the first refusal.
+
+No job reaches GitHub: a GitHub host among a record's or a binding's URLs is left out of the job's hosts
+(`network_hosts`). The one exception is `raw.githubusercontent.com` (file contents, read only), approved for one
+dataset at a time. The start dialog lists it for each record that names it and has no approval of its own
+(`per_dataset` in `/hosts/missing`), whatever the policy allows; an approval is written for each of the run's records
+that need it (the `kv` row `dataset_hosts`, `_approve_for`), beside the policy line the broker needs. A worker grants
+the host to jobs of an approved dataset only (`granted_hosts`). autodev's agent never gets it.
+
+`mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
 names its `agent.allow_hosts` plus the hosts its issue names, where the policy allows them
 (`autodev.agent.agent_hosts`); a job that would need more than csub's 64 is not started and its round fails saying so. An issue names hosts with `<!-- autodev: hosts a.org b.org -->` in its body
 (`hosts_marker`), and only when a bot of `github.trusted_bots` opened it: a dataset round writes there the hosts
@@ -708,7 +734,7 @@ pyramid as it is. A failed build next to a saved artifact (not a rebuild of it) 
 ## Preparation requests
 
 A buffer never asks mia-data for a dataset; a preparation request does. The page files one (`POST /prep`) for the
-datasets ticked on the Datasets list or the ones a new buffer's plan needs. Its spec is YAML, with `records` or
+datasets checked on the Datasets list or the ones a new buffer's plan needs. Its spec is YAML, with `records` or
 `select` (exactly one):
 
 ```yaml
@@ -717,7 +743,7 @@ kind: preparation
 catalog: {repo: <owner/catalog>, ref: <40-hex commit>}
 records: [<record id>, ...]     # an explicit list, or
 select: {...}                   # the buffer spec's select block, run over the git catalog snapshot at catalog.ref
-again: false                    # optional; true also gives a new round to datasets that are prepared or that stopped
+again: false                    # optional; true also gives a new round to datasets that are prepared
 timeout_days: 14                # optional, default 14
 max_records: 25                 # optional; a request for more records must say so here (each is an agent run)
 ```
@@ -732,10 +758,11 @@ action carries, once.
 `needs-human`: the request stopped, and its entry names the records that did not settle, each with its last
 registry state. `cancelled`: a person cancelled it.
 
-**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or `needs-human`
-settles the record, unless the request says `again`: then the dataset is sent a `go` all the same, and its row is
-set to `in-progress` at once, so the request follows the new round instead of settling on what the last one
-left. A dataset whose crops wait for a review is `needs-human`, so it settles too. Otherwise the dataset's
+**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or shelved settles
+the record. A dataset that stopped (`needs-human`) is sent a `go`, and so is a prepared one when the request says
+`again`; its row is set to `in-progress` at once, so the request follows the new round instead of settling on
+what the last one left. A stopped dataset whose jobs were refused a host that no one approved yet is sent none
+(its note names the hosts, which Run again on its page lists to check). A dataset whose crops wait for a review is in a round, so it is left to it. Otherwise the dataset's
 subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
 any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity
@@ -919,9 +946,11 @@ Each tab is one kind of thing, and each thing has one page:
   a row (or on the subject's page) takes it off the list with a reason; the *Shelved* toggle lists those, each with
   its reason and *Unshelve*.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
-  download, staged artifacts and buffers; filters by state, modality, dims and licence. Every row has a tick (the
-  header's and *Select all* tick the page that is showing). While something is ticked, a box says how many datasets are
-  selected and offers *Prepare* and *Create buffer*. The ticked are prepared in one request (one
+  download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
+  (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, or `anything`; `record_row` names them,
+  whatever buffer asks, and the row shows each as a pill). Every row has a check (the
+  header's and *Select all* check the page that is showing). While something is checked, a box says how many datasets are
+  selected and offers *Prepare* and *Create buffer*. The checked are prepared in one request (one
   `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a definition that
   selects exactly them (`specFromDatasets`: one `*/<id>.yaml` glob per dataset in `select.paths`). `#datasets?state=<state>` opens the list with a filter set.
 - **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`,
@@ -939,11 +968,15 @@ Each tab is one kind of thing, and each thing has one page:
     (`toSpecYaml`), or, while the YAML tab holds a text the controls did not write, that text (`TEXT`), read back
     into the controls by `POST /specs/parse`; what it holds that no control shows (`specDiff`) makes the controls
     read-only. It is run through `POST /plan` with `page` (debounced 300 ms) for the numbers, the charts and one
-    page of rows. Unticking a fitting dataset adds its id to `select.exclude.ids`. Step 2's button saves a new
+    page of rows. Step 2's table asks for the rows that fit (`page.fit_only`), which is the number step 1 counts; the
+    rows the selection admits but the patch does not fit are listed only on request, and the rows the planner could
+    not place because of their record (`RECORD_LACKS_GROUPS`) never: the step counts them (`summary.record_lacks`)
+    and links to `#datasets?lacks=anything`. Unchecking a
+    dataset adds its id to `select.exclude.ids`. Step 2's button saves a new
     buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
     `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
     someone is changing (`ensureDefinition`).
-  - *Prepare* lists the plan's rows that are left to prepare (`page.to_prepare`), ticks only what a request could
+  - *Prepare* lists the plan's rows that are left to prepare (`page.to_prepare`), checks only what a request could
     start (`summary.to_prepare`), files the request with `buffer`, and lists the buffer's requests. Its way
     forward is the one `go` a buffer gets from the page (`planRound`).
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the

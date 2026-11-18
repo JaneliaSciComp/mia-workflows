@@ -81,7 +81,8 @@ All in the current directory:
      class, a record that names no data file, a dependency missing from the allowlist, a host the job may not
      reach). Running the match again unchanged would stop at the same place:
 
-         {"outcome": "blocked", "reason": "<what is missing, and what a human must decide or change>"}
+         {"outcome": "blocked", "reason": "<what is missing, and what a human must decide or change>",
+          "hosts": ["<each host the harness refused with host_not_allowed; leave out when there is none>"]}
 
    - Something did not work, and running the match again later may pass (a host that did not answer or answered
      with a server error, a read that timed out, a harness or tool error that is not about this dataset, time
@@ -106,8 +107,9 @@ All in the current directory:
   (which metadata says so).
 - Never write, copy or alter snippet code, and don't modify anything under `snapshot/`. If no snippet can read
   the data, report `needs_snippet`.
-- If `smoke.json` reports `host_not_allowed`, report `blocked` naming that host (and the redirect chain). Don't
-  work around it.
+- If the harness reports `host_not_allowed` (in `smoke.json`, or from `harness list` or `harness describe`), report
+  `blocked` naming that host (and the redirect chain), and list it in `hosts`: a person is then asked to approve
+  it before the next run. Don't work around it.
 - Your only network access is the harness (`harness smoke`, `harness list`, `harness describe`), on the record's
   hosts; you have no GitHub access. Don't try to download files yourself; the harness reads the data.
 - A missing or partial `outcome.json` counts as `failed`.

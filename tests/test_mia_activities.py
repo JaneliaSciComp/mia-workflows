@@ -304,6 +304,37 @@ async def test_submit_refuses_host_missing_from_probe(tmp_path):
     assert e.value.non_retryable and "data.example.org" in str(e.value) and t.csub.submitted == []
 
 
+async def test_a_refused_host_is_noted_and_the_datasets_jobs_reach_it_once_the_policy_allows_it(tmp_path):
+    """Incident 2026-11-17: a redirect target no record names. What a job was refused is the dataset's to ask
+    for; its jobs get it when a person approved it, and only then."""
+    t = _setup(tmp_path)  # the policy allows *.example.org
+    blocked = {"outcome": "blocked", "reason": "refused", "hosts": ["cdn.example.org", "CDN.Elsewhere.net", 7]}
+    _, ws = await _match_ws(t, blocked)
+    assert (await t.a.read_match(str(ws))).outcome == "blocked"
+    (ws / "smoke.json").write_text(json.dumps({"host_not_allowed": {"host": "s3.example.org", "chain": ["a", "b"]}}))
+    await t.a.read_smoke(str(ws))
+    assert t.a.registry.dataset_hosts("rec-1")["hosts"] == ["cdn.elsewhere.net", "cdn.example.org", "s3.example.org"]
+    await t.a.submit(job_key(1, ROUND, "match", 1), "match", JobArgs(str(ws), ROUND, await t.a.admit(1, "99")))
+    (job,) = t.csub.submitted
+    assert {"cdn.example.org", "s3.example.org", "data.example.org"} <= set(job["allow_hosts"])
+    assert "cdn.elsewhere.net" not in job["allow_hosts"]  # nobody approved it
+    assert "cdn.example.org" in job["env"]["MIA_HARNESS_ALLOWED_HOSTS"].split(",")
+
+
+async def test_a_job_reaches_raw_github_only_once_a_person_approved_it_for_its_dataset(tmp_path):
+    raw = "raw.githubusercontent.com"
+    t = _setup(
+        tmp_path, probe=lambda: ["*.example.org", raw, "pypi.org", "*.pythonhosted.org", "*.anaconda.org", "*.dev"]
+    )
+    pins, ws = await _match_ws(t, None)
+    t.ledger.put_kv("dataset_hosts", {"rec-other": [raw]})  # the policy allows it: another dataset was approved
+    await t.a.submit(job_key(1, ROUND, "match", 1), "match", JobArgs(str(ws), ROUND, pins))
+    t.ledger.put_kv("dataset_hosts", {"rec-other": [raw], "rec-1": [raw]})
+    await t.a.submit(job_key(1, ROUND, "match", 2), "match", JobArgs(str(ws), ROUND, pins))
+    first, second = t.csub.submitted
+    assert raw not in first["allow_hosts"] and raw in second["allow_hosts"]
+
+
 async def test_submit_match_once(tmp_path):
     t = _setup(tmp_path)
     assert await _submit_match(t) == "777" == await _submit_match(t)
@@ -858,6 +889,10 @@ async def test_await_job_heartbeats_the_lock_it_is_given(tmp_path):
     for report, fetched in (({"bytes_fetched": 4096}, 4096), ({"bytes_fetched": "lots"}, 0), ([], 0)):
         (crops / "report.json").write_text(json.dumps(report))  # a crop job's report: untrusted, a count or nothing
         assert (await env.run(t.a.await_job, "j4", str(tmp_path / "crop-ws"))).bytes_fetched == fetched
+    for counted, cost in ((0.76, 0.76), (-1, None), (float("inf"), None), ("free", None)):
+        result = {"result": "done", "total_cost_usd": counted}  # an agent job's claude.json: untrusted as well
+        (tmp_path / "crop-ws" / "claude.json").write_text(json.dumps(result))
+        assert (await env.run(t.a.await_job, "j5", str(tmp_path / "crop-ws"))).cost_usd == cost
     locks.release("raw", "rec-1", "me")
     with pytest.raises(ApplicationError) as info:  # the lock is gone: the wait fails, never retried
         await env.run(t.a.await_job, "j3", "/w", ["raw", "rec-1", "me"])
@@ -924,6 +959,21 @@ async def test_reserve_and_settle_charge_the_root(tmp_path, token_server):  # no
     await t.a.settle("o/data#7", "mia-7-i7-e11-match-1", usd=1.0)
     assert t.a.registry.budget("o/data#7")["spent_usd"] == 1.0
     assert (await t.a.reserve("", "k", "match", 5.0)) == Reservation(True, "no budget")
+
+
+async def test_a_budget_books_what_is_paid_not_what_claude_code_counts(tmp_path, token_server):  # noqa: F811
+    """Incident 2026-11-16: 20 match runs that cost $1.92 were booked at $100, their reservations at list price,
+    and the request's other 134 datasets were refused."""
+    t = _setup(tmp_path)
+    t.a.registry = Registry(token_server, "t")
+    t.cfg.autonomy.price_factor = 0.1
+    assert (await t.a.reserve("o/data#7", "match-1", "match", 5.0)).ok
+    assert t.a.registry.budget("o/data#7")["reserved_usd"] == pytest.approx(0.5)
+    await t.a.settle("o/data#7", "match-1", usd=1.0)  # what Claude Code counted
+    assert t.a.registry.budget("o/data#7")["spent_usd"] == pytest.approx(0.1)
+    assert (await t.a.reserve("o/data#7", "match-2", "match", 5.0)).ok
+    await t.a.settle("o/data#7", "match-2")  # nobody read its cost: its reservation stands
+    assert t.a.registry.budget("o/data#7")["spent_usd"] == pytest.approx(0.6)
 
 
 async def test_paused_reads_the_manifest_fresh(tmp_path, monkeypatch):
@@ -1334,3 +1384,17 @@ async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp
     assert (look.pr, look.working, look.stopped) == (80, True, False)
     assert look.last_word.startswith("round 2 pushed xxx") and len(look.last_word) == 400
     assert (await t.a.autodev_look(72, 80)).pr == 80  # the PR the round follows is not looked up again
+    assert (look.answer, look.answer_at) == ("", "")  # no round of autodev's ended without commits
+    summary = (
+        "### snippets: round 3 made no commits · $1.48\n\nThe rows repeat in the source file.\n\nNothing to change."
+    )
+    t.snip.comments[80].append(
+        {
+            "created_at": "2026-11-14T23:30:00Z",
+            "user": {"login": "bot"},
+            "body": summary + "\n\n<!-- snippets: round x-3 -->",
+        }
+    )
+    look = await t.a.autodev_look(72, 80)
+    assert look.answer == "The rows repeat in the source file.\n\nNothing to change."
+    assert look.answer_at == "2026-11-14T23:30:00Z"

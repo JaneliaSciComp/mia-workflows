@@ -40,8 +40,8 @@ from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
+from mia_data.binding import granted_hosts, missing_hosts
 from mia_data.binding import hosts as job_hosts
-from mia_data.binding import missing_hosts, record_gaps
 from mia_data.catalog import dataset_folder
 from mia_data.config import round_open
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
@@ -63,6 +63,7 @@ from .config import (
     stage_pass,
 )
 from .drop import cache_key, drop_names, merge_manifest, read_manifest
+from .explore import start_gaps
 from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
@@ -706,10 +707,11 @@ class Activities:
         """nudge_dataset's work, and whether the dataset was started for the first time. The dataset's subject
         says where it stands; a dataset that needs a round gets a `go` sent to buffer-api with the worker token:
         actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
-        `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). No issue is
-        searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
+        `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). A stopped
+        dataset whose jobs were refused a host that is still unapproved gets none. No issue is searched, opened
+        or labelled. `DatasetIssue.number` is the dataset's number."""
         entry = self._record(round_id, record)
-        if gaps := record_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
+        if gaps := start_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
             raise ValueError(f"{record}: the record cannot be run: {'; '.join(gaps)}")
         registry, folder = self.registry, dataset_folder(entry, record)
         subject = await asyncio.to_thread(registry.subject, "dataset", record)
@@ -723,6 +725,12 @@ class Activities:
             return DatasetIssue(number, stage, False, note, folder), False
         if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
             return DatasetIssue(number, stage, False, folder=folder), False
+        if subject and subject["status"] == "stuck" and (waiting := subject.get("hosts")):
+            # only a person's click approves a host: a new round would be refused the same ones
+            raise ValueError(
+                f"{record}: its jobs were refused hosts no one approved yet: {', '.join(waiting)}; "
+                "press Run again on its page and check them"
+            )
         pins = self._pins(round_id)
         kind = "prep" if round_id.startswith("p") else "buffer"
         go = functools.partial(
@@ -806,22 +814,23 @@ class Activities:
     @activity.defn(name="prep_nudge")
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
-        """Hand one requested record to mia-data unless the registry already settled it (prepared, shelved or
-        needs-human); otherwise nudge_dataset, its result named for the request's entry. A request that says
-        `again` hands those over too: the dataset gets a new round, and its row says `in-progress` at once, so
-        the request follows that round instead of settling on what the last one left."""
+        """Hand one requested record to mia-data unless the registry says it is prepared or shelved; otherwise
+        nudge_dataset, its result named for the request's entry. A dataset that stopped (`needs-human`) is handed
+        over, and so is a prepared one when the request says `again`: the dataset gets a new round, and its row
+        says `in-progress` at once, so the request follows that round instead of settling on what the last one
+        left."""
         again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
         except RegistryError as error:  # best effort: the dataset's subject tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        settled = (state := _followed_state(row)) in ("prepared", "shelved", "needs-human")
-        if settled and (not again or state == "shelved"):  # a shelved dataset is never asked
+        state = _followed_state(row)
+        if state == "shelved" or (state == "prepared" and not again):  # a shelved dataset is never asked
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
         found, created = await self._nudge(round_id, record, again=again)
-        if settled and found.nudged:
+        if state in ("prepared", "needs-human") and found.nudged:
             await asyncio.to_thread(self.registry.put_dataset, record, state="in-progress")
         if found.nudged:
             outcome = "opened" if created else "nudged"
@@ -1001,16 +1010,21 @@ class Activities:
         shutil.copyfile(source, dest)
         digest = hashlib.sha256(dest.read_bytes()).hexdigest()
         url_hosts = sorted({host for url in urls if (host := (urlsplit(url).hostname or "").lower())})
-        manual = any(url.startswith("manual://") for url in urls) or bool(
-            missing_hosts(url_hosts, await asyncio.to_thread(self.probe))
-        )
+        patterns = await asyncio.to_thread(self.probe)
+        manual = any(url.startswith("manual://") for url in urls) or bool(missing_hosts(url_hosts, patterns))
         staged, artifact, refused = await self._staged_before(round_id, record)
         if manual:
             drops = [list(pair) for pair in drop_names(urls)]
             return BindingInfo(True, str(dest), digest, [], drops, staged=staged, artifact=artifact, refused=refused)
-        return BindingInfo(
-            True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged, artifact=artifact, refused=refused
-        )
+        # what a person approved for this dataset beside its URLs' hosts (redirect targets its rounds were refused,
+        # raw GitHub); buffer-api unreachable: none, and a job that needs one says `host_not_allowed`
+        try:
+            granted = granted_hosts(await asyncio.to_thread(self.registry.dataset_hosts, record), patterns)
+        except RegistryError as error:
+            activity.logger.warning("%s: registry unavailable, no host of its own granted: %s", record, error)
+            granted = []
+        hosts = sorted({*job_hosts(urls, self.cfg), *granted})
+        return BindingInfo(True, str(dest), digest, hosts, staged=staged, artifact=artifact, refused=refused)
 
     async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str, str]:
         """(found, artifact id, refused): found when buffer-api's registry holds an `ok` pyramid under this artifact

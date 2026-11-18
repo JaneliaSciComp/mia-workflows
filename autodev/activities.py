@@ -35,7 +35,7 @@ from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import TooManyHostsError, issue_hosts, judge_dir, log_tail, read_result, render_prompt
+from .agent import TooManyHostsError, cut_off, issue_hosts, judge_dir, log_tail, read_result, render_prompt
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
@@ -136,11 +136,14 @@ summary is the first comment.
 {cfg.marker("pr")}"""
 
 
+NO_COMMITS = "made no commits"  # how a round summary names a round that changed nothing; mia-data reads it
+
+
 def render_summary(
     cfg: Config, round_number: int, branch: str, head_sha: str | None, summary: str, cost: float | None
 ) -> str:
     """The comment posted after each round: what was pushed, what it cost, and the agent's own summary."""
-    what = f"pushed `{head_sha[:12]}` to `{branch}`" if head_sha else "made no commits"
+    what = f"pushed `{head_sha[:12]}` to `{branch}`" if head_sha else NO_COMMITS
     cost_text = f" · ${cost:.2f}" if cost is not None else ""
     return f"### {cfg.deployment}: round {round_number} {what}{cost_text}\n\n{summary}"
 
@@ -282,7 +285,11 @@ class Activities:
 
     @activity.defn(name="await_agent")
     async def await_agent(self, request: AwaitInput) -> JobOutcome:
-        return await self.jobs.wait(request.job_id, request.workspace, activity.heartbeat)
+        """Wait for the job; a failed one says whether Claude Code ended the agent's session (`cut_off`)."""
+        outcome = await self.jobs.wait(request.job_id, request.workspace, activity.heartbeat)
+        if outcome.exit_code not in (0, None):
+            outcome.cut_off = self._clean(await asyncio.to_thread(cut_off, Path(request.workspace.dir)))
+        return outcome
 
     @activity.defn(name="publish_round")
     @permanent_errors

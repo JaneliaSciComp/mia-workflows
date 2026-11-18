@@ -14,7 +14,7 @@ from typing import Any
 from mia_data.binding import record_gaps
 from mia_data.config import round_open
 
-from .plan import NOT_PREPARED
+from .plan import NOT_PREPARED, lacks_shape
 from .specmap import facts
 
 PAGE_LIMIT = 200  # the most rows one page may ask for
@@ -98,10 +98,31 @@ def paged(
 UNUSABLE = ("evicted", "missing")  # a staged artifact in one of these states is not on disk
 
 
+SHAPE_GAP = (
+    "it gives no shape for its largest raw array (`technical.arrays`: `axes` and `shape` with y and x, and z for "
+    "3D), so no buffer could place a crop in it; add the shape to the catalog record"
+)
+
+
+UNREADABLE_GAP = "the planner cannot read it, so no buffer could take the dataset; correct the catalog record"
+
+
+def start_gaps(record: dict) -> list[str]:
+    """What a catalog record lacks for its dataset to be started (empty = nothing): what a round needs
+    (`record_gaps`), and what a plan needs to place a crop in the dataset, a record it can read with the shape
+    of its largest raw array. Without those a round would prepare what no buffer can take."""
+    try:
+        unplanned = [SHAPE_GAP] if lacks_shape(facts("", record)) else []
+    except (TypeError, ValueError, AttributeError):
+        unplanned = [UNREADABLE_GAP]
+    return [*record_gaps(record), *unplanned]
+
+
 def record_row(path: str | None, record: dict) -> dict:
     """What a dataset's row takes from its catalog record; it never changes for a catalog ref. `gaps` is what
-    the record lacks for a round to run (`record_gaps`): a dataset with any cannot be started. `path` None: a
-    dataset the registry knows whose record is in no synced catalog."""
+    the record lacks for the dataset to be started (`start_gaps`): a dataset with any cannot be. `lacks` names, in
+    a word or two each, everything the record lacks whatever buffer asks for it (`LACKS`): the Datasets list flags
+    and filters by these. `path` None: a dataset the registry knows whose record is in no synced catalog."""
     row: dict[str, Any] = {
         "id": str(record.get("id") or (path or "").rsplit("/", 1)[-1].removesuffix(".yaml")),
         "path": path,
@@ -112,15 +133,32 @@ def record_row(path: str | None, record: dict) -> dict:
         "modality": None,
         "licence": None,
         "bytes": None,
-        "gaps": record_gaps(record) if path is not None else [],
+        "gaps": start_gaps(record) if path is not None else [],
+        "lacks": [],
     }
     if path is not None:
         try:
             found = facts(path, record)
         except (TypeError, ValueError, AttributeError):  # an unreadable record is still a dataset with a name
+            row["lacks"] = ["readable record"]
             return row
+        lacks = [
+            "data URL" if record_gaps(record) else None,
+            "array shape" if lacks_shape(found) else None,
+            "voxel size" if not found.voxel_size_known(found.dims or "") else None,
+        ]
         row.update(dims=found.dims, modality=found.modality_group, licence=found.license_spdx, bytes=found.size_bytes)
+        row["lacks"] = [name for name in lacks if name]
     return row
+
+
+LACKS = ("data URL", "array shape", "voxel size", "readable record")  # what a record can lack, as `lacks` names it
+ANYTHING = "anything"  # the `lacks` filter for a record that lacks any of them
+
+
+def lacks_filter(rows: list[dict], wanted: str) -> list[dict]:
+    """The rows whose record lacks `wanted` (one of `LACKS`), or anything at all (`ANYTHING`)."""
+    return [row for row in rows if (row["lacks"] if wanted == ANYTHING else wanted in row["lacks"])]
 
 
 def dataset_row(static: dict, dataset: dict | None, raw: dict | None, staged: list[dict]) -> dict:
@@ -172,11 +210,13 @@ def dataset_haystack(row: dict) -> tuple:
 
 def facets(rows: Iterable[dict]) -> dict[str, dict[str, int]]:
     """How many datasets have each value of each filter: what the page's filter boxes offer."""
-    counts: dict[str, dict[str, int]] = {name: {} for name in DATASET_FILTERS}
+    counts: dict[str, dict[str, int]] = {name: {} for name in (*DATASET_FILTERS, "lacks")}
     for row in rows:
         for name in DATASET_FILTERS:
             if (value := row[name]) is not None:
                 counts[name][value] = counts[name].get(value, 0) + 1
+        for value in [*row["lacks"], *([ANYTHING] if row["lacks"] else [])]:
+            counts["lacks"][value] = counts["lacks"].get(value, 0) + 1
     return {name: dict(sorted(values.items())) for name, values in counts.items()}
 
 
@@ -210,6 +250,9 @@ RULE_GROUPS: list[tuple[re.Pattern[str], str]] = [
     )
 ]
 POOL = "pool"  # the decision group of a row the buffer would draw from
+# The groups of a row the planner could not place because of its record, not because of the definition. Such a
+# dataset is flagged in the Datasets list (`record_row`'s `lacks`); a plan's table counts it and never lists it.
+RECORD_LACKS_GROUPS = ("record unreadable", "no array shape", "voxel size unknown")
 
 
 def rule_group(rule: str | None) -> str:
@@ -289,7 +332,8 @@ def plan_view(
     The three registry toggles narrow the rows and the summary's numbers; the funnel is the plan's own and
     ignores them. `fit_only` and the page's search narrow only the rows and, the search, the datasets to prepare:
     a request takes a bounded number, and the search is how a person prepares a large plan in parts.
-    `to_prepare` narrows the rows alone to the datasets that fit and are not prepared: a buffer's Prepare step."""
+    `to_prepare` narrows the rows alone to the datasets that fit and are not prepared: a buffer's Prepare step.
+    A row whose record lacks what a plan needs (`RECORD_LACKS_GROUPS`) is counted (`record_lacks`) and never listed."""
     rows = []
     for row in sorted(plan["rows"], key=lambda row: row["path"]):
         known = datasets.get(row["id"]) or {}
@@ -365,7 +409,9 @@ def plan_view(
             and (not page.text or matches(page.text, _plan_haystack(row)))
         ),
     }
-    shown = [row for row in rows if row["fits"]] if fit_only or to_prepare else rows
+    listed = [row for row in rows if row["decision"]["group"] not in RECORD_LACKS_GROUPS]
+    summary["record_lacks"] = len(rows) - len(listed)
+    shown = [row for row in listed if row["fits"]] if fit_only or to_prepare else listed
     if to_prepare:
         shown = [row for row in shown if row.get("prepared") != "prepared"]
     found, matched = paged(shown, page, PLAN_SORTS, _plan_haystack)

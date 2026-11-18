@@ -1,5 +1,5 @@
 // Steps 1 and 2 of a buffer: its definition as controls and as YAML, the plan of that definition as numbers,
-// charts and a table, and the tick that takes a dataset out.
+// charts and a table, and the check that takes a dataset out.
 import { DIMS, fromSpec, levelsKey, levelsOf, LIC, SRC, specDiff, toSpecYaml } from "./spec.js";
 import {
   $,
@@ -89,7 +89,7 @@ const defaults = () => ({
   cropsTest: 2000,
   maxCrops: 1024,
   holdout: "",
-  exclude: new Set(), // the datasets unticked on step 2
+  exclude: new Set(), // the datasets unchecked on step 2
   preparedOnly: false,
   rawCached: false,
   stagedGeom: false,
@@ -245,9 +245,9 @@ const splitText = x =>
 const PLAN_COLS = [
   {
     label: "selected",
-    title: "untick a dataset that fits to take it out of this buffer; it is then listed above the table",
+    title: "uncheck a dataset that fits to take it out of this buffer; it is then listed above the table",
     cell: x => {
-      if (!x.fits) return ""; // a rule of the definition keeps it out: there is nothing to tick
+      if (!x.fits) return ""; // a rule of the definition keeps it out: there is nothing to check
       const input = el("input", {
         type: "checkbox",
         "aria-label": "selected: " + x.id,
@@ -322,7 +322,7 @@ function chips(container, values, set, onchange) {
 let planTimer = 0,
   planSeq = 0,
   planTable = null,
-  fitOnly = false;
+  fitOnly = true; // step 2 lists the datasets that fit; the ones that do not, only when asked
 function schedulePlan(ms) {
   clearTimeout(planTimer);
   planTimer = setTimeout(() => {
@@ -574,6 +574,15 @@ function renderDesigner() {
         )
       : [el("li", { class: "empty" }, "No prepared dataset fits yet.")]),
   );
+  // datasets the planner could not place because of their record: counted here, listed and dealt with under Datasets
+  $("recordLacks").replaceChildren(
+    ...(m.record_lacks
+      ? [
+          `${plural(m.record_lacks, "dataset")} the filters admit ${m.record_lacks === 1 ? "is" : "are"} left out because of what the catalog record lacks (an array shape, a voxel size). `,
+          el("a", { href: "#datasets?lacks=anything" }, "See what records lack, under Datasets"),
+        ]
+      : []),
+  );
   // the datasets a person took out: the planner drops them before the table, so they are listed here to put back
   const out = [...C.exclude].sort();
   $("takenOut").replaceChildren(
@@ -620,9 +629,10 @@ export function showDesigner() {
   showText();
   showLock();
   if (planTable) return planTable.reload();
-  const fit = el("input", { type: "checkbox" });
-  fit.addEventListener("change", () => {
-    fitOnly = fit.checked;
+  const others = el("input", { type: "checkbox" });
+  others.checked = !fitOnly;
+  others.addEventListener("change", () => {
+    fitOnly = !others.checked;
     planTable.reload(true);
   });
   planTable = pagedTable("plan", {
@@ -630,9 +640,20 @@ export function showDesigner() {
     cols: PLAN_COLS,
     sort: "decision",
     search: "search id, title, modality, licence",
-    tools: [el("label", { class: "inline" }, fit, " fitting only")],
-    empty: "The definition admits no dataset.",
-    rowAttrs: x => ({ class: x.in_pool ? "" : "out" }),
+    tools: [
+      el(
+        "label",
+        {
+          class: "inline",
+          title:
+            "Also list the datasets the filters admit whose arrays the patch does not fit. They are counted under Where datasets leave.",
+        },
+        others,
+        " also list the datasets that do not fit",
+      ),
+    ],
+    empty: "No dataset fits this definition.",
+    rowAttrs: x => ({ class: x.fits ? "" : "out" }),
   });
   $("planTable").replaceChildren(planTable);
 }

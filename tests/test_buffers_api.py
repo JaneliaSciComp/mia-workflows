@@ -28,6 +28,9 @@ from tests.test_buffers_plan import FIXTURES, ONE_CH, U937
 from tests.test_buffers_sync import write_prepared
 from tests.test_core_hosts import SHORTHAND_IPS
 
+# what a record needs beside a data URL for its dataset to be started: the shape of its raw array
+SHAPE = {"technical": {"arrays": [{"role": "raw", "axes": "yx", "shape": [512, 512]}]}}
+
 
 def _spec_2d_text() -> str:
     """The fixture spec restricted to 2D, as the `spec_2d` fixture builds it, as YAML text."""
@@ -1164,11 +1167,14 @@ def test_the_cleaners_report_and_the_workers_commits(tmp_path):
     s, _ = _acting(tmp_path)
     assert call(s, "GET", "/cleaner")[:2] == (200, b"null")
     assert call(s, "PUT", "/cleaner", payload={"findings": []})[0] == 401
-    stored = worker(s, "PUT", "/cleaner", {"findings": [{"id": "restart mia-data", "text": "a restart is owed"}]})[1]
+    owed, paused = {"id": "restart mia-data", "text": "a restart is owed"}, {"id": "pause", "text": "paused"}
+    stored = worker(s, "PUT", "/cleaner", {"findings": [owed, paused]})[1]
     assert call(s, "GET", "/cleaner")[1] == stored and isinstance(stored["at"], float)
     assert call(s, "GET", "/workers")[1] == {"workers": {}}
     assert call(s, "PUT", "/workers/mia-data", payload={"commit": "abc"})[0] == 401
     assert worker(s, "PUT", "/workers/mia-data", {"commit": "abc", "code": "d1"})[1]["commit"] == "abc"
+    # the worker started on other code after the sweep: the restart the sweep found owed is not shown any more
+    assert call(s, "GET", "/cleaner")[1]["findings"] == [paused]
     assert worker(s, "PUT", "/workers/mia-buffers", {"commit": None})[0] == 200
     first = call(s, "GET", "/workers")[1]["workers"]["mia-data"]
     again = worker(s, "PUT", "/workers/mia-data", {"commit": "abd", "code": "d1"})[1]  # a commit of docs: same code
@@ -1540,7 +1546,7 @@ def _acting(tmp_path, **gateway_kwargs):
     records = [
         {
             "path": f"{name}.yaml",
-            "record": {"id": name, "data": {"download_url": f"https://data.example.org/{name}.zip"}},
+            "record": {"id": name, "data": {"download_url": f"https://data.example.org/{name}.zip"}, **SHAPE},
         }
         for name in ("rec-a", "rec-b")
     ]
@@ -1564,10 +1570,19 @@ def test_a_dataset_whose_record_names_no_data_url_cannot_be_started(tmp_path):
     subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
     assert "go" not in subject["actions"] and subject["gaps"] and len(gateway.sent) == 1
     assert call(s, "GET", "/catalog/datasets/rec-a")[1]["row"]["gaps"] == subject["gaps"]
-    sync("c" * 40, {"id": "rec-a", "data": {"download_url": "https://data.example.org/rec-a.zip"}})
+    sync("c" * 40, {"id": "rec-a", "data": {"download_url": "https://data.example.org/rec-a.zip"}, **SHAPE})
     subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
     assert "go" in subject["actions"] and subject["gaps"] == []
     assert call(s, "GET", "/catalog/datasets/rec-a")[1]["row"]["gaps"] == []
+    # nor can one no buffer could take: a record without the shape of its raw array, or one the planner cannot read
+    sync("d" * 40, {"id": "rec-a", "data": {"download_url": "https://data.example.org/rec-a.zip"}})
+    status, refused, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-3"})
+    assert status == 409 and "it gives no shape for its largest raw array" in refused["error"]
+    row = call(s, "GET", "/catalog/datasets/rec-a")[1]["row"]
+    assert len(row["gaps"]) == 1 and "array shape" in row["lacks"] and "data URL" not in row["lacks"]
+    assert "go" not in call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"]
+    sync("e" * 40, {"id": "rec-a", "data": {"download_url": ["https://data.example.org/rec-a.zip"]}, **SHAPE})
+    assert "the planner cannot read it" in call(s, "GET", "/subjects/dataset/rec-a")[1]["gaps"][0]
 
 
 def test_a_record_with_a_gap_gets_no_subject(tmp_path):
@@ -2363,6 +2378,23 @@ def catalog_service(tmp_path):
 HEMIBRAIN = "janelia-hemibrain-v1-2-fib-sem-connectome"
 
 
+def test_catalog_datasets_filters_by_what_a_record_lacks(tmp_path):
+    """The Datasets list flags what each record lacks and filters by one of them, or by any."""
+    s = svc(tmp_path)
+    records = [{"path": p, "record": r} for p, r in load_records(FIXTURE_CATALOG)]
+    bare = next(item for item in records if U937 in item["path"])
+    for array in bare["record"]["technical"]["arrays"]:
+        array.pop("shape", None)
+    assert call(s, "PUT", f"/records/{REF_A}", payload={"records": records})[0] == 200
+    out = call(s, "GET", "/catalog/datasets", {"lacks": "array shape"})[1]
+    assert U937 in [row["id"] for row in out["rows"]] and all("array shape" in row["lacks"] for row in out["rows"])
+    assert out["facets"]["lacks"]["array shape"] == out["total"] < len(records)  # counted over the whole catalog
+    assert out["facets"]["lacks"]["anything"] >= out["total"]
+    anything = call(s, "GET", "/catalog/datasets", {"lacks": "anything"})[1]
+    assert anything["total"] == out["facets"]["lacks"]["anything"] and all(row["lacks"] for row in anything["rows"])
+    assert call(s, "GET", "/catalog/datasets", {"lacks": "patience"})[0] == 422
+
+
 def test_catalog_datasets_joins_each_record_with_what_the_registry_knows(tmp_path):
     assert call(svc(tmp_path / "empty"), "GET", "/catalog/datasets")[:2] == (404, {"error": "no catalog synced"})
     s = catalog_service(tmp_path)
@@ -2692,7 +2724,9 @@ def _checking(tmp_path):
     )
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t", hosts=check)
     urls = {"rec-a": "https://data.example.org/a.zip", "rec-b": "https://zenodo.org/b.zip"}
-    records = [{"path": f"{n}.yaml", "record": {"id": n, "data": {"download_url": u}}} for n, u in urls.items()]
+    records = [
+        {"path": f"{n}.yaml", "record": {"id": n, "data": {"download_url": u}, **SHAPE}} for n, u in urls.items()
+    ]
     assert worker(s, "PUT", f"/records/{REF_A}", {"records": records})[0] == 200
     return s
 
@@ -2835,6 +2869,44 @@ def test_a_go_with_approve_hosts_approves_them_then_starts_the_round(tmp_path, _
     assert (line["host"], line["by"], line["kind"], line["number"]) == ("data.example.org", "page", "dataset", number)
     assert _missing(s, {"records": ["rec-a"]})[:2] == (200, {"hosts": []})
     assert len(gateway.sent) == 1
+
+
+def test_a_host_a_datasets_job_was_refused_is_offered_at_its_next_start(tmp_path, _home):
+    """Incident 2026-11-17: Harvard Dataverse sends every download to an S3 host no record names. The page offered
+    the record's host alone, so the dataset stopped `blocked` at the redirect on every run."""
+    s, gateway = _starting(tmp_path)
+    put = worker(s, "PUT", "/datasets/rec-b/hosts", {"hosts": ["cdn.example.net", "not a host", "10.0.0.1"]})
+    assert put[:2] == (200, {"hosts": ["cdn.example.net"]})
+    assert call(s, "GET", "/datasets/rec-b/hosts")[:2] == (200, {"hosts": ["cdn.example.net"], "approved": []})
+    assert s.handle("PUT", "/datasets/rec-b/hosts", {}, b'{"hosts": ["x.example.net"]}', JSON)[0] == 401  # no token
+    assert _missing(s, {"records": ["rec-b"]})[1] == {"hosts": [{"host": "cdn.example.net", "records": ["rec-b"]}]}
+    assert act(s, "/datasets/rec-b/actions", {"action": "go", "approve_hosts": ["cdn.example.net"]})[0] == 202
+    assert _missing(s, {"records": ["rec-b"]})[1] == {"hosts": []} and len(gateway.sent) == 1
+    worker(s, "PUT", "/datasets/rec-b/hosts", {"hosts": ["files.example.net"]})
+    assert call(s, "GET", "/subjects/dataset/rec-b")[1]["hosts"] == ["files.example.net"]  # the page's notice
+
+
+def test_raw_github_is_approved_for_one_dataset_at_a_time(tmp_path, _home):
+    """Incident 2026-11-17: records with files on GitHub. A person may let one dataset's jobs read
+    raw.githubusercontent.com; that says nothing about the next dataset, though the policy then allows the host."""
+    s, gateway = _starting(tmp_path)
+    raw = "raw.githubusercontent.com"
+    urls = {"rec-g": f"https://{raw}/o/r/main/g.tif", "rec-h": f"https://{raw}/o/s/main/h.tif"}
+    records = [
+        {"path": f"{n}.yaml", "record": {"id": n, "data": {"download_url": u}, **SHAPE}} for n, u in urls.items()
+    ]
+    assert worker(s, "PUT", f"/records/{REF_A}", {"records": records})[0] == 200
+    row = {"host": raw, "records": ["rec-g", "rec-h"], "per_dataset": True}
+    assert _missing(s, {"records": ["rec-g", "rec-h"]})[1] == {"hosts": [row]}
+    assert act(s, "/datasets/rec-h/actions", {"action": "go", "approve_hosts": ["github.com"]})[0] == 422
+    status, action, _ = act(s, "/datasets/rec-g/actions", {"action": "go", "approve_hosts": [raw]})
+    assert status == 202 and _bodies(s, "dataset", action["number"])[0] == f"**Hosts approved:** `{raw}` by `page`"
+    assert _missing(s, {"records": ["rec-g", "rec-h"]})[1] == {"hosts": [{**row, "records": ["rec-h"]}]}
+    assert call(s, "GET", "/datasets/rec-g/hosts")[1]["approved"] == [raw]
+    assert call(s, "GET", "/datasets/rec-h/hosts")[1]["approved"] == []
+    status, action, _ = act(s, "/datasets/rec-h/actions", {"action": "go", "approve_hosts": [raw]})
+    assert status == 202 and _bodies(s, "dataset", action["number"])[0] == f"**Hosts approved:** `{raw}` by `page`"
+    assert _missing(s, {"records": ["rec-g", "rec-h"]})[1] == {"hosts": []}
 
 
 @pytest.mark.parametrize(
@@ -3036,7 +3108,11 @@ def test_a_buffers_hosts_are_those_its_bindings_name_that_its_catalog_records_al
 )
 def test_an_ip_literal_and_the_deployments_own_hosts_are_never_offered_or_approved(tmp_path, _home, url, host):
     s, gateway = _starting(tmp_path)
-    record = {"id": "rec-x", "data": {"download_url": [url, "https://x.example.org/a.zip"]}}
+    record = {
+        "id": "rec-x",
+        "data": {"download_url": url},
+        "technical": {**SHAPE["technical"], "sample": {"urls": ["https://x.example.org/a.zip"]}},
+    }
     assert worker(s, "PUT", f"/records/{REF_A}", {"records": [{"path": "rec-x.yaml", "record": record}]})[0] == 200
     assert _missing(s, {"records": ["rec-x"]})[:2] == (
         200,
@@ -3050,7 +3126,7 @@ def test_an_ip_literal_and_the_deployments_own_hosts_are_never_offered_or_approv
 @pytest.mark.parametrize("host", [*SHORTHAND_IPS, "1.2.3.4.", "2130706433", "buffer-api.internal.example."])
 def test_a_host_that_cannot_be_approved_is_never_offered(tmp_path, _home, host):
     s = _checking(tmp_path)
-    record = {"id": "rec-x", "data": {"download_url": [f"http://{host}/a.zip", "https://x.example.org/a.zip"]}}
+    record = {"id": "rec-x", "data": {"download_url": [f"http://{host}/a.zip", "https://x.example.org/a.zip"]}, **SHAPE}
     assert worker(s, "PUT", f"/records/{REF_A}", {"records": [{"path": "rec-x.yaml", "record": record}]})[0] == 200
     assert _missing(s, {"records": ["rec-x"]})[:2] == (
         200,
@@ -3067,7 +3143,10 @@ def test_two_approvals_at_once_both_land(tmp_path, _home):
         f"/records/{REF_A}",
         {
             "records": [
-                {"path": f"{n}.yaml", "record": {"id": n, "data": {"download_url": f"https://{n}.example.org/a.zip"}}}
+                {
+                    "path": f"{n}.yaml",
+                    "record": {"id": n, "data": {"download_url": f"https://{n}.example.org/a.zip"}, **SHAPE},
+                }
                 for n in ("rec-c", "rec-d")
             ]
         },

@@ -3,7 +3,7 @@
   <div class="eyebrow">user guide · training on a buffer</div>
   <h1>Training on a MIA buffer</h1>
   <p>A buffer is a pool of training crops drawn from the catalogued datasets that match its definition. The definition is a short YAML text, and it describes both ends of the buffer. On the input side it says which datasets qualify. On the output side it says how crops are presented to the model: the patch size and pyramid levels, the channels, the normalisation, the weighting between datasets, and how volumes are split into train, validation and test. The system plans the buffer over the datasets it already knows how to read, downloads and converts them, and serves crop descriptors over HTTP; a Python dataset class turns them into tensors in the training process.</p>
-  <p>A buffer is six steps on one page, in a fixed order, and its page opens at the step it is on. Each step has one button that moves it forward and one that goes back; what else can be asked of it is under <i>More</i>. Every step the system takes is an entry in the buffer's timeline, under the step. <a href="#needs">Needs you</a> lists whatever is waiting for a person. Something that can wait is taken off that list with <i>Shelve…</i> and a reason: nothing starts it and no plan takes it until <i>Unshelve</i>. The page needs no login: anyone who can reach it can press its buttons.</p>
+  <p>A buffer is six steps on one page, in a fixed order, and its page opens at the step it is on. Each step has one button that moves it forward and one that goes back; what else can be asked of it is under <i>Actions…</i>. Every step the system takes is an entry in the buffer's timeline, under the step. <a href="#needs">Needs you</a> lists whatever is waiting for a person. Something that can wait is taken off that list with <i>Shelve…</i> and a reason: nothing starts it and no plan takes it until <i>Unshelve</i>. The page needs no login: anyone who can reach it can press its buttons.</p>
 </header>
 
 <h2>The whole loop</h2>
@@ -43,7 +43,7 @@ select:
     modality: {in: [fluorescence, brightfield]}
     license: {in: [CC0-1.0, CC-BY-4.0], allow_unknown: false}
     annotations: {required: true}
-  exclude: {ids: [a-dataset-id]}        <span class="c"># the datasets unticked on step 2</span>
+  exclude: {ids: [a-dataset-id]}        <span class="c"># the datasets unchecked on step 2</span>
 sampling:
   patch: {2D: {y: 256, x: 256}, c: 1}   <span class="c"># crop edges in pixels at level 1; one channel per crop</span>
   levels: [1, 2, 4]                     <span class="c"># the pyramid levels each crop is served at</span>
@@ -55,11 +55,11 @@ ready:
   min_fraction: 0.5                     <span class="c"># how much of each weighting group must be servable before the buffer counts as ready</span></pre>
 
 <h2>Step 2. Datasets</h2>
-<p><b>Next</b> shows every dataset the definition admits, and why each is selected or not. <b>Where datasets leave</b> counts the datasets each rule removes; the last rule, <em>not prepared</em>, means a dataset fits but no reader exists for its files yet, and the other rules are the definition's own filters. Untick a dataset that fits to take it out of this buffer: it is listed above the table, with <i>put back</i>, and written to the definition as an excluded id.</p>
-<p><b>Save buffer and continue</b> creates the buffer. Nothing runs yet. From here on the buffer has a page of its own, which the Buffers tab lists, and its definition can still be changed: go back to step 1 or 2, change it, and going on saves the change. A definition can be changed while the buffer rests: before its first plan, and after a round that was cancelled, stopped or retired. While a round is in progress it cannot (go back from that step, which cancels the round), and a buffer that serves is fixed. <i>Clone</i>, under <i>More</i>, opens New buffer on a copy of any buffer's definition.</p>
+<p><b>Next</b> lists the datasets that fit the definition, the prepared ones first: the same number step 1 counted. <b>Where datasets leave</b> counts the datasets each rule removes; the last rule, <em>not prepared</em>, means a dataset fits but no reader exists for its files yet, and the other rules are the definition's own filters, its patch (a footprint larger than the dataset) and what a record lacks (no array shape, no voxel size). A dataset the patch does not fit is listed when you check <i>also list the datasets that do not fit</i>. A dataset whose record lacks something is never listed in a buffer: the step counts them and links to the <a href="#datasets?lacks=anything">Datasets</a> tab, which flags what each record lacks (<i>no array shape</i>, <i>no voxel size</i>, <i>no data URL</i>) and filters by it. Uncheck a dataset to take it out of this buffer: it is listed above the table, with <i>put back</i>, and written to the definition as an excluded id.</p>
+<p><b>Save buffer and continue</b> creates the buffer. Nothing runs yet. From here on the buffer has a page of its own, which the Buffers tab lists, and its definition can still be changed: go back to step 1 or 2, change it, and going on saves the change. A definition can be changed while the buffer rests: before its first plan, and after a round that was cancelled, stopped or retired. While a round is in progress it cannot (go back from that step, which cancels the round), and a buffer that serves is fixed. <i>Clone</i>, under <i>Actions…</i>, opens New buffer on a copy of any buffer's definition.</p>
 
 <h2>Step 3. Prepare</h2>
-<p>A buffer is planned over prepared datasets only. This step lists the datasets that fit and are not prepared. Tick the ones you want and press <b>Prepare the ticked datasets</b>: that files one preparation request for this buffer. Each dataset in it is an agent run that writes and verifies a reader for that dataset's files; some stop with a question for a person. The step lists the buffer's requests with their stage, and each dataset with where it stands. (To prepare datasets apart from any buffer, tick them on the <a href="#datasets">Datasets</a> tab; every request is listed under <a href="#preparation">Preparation requests</a> there.)</p>
+<p>A buffer is planned over prepared datasets only. This step lists the datasets that fit and are not prepared. Check the ones you want and press <b>Prepare the checked datasets</b>: that files one preparation request for this buffer. Each dataset in it is an agent run that writes and verifies a reader for that dataset's files; some stop with a question for a person. The step lists the buffer's requests with their stage, and each dataset with where it stands. (To prepare datasets apart from any buffer, check them on the <a href="#datasets">Datasets</a> tab; every request is listed under <a href="#preparation">Preparation requests</a> there.)</p>
 <p>The buffer waits at this step for as long as you like, and nothing about it runs meanwhile. <b>Continue with N prepared datasets</b> plans it over whatever is prepared at that moment. Datasets that are prepared later join the next plan.</p>
 
 <h2>Step 4. Plan</h2>
@@ -77,7 +77,7 @@ ready:
 
 <h2>Step 6. Serve</h2>
 <p>The step names the <b>version</b> being served by its id, with the line a training script pastes. Every round that reaches its plan makes a version with an id of its own, and a training run names that id, never the buffer's name. The step lists the buffer's versions, each opening a page with its events, datasets, volumes, consumers and usage.</p>
-<p>A serving buffer's definition is fixed. <b>Plan a new version</b> plans it again over the datasets that are prepared now; the version being served keeps serving the runs connected to it until the new one is approved. <i>Revoke the ticked</i> withdraws single datasets from the serving version, and <i>Retire</i>, under <i>More</i>, releases all of it.</p>
+<p>A serving buffer's definition is fixed. <b>Plan a new version</b> plans it again over the datasets that are prepared now; the version being served keeps serving the runs connected to it until the new one is approved. <i>Revoke the checked</i> withdraws single datasets from the serving version, and <i>Retire</i>, under <i>Actions…</i>, releases all of it.</p>
 
 <h2>Buttons and stages</h2>
 <div class="tw"><table>
@@ -90,12 +90,12 @@ ready:
 <tr><td><i>Change the buffer</i></td><td>steps 4 and 5</td><td>Cancels the round: its cluster jobs are killed and its version is retired. The buffer rests at step 3.</td></tr>
 <tr><td><i>Files are in place</i></td><td>step 5</td><td>For a dataset waiting on files placed by hand: tells the round they are in its <code>incoming/</code> directory.</td></tr>
 <tr><td><i>Plan a new version</i></td><td>step 6</td><td>A new round of the same definition, over the datasets prepared now.</td></tr>
-<tr><td><i>Revoke the ticked</i></td><td>step 6</td><td>Withdraws the ticked datasets from the serving version. Their volumes leave it and their artifacts are quarantined; the version serves on at its floor or asks for a person.</td></tr>
-<tr><td><i>Keep</i></td><td><i>More</i>, <code>idle</code></td><td>An idle buffer stays; back to ready.</td></tr>
-<tr><td><i>Retire</i></td><td><i>More</i>, <code>ready</code>, <code>idle</code></td><td>Releases the version's staged data.</td></tr>
-<tr><td><i>Cancel the round</i></td><td><i>More</i>, a round before <code>ready</code></td><td>The same cancel as the way back from steps 4 and 5.</td></tr>
-<tr><td><i>Force stop</i></td><td><i>More</i>, any stage with a run</td><td>For a run that does not answer a cancel: terminates the workflow and retires the versions. It does not kill a job already running.</td></tr>
-<tr><td><i>Clone</i></td><td><i>More</i></td><td>Opens New buffer on a copy of this buffer's definition.</td></tr>
+<tr><td><i>Revoke the checked</i></td><td>step 6</td><td>Withdraws the checked datasets from the serving version. Their volumes leave it and their artifacts are quarantined; the version serves on at its floor or asks for a person.</td></tr>
+<tr><td><i>Keep</i></td><td><i>Actions…</i>, <code>idle</code></td><td>An idle buffer stays; back to ready.</td></tr>
+<tr><td><i>Retire</i></td><td><i>Actions…</i>, <code>ready</code>, <code>idle</code></td><td>Releases the version's staged data.</td></tr>
+<tr><td><i>Cancel the round</i></td><td><i>Actions…</i>, a round before <code>ready</code></td><td>The same cancel as the way back from steps 4 and 5.</td></tr>
+<tr><td><i>Force stop</i></td><td><i>Actions…</i>, any stage with a run</td><td>For a run that does not answer a cancel: terminates the workflow and retires the versions. It does not kill a job already running.</td></tr>
+<tr><td><i>Clone</i></td><td><i>Actions…</i></td><td>Opens New buffer on a copy of this buffer's definition.</td></tr>
 <tr><td><i>Check again</i></td><td>a request at <code>needs-human</code></td><td>The request looks at its datasets again and is done once each is prepared or shelved.</td></tr>
 </table></div>
 <p>A round in progress accepts only its cancel: cancel it before asking for anything else. After a click the buttons are held, with the pressed one marked, until the round answers.</p>
@@ -135,7 +135,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <ul>
   <li><b>Degraded.</b> When a group's servable share falls under the floor set at the approve (a pyramid was evicted or lost), the timeline says so and the worker stages the missing datasets again from the cache.</li>
   <li><b>Idle.</b> No consumer for <code>idle.hours</code> (default 72) moves the buffer to <code>idle</code>; <i>Keep</i> returns it to ready. After <code>retire_after_days</code> (default 14) more days without a draw the keeper retires the version and its space is reclaimed.</li>
-  <li><b>Revoked.</b> <i>Revoke the ticked</i> removes single datasets from the serving version; <i>Retire</i> releases all of it.</li>
+  <li><b>Revoked.</b> <i>Revoke the checked</i> removes single datasets from the serving version; <i>Retire</i> releases all of it.</li>
   <li><b>A new version.</b> <i>Plan a new version</i> builds one with a new id, reusing what is in the cache. A training run that should use it is given the new id.</li>
 </ul>
 
@@ -148,13 +148,13 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td><i>Approve</i> refused: the subject has changed</td><td>a newer plan or board was posted after the page showed the one you read</td><td>read the newest entry, then approve again</td></tr>
 <tr><td>"The registry says a round is in progress, but its workflow is …"</td><td>the run ended without writing its last stage</td><td><i>Cancel the round</i> settles it</td></tr>
 <tr><td>no weighting group reached <code>ready.min_fraction</code></td><td>every dataset of every group failed or is still waiting</td><td>the board names the failures; change the definition or prepare the datasets, then continue from step 3 again</td></tr>
-<tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td>tick it on step 3 of the buffer, or on the Datasets tab, and prepare it; then plan again</td></tr>
+<tr><td>a dataset is "not prepared"</td><td>no reader exists for its files yet</td><td>check it on step 3 of the buffer, or on the Datasets tab, and prepare it; then plan again</td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer not approved)</td><td>the round is staged but not approved</td><td>press <i>Approve and serve</i> on step 5 of the buffer (it is listed under <i>Needs you</i>)</td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer needs a human)</td><td>the buffer's latest event is <code>needs-human</code>: a degraded rebuild or a round that stopped</td><td>read the newest entry of the buffer's timeline; the version serves again once the round writes <code>approved</code> or <code>ready</code></td></tr>
 <tr><td><code>BufferNotApproved</code> (409 buffer has no approved event)</td><td>the buffer was registered without being authorised to serve</td><td>re-run <code>mia-buffers register</code> with the same arguments; it writes the <code>approved</code> and <code>ready</code> events</td></tr>
 <tr><td>410 buffer retired</td><td>the buffer was retired: by <i>Retire</i>, by the keeper, or by a new round</td><td>use the id the buffer is serving now: the Buffers tab and step 6 name it</td></tr>
 <tr><td>staged with harness X, this checkout is Y</td><td>the mia-snippets checkout is not at the commit the buffer was converted with</td><td>check out that commit, or pass <code>allow_recipe_mismatch=True</code></td></tr>
-<tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td>the cleaner finds it within the hour and says on the <i>Cleaner</i> tab what it saw and did. By hand: <i>Cancel the round</i>, under <i>More</i> on its page; if that gets no answer, <i>Force stop</i>, then run it again</td></tr>
+<tr><td>a round shows no new entry for hours</td><td>the run may be frozen</td><td>the cleaner finds it within the hour and says on the <i>Cleaner</i> tab what it saw and did. By hand: <i>Cancel the round</i>, under <i>Actions…</i> on its page; if that gets no answer, <i>Force stop</i>, then run it again</td></tr>
 <tr><td>a line under the top bar says a restart is owed, or a schedule has stopped</td><td>the cleaner found something wrong with the installation; the rounds behind it are left alone until it clears</td><td>do what the line says on the host (<code>pixi run mia restart …</code>)</td></tr>
 <tr><td><code>blocked</code> (a dataset) or <code>needs-human</code> (a buffer, a request) whose entry starts "paused by the operator"</td><td><code>autonomy.pause</code> is set in <code>mia.yaml</code> (<code>mia pause</code>): every round stops at its next job</td><td><code>mia resume</code>, then press the button again</td></tr>
 <tr><td><code>blocked</code> whose entry starts "revoked by", or a dataset shown as <code>revoked</code></td><td>a person withdrew the dataset's crops (<i>Revoke</i> on its page): its artifacts are quarantined and no buffer selects or reuses it</td><td>fix the snippet or the binding, then <i>Run again</i> on the dataset's page; a round that saves its crops repairs it</td></tr>
@@ -166,7 +166,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <tr><td>dataset, record</td><td>one entry of the catalog: a published dataset with its files, licence, modality and annotations described. The code and the catalog say <em>record</em> for the entry and its id; the pages say <em>dataset</em>.</td></tr>
 <tr><td>prepared</td><td>a dataset with an approved reader and verified sample crops, produced by the preparation pipeline. Only prepared datasets enter a plan.</td></tr>
 <tr><td>buffer, definition, version, round</td><td>a buffer is what you define, prepare and serve; its definition is the YAML text that says what goes in and how crops come out. A round plans and sources the buffer; a buffer runs one round at a time, and each round that reaches its plan makes a version with an id of its own. A training run names a version's id.</td></tr>
-<tr><td>selected, in this version, on disk</td><td>a dataset is <em>selected</em> when the definition admits it and its tick is on; <em>in this version</em> when a plan holds it; <em>on disk</em> when its data is staged and can be drawn from.</td></tr>
+<tr><td>selected, in this version, on disk</td><td>a dataset is <em>selected</em> when the definition admits it and it is checked; <em>in this version</em> when a plan holds it; <em>on disk</em> when its data is staged and can be drawn from.</td></tr>
 <tr><td>stage, timeline</td><td>a buffer, a dataset and a preparation request are each in one stage at a time, and the stage decides which buttons are offered. The timeline is the list of everything that happened to it, newest first.</td></tr>
 <tr><td>weighting group</td><td>the datasets that share the first key of <code>weighting.over</code>, a modality for instance. <code>min_fraction</code> and the floors are per group.</td></tr>
 <tr><td>staged</td><td>converted: a dataset's volumes rewritten once as immutable OME-Zarr pyramids in the shared cache, reused by every buffer that needs the same geometry and plan.</td></tr>

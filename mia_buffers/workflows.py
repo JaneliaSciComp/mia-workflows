@@ -97,7 +97,7 @@ NOT_PREPARED = "not prepared: prepare it first (Prepare these datasets, on the p
 PREP_GO = "prep:go"
 REFUSED_ARTIFACT = "staged artifact {artifact} is refused: {why}"
 REVOKE_LABEL = "buffer:revoke"
-NO_REVOKE_LINES = "name the records to revoke: tick them on the spec's page"
+NO_REVOKE_LINES = "name the records to revoke: check them on the spec's page"
 PAUSED = "paused by the operator (autonomy.pause); `mia resume`, then run it again"
 # registry states a preparation request stops following (spec §12); a request is done when each record is one of
 # PREP_DONE: prepared, or set aside by a person

@@ -134,7 +134,7 @@ def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
 
 
 def test_page_names_the_revoked_states_and_the_pause() -> None:
-    for needle in ('"revoked":', '"quarantined":', "Revoke the ticked", "paused by the operator"):
+    for needle in ('"revoked":', '"quarantined":', "Revoke the checked", "paused by the operator"):
         assert has(needle), needle
 
 
@@ -574,7 +574,7 @@ def test_a_lifecycle_marks_the_current_stage_on_its_line() -> None:
 
 
 def test_a_buffer_is_always_planned_first() -> None:
-    """The page has no tick for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
+    """The page has no check for the plan: every go it sends for a buffer stops at the plan, and Run continues it."""
     assert not has("Show me the plan first") and not has("first.checked")
     assert has('subject.stage === "plan-review" ? "Run"')
 
@@ -634,7 +634,7 @@ def test_the_page_asks_which_hosts_a_run_lacks_before_it_starts() -> None:
 
 
 def test_the_hosts_dialog_offers_approve_start_anyway_and_cancel() -> None:
-    """The dialog lists the hosts with Select all; Approve and start waits for a ticked host."""
+    """The dialog lists the hosts with Select all; Approve and start waits for a checked host."""
     for text in (
         "Approve and start",
         "Start without approving",
@@ -875,7 +875,7 @@ def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
 
 
 def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> None:
-    """Every row of the Datasets list has a tick, prepared or not. The ticked that still need it can be prepared
+    """Every row of the Datasets list has a check, prepared or not. The checked that still need it can be prepared
     in one request, and all of them can open New buffer as a spec that selects exactly them: each by a glob on
     its record's file name, which no other record's path matches."""
     from mia_buffers.select import _glob
@@ -888,11 +888,25 @@ def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> N
     assert not _glob(patterns, "datasets/2D/confocal/not-u937.yaml") and not _glob(patterns, "datasets/u937.yaml.bak")
 
 
+def test_the_datasets_list_flags_and_filters_what_a_record_lacks() -> None:
+    """A dataset whose record lacks something every buffer needs (an array shape, a voxel size, a data URL) says so
+    in its row, and the list filters by one of them or by any. An address can name the filter: a buffer's step 2
+    links there for the datasets its plan could not place."""
+    datasets = squeezed(FILES["datasets.js"])
+    assert has('const DS_FILTER = { state: "", modality: "", dims: "", licence: "", lacks: "" };', datasets)
+    assert has('(x.lacks || []).map(name => pill(`no ${name}`, "warn"))', datasets)  # every lack is marked
+    assert has('name === "lacks" ? "lacks…"', datasets)
+    assert ("GET", "/catalog/datasets") in requested_paths()
+    # step 2 of a buffer counts them and sends the person to Datasets; it never lists them
+    assert has('href: "#datasets?lacks=anything"', squeezed(FILES["designer.js"]))
+    assert has("m.record_lacks", squeezed(FILES["designer.js"]))
+
+
 def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked() -> None:
-    """With nothing ticked the list offers Select all and Clear selection and says nothing more. With a tick, a
+    """With nothing checked the list offers Select all and Clear selection and says nothing more. With a check, a
     box of its own colour says how many datasets are selected and offers Prepare and Create buffer."""
     assert has('"Select all")') and not has("Select all matching")
-    assert not has("tick the datasets to prepare first")
+    assert not has("check the datasets to prepare first")
     assert has('class: "chosen", hidden: true') and has(".chosen[hidden]{display:none}")
     assert has("box.hidden = !CHOSEN.size") and has('"Create buffer")')
     # Select all takes the rows of the page that is showing, and asks the server for nothing
@@ -988,7 +1002,7 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
     assert back == controls and same == []
     hand_controls, hand_text = lost
     assert hand_controls["name"] == "microscopy-foundation-pretrain" and hand_controls["level"] == 4
-    assert load_spec_text(written).select.exclude.ids == ["bcss", "u937"]  # an unticked dataset is an exclusion
+    assert load_spec_text(written).select.exclude.ids == ["bcss", "u937"]  # an unchecked dataset is an exclusion
     differs = run_js(
         "print(specDiff(input.hand, input.rewritten));",
         {"spec.js": "specDiff"},
@@ -1013,7 +1027,8 @@ def test_a_buffer_is_one_page_and_the_tabs_name_no_spec_and_no_preparation() -> 
     assert "/#buffer/" in (UI_DIR.parent / "mirror.py").read_text()
     # the strip, and what is not a step
     assert has("stripOf(subject?.stage, step)", flow) and has("stepToShow(subject.stage, asked)", flow)
-    assert has('el("summary", { class: "btn" }, "More")', flow) and has("actionBar(subject, redraw, ", flow)
+    assert has('el("summary", { class: "btn" }, "Actions…")', flow) and has("actionBar(subject, redraw, ", flow)
+    assert has("bar.prepend(", flow) and has('document.querySelectorAll("details.more[open]")')  # Clone first; closes
     assert has("timelineCard(entries)", flow) and has("shelvedNotice(subject.shelved)", flow)
     # the stream redraws the buffer's page, not a subject's
     assert has("if (onScreen.redraw) onScreen.redraw();") and has("onScreen.redraw = null;")
@@ -1040,7 +1055,7 @@ def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
     assert has("the controls do not show", designer)
     # a redraw the stream asked for leaves a definition someone is changing alone
     assert has("if (changed()) return;", designer)
-    # the four numbers of step 1, and the tick of step 2 that takes a dataset out
+    # the four numbers of step 1, and the check of step 2 that takes a dataset out
     assert has('$("kpisFit").replaceChildren(tile("Datasets that fit"', designer)
     assert has("C.exclude.add(x.id);", designer) and has("C.exclude.delete(id);", designer)
     # saving: a new subject and no action; a saved buffer's change is an edit that names the revision it was made at
@@ -1057,7 +1072,7 @@ def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() 
     assert has('pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number }))', flow)
     assert has("...(owner == null ? {} : { buffer: owner })", actions)
     assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
-    # only what a request could start can be ticked: the plan's own list, not every row
+    # only what a request could start can be checked: the plan's own list, not every row
     assert has("startable.has(x.id)", flow)
     assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
     assert count("plan_first: true") == 1 and has("title: BUTTON_HELP.plan", flow)  # every plan stops for its Run
@@ -1154,6 +1169,27 @@ def test_a_redraw_leaves_a_number_being_typed_alone() -> None:
     assert typed == "25000"
 
 
+def test_step_two_lists_the_datasets_that_fit_and_the_others_only_when_asked() -> None:
+    """Step 1 counts the datasets that fit, and step 2's table is those datasets. A dataset the patch does not fit,
+    or whose record has no array shape, is counted where datasets leave and is listed only once the person asks."""
+    asked, shown = designer(
+        "const pages = [];\n"
+        "const service = globalThis.fetch;\n"
+        "globalThis.fetch = async (path, options) => {\n"
+        "  if (path === '/plan') pages.push(JSON.parse(options.body).page);\n"
+        "  return service(path, options);\n"
+        "};\n"
+        "showDesigner(); await later(50);\n"
+        "const others = walk(document.getElementById('planTable')).find(node => node.tag === 'input' && node.attrs.type === 'checkbox');\n"
+        "others.checked = true; others.fire('change'); await later(50);\n"
+        "print([pages.map(page => page.fit_only), textOf(document.getElementById('planTable'))]);",
+        _definitions(),
+    )
+    assert asked == [True, False]
+    assert "also list the datasets that do not fit" in shown
+    assert "The datasets that fit this definition" in FILES["index.html"]
+
+
 def test_yaml_typed_into_one_buffer_never_lands_in_the_next_one_opened() -> None:
     """The YAML tab is read after a pause in typing. Opening another buffer within that pause drops the read: the
     buffer opened shows its own definition, unchanged."""
@@ -1192,7 +1228,7 @@ def test_the_page_says_buffer_and_definition_and_explains_nothing_by_its_past() 
 
 
 def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> None:
-    """Unticking a dataset writes its id to `select.exclude.ids`. A reason beside it, or an excluded path, is
+    """Unchecking a dataset writes its id to `select.exclude.ids`. A reason beside it, or an excluded path, is
     something no control shows: specDiff names it, so the page keeps the text."""
     from mia_buffers.spec import load_spec_text
 
@@ -1205,11 +1241,11 @@ def test_a_spec_that_says_why_it_excludes_is_more_than_the_ticks_can_hold() -> N
         **plain,
         "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {"x": "blurry"}}},
     }
-    ticked = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {}}}}
+    checked = {**plain, "select": {**plain["select"], "exclude": {"paths": [], "ids": ["x"], "reasons": {}}}}
     ids, differs = run_js(
-        "print([[...fromSpec(input.reasoned).exclude], specDiff(input.reasoned, input.ticked)]);",
+        "print([[...fromSpec(input.reasoned).exclude], specDiff(input.reasoned, input.checked)]);",
         {"spec.js": "fromSpec, specDiff"},
-        {"reasoned": reasoned, "ticked": ticked},
+        {"reasoned": reasoned, "checked": checked},
     )
     assert ids == ["x"] and differs == ["select.exclude.reasons.x"]
 

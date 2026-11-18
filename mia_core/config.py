@@ -94,6 +94,9 @@ class AutonomyCfg(BaseModel):
     pause: bool = False  # `mia pause` flips it; every workflow stops at its next job while it is set
     quarantine_days: float = Field(default=30, ge=0)  # a revoked artifact is held this long before eviction
     root: RootBudgetCfg = RootBudgetCfg()
+    # What this installation pays for a dollar Claude Code counts (it counts list price): a budget books an
+    # agent job's reservation and its cost times this, so `max_usd` is money paid.
+    price_factor: float = Field(default=1.0, gt=0)
 
     def caps(self) -> dict[str, float]:
         """The root caps as the `caps` dict buffer-api's reserve route takes."""

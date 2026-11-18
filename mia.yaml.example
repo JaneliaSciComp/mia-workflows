@@ -87,7 +87,8 @@ limits:
   fetch_attempts: 4
 
 # Hosts the sandbox lets jobs reach. `package_hosts` are the package indexes every job may use.
-# `redirect_hosts` is filled from the redirect probe: exact hosts, no patterns.
+# `redirect_hosts` names hosts a data host redirects to (exact hosts, no patterns) ahead of a run; one it does not
+# name is offered for approval on the dataset's page after the first job that was refused it.
 network:
   package_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, repo.prefix.dev]
   redirect_hosts: {}
@@ -166,9 +167,13 @@ judge:
 # artifact is held this long before the keeper may evict it. `root`: what one request (a buffer spec, a preparation
 # request or a dataset, including the dataset rounds it starts) may spend in all. A request busy for `max_days` straight is
 # stopped; one idle that long starts a fresh budget. The concurrency cap makes a job wait; the others end the work.
+# `price_factor`: what this installation pays for a dollar Claude Code counts. Claude Code counts list price, and so
+# do the per-run caps handed to it (`limits.agent_max_budget_usd`, `judge.max_budget_usd`); a budget books a run's
+# reservation and its cost times this factor, so `max_usd` and the cleaner's `max_usd_per_day` are money paid.
 autonomy:
   pause: false
   quarantine_days: 30
+  price_factor: 0.1
   root:
     max_usd: 100
     max_fetch_bytes: 500e9

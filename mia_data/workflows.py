@@ -142,6 +142,10 @@ class MiaDataDataset:
         self.unwinding = False  # the round's task has been told to stop: what it runs from here on is clean-up
         self.in_flight = 0  # the round's activities in flight (clean-up not counted)
         self.round_task: asyncio.Future[None] | None = None
+        # the crop judge while it looks beside the round's task (see _judged), and whether the round went on to a
+        # person's label before it ended: its verdict is then on record only
+        self.judging: asyncio.Future[JudgeResult | None] | None = None
+        self.verdict_first = False
         self.unkilled: list[str] = []  # jobs a cancel could not kill, each with the reason
         self.limits: RoundLimits | None = None  # read from config at the start of a round
         self.stage_write: Any = None  # the handle of a stage write still running beside the round (see _stage)
@@ -242,11 +246,14 @@ class MiaDataDataset:
         While a cancel is in progress the round's task starts no new activity: it is stopped here instead (the
         round's own clean-up, `cleanup` or anything after it was told to stop, goes through). An activity
         already in flight is left to answer, so what it did (a job submitted, a lock taken, a reservation
-        opened) is known and undone; `_cancel_round` waits for that."""
-        of_round = asyncio.current_task() is self.round_task and not self.unwinding and not cleanup
+        opened) is known and undone; `_cancel_round` waits for that. The crop judge's task (`_judged`) is waited
+        for the same way and stopped after the round's."""
+        task = asyncio.current_task()
+        of_round = task is self.round_task and not self.unwinding and not cleanup
         if of_round and self.cancelling:
             self.unwinding = True
             raise asyncio.CancelledError
+        of_round = of_round or (task is self.judging and not cleanup)  # counted in flight, stopped by _judge_ended
         self.in_flight += of_round
         try:
             return await workflow.execute_activity(
@@ -267,8 +274,9 @@ class MiaDataDataset:
             self.in_flight -= of_round
 
     def _roll_due(self) -> bool:
-        """Whether to continue as new now: never with a cancel queued, which a new run would not hear."""
-        return _rollover_due() and not self.cancel_events
+        """Whether to continue as new now: never with a cancel queued, which a new run would not hear, and never
+        while the crop judge still looks, which a new run would not wait for."""
+        return _rollover_due() and not self.cancel_events and not (self.judging and not self.judging.done())
 
     async def _limits(self) -> RoundLimits:
         """The round's config values. They are not part of the durable state, so a rollover re-reads them."""
@@ -303,6 +311,7 @@ class MiaDataDataset:
         finally:
             cancel.cancel()
             self.round_task, self.cancelling, self.unwinding = None, False, False
+        await self._judge_ended()  # a judge a person's verdict overtook: the round closes when its record is written
         await self._settle_stage_write(cancel=False)  # quiet point: the last stage write lands before a rollover
         if (failure := self.failure) is not None:  # the step failed with a debugging cycle left: that runs now
             self.failure = None
@@ -326,6 +335,7 @@ class MiaDataDataset:
             self.unwinding = True
             round_task.cancel()
         await workflow.wait([round_task])
+        await self._judge_ended(stop=True)  # while `cancelling`: its job is killed like the round's (`_job`)
         self.cancelling = self.unwinding = False
         if not round_task.cancelled() and round_task.exception() is None:
             # the round reached its end by itself while the cancel was on its way: its stage stands
@@ -694,11 +704,11 @@ class MiaDataDataset:
             if budgeted:
                 await self._settle(key)
             if self.cancelling:  # never a failed job to a best-effort caller (the crop judge), which would go on
-                self.unwinding = True
+                self.unwinding = self.unwinding or asyncio.current_task() is not self.judging
                 raise asyncio.CancelledError from error
             raise
         if budgeted:  # the crop job is the one that downloads: its bytes count against the root's max_fetch_bytes
-            await self._settle(key, done.bytes_fetched if kind == "crop" else 0)
+            await self._settle(key, done.bytes_fetched if kind == "crop" else 0, done.cost_usd)
         return done
 
     async def _reserve(self, key: str, kind: str, usd: float) -> None:
@@ -718,13 +728,13 @@ class MiaDataDataset:
             await workflow.sleep(timedelta(minutes=min(poll_minutes * 2**tries, 30)))
             tries += 1
 
-    async def _settle(self, key: str, fetched_bytes: int = 0) -> None:
-        """Close the job's reservation with what it downloaded; an accounting write that fails is logged, never
-        the round's end."""
+    async def _settle(self, key: str, fetched_bytes: int = 0, usd: float | None = None) -> None:
+        """Close the job's reservation with what it cost (None when nobody knows: a job that never ended, or no
+        agent's) and downloaded; an accounting write that fails is logged, never the round's end."""
         assert self.state.pins
         try:
             await self._act(
-                "settle", self.state.pins.root, key, None, fetched_bytes, budget=timedelta(minutes=10), cleanup=True
+                "settle", self.state.pins.root, key, usd, fetched_bytes, budget=timedelta(minutes=10), cleanup=True
             )
         except ActivityError as error:
             workflow.logger.warning("issue #%d: settle %s failed: %s", self.state.issue, key, error_message(error))
@@ -979,8 +989,8 @@ class MiaDataDataset:
             return await self._finish("failed", "; ".join(["the crops failed; nothing is saved", *failed_jobs]))
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
-        # after the gate opens, so a person's verdict is only queued, never held
-        if self._judge_grants(await self._judge_crops(test)):
+        # after the gate opens, and a person's verdict that comes while the judge looks is acted on at once
+        if self._judge_grants(await self._judged(test)):
             test.approved_at = workflow.now().isoformat()
             self._found("Approved by the crop judge.")
             return await self._publish_set()
@@ -1062,6 +1072,38 @@ class MiaDataDataset:
             feedback = await self._feedback(event)
             await self._develop({"what_fails": feedback}, state.snippet_issue, binding=state.binding)
 
+    async def _judged(self, test: Test) -> JudgeResult | None:
+        """The crop judge's verdict on a passing set, or None as soon as a person's label is queued
+        (`verdict-first`): the round acts on the label at once, and the judge goes on beside it to the end of its
+        record, where it decides nothing (`_judge_crops` reads its verdict as shadow). The round closes when that
+        is written (`_guard`), and a cancel stops it (`_cancel_round`). A history without the patch waits for the
+        judge first."""
+        if not workflow.patched("verdict-first"):
+            return await self._judge_crops(test)
+        await self._judge_ended()  # an earlier head's judge still looks: one at a time
+        self.verdict_first = False
+        judging = self.judging = asyncio.ensure_future(self._judge_crops(test))
+        await workflow.wait_condition(lambda: judging.done() or self._labels())
+        if not judging.done():
+            self.verdict_first = True
+            return None
+        self.judging = None
+        return judging.result()  # or what ended the judge: a refusal at an active gate, a cancel
+
+    async def _judge_ended(self, stop: bool = False) -> None:
+        """Wait for the crop judge that looks beside the round, if one does; `stop` ends it now, for a cancel: its
+        job is killed and its reservation settled (`_job`). Its verdict is on record only by now, so what it
+        raised is logged, never the round's failure."""
+        judging = self.judging
+        if judging is None:
+            return
+        if stop:
+            judging.cancel()
+        await workflow.wait([judging])
+        self.judging = None
+        if not judging.cancelled() and (error := judging.exception()) is not None:
+            workflow.logger.warning("issue #%d: the crop judge ended with: %s", self.state.issue, error)
+
     async def _judge_crops(self, test: Test) -> JudgeResult | None:
         """The crop judge over a passing set (spec autonomous-gates §4.2, §9): evidence, the job, the assessment,
         one comment. Off, or a run from before `m-crop-judge`: nothing. In shadow nothing here changes the round's
@@ -1115,7 +1157,7 @@ class MiaDataDataset:
                 "crops",
                 "crop_set",
                 f"{state.round_id}:{test.test_id}",
-                limits.crop_judge,
+                "shadow" if self.verdict_first else limits.crop_judge,  # a person decided: the judge grants nothing
                 seconds=300,
                 result_type=JudgeResult,
             )
@@ -1369,7 +1411,8 @@ class MiaDataDataset:
 
     async def _look(self) -> bool:
         """The round looks at autodev itself; True when that ended the round. A PR is acted on as it is now (a
-        head, a merge or a stop the round was not told of). Otherwise the round ends `blocked`, with autodev's
+        head, a merge or a stop the round was not told of). A revision request autodev answered without a new
+        head goes back to review (`_answered`). Otherwise the round ends `blocked`, with autodev's
         last comment, when autodev stopped before it opened a PR, or when `limits.autodev_quiet_hours` passed
         with nothing from it and no agent round running."""
         state = self.state
@@ -1377,6 +1420,8 @@ class MiaDataDataset:
         before = (state.stage, len(state.tests))
         if look.pr and await self._on_pr(look.pr):
             return True
+        if await self._answered(look):
+            return False
         where = f"mia-snippets issue #{state.snippet_issue}" + (f" (PR #{look.pr})" if look.pr else "")
         said = f' Its last comment: "{look.last_word}"' if look.last_word else ""
         if look.stopped and not look.pr:
@@ -1389,6 +1434,27 @@ class MiaDataDataset:
             await self._finish("blocked", f"{where}: nothing from autodev for {hours:g} h.{said}")
             return True
         return False
+
+    async def _answered(self, look: AutodevLook) -> bool:
+        """Whether autodev answered the reviewer's comments without changing the snippet: its round after the
+        revision request made no commits, and it is at rest. Then no new head will come: the answer is this
+        pass's result, and the same crops go back to review for a verdict made with it."""
+        state = self.state
+        asked, answered = _parse_time(state.revised_at), _parse_time(look.answer_at or None)
+        if not (asked and answered and answered > asked) or look.working or look.stopped:
+            return False
+        if state.stage != "developing" or not (state.pr and state.tests and state.tests[-1].ok):
+            return False
+        state.revised_at = None
+        pr = await self._act("pr_state", state.pr, result_type=PrUpdate)
+        quoted = "\n".join(f"> {line}" for line in look.answer.splitlines())
+        self._found(f"autodev changed nothing in the snippet. Its answer to your comments:\n\n{quoted}")
+        await self._stage(
+            "review",
+            "autodev answered your comments without changing the snippet; the same crops wait for your verdict",
+            extra=f"**Snippet PR:** {pr.url or f'#{pr.pr}'}\n",
+        )
+        return True
 
     async def _approve_pr(self, event: LabelEvent) -> None:
         """The reviewer approved the PR head's set: `/approve <head>` tells autodev to merge it. The merge wakes
@@ -1414,6 +1480,7 @@ class MiaDataDataset:
         brings its crops back to review."""
         state = self.state
         await self._assess("reject", event, ("pr_head", state.tests[-1].sha))
+        state.revised_at = workflow.now().isoformat()
         feedback = await self._feedback(event)
         await self._act(
             "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} {event.event_id}", "snippets"
@@ -1466,6 +1533,7 @@ class MiaDataDataset:
         still current moves the stage to `review` (spec §14); a failing one goes to the PR as `/revise`, so autodev
         fixes it. Pre-§14 histories made `test_n` test crops and moved to `pr-ready`."""
         state, head = self.state, pr.head_sha
+        state.revised_at = None  # a head came: whatever was asked for, this is autodev's answer
         loop = workflow.patched("review-loop")
         results = self._results()
         if results and state.pass_stage != "testing":  # every head tested is a pass of its own
@@ -1517,7 +1585,7 @@ class MiaDataDataset:
             await self._flush()
         if test.ok:
             # after the status and the stage: the required status never waits on it
-            if self._judge_grants(await self._judge_crops(test)) and shown and loop:
+            if self._judge_grants(await self._judged(test)) and shown and loop:
                 await self._pr_approved(test, "the crop judge", workflow.now().isoformat())
         return current
 

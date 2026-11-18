@@ -14,6 +14,7 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import time
@@ -27,7 +28,7 @@ import yaml
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from autodev.activities import PERMANENT_CSUB, permanent_errors
+from autodev.activities import NO_COMMITS, PERMANENT_CSUB, permanent_errors
 from autodev.agent import hosts_marker
 from autodev.jobs import JobSpec
 from mia_core import autonomy
@@ -48,7 +49,7 @@ from mia_core.untrusted import write_atomic as write_atomic
 
 from . import catalog
 from . import publish as crop_publish
-from .binding import check_binding, hosts, record_gaps, record_urls
+from .binding import check_binding, granted_hosts, hosts, record_gaps, record_urls
 from .config import HUMAN_LABELS, STAGE_SENTENCES, STAGES, dataset_state, round_open
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
@@ -69,6 +70,7 @@ from .jobspec import (
     smoke_job,
     snapshot,
     verify_job,
+    with_hosts,
 )
 from .models import (
     ADVISERS,
@@ -115,6 +117,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+def _refused_host(report: dict) -> object:
+    """The host a harness report says the job was refused (`host_not_allowed`: {host, chain}), or None."""
+    refused = report.get("host_not_allowed")
+    return refused.get("host") if isinstance(refused, dict) else None
+
+
 TEST_PR_RE = re.compile(r"i0-e(\d+)-[0-9a-f]{7}")  # `mia-data test-pr`'s round id: PR <n> at a head, no data issue
 ROUND_RE = re.compile(rf"i\d+-e\d+|{TEST_PR_RE.pattern}")
 # what a job leaves in its workspace that says how it went: copied for the debugging agent, each cut at this size
@@ -133,6 +142,9 @@ LOG_BYTES = 64 << 10  # the end of a job's stdout and stderr
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
+# the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
+NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
+MARKER_RE = re.compile(r"(?s)<!--.*?-->")
 CROP_STATUS = {
     "pending": "test crops running",
     "success": "test crops passed",
@@ -372,6 +384,19 @@ class Activities:
 
     def _pins(self, round_id: str) -> Pins:
         return Pins(**json.loads((self._round_dir(round_id) / "pins.json").read_text()))
+
+    async def _note_refused(self, round_id: str, hosts: object) -> None:
+        """Tell the registry which hosts a job of a dataset round was refused, best effort: the dataset's next
+        start asks a person to approve them. `hosts` is what a job left: anything but host names is dropped."""
+        named = [host.lower() for host in (hosts if isinstance(hosts, list) else [hosts]) if isinstance(host, str)]
+        if not named:
+            return
+        try:
+            record = self._pins(round_id).record
+        except (OSError, ValueError, TypeError):
+            return  # ponytail: a PR head's test round lies elsewhere and tells nobody; its match round did
+        put = functools.partial(self.registry.add_refused_hosts, record, named[:20])
+        await asyncio.to_thread(best_effort, put, f"refused hosts of {record}", log)
 
     def _round_workspace(self, issue: int, round_id: str) -> Path:
         """work_root/issue-<n>/<round>, the parent of the round's job workspaces; a test-pr round's is
@@ -691,24 +716,27 @@ class Activities:
 
     @activity.defn(name="reserve")
     async def reserve(self, root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
-        """Charge a job to its root before it launches; a refusal names the cap. Without a root there is no
-        budget to check."""
+        """Charge a job to its root before it launches; a refusal names the cap. `usd` is the most Claude Code
+        may count for the job, booked as what that costs here (`autonomy.price_factor`). Without a root there is
+        no budget to check."""
         if not root:
             return Reservation(True, "no budget")
-        caps = self.cfg.autonomy.caps()
-        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
+        caps, paid = self.cfg.autonomy.caps(), usd * self.cfg.autonomy.price_factor
+        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, paid, caps)
         ok = bool(out.get("ok"))
         return Reservation(ok, "" if ok else str(out.get("reason", "")), wait=bool(out.get("wait")) and not ok)
 
     @activity.defn(name="settle")
     async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
-        """Close the job's reservation with what it cost and moved; an accounting write never fails a round."""
+        """Close the job's reservation with what it cost and moved: `usd` is Claude Code's count, booked as what
+        that costs here (`autonomy.price_factor`); with None the reservation stands as the cost. An accounting
+        write never fails a round."""
         if not root:
             return
-        registry = self.registry
+        registry, paid = self.registry, None if usd is None else usd * self.cfg.autonomy.price_factor
         await asyncio.to_thread(
             best_effort,
-            lambda: registry.settle(root, reservation_id, usd=usd, fetched_bytes=fetched_bytes),
+            lambda: registry.settle(root, reservation_id, usd=paid, fetched_bytes=fetched_bytes),
             f"settle {reservation_id}",
             log,
         )
@@ -921,6 +949,7 @@ class Activities:
         outcome = _job_json(self._job_workspace(issue, round_id, workspace), "outcome.json")
         if not isinstance(outcome, dict) or outcome.get("outcome") not in ("rerun", "blocked"):
             return DebugResult("failed", "the debugging agent left no readable outcome.json")
+        await self._note_refused(round_id, outcome.get("hosts"))
         return DebugResult(
             outcome["outcome"],
             self._clean(_text(outcome.get("diagnosis"), 6000)) or "(the debugging agent gave no diagnosis)",
@@ -987,17 +1016,19 @@ class Activities:
     @activity.defn(name="submit")
     @mia_permanent_errors
     async def submit(self, key: str, kind: str, args: JobArgs) -> str:
-        """Build the job (the builders refuse a moved harness pin), refuse hosts a fresh `csub probe` doesn't
-        allow, and submit at most once per key. Returns the job id."""
+        """Build the job (the builders refuse a moved harness pin), let it reach what a person approved for its
+        dataset beside its URLs' hosts (`granted_hosts`), refuse hosts a fresh `csub probe` doesn't allow, and submit at most
+        once per key. Returns the job id."""
         from csub import CsubError  # pixi-only dependency, imported where used (as autodev does)
 
         patterns = await asyncio.to_thread(self.probe)
+        noted = await asyncio.to_thread(self.registry.dataset_hosts, args.pins.record)
         snapshot_dir = (
             await self._snapshot(args.sha or args.pins.snippets_commit) if kind in ("smoke", "crop") else None
         )
 
         def build() -> JobSpec:
-            spec = self._spec(kind, args, snapshot_dir)
+            spec = with_hosts(self._spec(kind, args, snapshot_dir), granted_hosts(noted, patterns))
             check_hosts_allowed(spec, patterns)
             return spec
 
@@ -1012,14 +1043,16 @@ class Activities:
     async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
         """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock.
         A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3). The answer
-        carries what a crop job downloaded, which its reservation is settled with."""
+        carries what a crop job downloaded and what an agent job cost, which its reservation is settled with."""
         heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
         try:
             outcome = await self.jobs.wait(job_id, workspace, heartbeat)
         except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
             raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
         fetched = await asyncio.to_thread(_bytes_fetched, workspace)
-        return JobDone(outcome.job_id, outcome.state, outcome.exit_code, fetched)
+        cost = (await asyncio.to_thread(read_claude_json, Path(workspace)))[1]
+        known = cost is not None and math.isfinite(cost) and cost >= 0  # the job's own file: a real cost or nothing
+        return JobDone(outcome.job_id, outcome.state, outcome.exit_code, fetched, cost if known else None)
 
     @activity.defn(name="kill_job")
     async def kill_job(self, job_id: str) -> None:
@@ -1061,6 +1094,7 @@ class Activities:
         if not isinstance(outcome, dict):
             return MatchResult("failed", "outcome.json is missing, unreadable or not a JSON object")
         kind = outcome.get("outcome")
+        await self._note_refused(round_id, outcome.get("hosts"))
         if kind in ("blocked", "failed"):
             return MatchResult(kind, _text(outcome.get("reason")) or f"the match agent reported {kind}, with no reason")
         if kind == "needs_snippet":
@@ -1098,7 +1132,7 @@ class Activities:
             snapshot_dir = await self._snapshot(sha)
             names = set(usable_snippets(snapshot_dir) if tested else visible_snippets(snapshot_dir))
             errors = check_binding(binding, self._record(round_id), names, pins=pins)
-            if not errors:  # hosts() raises if a URL would grant a GitHub host
+            if not errors:  # a malformed URL raises in urlsplit
                 hosts(
                     [url for array in binding["raw"] + (binding.get("labels") or []) for url in array["urls"]], self.cfg
                 )
@@ -1144,6 +1178,7 @@ class Activities:
         if not isinstance(report, dict):
             return SmokeResult(False, errors=["smoke.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")
+        await self._note_refused(Path(workspace).parent.name, _refused_host(report))
         return SmokeResult(
             report.get("ok") is True,
             report.get("eligible") is True,
@@ -1200,6 +1235,7 @@ class Activities:
             verified = []
         crop_report = _job_json(crop_workspace, "crops/report.json") if crop_workspace else None
         crop_report = crop_report if isinstance(crop_report, dict) else {}
+        await self._note_refused(Path(workspace).parent.name, _refused_host(crop_report))
 
         def count(key: str) -> int | None:
             value = crop_report.get(key)
@@ -1542,7 +1578,8 @@ class Activities:
     async def autodev_look(self, snippet_issue: int, pr: int | None) -> AutodevLook:
         """What a round that waits for autodev finds when it looks itself, whatever the poller told it: the PR
         (`pr`, the one the round follows, else the open one on the issue's branch), whether an agent round is
-        running or autodev has stopped, and the last comment autodev left on the issue or the PR."""
+        running or autodev has stopped, the last comment autodev left on the issue or the PR, and the summary of
+        its newest round that changed nothing."""
         gh = self.gh_snippets
         issue = await gh.get_issue(int(snippet_issue))
         labels = {label["name"] for label in issue.get("labels", [])}
@@ -1557,11 +1594,17 @@ class Activities:
             if (comment.get("user") or {}).get("login") == self.bot and ours not in (comment.get("body") or "")
         ]
         last = max(said, key=lambda comment: comment.get("created_at") or "", default=None)
+        unchanged = [comment for comment in said if NO_COMMITS_RE.match(comment.get("body") or "")]
+        answer = max(unchanged, key=lambda comment: comment.get("created_at") or "", default=None)
         return AutodevLook(
             pr,
             "snippets:working" in labels,
             issue.get("state") == "closed" or "snippets:needs-human" in labels,
             _text(self._clean(" ".join((last.get("body") or "").split())), 400) if last else "",
+            _text(self._clean(NO_COMMITS_RE.sub("", MARKER_RE.sub("", answer["body"]), count=1).strip()), 1500)
+            if answer
+            else "",
+            str(answer.get("created_at") or "") if answer else "",
         )
 
     @activity.defn(name="set_crop_status")

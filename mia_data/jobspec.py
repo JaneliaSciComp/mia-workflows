@@ -15,6 +15,7 @@ does, and every builder then refuses (PinMoved).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import re
@@ -246,6 +247,15 @@ def assert_pin(cfg: Config, pins: HarnessPinned) -> None:
             f"harness environment in {cfg.harness.dir} changed since admission: pixi.lock "
             f"{pins.env_digest[:12]} -> {current[:12]}"
         )
+
+
+def with_hosts(spec: JobSpec, more: list[str]) -> JobSpec:
+    """The job with `more` hosts it may reach (those its dataset's jobs were refused and a person approved since);
+    a job that reaches no host stays offline."""
+    if not (spec.allow_hosts and more):
+        return spec
+    allow = sorted({*spec.allow_hosts, *more})
+    return dataclasses.replace(spec, allow_hosts=allow, env={**spec.env, "MIA_HARNESS_ALLOWED_HOSTS": ",".join(allow)})
 
 
 def check_hosts_allowed(spec: JobSpec, patterns: list[str]) -> None:
