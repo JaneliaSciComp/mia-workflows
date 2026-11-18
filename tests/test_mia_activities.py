@@ -539,6 +539,30 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
     assert issue_hosts(body) == ["data.example.org"] and "The reader's job may reach `data.example.org`." in body
 
 
+async def test_the_readers_job_may_reach_the_hosts_a_person_approved_for_its_dataset(tmp_path):
+    """2026-11-18, eight datasets: figshare and Hugging Face hand a download to a storage host. The dataset's
+    own jobs were refused it, a person approved it, and the match job read the files; the developer's job was
+    still granted the record's hosts alone, could read nothing and stopped with no commits. The issue names
+    what the dataset's jobs may reach by now, also an issue opened before the host was approved."""
+    t = _setup(tmp_path)  # the policy allows *.example.org
+    await t.a.admit(1, "99")
+    draft = {"draft_binding": BINDING, "what_fails": "no reader", "tried": []}
+    first = await t.a.open_snippet_issue(1, ROUND, draft)
+    assert issue_hosts(t.snip.issues[first]["body"]) == ["data.example.org"]
+    # its jobs are refused a redirect target and another host; a person approves the first (the policy has it)
+    t.a.registry.add_refused_hosts("rec-1", ["s3.example.org", "cdn.elsewhere.net"])
+    t.ledger.put_kv("dataset_hosts", {"rec-1": ["raw.githubusercontent.com"]})
+    assert await t.a.open_snippet_issue(1, ROUND, draft, first) == first and len(t.snip.created) == 1
+    body = t.snip.issues[first]["body"]
+    assert issue_hosts(body) == ["data.example.org", "s3.example.org"]  # not the unapproved one, never GitHub's
+    assert "The reader's job may reach `data.example.org`, `s3.example.org`." in body
+    assert body.count("<!-- autodev: hosts") == 1 and body.startswith("<!-- mia-data: issue=1 round=i1-e99 -->")
+    # and a new issue names them from the start
+    t.snip.issues[first]["state"] = "closed"
+    second = await t.a.open_snippet_issue(1, ROUND, draft)
+    assert second != first and issue_hosts(t.snip.issues[second]["body"]) == ["data.example.org", "s3.example.org"]
+
+
 async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(tmp_path):
     """A reviewer rejected a matched binding's crops (spec §14): the issue names the binding's snippets, carries
     the comments and the binding, and asks for a superseding snippet, never an edit."""

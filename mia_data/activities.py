@@ -30,6 +30,7 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import NO_COMMITS, PERMANENT_CSUB, permanent_errors
 from autodev.agent import hosts_marker
+from autodev.config import is_github_host
 from autodev.jobs import JobSpec
 from mia_core import autonomy
 from mia_core.assets import raw_asset
@@ -154,6 +155,8 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
 # the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
 NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
 MARKER_RE = re.compile(r"(?s)<!--.*?-->")
+# the line of a snippets issue that names the hosts its agent's job may reach (`open_snippet_issue`)
+REACH_RE = re.compile(r"The reader's job may reach [^\n]*?<!-- autodev: hosts[^>]*?-->")
 EVIDENCE_FILE_BYTES = 64 << 20  # the largest file of the judge's evidence that is shared with the developer
 NO_CHANGE_RE = re.compile(r"<!-- \S+: no-change (\S+) -->")  # autodev's marker on a validated "nothing to change"
 CROP_STATUS = {
@@ -1566,24 +1569,45 @@ class Activities:
             if not (given.is_relative_to(rounds) and given.relative_to(rounds).parts[0].startswith(f"i{int(issue)}-e")):
                 raise ValueError(f"binding {binding} is not one of this dataset's rounds'")
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
+        record = self._record(round_id)
+        urls = record_urls(record)
+        # What the reader's job may reach: the hosts the dataset's files are on, and those its own jobs were
+        # refused that a person has approved since (a redirect target, mostly: a download host hands the file
+        # to a storage host). autodev grants its agent's job these, of what the policy allows, and no other
+        # approved host; it grants no GitHub host, so none is named.
+        patterns = await asyncio.to_thread(self.probe)
+        noted = await asyncio.to_thread(self.registry.dataset_hosts, pins.record)
+        reach = [
+            host
+            for host in dict.fromkeys([*hosts(urls, self.cfg), *granted_hosts(noted, patterns)])
+            if host not in self.cfg.network.package_hosts and not is_github_host(host)
+        ]
+        reach_line = f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
 
         def ours(existing: dict, prefix: str) -> bool:  # filter by author: an outsider can copy the marker
             return (existing.get("user") or {}).get("login") == self.bot and (existing.get("body") or "").startswith(
                 prefix
             )
 
+        async def found(existing: dict) -> int:
+            """An issue of an earlier round, with the hosts its next agent job may reach as they are now: one
+            approved since the issue was written is in its text from here on."""
+            body = existing.get("body") or ""
+            named = REACH_RE.sub(lambda _: reach_line, body, count=1)
+            if named != body:
+                await gh.update_issue(existing["number"], body=named)
+            return existing["number"]
+
         if snippet_issue:  # any round's marker for this data issue will do: the round id is new on a re-trigger
             remembered = await gh.get_issue(int(snippet_issue))
             any_round = self.cfg.marker(f"issue={int(issue)} round=").removesuffix(" -->")
             if remembered.get("state") != "closed" and ours(remembered, any_round):
-                return remembered["number"]
+                return await found(remembered)
         # ponytail: lists every issue; one call per round.
         for existing in await gh.list_issues(state="all"):
             # a closed one is done with (merged, or answered "nothing needs changing"): what is asked now is new
             if existing.get("state") != "closed" and ours(existing, marker):
-                return existing["number"]
-        record = self._record(round_id)
-        urls = record_urls(record)
+                return await found(existing)
         data_format = _text(((record.get("data") or {}).get("formats") or ["unknown"])[0], 40)
         # ponytail: container guessed from the record's URLs; the agent's what_fails is the authority
         container = (
@@ -1601,9 +1625,6 @@ class Activities:
         # number (spec webapp-actions §4.1, §9)
         data_link = f"[{pins.record}]({self.page_url}/#datasets/{quote(pins.record, safe='')})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
-        # the hosts the dataset's files are on: autodev grants its agent's job these and no other approved host
-        reach = [host for host in hosts(urls, self.cfg) if host not in self.cfg.network.package_hosts]
-        reach_line = f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}
             names = sorted(

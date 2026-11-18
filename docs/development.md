@@ -552,8 +552,11 @@ the host to jobs of an approved dataset only (`granted_hosts`). autodev's agent 
 names its `agent.allow_hosts` plus the hosts its issue names, where the policy allows them
 (`autodev.agent.agent_hosts`); a job that would need more than csub's 64 is not started and its round fails saying so. An issue names hosts with `<!-- autodev: hosts a.org b.org -->` in its body
 (`hosts_marker`), and only when a bot of `github.trusted_bots` opened it: a dataset round writes there the hosts
-of its record's URLs and their redirect targets, so a reader's job reaches its own dataset's files and no other
-approved host.
+of its record's URLs and their configured redirect targets, and the hosts its own jobs were refused that a person
+has approved since (`granted_hosts`: where a download host hands the file to a storage host), so a reader's job
+reaches its own dataset's files and no other approved host. An open issue of an earlier round gets that line
+written again when a round comes back to it (`open_snippet_issue`), so a host approved after the issue was
+opened reaches its next agent job. No GitHub host is named: autodev grants none.
 
 1. **The go.** A `go` action carries the spec text (the page's *Plan*). With `plan_first` the round waits at its
    plan; without it the round stages first and asks once, at `staged`.
