@@ -981,8 +981,8 @@ Each tab is one kind of thing, and each thing has one page:
   download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
   (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, or `anything`; `record_row` names them,
   whatever buffer asks, and the row shows each as a pill). Every row has a check (the
-  header's and *Select all* check the page that is showing). While something is checked, a box says how many datasets are
-  selected and offers *Prepare* and *Create buffer*. The checked are prepared in one request (one
+  header's checks the page that is showing). While something is checked, a box says how many datasets are
+  selected and offers *Prepare* and *Create buffer* (`chosenBox`). The checked are prepared in one request (one
   `POST /prep` that says `again`, so a prepared dataset and one at review get a new round), or opened in New buffer as a definition that
   selects exactly them (`specFromDatasets`: one `*/<id>.yaml` glob per dataset in `select.paths`). `#datasets?state=<state>` opens the list with a filter set.
 - **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`,
@@ -1008,8 +1008,9 @@ Each tab is one kind of thing, and each thing has one page:
     buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
     `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
     someone is changing (`ensureDefinition`).
-  - *Prepare* lists the plan's rows that fit (`page.fit_only`), each with a check as on the Datasets list, and
-    sorts by stage too (`where it is`). It files the request with `buffer` and `again`, and lists the buffer's
+  - *Prepare* lists the plan's rows that fit (`page.fit_only`) as the Datasets list lists datasets: the same
+    columns (`datasetCols`; `plan_view` gives a row those fields), a check per row, and the box of the checked
+    (`chosenBox`), whose *Prepare* files the request with `buffer` and `again`. It also lists the buffer's
     requests. Its way
     forward is the one `go` a buffer gets from the page (`planRound`).
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the

@@ -288,6 +288,9 @@ PLAN_SORTS: dict[str, Callable[[dict], Any]] = {
     "licence": lambda row: row["licence"],
     "state": lambda row: row.get("prepared"),
     "stage": lambda row: row.get("stage"),  # where the dataset's preparation stands; one never started sorts last
+    "crops": lambda row: row.get("crops"),
+    "staged": lambda row: row.get("staged") or None,
+    "updated": lambda row: row.get("updated_at"),
     "raw": lambda row: (row["raw"] or {}).get("bytes"),
     "buffers": lambda row: len(row["buffers"]) or None,
     "bytes": lambda row: row.get("bytes"),
@@ -337,6 +340,10 @@ def plan_view(
         joined = {
             **row,
             **{name: known.get(name) for name in ("issue", "folder", "crops", "raw", "url", "stage")},
+            # what the Datasets list shows of a dataset, under its names there: a buffer's Prepare step has its columns
+            "state": row.get("prepared"),
+            "modality": row.get("modality_group"),
+            **{name: known.get(name) for name in ("reason", "staged", "lacks", "gaps", "updated_at")},
             "title": known.get("title") or "",
             "licence": known.get("licence"),
             "previews": known.get("previews") or [],

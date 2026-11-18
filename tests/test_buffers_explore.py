@@ -226,4 +226,10 @@ def test_the_plan_sorts_by_where_each_dataset_stands() -> None:
     stages = {**DATASETS, "a": {"stage": "review"}, "b": {"stage": "blocked"}, "c": {}}
     by_stage = plan_view(PLAN, stages, "p256-l1-2", Page(50, 0, "stage", False, ""), fit_only=True)
     assert [(row["id"], row["stage"]) for row in by_stage["rows"]] == [("b", "blocked"), ("a", "review"), ("c", None)]
+    # a row carries what the Datasets list shows of a dataset, under the names it has there
+    last = by_stage["rows"][-1]
+    assert (last["state"], last["modality"]) == (last["prepared"], last["modality_group"])
+    assert {"reason", "staged", "lacks", "gaps", "updated_at"} <= set(last)
+    for name in ("crops", "staged", "updated"):  # and sorts by each of its columns
+        assert plan_view(PLAN, stages, "p256-l1-2", Page(50, 0, name, False, ""))["total"] == 4
     assert plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "zzz"))["summary"]["fitting"] == 3

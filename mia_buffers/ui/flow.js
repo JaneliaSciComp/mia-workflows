@@ -1,25 +1,12 @@
 // A buffer's page: its name and state, the strip of its six steps, the step being shown, and its timeline.
 import { editable, STEP_TITLES, STEPS, stepOf, stepToShow, stripOf } from "./steps.js";
-import {
-  $,
-  bufferLink,
-  card,
-  datasetLink,
-  el,
-  fmtBytes,
-  ghIcon,
-  num,
-  pill,
-  stagePill,
-  statePill,
-  SUBJECT_HASH,
-  when,
-} from "./dom.js";
+import { $, bufferLink, card, el, ghIcon, num, pill, stagePill, statePill, SUBJECT_HASH, when } from "./dom.js";
 import { api, banner, JSON_HEADERS, load, newKey, S } from "./api.js";
 import { pagedTable, pageOf } from "./table.js";
 import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
-import { actionBar, askHosts, BUTTON_HELP, onScreen, prepareButton, sendAction, undelivered } from "./actions.js";
+import { actionBar, askHosts, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
 import { poolTable, servableText, stageOf } from "./buffers.js";
+import { chosenBox, datasetCols } from "./datasets.js";
 import {
   baseRevision,
   changed,
@@ -382,7 +369,8 @@ const cancelBack = (subject, redraw) =>
   );
 const approval = subject => ({ action: "approve", revision: subject.revision, key: newKey() });
 
-// ---- step 3: the datasets that fit, each with a check, the requests this buffer filed, and the way on.
+// ---- step 3: the datasets that fit, listed and checked as on the Datasets list, the requests this buffer filed,
+// and the way on.
 // The buffer waits here for as long as the person likes; the way on takes what is prepared at that moment.
 const ticked = { key: null, chosen: new Set() }; // the checks of the buffer shown: they outlast the page's redraws
 // Why the planner would refuse this plan (`plan`: what POST /plan answered), or null when a round of it would run.
@@ -430,21 +418,8 @@ function prepareStep(pane, subject, redraw, wanted) {
   if (ticked.key !== subject.key) Object.assign(ticked, { key: subject.key, chosen: new Set() });
   const chosen = ticked.chosen;
   const counts = el("p", {}, "planning…"),
-    bar = el("i"),
-    prepare = el("span", { class: "actions" });
-  const offer = () => {
-    prepareButton(
-      prepare,
-      [...chosen],
-      chosen.size ? null : "check the datasets to prepare",
-      () => {
-        chosen.clear();
-        redraw();
-      },
-      chosen.size > 1 ? `Prepare the ${num(chosen.size)} checked datasets` : "Prepare the checked dataset",
-      subject.number,
-    );
-  };
+    bar = el("i");
+  const { box, show } = chosenBox(chosen, redraw, subject.number);
   const fitting = async state => {
     // the plan of the stored definition, which is what a round runs, narrowed to the datasets that fit; its
     // summary is over the whole plan
@@ -477,7 +452,7 @@ function prepareStep(pane, subject, redraw, wanted) {
       );
       bar.style.width = `${m.fitting ? (100 * (m.prepared || 0)) / m.fitting : 0}%`;
     }
-    offer();
+    show();
     if (wanted() && page.out) prepareFoot(subject, page.out, redraw);
   };
   const table = pagedTable("to-prepare:" + subject.key, {
@@ -486,16 +461,8 @@ function prepareStep(pane, subject, redraw, wanted) {
     sort: "state",
     search: "search id, title, modality, licence",
     empty: "No dataset fits this definition.",
-    select: { chosen, id: x => x.id, onchange: offer },
-    cols: [
-      { key: "dataset", label: "dataset", cell: x => datasetLink(x.id) },
-      { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
-      { key: "modality", label: "modality", cell: x => x.modality_group || "" },
-      { key: "dims", label: "dims", cell: x => x.dims || "" },
-      { key: "state", label: "state", cell: x => statePill(x.prepared) },
-      { key: "stage", label: "where it is", cell: x => x.stage || "" },
-      { key: "bytes", label: "size", num: true, cell: x => (x.bytes ? fmtBytes(x.bytes) : "") },
-    ],
+    select: { chosen, id: x => x.id, onchange: show },
+    cols: datasetCols(),
   });
   pane.replaceChildren(
     unsavedFor(subject.key)
@@ -511,7 +478,7 @@ function prepareStep(pane, subject, redraw, wanted) {
     card(
       "Datasets that fit",
       "Every dataset that fits this definition. Check any of them: preparing the checked is one request, filed for this buffer, and each gets a new run, also one that is prepared or waits at review. The buffer waits here meanwhile.",
-      prepare,
+      el("div", { class: "actions" }, box),
       table,
     ),
     card(
@@ -532,7 +499,7 @@ function prepareStep(pane, subject, redraw, wanted) {
       }),
     ),
   );
-  offer();
+  show();
   prepareFoot(subject, null, redraw);
 }
 // ---- step 4: the plan as the round wrote it, and the Run that starts the jobs

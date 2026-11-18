@@ -29,7 +29,6 @@ export const BUTTON_HELP = {
     "File one preparation request for the checked datasets: each one gets a new run of the preparation workflow, also one that is already prepared or whose crops wait at review, which are dropped. One whose round is running is left to it.",
   specFrom:
     "Open New buffer on a definition that selects exactly these datasets. Only the prepared ones are in a plan; step 2 there says which fit.",
-  clearSelection: "Uncheck every dataset.",
   sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
   acceptHeld:
     "Cancel the rework and save this set as it is, not the newer one under review. If a reader's pull request made it, it is merged as it was at that set, once the agent's running job has ended.",

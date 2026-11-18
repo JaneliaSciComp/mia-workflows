@@ -988,15 +988,32 @@ def test_the_datasets_list_flags_and_filters_what_a_record_lacks() -> None:
     assert has("m.record_lacks", squeezed(FILES["designer.js"]))
 
 
-def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked() -> None:
-    """With nothing checked the list offers Select all and Clear selection and says nothing more. With a check, a
-    box of its own colour says how many datasets are selected and offers Prepare and Create buffer."""
-    assert has('"Select all")') and not has("Select all matching")
-    assert not has("check the datasets to prepare first")
-    assert has('class: "chosen", hidden: true') and has(".chosen[hidden]{display:none}")
-    assert has("box.hidden = !CHOSEN.size") and has('"Create buffer")')
-    # Select all takes the rows of the page that is showing, and asks the server for nothing
-    assert not has("datasets match; the first") and not has('ids: "1"')
+def test_a_list_of_datasets_shows_its_actions_only_when_something_is_ticked() -> None:
+    """With nothing checked a list of datasets says nothing: the header's check takes the page, and no button
+    repeats it. With a check, a box of its own colour says how many datasets are selected and offers Prepare; the
+    Datasets list also offers Create buffer, a buffer's Prepare step files the request for its buffer. Both lists
+    have the same columns, and none links a folder."""
+    empty, lists, labels = run_js(
+        "const { S } = await import(input.api);\n"
+        "S.meta = { datasets_repo: 'o/data' };\n"
+        "const chosen = new Set();\n"
+        "const { box, show } = chosenBox(chosen);\n"
+        "show();\n"
+        "const empty = box.hidden;\n"
+        "const shown = owner => { const made = chosenBox(new Set(['u937', 'bcss']), null, owner); made.show();\n"
+        "  return [made.box.hidden, walk(made.box).find(node => node.tag === 'b').textContent, textOf(made.box)]; };\n"
+        "print([empty, [shown(undefined), shown(7)], datasetCols().map(col => col.label)]);",
+        {"datasets.js": "chosenBox, datasetCols"},
+        {"api": (UI_DIR / "api.js").as_uri()},
+    )
+    assert empty is True
+    assert [(hidden, count) for hidden, count, _ in lists] == [(False, "2 datasets selected")] * 2
+    assert [text for _, _, text in lists] == ["PrepareCreate buffer", "Prepare"]
+    assert labels[:5] == ["dataset", "issue", "preview", "state", "stage"] and "files" not in labels
+    datasets, flow = squeezed(FILES["datasets.js"]), squeezed(FILES["flow.js"])
+    assert has("cols: datasetCols()", datasets) and has("cols: datasetCols()", flow)
+    assert has("chosenBox(CHOSEN)", datasets) and has("chosenBox(chosen, redraw, subject.number)", flow)
+    assert not has('"Select all")', datasets) and not has("Clear selection") and has(".chosen[hidden]{display:none}")
 
 
 # strings a person can type into a spec's name or paths, or that a record's id can be: each reads as something
@@ -1158,9 +1175,8 @@ def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() 
     assert has('pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number }))', flow)
     assert has("...(owner == null ? {} : { buffer: owner })", actions)
     assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
-    # any row can be checked, prepared or at review too, and the list sorts by where each dataset stands
-    assert has("select: { chosen, id: x => x.id, onchange: offer }", flow)
-    assert has('{ key: "stage", label: "where it is", cell: x => x.stage || "" }', flow)
+    # any row can be checked, prepared or at review too
+    assert has("select: { chosen, id: x => x.id, onchange: show }", flow)
     # both lists file the same request: every checked dataset gets a round
     assert has('"again: true\\n" +', actions) and not has("again == null", actions)
     assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
