@@ -235,6 +235,19 @@ def test_a_merge_refused_for_conflicts_asks_autodev_to_merge_main():
     assert rule == "merge conflict" and [step["do"] for step in plan] == ["close", "go"] and plan[0]["pr"] == 44
 
 
+def test_a_pull_request_that_merged_after_the_stop_runs_the_dataset_again_once():
+    # zenodo-8235843: stopped on autodev's needs-human 46 seconds before autodev's next try merged the pull request
+    said = "snippet PR #230: its issue has `snippets:needs-human`. Its last comment: merging failed: 405"
+    party = {"issue": 229, "state": "closed", "stopped": True, "pr": 230, "mergeable": None, "merged": True}
+    assert stopped(said, party) == ("merged since", [{"do": "go"}])
+    before = [{"rule": "merged since", "data": {"party": {"issue": 229, "pr": 230}}}]
+    assert stopped(said, party, earlier=before)[1] == [{"do": "diagnose"}]
+    # a stop that came after the merge is not about the merge: the crops at the merge commit failed
+    assert stopped("the merge commit's crops failed; nothing is saved", party)[0] != "merged since"
+    # and a pull request that is still open is the conflict rule's, or nobody's
+    assert stopped(said, {**party, "state": "open", "merged": False})[0] != "merged since"
+
+
 def test_autodev_at_its_revision_limit_goes_to_the_diagnosis():
     party = {**AUTODEV_STOPPED, "pr": 53, "mergeable": True, "last_word": "Needs a human: revision limit (3) reached"}
     assert stopped("snippet PR #53: its issue has `snippets:needs-human`", party) == (

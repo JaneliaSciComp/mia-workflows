@@ -252,6 +252,10 @@ const RULE_HELP = {
     "Passing failure",
     "The round stopped on something that usually passes by itself: a dropped connection, a time-out, a busy service. The cleaner waits, then runs it again, at most twice, and diagnoses it after that.",
   ],
+  "merged since": [
+    "Merged after the stop",
+    "The round stopped because autodev reported a problem with the reader's pull request, and that pull request was merged afterwards. The cleaner runs the dataset again, once per pull request: the round finds the merged reader.",
+  ],
   "fixed since": [
     "Worker restarted since",
     "The round stopped on an error of the worker, and the worker has since started on newer code. The cleaner runs it again, once per commit.",

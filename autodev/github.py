@@ -306,13 +306,11 @@ class GitHub:
 
     # --- pull requests ---------------------------------------------------------------------
 
-    async def find_pr(self, branch: str) -> dict | None:
-        """The open PR whose head is `branch` in this repo, if any."""
+    async def find_pr(self, branch: str, state: str = "open") -> dict | None:
+        """The open PR whose head is `branch` in this repo, if any; with `state="closed"` the newest closed one."""
         owner = self.repo.split("/")[0]
         prs = (
-            await self.request(
-                "GET", f"/repos/{self.repo}/pulls", params={"head": f"{owner}:{branch}", "state": "open"}
-            )
+            await self.request("GET", f"/repos/{self.repo}/pulls", params={"head": f"{owner}:{branch}", "state": state})
         ).json()
         return prs[0] if prs else None
 

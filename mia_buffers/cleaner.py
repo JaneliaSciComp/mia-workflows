@@ -53,6 +53,7 @@ PASSING_RE = re.compile(
     re.IGNORECASE,
 )
 WORKER_ERROR_RE = re.compile(r"\b[A-Z][A-Za-z]*(Error|Exception)\b")
+NEEDS_HUMAN = "snippets:needs-human"  # how a round that stopped on autodev's label says so
 SECOND_RETRY = 6  # the second run after a passing cause waits this many times as long as the first
 REVISE_TEXT = "/revise Merge `main` into this branch and resolve the conflicts. Change nothing else."
 
@@ -263,6 +264,8 @@ def stop_rule(item: dict, said: str, since: float) -> str | None:
     party, worker = item.get("party") or {}, item.get("worker") or {}
     if item["subject"]["kind"] != "dataset":
         return None
+    if party.get("merged") and NEEDS_HUMAN in said:  # the round gave up on a pull request that merged afterwards
+        return "merged since"
     if party.get("stopped") and party.get("state") == "open":  # autodev stopped on the snippets issue
         words = f"{said} {party.get('last_word') or ''}"
         if party.get("pr") and (party.get("mergeable") is False or CONFLICT_RE.search(words)):
@@ -335,6 +338,10 @@ def plan_for(found: dict, item: dict) -> list[dict]:
             why = "the pull request cannot be merged and autodev has no revision left"
             return [{"do": "close", "issue": issue, "pr": pr, "why": why}, {"do": "go"}]
         return [{"do": "revise", "issue": issue, "pr": pr}, {"do": "await_autodev", "issue": issue}, {"do": "go"}]
+    if rule == "merged since":
+        if any((case["data"].get("party") or {}).get("pr") == party.get("pr") for case in earlier):
+            return [{"do": "diagnose"}]  # once per pull request
+        return [{"do": "go"}]  # the reader is on main: the round matches it, makes its crops and has them judged
     if rule == "passing cause":
         if len(earlier) >= 2:  # at most twice
             return [{"do": "diagnose"}]

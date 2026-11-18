@@ -92,16 +92,18 @@ class Snippets:
             for index, text in enumerate(said)
         ]
 
-    def pull(self, number, issue, mergeable=True):
+    def pull(self, number, issue, mergeable=True, merged=False):
         head = {"ref": f"snippets/issue-{issue}"}
+        state = "closed" if merged else "open"
         self.pulls[number] = {
             "number": number,
-            "state": "open",
+            "state": state,
             "head": head,
             "mergeable": mergeable,
+            "merged": merged,
             "user": {"login": "bot"},
         }
-        self.issues[number] = {"number": number, "state": "open", "labels": [], "body": "", "pull_request": {}}
+        self.issues[number] = {"number": number, "state": state, "labels": [], "body": "", "pull_request": {}}
         self.comments.setdefault(number, [])
 
     def labels(self, number):
@@ -113,9 +115,9 @@ class Snippets:
     async def get_pr(self, number):
         return self.pulls[number]
 
-    async def find_pr(self, branch):
+    async def find_pr(self, branch, state="open"):
         return next(
-            (pull for pull in self.pulls.values() if pull["head"]["ref"] == branch and pull["state"] == "open"), None
+            (pull for pull in self.pulls.values() if pull["head"]["ref"] == branch and pull["state"] == state), None
         )
 
     async def list_issues(self, state, creator=None):
@@ -483,6 +485,24 @@ def test_a_merge_conflict_is_handed_to_autodev_as_a_revision(world):
     assert case["rule"] == "merge conflict" and world.snippets.comments[44][-1]["body"].startswith(
         "/revise Merge `main`"
     )
+
+
+def test_a_dataset_whose_pull_request_merged_after_it_stopped_is_run_again(world):
+    """zenodo-8235843 (2026-11-18): GitHub refused the merge once because the base branch moved, autodev labelled
+    the issue needs-human and merged the pull request two minutes later; the dataset had stopped as blocked in
+    between, its approved crops unsaved. The reader is on main: a new round matches it."""
+    number = world.dataset(run=False)
+    world.snippets.issue(72, number, state="closed", said=["Approved, but merging failed: Base branch was modified"])
+    world.snippets.pull(44, 72, merged=True)
+    world.stage(
+        "dataset",
+        number,
+        "blocked",
+        "snippet PR https://github.example/o/snippets/pull/44: its issue has `snippets:needs-human`",
+    )
+    world.sweep()
+    (case,) = world.cases()
+    assert case["rule"] == "merged since" and cleaner_actions(world, number) == ["go"]
 
 
 def test_a_passing_cause_is_run_again_after_the_retry_time(world):

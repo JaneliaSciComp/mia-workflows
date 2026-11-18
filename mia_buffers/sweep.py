@@ -256,7 +256,8 @@ class Sweep:
         return None
 
     async def _snippets(self, number: int, dataset: int) -> dict | None:
-        """The snippets issue as the rules read it: {issue, state, working, stopped, pr, mergeable, last_word}.
+        """The snippets issue as the rules read it: {issue, state, working, stopped, pr, mergeable, merged,
+        last_word}. `pr` is its open pull request, or the one autodev merged when the issue is closed.
         `last_word` is autodev's last comment on the issue or its pull request, on one line. None when the issue
         is not the one a round of this dataset opened: its number came from a timeline entry, which quotes what
         jobs and agents wrote."""
@@ -267,6 +268,8 @@ class Sweep:
             return None
         labels = {label["name"] for label in issue.get("labels", [])}
         found = await gh.find_pr(f"snippets/issue-{number}")
+        if found is None and issue.get("state") == "closed":  # autodev closes the issue when it has merged
+            found = await gh.find_pr(f"snippets/issue-{number}", state="closed")
         pull = await gh.get_pr(found["number"]) if found else None
         comments = await gh.issue_comments(number) + (await gh.issue_comments(pull["number"]) if pull else [])
         said = [
@@ -282,6 +285,7 @@ class Sweep:
             "stopped": "snippets:needs-human" in labels,
             "pr": pull["number"] if pull else None,
             "mergeable": pull.get("mergeable") if pull else None,
+            "merged": bool(pull and pull.get("merged")),
             "last_word": neutralize(" ".join((last.get("body") or "").split()))[:LAST_WORD_CHARS] if last else "",
         }
 
