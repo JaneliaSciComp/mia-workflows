@@ -2632,7 +2632,6 @@ def test_plan_paged_answers_a_page_and_the_numbers_over_the_whole_plan(tmp_path)
     summary = out["summary"]
     assert (summary["fitting"], summary["pool"]) == (len(fitting), len(pool)) and summary["pool"] == 1
     assert summary["bytes_fitting"] == sum(row["bytes"] or 0 for row in fitting)
-    assert summary["to_prepare"] == sorted(row["id"] for row in fitting if row["prepared"] != "prepared")
     assert sum(step["value"] for step in summary["funnel"]) == whole["n_seen"]  # every record leaves or is in the pool
     row = next(r for r in call(s, "POST", "/plan", payload={"spec": text, "page": {"q": "u937"}})[1]["rows"])
     assert (row["id"], row["issue"], row["raw"], row["in_pool"]) == (U937, 9, {"state": "ready", "bytes": 10}, True)
@@ -2647,13 +2646,14 @@ def test_plan_paged_answers_a_page_and_the_numbers_over_the_whole_plan(tmp_path)
 def test_a_kept_plan_is_rebuilt_when_a_dataset_changes_state(tmp_path):
     s = catalog_service(tmp_path)
     text = re.sub(r"ref: [0-9a-f]{40}", f"ref: {REF_A}", SPEC_2D_TEXT)
-    first = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]["summary"]
-    assert first["pool"] == 0 and first["to_prepare"]
+    whole = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]
+    first, waiting = whole["summary"], next(row["id"] for row in whole["rows"] if row["fits"])
+    assert first["pool"] == 0
     again = call(s, "POST", "/plan", payload={"spec": text, "page": {"offset": 1}})[1]["summary"]
     assert again == first  # the same plan, another page
-    call(s, "PUT", f"/datasets/{first['to_prepare'][0]}", payload={"state": "prepared"})
+    call(s, "PUT", f"/datasets/{waiting}", payload={"state": "prepared"})
     after = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]["summary"]
-    assert after["pool"] == 1 and first["to_prepare"][0] not in after["to_prepare"]
+    assert after["pool"] == 1 and after["prepared"] == first["prepared"] + 1
     assert call(s, "POST", "/plan", payload={"spec": text.replace(REF_A, "c" * 40), "page": {}})[0] == 409  # not synced
 
 

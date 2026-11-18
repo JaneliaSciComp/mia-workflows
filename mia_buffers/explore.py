@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from mia_data.binding import record_gaps
-from mia_data.config import round_open
 
 from .plan import NOT_PREPARED, lacks_shape
 from .specmap import facts
@@ -288,6 +287,7 @@ PLAN_SORTS: dict[str, Callable[[dict], Any]] = {
     "modality": lambda row: row.get("modality_group"),
     "licence": lambda row: row["licence"],
     "state": lambda row: row.get("prepared"),
+    "stage": lambda row: row.get("stage"),  # where the dataset's preparation stands; one never started sorts last
     "raw": lambda row: (row["raw"] or {}).get("bytes"),
     "buffers": lambda row: len(row["buffers"]) or None,
     "bytes": lambda row: row.get("bytes"),
@@ -329,8 +329,7 @@ def plan_view(
 ) -> dict:
     """{rows, total, summary} of a plan (`Plan.to_dict` with states). `datasets` maps a record to its dataset_row.
     The three registry toggles narrow the rows and the summary's numbers; the funnel is the plan's own and
-    ignores them. `fit_only` and the page's search narrow only the rows and, the search, the datasets to prepare:
-    a request takes a bounded number, and the search is how a person prepares a large plan in parts.
+    ignores them. `fit_only` and the page's search narrow only the rows.
     A row whose record lacks what a plan needs (`RECORD_LACKS_GROUPS`) is counted (`record_lacks`) and never listed."""
     rows = []
     for row in sorted(plan["rows"], key=lambda row: row["path"]):
@@ -398,14 +397,6 @@ def plan_view(
             {name: row.get(name) for name in ("id", "modality_group", "positions", "channels", "weight")}
             for row in heaviest
         ],
-        "to_prepare": sorted(
-            row["id"]
-            for row in fitting
-            if row.get("prepared") not in ("prepared", "shelved")  # shelved: set aside by a person
-            and not round_open(row.get("stage"))  # in a round or at review: a request would start nothing
-            and not (datasets.get(row["id"]) or {}).get("gaps")  # the record cannot be run: nor would it there
-            and (not page.text or matches(page.text, _plan_haystack(row)))
-        ),
     }
     listed = [row for row in rows if row["decision"]["group"] not in RECORD_LACKS_GROUPS]
     summary["record_lacks"] = len(rows) - len(listed)

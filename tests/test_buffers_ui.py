@@ -1158,9 +1158,9 @@ def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() 
     assert has('pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number }))', flow)
     assert has("...(owner == null ? {} : { buffer: owner })", actions)
     assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
-    # any row can be checked, prepared or at review too; one button checks what is left to prepare
+    # any row can be checked, prepared or at review too, and the list sorts by where each dataset stands
     assert has("select: { chosen, id: x => x.id, onchange: offer }", flow)
-    assert has("left = m?.to_prepare || [];", flow) and has("for (const id of left) chosen.add(id);", flow)
+    assert has('{ key: "stage", label: "where it is", cell: x => x.stage || "" }', flow)
     # both lists file the same request: every checked dataset gets a round
     assert has('"again: true\\n" +', actions) and not has("again == null", actions)
     assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)

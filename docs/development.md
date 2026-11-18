@@ -1008,9 +1008,9 @@ Each tab is one kind of thing, and each thing has one page:
     buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
     `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
     someone is changing (`ensureDefinition`).
-  - *Prepare* lists the plan's rows that fit (`page.fit_only`), each with a check as on the Datasets list;
-    *Check what is left* checks what is not prepared and in no round (`summary.to_prepare`). It files the request
-    with `buffer` and `again`, and lists the buffer's requests. Its way
+  - *Prepare* lists the plan's rows that fit (`page.fit_only`), each with a check as on the Datasets list, and
+    sorts by stage too (`where it is`). It files the request with `buffer` and `again`, and lists the buffer's
+    requests. Its way
     forward is the one `go` a buffer gets from the page (`planRound`).
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the
     version's page) and *Files are in place*; *Serve* the version's id, the line a training script pastes, the

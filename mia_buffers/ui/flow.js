@@ -429,7 +429,6 @@ function prepareFoot(subject, plan, redraw) {
 function prepareStep(pane, subject, redraw, wanted) {
   if (ticked.key !== subject.key) Object.assign(ticked, { key: subject.key, chosen: new Set() });
   const chosen = ticked.chosen;
-  let left = []; // what is left to prepare: it fits, is not prepared, is in no round, its record can run
   const counts = el("p", {}, "planning…"),
     bar = el("i"),
     prepare = el("span", { class: "actions" });
@@ -471,7 +470,6 @@ function prepareStep(pane, subject, redraw, wanted) {
   };
   const seen = page => {
     const m = page.out?.summary;
-    left = m?.to_prepare || [];
     if (m) {
       counts.replaceChildren(
         el("b", {}, `${num(m.prepared || 0)} of ${num(m.fitting || 0)}`),
@@ -495,7 +493,7 @@ function prepareStep(pane, subject, redraw, wanted) {
       { key: "modality", label: "modality", cell: x => x.modality_group || "" },
       { key: "dims", label: "dims", cell: x => x.dims || "" },
       { key: "state", label: "state", cell: x => statePill(x.prepared) },
-      { label: "where it is", cell: x => x.stage || "" },
+      { key: "stage", label: "where it is", cell: x => x.stage || "" },
       { key: "bytes", label: "size", num: true, cell: x => (x.bytes ? fmtBytes(x.bytes) : "") },
     ],
   });
@@ -513,25 +511,7 @@ function prepareStep(pane, subject, redraw, wanted) {
     card(
       "Datasets that fit",
       "Every dataset that fits this definition. Check any of them: preparing the checked is one request, filed for this buffer, and each gets a new run, also one that is prepared or waits at review. The buffer waits here meanwhile.",
-      el(
-        "div",
-        { class: "actions" },
-        el(
-          "button",
-          {
-            type: "button",
-            class: "btn",
-            title:
-              "Check every dataset that is left to prepare: it is not prepared and in no round, and its record can run.",
-            onclick: () => {
-              for (const id of left) chosen.add(id);
-              table.reload();
-            },
-          },
-          "Check what is left",
-        ),
-        prepare,
-      ),
+      prepare,
       table,
     ),
     card(
