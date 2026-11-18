@@ -1,6 +1,6 @@
 # MIA: the crop judge decides — Spec
 
-**Status:** v0.2 · approved 2026-11-17 · nothing built (plan: `docs/plans/2026-11-17-judge-decides.md`). Rests on the crop judge of the autonomous-gates
+**Status:** v0.2 · approved 2026-11-17 · built on the branch `judge-decides` (plan: `docs/plans/2026-11-17-judge-decides.md`); not merged. Rests on the crop judge of the autonomous-gates
 spec (`2026-11-09-autonomous-gates.md` §4.2, §9), on the action routes and stage tables of the webapp-actions
 spec, and on revocation (`data:revoke`, `docs/development.md`). §3 to §6 are the user's decisions of
 2026-11-17; §8 lists the calls that are the writer's and still the user's to change.
@@ -289,5 +289,9 @@ Each is assumed above and is the user's to change.
 ## 10. Rollout
 
 The harness is not touched. After the merge: `judge.crops` in the live `mia.yaml` becomes
-`{mode: active, max_reworks: 1}` (it reads `{mode: shadow, max_suspect: 3}` today), buffer-api and the workers
-are restarted, and one dataset is run to `done` with a person overriding in each direction.
+`{mode: active, max_reworks: 1}` (it reads `{mode: shadow, max_suspect: 3}` today, and a config that still sets
+`max_suspect` is refused); the snippets autodev's `agent.evidence_dir` is set to mia-data's
+`<work_root>/_evidence`; autodev's `init-labels` creates the `answered` label; `mia judge eval crops <set>` is
+run once over the evaluation set with the rewritten prompt; buffer-api and the workers are restarted; and one
+dataset is run to `done` with a person overriding in each direction. A dataset saved before the deploy has no
+saved set on record, so its page offers *Reject* only after its next round.
