@@ -572,7 +572,13 @@ class Activities:
             raise ApplicationError(f"PR #{request.pr}: {BASE_MOVED}; the merge is tried again", type="BaseMoved")
         if merged:
             await self.gh.delete_branch(self.cfg.branch(request.issue))
-            await self.gh.update_issue(request.issue, state="closed", state_reason="completed")
+            try:
+                await self.gh.update_issue(request.issue, state="closed", state_reason="completed")
+            except GitHubError as error:
+                # GitHub closes the issue itself for a merged pull request that names it, and answers a close
+                # that arrives in the same moment with 422: the issue is closed, which is all that was asked
+                if error.status != 422 or (await self.gh.get_issue(request.issue)).get("state") != "closed":
+                    raise
         return MergeResult(merged, message)
 
     @activity.defn(name="report_failure")

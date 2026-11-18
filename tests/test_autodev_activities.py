@@ -724,3 +724,22 @@ async def test_a_merge_refused_for_the_pull_requests_own_reason_is_still_reporte
     respx.get(f"{API}{R}/pulls/5").mock(return_value=httpx.Response(200, json={"merged": False}))
     result = await acts(tmp_path, gh).merge_pr(MergeInput(1, 5, "a" * 40))
     assert not result.merged and "merge conflicts" in result.message
+
+
+@respx.mock
+async def test_a_merge_whose_issue_github_closed_in_the_same_moment_is_a_merge(tmp_path, gh):
+    """2026-11-18, six of 66 merges: the pull request merged, GitHub closed the issue it names, and autodev's own
+    close a moment later was answered `422 This issue was closed by another request`. autodev reported a failed
+    round and labelled the closed issue needs-human; the dataset that waited for the merge stopped as blocked.
+    The issue is closed, which is all the close asked for."""
+    respx.put(f"{API}{R}/pulls/5/merge").mock(return_value=httpx.Response(200, json={"merged": True}))
+    respx.delete(f"{API}{R}/git/refs/heads/autodev/issue-1").mock(return_value=httpx.Response(204))
+    raced = {"message": "Validation Failed", "errors": [{"message": "This issue was closed by another request."}]}
+    respx.patch(f"{API}{R}/issues/1").mock(return_value=httpx.Response(422, json=raced))
+    state = respx.get(f"{API}{R}/issues/1").mock(return_value=httpx.Response(200, json={"state": "closed"}))
+    assert (await acts(tmp_path, gh).merge_pr(MergeInput(1, 5, "a" * 40))).merged and state.called
+    # a 422 on an issue that is still open is a refusal like any other
+    respx.get(f"{API}{R}/issues/1").mock(return_value=httpx.Response(200, json={"state": "open"}))
+    with pytest.raises(ApplicationError) as refused:
+        await acts(tmp_path, gh).merge_pr(MergeInput(1, 5, "a" * 40))
+    assert refused.value.non_retryable
