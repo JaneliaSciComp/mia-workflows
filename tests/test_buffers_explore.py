@@ -155,7 +155,7 @@ def test_a_dataset_row_names_what_its_record_lacks() -> None:
     size (no plan can place a crop in it without assuming). The Datasets list flags each and filters by it."""
     import copy
 
-    from mia_buffers.explore import facets, record_row
+    from mia_buffers.explore import facets, lacks_filter, record_row
     from mia_buffers.plan import load_records
     from tests.test_buffers_plan import CATALOG
 
@@ -188,7 +188,9 @@ def test_a_dataset_row_names_what_its_record_lacks() -> None:
     rows = [{"lacks": []}, {"lacks": ["array shape"]}, {"lacks": ["array shape", "voxel size"]}]
     plain = {name: None for name in ("state", "modality", "dims", "licence")}
     counts = facets([{**plain, **row} for row in rows])["lacks"]
-    assert counts == {"anything": 2, "array shape": 2, "voxel size": 1}
+    assert counts == {"anything": 2, "nothing": 1, "array shape": 2, "voxel size": 1}
+    assert list(counts)[:2] == ["anything", "nothing"]  # the two that are about every lack come first
+    assert lacks_filter(rows, "nothing") == [{"lacks": []}]
 
 
 def test_a_dataset_whose_record_lacks_something_is_not_listed_in_a_buffers_plan() -> None:

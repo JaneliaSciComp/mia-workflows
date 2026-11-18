@@ -153,10 +153,13 @@ def record_row(path: str | None, record: dict) -> dict:
 
 LACKS = ("data URL", "array shape", "voxel size", "readable record")  # what a record can lack, as `lacks` names it
 ANYTHING = "anything"  # the `lacks` filter for a record that lacks any of them
+NOTHING = "nothing"  # and for a record that lacks none
 
 
 def lacks_filter(rows: list[dict], wanted: str) -> list[dict]:
-    """The rows whose record lacks `wanted` (one of `LACKS`), or anything at all (`ANYTHING`)."""
+    """The rows whose record lacks `wanted` (one of `LACKS`), anything at all (`ANYTHING`) or nothing (`NOTHING`)."""
+    if wanted == NOTHING:
+        return [row for row in rows if not row["lacks"]]
     return [row for row in rows if (row["lacks"] if wanted == ANYTHING else wanted in row["lacks"])]
 
 
@@ -214,9 +217,14 @@ def facets(rows: Iterable[dict]) -> dict[str, dict[str, int]]:
         for name in DATASET_FILTERS:
             if (value := row[name]) is not None:
                 counts[name][value] = counts[name].get(value, 0) + 1
-        for value in [*row["lacks"], *([ANYTHING] if row["lacks"] else [])]:
+        for value in [*row["lacks"], ANYTHING if row["lacks"] else NOTHING]:
             counts["lacks"][value] = counts["lacks"].get(value, 0) + 1
-    return {name: dict(sorted(values.items())) for name, values in counts.items()}
+
+    def in_order(item: tuple[str, int]) -> tuple[bool, str]:
+        """`anything` and `nothing` are about every lack, so a box offers them before the single ones."""
+        return item[0] not in (ANYTHING, NOTHING), item[0]
+
+    return {name: dict(sorted(values.items(), key=in_order)) for name, values in counts.items()}
 
 
 # --- a plan as the buffer designer shows it: one page of its rows, and the numbers over all of them ---------

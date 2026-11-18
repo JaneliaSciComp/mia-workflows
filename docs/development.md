@@ -990,7 +990,7 @@ Each tab is one kind of thing, and each thing has one page:
   its reason and *Unshelve*.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
   download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
-  (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, or `anything`; `record_row` names them,
+  (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, `anything` or `nothing`; `record_row` names them,
   whatever buffer asks, and the row shows each as a pill). Every row has a check (the
   header's checks the page that is showing). While something is checked, a box says how many datasets are
   selected and offers *Prepare* and *Create buffer* (`chosenBox`). The checked are prepared in one request (one

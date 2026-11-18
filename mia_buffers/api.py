@@ -46,6 +46,7 @@ from .explore import (
     DATASET_FILTERS,
     DATASET_SORTS,
     LACKS,
+    NOTHING,
     PLAN_SORTS,
     Page,
     dataset_haystack,
@@ -964,7 +965,7 @@ class BufferService:
 
     def _catalog_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         """The Datasets list: one page of datasets, filtered by state, modality, dims, licence, what the record
-        lacks (`lacks`: one of `LACKS`, or `anything`) or a request's records, with how many datasets have each
+        lacks (`lacks`: one of `LACKS`, `anything` or `nothing`) or a request's records, with how many datasets have each
         filter value."""
         page = self._page_of({"limit": "50", **query}, DATASET_SORTS)
         assert page is not None
@@ -977,8 +978,8 @@ class BufferService:
             if name in query:
                 rows = [row for row in rows if row[name] == query[name]]
         if "lacks" in query:
-            if query["lacks"] not in (*LACKS, ANYTHING):
-                raise HttpError(422, f"lacks must be one of {[*LACKS, ANYTHING]}, got {query['lacks']!r}")
+            if query["lacks"] not in (*LACKS, ANYTHING, NOTHING):
+                raise HttpError(422, f"lacks must be one of {[*LACKS, ANYTHING, NOTHING]}, got {query['lacks']!r}")
             rows = lacks_filter(rows, query["lacks"])
         found, total = paged(rows, page, DATASET_SORTS, dataset_haystack)
         return 200, {"ref": ref, "rows": found, "total": total, "facets": counts}, {}

@@ -2476,6 +2476,9 @@ def test_catalog_datasets_filters_by_what_a_record_lacks(tmp_path):
     assert out["facets"]["lacks"]["anything"] >= out["total"]
     anything = call(s, "GET", "/catalog/datasets", {"lacks": "anything"})[1]
     assert anything["total"] == out["facets"]["lacks"]["anything"] and all(row["lacks"] for row in anything["rows"])
+    nothing = call(s, "GET", "/catalog/datasets", {"lacks": "nothing"})[1]
+    assert nothing["total"] == nothing["facets"]["lacks"]["nothing"] == len(records) - anything["total"]
+    assert nothing["total"] and not any(row["lacks"] for row in nothing["rows"])
     assert call(s, "GET", "/catalog/datasets", {"lacks": "patience"})[0] == 422
 
 
