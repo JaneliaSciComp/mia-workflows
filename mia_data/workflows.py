@@ -29,10 +29,11 @@ with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
 
     from .config import round_open
-    from .crop_test import describe_failure, job_succeeded, judge
+    from .crop_test import describe_failure, job_succeeded, judge, rework_request
     from .models import (
         ADVISERS,
         DEBUGGER,
+        RERUNNERS,
         AssessmentWritten,
         AutodevLook,
         CropSet,
@@ -918,6 +919,8 @@ class MiaDataDataset:
         left = (*STOPPED, "cancelled", "debugging", *(("review",) if restarted else ()))
         if event.actor != DEBUGGER:
             state.debugs = 0  # somebody asked for this round: it has its own debugging cycles
+        if event.actor not in RERUNNERS:
+            state.reworks = 0  # ... and the crop judge may send its sets back anew (spec judge-decides §4.3)
         if state.stage in left and state.snippet_issue and workflow.patched("resume-snippet-pr"):
             snippet_issue, snippet_pr = state.snippet_issue, state.pr
         if self._results() and state.pass_stage:  # left open by the round before: a restart at review, a go
@@ -994,10 +997,13 @@ class MiaDataDataset:
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
         # after the gate opens, and a person's verdict that comes while the judge looks is acted on at once
-        if self._judge_grants(await self._judged(test)):
+        judged = await self._judged(test)
+        if self._judge_grants(judged):
             test.approved_at, test.approved_by = workflow.now().isoformat(), JUDGE
             self._found("Approved by the crop judge.")
             return await self._publish_set()
+        if judged and self._sends_back(judged) and await self._send_back(test, judged):
+            return  # the round went on as a develop round and ended there
         await self._from_review()
 
     async def _smoke(self, match: MatchResult, no_size_verdict: bool) -> bool:
@@ -1187,6 +1193,55 @@ class MiaDataDataset:
         reject, an escalate and a judge that did not run leave the set to a person."""
         return bool(judged and judged.authorized and not self._labels())
 
+    def _sends_back(self, judged: JudgeResult) -> bool:
+        """Whether the crop judge's verdict sends the set under review back for rework with no person (spec
+        judge-decides §3): the gate is active, the judge found a `suspect` or a `bad` crop (the policy's
+        `reject`), and nobody's verdict, go or revoke came while it looked."""
+        if not workflow.patched("judge-decides") or self.limits is None or self.limits.crop_judge != "active":
+            return False
+        return judged.effective == "reject" and not self.verdict_first and not self._labels()
+
+    async def _send_back(self, test: Test, judged: JudgeResult) -> bool:
+        """The crop judge sends `test`'s set back: its findings go to the developer as a person's reject would,
+        and the set is held so that a person can still accept it (spec judge-decides §4.1, §5.1). False when the
+        judge has done so `limits.max_reworks` times since a person last acted: the set then waits at review
+        (§4.3)."""
+        state, limits = self.state, await self._limits()
+        if state.reworks >= limits.max_reworks:
+            await self._act(
+                "comment",
+                state.issue,
+                f"The crop judge found {judged.worst or 'doubtful'} crops and has sent this dataset back "
+                f"{state.reworks} time(s) already (`judge.crops.max_reworks` is {limits.max_reworks}): the set "
+                "waits for your verdict.",
+                f"judge limit {state.round_id} {test.sha}",
+            )
+            return False
+        state.reworks += 1
+        held = state.held = self._set_of(test)
+        held.sent_back_by, held.worst = JUDGE, judged.worst
+        held.request = f"{held.set_id}#{state.reworks}"
+        held.findings = [finding for finding in judged.findings if finding.get("severity") != "ok"]
+        feedback = rework_request(held.findings, held.request)
+        self._found(
+            f"Sent back by the crop judge, which found {judged.worst or 'doubtful'} crops: the developer is asked "
+            "to look into its findings."
+        )
+        if state.pr is None:  # a matched binding's set: a snippet superseding the binding's
+            held.opened_issue = state.snippet_issue is None
+            await self._develop({"what_fails": feedback}, state.snippet_issue, binding=state.binding)
+            return True
+        state.revised_at = workflow.now().isoformat()
+        await self._act(
+            "comment", state.pr, f"/revise {feedback}", f"revise {state.round_id} judge {test.sha}", "snippets"
+        )
+        await self._stage(
+            "developing",
+            "the crop judge's findings went to the snippet PR as a revision request; the next head's crops are "
+            "judged again",
+        )
+        return True
+
     async def _assess(self, verdict: str, event: LabelEvent, subject: tuple[str, str]) -> AssessmentWritten:
         """Record a human verdict as an assessment (spec autonomous-gates §5) and ask whether the subject is
         authorized; a run from before `l-assess` takes the label alone as the authorization."""
@@ -1332,6 +1387,7 @@ class MiaDataDataset:
                 await self._refuse(label, NOT_REVIEW, event)
             elif (at := _parse_time(event.at)) and at > tested_at:
                 found = (kind, event)
+                self.state.reworks = 0  # a person decided: the judge's send-backs are counted from here
             else:
                 await self._refuse(label, f"it is older than the round's test crops; ask again to {kind} them", event)
         return found
@@ -1364,7 +1420,10 @@ class MiaDataDataset:
         state.snippet_issue = await self._act(
             "open_snippet_issue", state.issue, state.round_id, draft, *extra, seconds=300, result_type=int
         )
-        what = "a snippet superseding the binding's, from your comments," if binding else "the snippet"
+        if state.held and state.held.opened_issue and state.held.snippet_issue is None:
+            state.held.snippet_issue = state.snippet_issue  # the issue this send-back opened: an accept closes it
+        source = "the crop judge's findings" if state.held and state.held.sent_back_by == JUDGE else "your comments"
+        what = f"a snippet superseding the binding's, from {source}," if binding else "the snippet"
         await self._stage(
             "developing",
             f"autodev is writing {what} in mia-snippets issue #{state.snippet_issue}; each PR head's crops come "
@@ -1606,8 +1665,11 @@ class MiaDataDataset:
             await self._flush()
         if test.ok:
             # after the status and the stage: the required status never waits on it
-            if self._judge_grants(await self._judged(test)) and shown and loop:
+            judged = await self._judged(test)
+            if self._judge_grants(judged) and shown and loop:
                 await self._pr_approved(test, JUDGE_NAME, workflow.now().isoformat())
+            elif judged and shown and loop and self._sends_back(judged):
+                await self._send_back(test, judged)
         return current
 
     async def _merged(self, pr: PrUpdate) -> None:
