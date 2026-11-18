@@ -510,7 +510,7 @@ function agreementLine(gate, a) {
   return el(
     "div",
     { class: "small" },
-    `${gate}: ${num(a.judged)} judged · ${num(a.agree)} agree · ${num(a.disagree)} disagree · ${num(a.abstain)} abstained · ${num(a.pending)} awaiting a human`,
+    `${gate}: ${num(a.judged)} judged · ${num(a.agree)} agree · ${num(a.disagree)} disagree (${num(a.overturned || 0)} overturned by a person afterwards) · ${num(a.abstain)} abstained · ${num(a.pending)} awaiting a human`,
   );
 }
 export function viewDecisions(arg) {

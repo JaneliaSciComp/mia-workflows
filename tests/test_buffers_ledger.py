@@ -527,6 +527,34 @@ def test_assessments_before_cursor_and_by_filter(tmp_path):
     assert led.assessments(by="judge") == [rows[1]] and led.assessments(before=rows[0]["id"]) == []
 
 
+def test_a_judges_decision_a_person_overturned_later_is_counted_and_named(tmp_path):
+    """spec judge-decides §6: what the judge decided and a person then overturned is shown as overturned."""
+    from mia_core.judge.policy import new_assessment
+
+    led = Ledger(tmp_path / "l.sqlite")
+
+    def put(ref, verdict, by, at):
+        led.put_assessment(
+            new_assessment(gate="crops", subject_kind="crop_set", subject_ref=ref, verdict=verdict, by=by, at=at)
+        )
+
+    put("sent-back", "reject", "judge", 10.0)  # the judge sent it back; a person accepted the set afterwards
+    put("sent-back", "approve", "human:alice", 20.0)
+    put("saved", "approve", "judge", 30.0)  # the judge approved; a person rejected the saved set afterwards
+    put("saved", "reject", "human:bob", 40.0)
+    put("first", "reject", "human:carol", 50.0)  # the person spoke first: a disagreement, nothing overturned
+    put("first", "approve", "judge", 60.0)
+    put("agreed", "approve", "judge", 70.0)
+    put("agreed", "approve", "human:alice", 80.0)
+    out = led.agreement("crops")
+    assert (out["judged"], out["agree"], out["disagree"], out["overturned"]) == (4, 1, 3, 2)
+    pairs = {pair["subject"]: pair for pair in out["pairs"]}
+    assert pairs["crop_set:sent-back"]["overturned_by"] == "human:alice"
+    assert pairs["crop_set:sent-back"]["overturned_at"] == "1970-01-01T00:00:20+00:00"
+    assert pairs["crop_set:saved"]["overturned_by"] == "human:bob"
+    assert pairs["crop_set:first"]["overturned_by"] is None and pairs["crop_set:agreed"]["overturned_by"] is None
+
+
 def test_agreement_pairs_judge_with_newest_human(tmp_path):
     from mia_core.judge.policy import new_assessment
 
@@ -563,12 +591,15 @@ def test_agreement_pairs_judge_with_newest_human(tmp_path):
         "human": "approve",
         "agree": False,
         "at": by_subject["crop_set:s3"]["at"],
+        "overturned_by": "human:b",  # the judge rejected first, the person approved afterwards
+        "overturned_at": "1970-01-01T00:00:31+00:00",
     }
     assert by_subject["crop_set:s2"]["agree"] is None and "crop_set:s4" not in by_subject
     assert led.agreement("staged")["judged"] == 1 and led.agreement("review") == {
         "judged": 0,
         "agree": 0,
         "disagree": 0,
+        "overturned": 0,
         "abstain": 0,
         "pending": 0,
         "pairs": [],

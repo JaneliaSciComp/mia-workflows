@@ -899,7 +899,10 @@ class Ledger:
         """How the judge and the humans agree at a gate (spec autonomous-gates §9): per subject with a judge
         assessment, its newest judge verdict against the newest human verdict; no human verdict yet is `pending`.
         A person's verdict on a snippet PR head counts for the crop set made from that head (`head_of`).
-        Returns {"judged", "agree", "disagree", "pending", "pairs": [{subject, judge, human, agree}]}."""
+        A judge's decision that a person's later, opposite verdict overturned (spec judge-decides §5, §6) is a
+        disagreement that names who overturned it and when.
+        Returns {"judged", "agree", "disagree", "overturned", "abstain", "pending", "pairs": [{subject, judge,
+        human, agree, at, overturned_by, overturned_at}]}."""
         newest_judge: dict[str, dict] = {}
         newest_human: dict[str, dict] = {}
         on_head: dict[str, dict] = {}  # snippet PR head -> the newest human verdict recorded on it
@@ -919,19 +922,24 @@ class Ledger:
             if human is None and key.startswith("crop_set:"):
                 human = on_head.get(head_of(judge["subject"]) or "")
             abstained = judge.get("verdict") == "escalate"  # the judge did not decide: neither agreement nor not
+            agree = None if human is None or abstained else judge.get("verdict") == human.get("verdict")
+            overturned = human if human and agree is False and str(human.get("at")) > str(judge.get("at")) else None
             pairs.append(
                 {
                     "subject": key,
                     "judge": judge.get("verdict"),
                     "human": human.get("verdict") if human else None,
-                    "agree": None if human is None or abstained else judge.get("verdict") == human.get("verdict"),
+                    "agree": agree,
                     "at": judge.get("at"),
+                    "overturned_by": overturned.get("by") if overturned else None,
+                    "overturned_at": overturned.get("at") if overturned else None,
                 }
             )
         return {
             "judged": len(pairs),
             "agree": sum(1 for pair in pairs if pair["agree"] is True),
             "disagree": sum(1 for pair in pairs if pair["agree"] is False),
+            "overturned": sum(1 for pair in pairs if pair["overturned_by"]),
             "abstain": sum(1 for pair in pairs if pair["judge"] == "escalate"),
             "pending": sum(1 for pair in pairs if pair["agree"] is None and pair["judge"] != "escalate"),
             "pairs": pairs[:200],

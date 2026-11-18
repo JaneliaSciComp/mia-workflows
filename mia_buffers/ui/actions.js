@@ -33,6 +33,8 @@ export const BUTTON_HELP = {
     "Open New buffer on a definition that selects exactly these datasets. Only the prepared ones are in a plan; step 2 there says which fit.",
   clearSelection: "Uncheck every dataset.",
   sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
+  acceptHeld:
+    "Cancel the rework and save this set as it is, not the newer one under review. If a reader's pull request made it, it is merged as it was at that set, once the agent's running job has ended.",
   cancelReject: "Close this without sending anything.",
   sendShelve: "Shelve it with this reason. Unshelve on its page takes it back.",
   cancelShelve: "Close this without shelving anything.",
@@ -65,9 +67,14 @@ export const ACTION_HELP = {
             : s.again
               ? "Run the preparation workflow again: a new round makes more sample crops, which are saved once you approve them. Until then the dataset is not prepared, and a new buffer plan leaves it out."
               : "Start the preparation workflow: an agent matches the dataset to a reader, then sample crops are made for you to review.",
-    approve:
-      "Save the crops under review: the dataset becomes prepared and buffers can use it. If a new reader made them, its pull request is merged first.",
-    reject: "Send the crops back with your feedback: the agent fixes the reader, and new crops come back for review.",
+    approve: s =>
+      s.stage === "review"
+        ? "Save the crops under review: the dataset becomes prepared and buffers can use it. If a new reader made them, its pull request is merged first."
+        : "Cancel the rework and save this set as it is: the crops that were sent back become the dataset's. If a reader's pull request made them, it is merged as it was at that set, once the agent's running job has ended.",
+    reject: s =>
+      s.stage === "done"
+        ? "Revoke the saved crops and send them back with your feedback: buffers stop drawing from the dataset, the agent fixes the reader, and new crops come back for review."
+        : "Send the crops back with your feedback: the agent fixes the reader, and new crops come back for review.",
     revoke:
       "Withdraw this dataset's saved crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Run again repairs it.",
     cancel: "Stop the round in progress: its cluster jobs are killed and nothing is saved.",
@@ -126,21 +133,23 @@ const ACTION_WORDS = {
 export const actionWord = (subject, action) =>
   action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review"
     ? "Run" // the plan's gate: this starts the jobs
-    : action === "go" && subject.kind === "buffer"
-      ? "Plan"
-      : action === "dropped"
-        ? "Files are in place" // a spec's own controls
-        : action === "go" && subject.kind === "dataset" && subject.stage === "debugging"
-          ? "Run again now" // or wait: the debugger runs it again itself
-          : action === "go" && subject.kind === "dataset" && subject.stage === "review"
-            ? "Restart" // beside Approve and Reject: neither verdict, the set is dropped
-            : action === "go" && subject.stage === "new"
-              ? subject.kind === "dataset"
-                ? subject.again
-                  ? "Start again"
-                  : "Start"
-                : "Run"
-              : ACTION_WORDS[action] || action;
+    : action === "approve" && subject.kind === "dataset" && subject.stage !== "review"
+      ? "Accept these crops" // the set that was sent back for rework
+      : action === "go" && subject.kind === "buffer"
+        ? "Plan"
+        : action === "dropped"
+          ? "Files are in place" // a spec's own controls
+          : action === "go" && subject.kind === "dataset" && subject.stage === "debugging"
+            ? "Run again now" // or wait: the debugger runs it again itself
+            : action === "go" && subject.kind === "dataset" && subject.stage === "review"
+              ? "Restart" // beside Approve and Reject: neither verdict, the set is dropped
+              : action === "go" && subject.stage === "new"
+                ? subject.kind === "dataset"
+                  ? subject.again
+                    ? "Start again"
+                    : "Start"
+                  : "Run"
+                : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {
   revoke: "Revoke this dataset's saved crops? Buffers that drew from it are degraded; nothing is deleted.",
   retire: "Retire this buffer? Training jobs reading it are refused and its staged data is released.",
@@ -341,14 +350,68 @@ export async function askHosts(run, send) {
 
 // ---- a subject's action bar
 // what the service is asked about before this subject's action starts a run; null for the actions that start none
-const hostsRun = (subject, action) =>
-  action === "go" && subject.kind === "dataset"
+export const hostsRun = (subject, action) =>
+  // a reject of the saved set starts its rework's jobs, as a go starts a round's
+  (action === "go" || (action === "reject" && subject.stage === "done")) && subject.kind === "dataset"
     ? { records: [subject.key] }
     : action === "go" && subject.kind === "prep"
       ? { prep: subject.number }
       : action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review"
         ? { spec: subject.key }
         : null;
+// what a verdict carries beside its action: the revision this page is showing (the server refuses the verdict if
+// the subject has moved on) and, for a dataset, the set of crops it is about: the one under review, away from
+// review the one that was sent back (an approve) or, at done, the saved one (a reject)
+export const verdictOf = (subject, action) => {
+  if (action !== "approve" && action !== "reject") return {};
+  const sets = subject.kind === "dataset" ? subject.data?.sets : null;
+  if (!sets) return { revision: subject.revision };
+  const set = subject.stage === "review" ? sets.review : action === "approve" ? sets.held?.set : sets.saved?.set;
+  return { revision: subject.revision, ...(set ? { set } : {}) };
+};
+
+// the set that was sent back for rework, on its dataset's page: who sent it back, the findings, and at review
+// (where Approve is about the newer set) a button to accept this one instead
+export function heldPanel(subject, after) {
+  const held = subject.kind === "dataset" ? subject.data?.sets?.held : null;
+  if (!held || !subject.actions.includes("approve")) return null;
+  const who = held.by === "judge" ? "The crop judge" : held.by;
+  const findings = (held.findings || []).map(finding =>
+    el("li", {}, `${finding.item} [${finding.severity}]: ${finding.note}`),
+  );
+  const instead = subject.stage === "review" && subject.data.sets.review !== held.set;
+  const say =
+    subject.stage === "review" && !instead
+      ? "They are under review again."
+      : `${instead ? "Accept these crops instead" : "Accept these crops"} saves this set as it is and ends the rework.`;
+  return el(
+    "div",
+    { class: "notice" },
+    el("div", {}, `${who} sent a set of crops back for rework (${held.set}). ${say}`),
+    findings.length ? el("ul", {}, ...findings) : null,
+    instead
+      ? el(
+          "button",
+          {
+            type: "button",
+            class: "btn",
+            title: BUTTON_HELP.acceptHeld,
+            disabled: !!subject.asked,
+            onclick: e => {
+              e.target.disabled = true;
+              sendAction(
+                subject,
+                { action: "approve", key: newKey(), revision: subject.revision, set: held.set },
+                after,
+              );
+            },
+          },
+          "Accept these crops instead",
+        )
+      : null,
+  );
+}
+
 export function actionBar(subject, after, skip) {
   // `skip`: actions that have their own control on the page (a spec's go, revoke)
   const bar = el("div", { class: "actions" });
@@ -365,8 +428,6 @@ export function actionBar(subject, after, skip) {
     const word = actionWord(subject, action);
     const dialog = NOTE_DIALOGS[action]; // its word already ends in the dots of "more to enter"
     const sending = dialog ? dialog.sending : word + "…";
-    // a verdict names the revision this page is showing: the server refuses it if the subject has moved on
-    const verdict = action === "approve" || action === "reject" ? { revision: subject.revision } : {};
     bar.append(
       el(
         "button",
@@ -381,19 +442,23 @@ export function actionBar(subject, after, skip) {
                 b.disabled = true;
               });
               e.target.textContent = sending;
-              sendAction(subject, { action, key: newKey(), ...verdict, ...more }, after);
+              sendAction(subject, { action, key: newKey(), ...verdictOf(subject, action), ...more }, after);
             };
-            if (dialog) return askNote(subject, dialog, note => send({ note }));
-            if (ACTION_CONFIRM[action] && !confirm(actionConfirm(subject, action))) return;
-            const run = hostsRun(subject, action);
-            if (run) {
+            // an action that starts a run asks first which hosts the run lacks; what was typed rides along
+            const start = more => {
+              const run = hostsRun(subject, action);
+              if (!run) return send(more);
               if (checking) return;
               checking = true;
-              return askHosts(run, hosts => send(hosts.length ? { approve_hosts: hosts } : {})).finally(() => {
+              return askHosts(run, hosts =>
+                send({ ...more, ...(hosts.length ? { approve_hosts: hosts } : {}) }),
+              ).finally(() => {
                 checking = false;
               });
-            }
-            send({});
+            };
+            if (dialog) return askNote(subject, dialog, note => start({ note }));
+            if (ACTION_CONFIRM[action] && !confirm(actionConfirm(subject, action))) return;
+            start({});
           },
         },
         asked && asked.action === action ? sending : word,
