@@ -124,6 +124,7 @@ class PublishInput:
     workspace: Workspace
     pr: int | None
     feedback_id: str | None = None
+    feedback_text: str = ""  # a revision round: the reviewer's request as the agent was given it
 
 
 @dataclass
@@ -154,6 +155,8 @@ class JudgeOutcome:
 class PrRef:
     pr: int | None
     head_sha: str | None
+    # the id of the request the round answered with a validated "nothing needs changing" (no commits); "" otherwise
+    no_change: str = ""
 
 
 @dataclass

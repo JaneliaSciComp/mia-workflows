@@ -1438,3 +1438,17 @@ async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp
     look = await t.a.autodev_look(72, 80)
     assert look.answer == "The rows repeat in the source file.\n\nNothing to change."
     assert look.answer_at == "2026-11-14T23:30:00Z"
+    # a no-commit round is an answer; "the crops are right as they are" is autodev's marker for a request
+    assert look.no_change == ""
+    t.snip.comments[80].append(
+        {
+            "created_at": "2026-11-14T23:40:00Z",
+            "user": {"login": "mallory"},
+            "body": "### snippets: round 4 made no commits\n\nfine\n\n<!-- snippets: no-change i1-e11:t1#9 -->",
+        }
+    )
+    assert (await t.a.autodev_look(72, 80)).no_change == ""  # anyone can paste a marker; only autodev's counts
+    for at, request in (("2026-11-14T23:50:00Z", "i1-e11:t1#1"), ("2026-11-14T23:55:00Z", "i1-e11:t1#2")):
+        body = f"### snippets: round 5 made no commits\n\n**Nothing needs changing.**\n\n<!-- snippets: round x-5 -->\n<!-- snippets: no-change {request} -->"
+        t.snip.comments[80].append({"created_at": at, "user": {"login": "bot"}, "body": body})
+    assert (await t.a.autodev_look(72, 80)).no_change == "i1-e11:t1#2"  # the newest

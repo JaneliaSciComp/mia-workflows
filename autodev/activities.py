@@ -35,7 +35,16 @@ from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import TooManyHostsError, cut_off, issue_hosts, judge_dir, log_tail, read_result, render_prompt
+from .agent import (
+    TooManyHostsError,
+    cut_off,
+    issue_hosts,
+    judge_dir,
+    log_tail,
+    read_no_change,
+    read_result,
+    render_prompt,
+)
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
@@ -328,9 +337,18 @@ class Activities:
         if request.feedback_id:
             markers.append(f"handled {request.feedback_id}")  # tells observe_pr this feedback was addressed
         body = render_summary(self.cfg, request.round, request.workspace.branch, head_sha, self._clean(summary), cost)
+        no_change: str = ""
+        answers: dict[str, str] = {}
+        if not head_sha:  # no commits: did the agent answer a request with "nothing needs changing"?
+            asked = request.feedback_text or (await self.gh.get_issue(request.issue)).get("body") or ""
+            no_change, answers = read_no_change(workspace_dir, asked)
+        if no_change:
+            markers.append(f"no-change {no_change}")  # tells whoever asked that this request was answered so
+            listed = "\n".join(f"- {self._clean(item)}: {self._clean(answer)}" for item, answer in answers.items())
+            body += f"\n\n**Nothing needs changing.** The answer to each finding:\n\n{listed}"
         body += "\n\n" + "\n".join(self.cfg.marker(marker) for marker in markers)
         await self._comment_once(pr_number or request.issue, body, self.cfg.marker(markers[0]))
-        return PrRef(pr_number, head_sha)
+        return PrRef(pr_number, head_sha, no_change)
 
     # --- the review judge (spec autonomous-gates §4.1, §9) ------------------------------------------
 

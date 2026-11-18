@@ -113,6 +113,12 @@ class IssueWorkflow:
             if state.pr is None:
                 await self._act("set_stage", StageInput(state.issue, "working"))
                 result = await self._run_round(None)
+                if result.pr is None and result.no_change:
+                    # the agent looked into the request and found nothing to change (spec judge-decides §4.2):
+                    # an answer, not a stop; whoever asked reads it from the round's comment
+                    await self._act("set_stage", StageInput(state.issue, "answered"))
+                    await self._settle_judge()
+                    return "answered"
                 if result.pr is None:
                     raise RoundFailed("the agent made no commits; its summary is above")
                 state.pr = result.pr
@@ -183,7 +189,15 @@ class IssueWorkflow:
         self.phase = "PUBLISHING"
         result = await self._act(
             "publish_round",
-            PublishInput(state.issue, state.key, state.round, workspace, state.pr, feedback.id if feedback else None),
+            PublishInput(
+                state.issue,
+                state.key,
+                state.round,
+                workspace,
+                state.pr,
+                feedback.id if feedback else None,
+                feedback.text if feedback else "",
+            ),
             seconds=300,
             result_type=PrRef,
         )

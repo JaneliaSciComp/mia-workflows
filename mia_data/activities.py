@@ -153,6 +153,7 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
 # the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
 NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
 MARKER_RE = re.compile(r"(?s)<!--.*?-->")
+NO_CHANGE_RE = re.compile(r"<!-- \S+: no-change (\S+) -->")  # autodev's marker on a validated "nothing to change"
 CROP_STATUS = {
     "pending": "test crops running",
     "success": "test crops passed",
@@ -1639,6 +1640,8 @@ class Activities:
         last = max(said, key=lambda comment: comment.get("created_at") or "", default=None)
         unchanged = [comment for comment in said if NO_COMMITS_RE.match(comment.get("body") or "")]
         answer = max(unchanged, key=lambda comment: comment.get("created_at") or "", default=None)
+        validated = [comment for comment in unchanged if NO_CHANGE_RE.search(comment.get("body") or "")]
+        newest = max(validated, key=lambda comment: comment.get("created_at") or "", default=None)
         return AutodevLook(
             pr,
             "snippets:working" in labels,
@@ -1648,6 +1651,7 @@ class Activities:
             if answer
             else "",
             str(answer.get("created_at") or "") if answer else "",
+            NO_CHANGE_RE.findall(newest["body"])[-1] if newest else "",
         )
 
     @activity.defn(name="set_crop_status")

@@ -34,6 +34,7 @@ STAGES = {
     "working": ("fbca04", "autodev: agent job running"),
     "review": ("1d76db", "autodev: PR open, waiting for review"),
     "needs-human": ("d93f0b", "autodev: stopped, needs a human"),
+    "answered": ("c2e0c6", "autodev: looked into it, nothing to change"),
     "done": ("5319e7", "autodev: merged"),
 }
 

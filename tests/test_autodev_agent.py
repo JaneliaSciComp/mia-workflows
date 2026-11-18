@@ -19,6 +19,7 @@ from autodev.agent import (
     issue_hosts,
     job_script,
     log_tail,
+    read_no_change,
     read_result,
     render_prompt,
 )
@@ -427,3 +428,71 @@ def test_judge_script_is_read_only(tmp_path):
     assert '--allowedTools "Read,Glob,Grep"' in script and '--tools "Read,Glob,Grep"' in script
     assert "--restricted" in script and "--add-dir evidence > claude.json" in script and "--model opus" in script
     assert "> exit_code" in script and "git bundle" not in script and "Edit" not in script and "Bash" not in script
+
+
+REQUEST = """/revise Request: i7-e1:t1#1
+
+The crop judge looked at the sample crops this reader made and doubts them. Its findings:
+
+- crop-3 [suspect]: labels look shifted
+- crop-5 [bad]: empty
+
+Look into every finding before you change anything."""
+ANSWERS = [
+    {"item": "crop-3", "answer": "the shift is the label's own: the record says so"},
+    {"item": "crop-5", "answer": "there are no cells in that field"},
+]
+
+
+def _answered(round_dir, content, result=None):
+    """A round dir whose agent left `content` as no_change.json in its checkout, and a result object."""
+    (round_dir / "repo").mkdir(exist_ok=True)
+    (round_dir / "result.json").write_text(json.dumps(result or {"result": "nothing to change", "is_error": False}))
+    if content is not None:
+        text = content if isinstance(content, str) else json.dumps(content)
+        (round_dir / "repo" / "no_change.json").write_text(text)
+
+
+def test_a_complete_answer_to_this_request_counts(tmp_path):
+    _answered(tmp_path, {"request": "i7-e1:t1#1", "findings": ANSWERS})
+    assert read_no_change(tmp_path, REQUEST) == (
+        "i7-e1:t1#1",
+        {"crop-3": "the shift is the label's own: the record says so", "crop-5": "there are no cells in that field"},
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,  # no file
+        "not json",
+        ["a", "list"],
+        {"request": "i7-e0:t9#1", "findings": ANSWERS},  # another request
+        {"request": "i7-e1:t1#1", "findings": ANSWERS[:1]},  # one finding left out
+        {"request": "i7-e1:t1#1", "findings": [{"item": "crop-3", "answer": " "}, ANSWERS[1]]},  # an empty answer
+        {"request": "i7-e1:t1#1", "findings": [*ANSWERS, {"item": "crop-9", "answer": "x"}]},  # one it was not asked
+        {"request": "i7-e1:t1#1", "findings": [ANSWERS[0], ANSWERS[0]]},  # one twice, one missing
+        {"request": "i7-e1:t1#1", "findings": "all fine"},
+        {"request": "i7-e1:t1#1", "findings": [{"item": "crop-3", "answer": 1}, ANSWERS[1]]},
+        "x" * (300 * 1024),  # oversized
+    ],
+)
+def test_anything_else_is_not_an_answer(tmp_path, content):
+    _answered(tmp_path, content)
+    assert read_no_change(tmp_path, REQUEST) == ("", {})
+
+
+def test_an_answer_counts_only_for_a_request_with_findings_and_a_run_that_ended_by_itself(tmp_path):
+    good = {"request": "i7-e1:t1#1", "findings": ANSWERS}
+    _answered(tmp_path, good)
+    assert read_no_change(tmp_path, "/revise please rename the file") == ("", {})  # nothing was asked that way
+    assert read_no_change(tmp_path, "Request: i7-e1:t1#1\n\nno findings listed") == ("", {})
+    _answered(tmp_path, good, result={"result": "API Error", "is_error": True})
+    assert read_no_change(tmp_path, REQUEST) == ("", {})  # Claude Code ended the session
+    (tmp_path / "result.json").write_text("garbage")
+    assert read_no_change(tmp_path, REQUEST) == ("", {})
+    _answered(tmp_path, good)
+    (tmp_path / "repo" / "no_change.json").unlink()
+    (tmp_path / "elsewhere.json").write_text(json.dumps(good))
+    (tmp_path / "repo" / "no_change.json").symlink_to(tmp_path / "elsewhere.json")
+    assert read_no_change(tmp_path, REQUEST) == ("", {})  # a link is not the agent's file

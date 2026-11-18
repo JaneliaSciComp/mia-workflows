@@ -51,6 +51,9 @@ class AutodevLook:
     # posted it (ISO time); "" when no round ended so
     answer: str = ""
     answer_at: str = ""
+    # the request (`CropSet.request`) autodev's newest validated "nothing needs changing" answers; "" when none.
+    # Only this says the crops are right as they are: a round without commits alone does not.
+    no_change: str = ""
 
 
 @dataclass
