@@ -4,7 +4,7 @@ import respx
 from autodev_helpers import API, R
 
 from autodev.github import GitHub
-from autodev.review import Reviewers, approved, combine_checks, feedback, handled_ids, latest_round_at
+from autodev.review import Reviewers, accepted, approved, combine_checks, feedback, handled_ids, latest_round_at
 
 MP = "<!-- autodev:"
 HEAD = "abc1234def5678"
@@ -208,3 +208,22 @@ def test_a_trusted_bot_commands_only_from_the_first_line():
     )
     assert [item.text for item in fb] == ["the masks are shifted by one pixel"]
     assert feedback([], [], [cm(4, "alice", "intro\n/revise yes")], trusted)[0].text == "yes"  # humans: any line
+
+
+def test_an_accept_counts_only_for_a_head_the_issue_had_and_a_sender_who_may_command():
+    """spec judge-decides §5.1: `/accept <sha>` names an earlier head whose set a person accepted."""
+    first, second, other = "a" * 40, "b" * 40, "c" * 40
+    heads = [first, second]
+    people = Reviewers(W, "bot", False, MP, frozenset({"mia-bot"}))
+    assert accepted([cm(1, "alice", f"/accept {first}")], people, heads) == first
+    assert (
+        accepted([cm(1, "mia-bot", f"/accept {first}\n\n<!-- mia-data: accept r {first} -->")], people, heads) == first
+    )
+    assert accepted([cm(1, "alice", f"/accept {other}")], people, heads) == ""  # never this issue's head
+    assert accepted([cm(1, "alice", f"/accept {first[:12]}")], people, heads) == ""  # the whole sha, or nothing
+    assert accepted([cm(1, "bob", f"/accept {first}")], people, heads) == ""  # read access commands nothing
+    # a trusted bot's command is its comment's first line: text it quotes cannot command
+    assert accepted([cm(1, "mia-bot", f"the agent wrote:\n/accept {first}")], people, heads) == ""
+    assert accepted([cm(1, "alice", f"/accept {first} {MP} round k-1 -->")], people, heads) == ""  # autodev's own
+    both = [cm(1, "alice", f"/accept {first}", at="2026-10-10T02:00:00Z"), cm(2, "alice", f"/accept {second}")]
+    assert accepted(both, people, heads) == second  # the newest

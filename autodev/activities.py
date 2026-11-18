@@ -48,7 +48,7 @@ from .agent import (
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
-from .gitops import RejectedBundleError, git
+from .gitops import GitError, RejectedBundleError, git
 from .models import (
     AwaitInput,
     CommentInput,
@@ -65,13 +65,14 @@ from .models import (
     PrRef,
     PrSnapshot,
     PublishInput,
+    ResetInput,
     RoundInput,
     StageInput,
     SubmitInput,
     Workspace,
     check_key,
 )
-from .review import WRITE_PERMISSIONS, Reviewers, approved, feedback, handled_ids, latest_round_at
+from .review import WRITE_PERMISSIONS, Reviewers, accepted, approved, feedback, handled_ids, latest_round_at
 from .workflows import IssueWorkflow
 
 if TYPE_CHECKING:
@@ -198,6 +199,8 @@ class Activities:
             self.submit_agent,
             self.publish_round,
             self.observe_pr,
+            self.accepted_head,
+            self.reset_pr,
             self.merge_pr,
             self.report_failure,
             self.poll_issues,
@@ -524,7 +527,32 @@ class Activities:
         ]
         is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
-        return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)
+        accept = accepted(comments, reviewers, await asyncio.to_thread(self._heads, pr["head"].get("ref") or ""))
+        return PrSnapshot(number, "open", head_sha, is_approved, checks, pending, accept)
+
+    def _heads(self, branch: str) -> list[str]:
+        """Every head autodev pushed for the issue whose branch this is; none for any other branch."""
+        issue = re.fullmatch(rf"{re.escape(self.cfg.deployment)}/issue-(\d+)", branch)
+        return self.mirror.heads(int(issue.group(1))) if issue else []
+
+    @activity.defn(name="accepted_head")
+    @permanent_errors
+    async def accepted_head(self, pr: int) -> str:
+        """The earlier head of the pull request a person accepted, or "": asked when an agent's job has ended,
+        before anything of it is pushed (spec judge-decides §5.1)."""
+        return (await self._snapshot(pr)).accepted
+
+    @activity.defn(name="reset_pr")
+    @permanent_errors
+    async def reset_pr(self, request: ResetInput) -> None:
+        """Move the pull request's branch back to the head a person accepted. The mirror refuses a commit that
+        was never a head of the issue."""
+        try:
+            await asyncio.to_thread(self.mirror.reset, self.cfg.branch(request.issue), request.sha, request.issue)
+        except GitError as error:
+            if "is not a head" in str(error):
+                raise ApplicationError(str(error), non_retryable=True) from error
+            raise
 
     @activity.defn(name="merge_pr")
     @permanent_errors

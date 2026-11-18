@@ -73,6 +73,23 @@ class Mirror:
             git("clone", "-q", "--bare", self.url, str(self.path), token=self.tokens())
         git("fetch", "-q", "--prune", "origin", "+refs/heads/*:refs/heads/*", cwd=self.path, token=self.tokens())
 
+    def heads(self, issue: int) -> list[str]:
+        """Every commit that was pushed as a head of the issue's branch: one ref per round that made commits
+        (`publish`), kept in this mirror."""
+        try:
+            listed = git("for-each-ref", "--format=%(objectname)", f"refs/autodev/issue-{int(issue)}/", cwd=self.path)
+        except GitError:
+            return []
+        return listed.split()
+
+    def reset(self, branch: str, sha: str, issue: int) -> None:
+        """Move `branch` back to `sha` on the remote and here. Only to a commit that was the issue's head once:
+        a reset discards commits, and it must never be able to put anything else on the branch."""
+        if sha not in self.heads(issue):
+            raise GitError(f"{sha[:12]} is not a head that was pushed for issue {issue}")
+        git("push", "-q", "origin", f"+{sha}:refs/heads/{branch}", cwd=self.path, token=self.tokens())
+        git("update-ref", f"refs/heads/{branch}", sha, cwd=self.path)
+
     def workspace(self, dest: Path, start: str, branch: str, agent_url: str) -> str:
         """Fresh clone of branch `start` at dest/repo, checked out as `branch`. Returns the base sha.
 
