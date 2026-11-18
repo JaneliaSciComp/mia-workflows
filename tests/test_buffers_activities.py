@@ -1847,8 +1847,20 @@ async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_to
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
     assert [sent[:3] for sent in gateway.sent] == [("dataset", 5, "restart"), ("dataset", 6, "restart")]
     assert [acts.registry.dataset(record)["state"] for record in (U937, BCSS)] == ["in-progress", "in-progress"]
-    acts.registry.adopt_subject("dataset", 5, U937, stage="review")  # a round is under way: it is left to it
+    acts.registry.adopt_subject("dataset", 5, U937, stage="testing")  # a round is running: it is left to it
     assert (await acts.prep_nudge(PREP_ROUND, U937)).outcome == "in-progress" and len(gateway.sent) == 2
+
+
+async def test_a_request_that_says_again_starts_a_dataset_at_review_over(acts, gateway):
+    """A set that waits at review is dropped for a new round when the request says `again`; without it the
+    dataset is left to its review (test_nudge_dataset_in_a_round_or_at_review_is_left_alone)."""
+    prep_issue(acts, records=[U937], again=True)
+    await acts.prep_admit(8, "21")
+    acts.registry.put_dataset(U937, state="needs-human", issue=5)
+    acts.registry.adopt_subject("dataset", 5, U937, stage="review")
+    assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "nudged", 5)
+    assert [sent[:2] for sent in gateway.sent] == [("dataset", 5)]
+    assert acts.registry.dataset(U937)["state"] == "in-progress"
 
 
 async def test_a_request_leaves_a_shelved_dataset_alone_and_settles_it(acts, gateway):

@@ -708,8 +708,8 @@ class Activities:
         says where it stands; a dataset that needs a round gets a `go` sent to buffer-api with the worker token:
         actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
         `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). A stopped
-        dataset whose jobs were refused a host that is still unapproved gets none. No issue is searched, opened
-        or labelled. `DatasetIssue.number` is the dataset's number."""
+        dataset whose jobs were refused a host that is still unapproved gets none. `again`: a dataset that is done,
+        or whose set waits at review, gets a go all the same. No issue is searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
         entry = self._record(round_id, record)
         if gaps := start_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
             raise ValueError(f"{record}: the record cannot be run: {'; '.join(gaps)}")
@@ -723,7 +723,9 @@ class Activities:
                 "run it again from its page so mia-data saves both"
             )
             return DatasetIssue(number, stage, False, note, folder), False
-        if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
+        # a round that is running is left to it, and so is one that waits at review, unless the request says
+        # `again`: its go starts the dataset over, and the set under review is dropped
+        if subject and (subject["status"] == "working" or (subject["status"] == "waiting" and not again)):
             return DatasetIssue(number, stage, False, folder=folder), False
         if subject and subject["status"] == "stuck" and (waiting := subject.get("hosts")):
             # only a person's click approves a host: a new round would be refused the same ones
@@ -816,9 +818,9 @@ class Activities:
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
         """Hand one requested record to mia-data unless the registry says it is prepared or shelved; otherwise
         nudge_dataset, its result named for the request's entry. A dataset that stopped (`needs-human`) is handed
-        over, and so is a prepared one when the request says `again`: the dataset gets a new round, and its row
-        says `in-progress` at once, so the request follows that round instead of settling on what the last one
-        left."""
+        over, and so is a prepared one, or one whose set waits at review, when the request says `again`: the
+        dataset gets a new round, and its row says `in-progress` at once, so the request follows that round
+        instead of settling on what the last one left. A dataset whose round is running is left to it."""
         again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
