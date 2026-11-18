@@ -1396,6 +1396,20 @@ async def test_refusing_an_action_marks_it_refused_and_touches_no_label(tmp_path
     assert ledger.timeline("dataset", 1)[0]["body"].startswith("Refused `go`: busy")  # the action, not a label
 
 
+async def test_close_snippet_issue_closes_what_is_open_with_one_comment(tmp_path):
+    t = _setup(tmp_path)
+    t.snip.issues[72] = {"number": 72, "state": "open", "labels": []}
+    t.snip.issues[80] = {"number": 80, "state": "open", "labels": []}
+    t.snip.issues[81] = {"number": 81, "state": "closed", "labels": []}
+    await t.a.close_snippet_issue(72, 80, "accepted as they are <!-- x -->")
+    await t.a.close_snippet_issue(72, 80, "accepted as they are <!-- x -->")  # a retry: nothing twice
+    assert t.snip.issues[72]["state"] == t.snip.issues[80]["state"] == "closed"
+    said = [comment["body"] for comment in t.snip.comments.get(72, [])]
+    assert len(said) == 1 and said[0].startswith("accepted as they are &lt;!-- x -->")
+    await t.a.close_snippet_issue(81, None, "why")
+    assert not t.snip.comments.get(81)
+
+
 async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp_path):
     """What a round that waits for autodev finds: no PR and a stopped issue, then the open PR of a working one."""
     t = _setup(tmp_path)

@@ -323,6 +323,7 @@ class Activities:
             self.publish_gallery,
             self.publish_crops,
             self.refuse_label,
+            self.close_snippet_issue,
             self.read_feedback,
             self.open_snippet_issue,
             self.pr_state,
@@ -879,6 +880,20 @@ class Activities:
             return await self._comment_once(self.gh_snippets, issue, f"{body}\n\n{full_marker}", full_marker)
         await self._post(issue, f"{body}\n\n{full_marker}", full_marker)
         return None
+
+    @activity.defn(name="close_snippet_issue")
+    @mia_permanent_errors
+    async def close_snippet_issue(self, snippet_issue: int, pr: int | None, why: str) -> None:
+        """Close a snippets issue, and its pull request when one is given, that no round waits for any more: the
+        crops it was opened for were accepted as they are, or autodev answered that nothing needs changing (spec
+        judge-decides §4.2, §5.1). One comment says why; what is closed already is left alone."""
+        gh = self.gh_snippets
+        for number in (int(snippet_issue), *([int(pr)] if pr else [])):
+            if (await gh.get_issue(number)).get("state") == "closed":
+                continue
+            marker = self.cfg.marker(f"closed {number}")
+            await self._comment_once(gh, number, f"{self._clean(why)}\n\n{marker}", marker)
+            await gh.update_issue(number, state="closed")
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
