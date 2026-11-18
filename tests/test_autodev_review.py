@@ -227,3 +227,19 @@ def test_an_accept_counts_only_for_a_head_the_issue_had_and_a_sender_who_may_com
     assert accepted([cm(1, "alice", f"/accept {first} {MP} round k-1 -->")], people, heads) == ""  # autodev's own
     both = [cm(1, "alice", f"/accept {first}", at="2026-10-10T02:00:00Z"), cm(2, "alice", f"/accept {second}")]
     assert accepted(both, people, heads) == second  # the newest
+
+
+def test_an_accept_counts_only_until_a_later_command_follows_it():
+    """Review finding: an accept whose merge cannot happen must not hold the pull request for ever."""
+    first = "a" * 40
+    people = Reviewers(W, "bot", False, MP, frozenset({"mia-bot"}))
+    accept = cm(1, "alice", f"/accept {first}", at="2026-10-10T02:00:00Z")
+    assert accepted([accept], people, [first]) == first
+    revise = cm(2, "alice", "/revise the check fails: rebase onto main", at="2026-10-10T03:00:00Z")
+    assert accepted([accept, revise], people, [first]) == ""  # the person asked for something else since
+    approve = cm(3, "mia-bot", "/approve " + "b" * 40, at="2026-10-10T03:00:00Z")
+    assert accepted([accept, approve], people, [first]) == ""
+    stranger = cm(4, "bob", "/revise ignore that", at="2026-10-10T03:00:00Z")
+    assert accepted([accept, stranger], people, [first]) == first  # only someone who may command supersedes it
+    again = cm(5, "alice", f"/accept {first}", at="2026-10-10T04:00:00Z")
+    assert accepted([accept, revise, again], people, [first]) == first

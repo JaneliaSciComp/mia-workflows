@@ -224,7 +224,7 @@ class MiaDataDataset:
         elif state.stage == "review" and state.tests and not state.pr:  # rolled over while waiting for a verdict
             await self._guard(self._from_review())
         elif (state.stage in DEVELOP or state.stage == "review") and state.snippet_issue:  # ... or following the PR
-            await self._guard(self._follow_pr())
+            await self._guard(self._follow())
         else:
             worked = False
         while True:
@@ -976,6 +976,9 @@ class MiaDataDataset:
         """A new round for `event`: its id and seed, the state of the round before cleared (the sets that outlive
         a round stay), and its admission: the pins, the limits, the operator's pause."""
         state = self.state
+        for kept in (state.held, state.saved):  # a set of the round that ends here keeps its pass numbers
+            if kept and kept.round_id == state.round_id:
+                kept.passes = dict(state.passes)
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
         state.tests, state.attempts, state.pending, state.waiting_since = [], {}, [], None
@@ -1014,10 +1017,10 @@ class MiaDataDataset:
         if self._results() and state.pass_stage:  # none is open at rest; a pass left open ends here
             self._found(state.result or "Ended: the saved crops were rejected.")
             await self._flush()
-        state.reworks = 0  # a person acted: the crop judge's send-backs are counted from here
-        await self._begin_round(event)
-        # the saved set's pull request is merged and done with: the rejected set is its crops under the commit
-        # they were saved at, with its binding
+        state.reworks = state.debugs = 0  # a person acted: the judge's send-backs and the debugger's cycles start over
+        # the rejected set is held before anything else can fail (the pause, an admission that refuses): it can
+        # be accepted back whatever becomes of the rework. Its pull request is merged and done with: the set is
+        # its crops under the commit they were saved at, with its binding
         held = state.held = dataclasses.replace(
             saved,
             test=dataclasses.replace(saved.test, sha=saved.pins.snippets_commit),
@@ -1029,17 +1032,19 @@ class MiaDataDataset:
             request=f"{saved.set_id}#{event.event_id}",
             opened_issue=True,
         )
-        state.saved, state.binding, state.binding_hash = None, held.binding, held.binding_hash
+        state.saved = None
         count = len(out.artifacts)
         buffers = ", ".join(f"`{buffer}`" for buffer in out.buffers) or "none"
         await self._act(
             "comment",
             state.issue,
-            f"**Rejected by {event.actor}: the saved crops are revoked** ({count} staged artifact"
-            f"{'' if count == 1 else 's'} quarantined; buffers that drew from it: {buffers}) and the developer is "
-            "asked for a reader that takes the comments in.",
-            f"rework {state.round_id}",
+            f"**Rejected by {event.actor}: the saved crops are revoked** (the set `{held.set_id}`; {count} staged "
+            f"artifact{'' if count == 1 else 's'} quarantined; buffers that drew from it: {buffers}) and the "
+            "developer is asked for a reader that takes the comments in.",
+            f"rework {held.set_id} {event.event_id}",
         )
+        await self._begin_round(event)
+        state.binding, state.binding_hash = held.binding, held.binding_hash
         comments = await self._act(
             "read_feedback", state.issue, saved.test.finished_at, event.at, seconds=300, result_type=str
         )
@@ -1068,6 +1073,8 @@ class MiaDataDataset:
             await self._flush()
         await self._begin_round(event)
         assert state.pins and state.seed  # the round is admitted
+        if state.held:  # a set held from an earlier round stays acceptable; its request is answered there or never
+            state.held.request = ""
         # a go with advice (the debugger's, the cleaner's after a diagnosis) starts from the match, whose agent
         # reads the advice: any other go resumes the PR
         advised = bool(snippet_issue and snippet_pr and event.actor in ADVISERS) and workflow.patched(
@@ -1355,8 +1362,8 @@ class MiaDataDataset:
         held.findings = [finding for finding in judged.findings if finding.get("severity") != "ok"]
         feedback = rework_request(held.findings, held.request)
         self._found(
-            f"Sent back by the crop judge, which found {judged.worst or 'doubtful'} crops: the developer is asked "
-            "to look into its findings."
+            f"Sent back by the crop judge, which found {judged.worst or 'doubtful'} crops in the set "
+            f"`{held.set_id}`: the developer is asked to look into its findings."
         )
         if state.pr is None:  # a matched binding's set: a snippet superseding the binding's
             held.opened_issue = state.snippet_issue is None
@@ -1470,7 +1477,9 @@ class MiaDataDataset:
             if self._results() and state.pass_stage:
                 self._found(state.result or said)
                 await self._flush()
-            state.passes, state.pass_stage, state.pass_jobs, state.result, state.result_binding = {}, "", [], "", False
+            # the set's round goes on where it stopped: its next pass at a stage is one more, never the first again
+            state.passes, state.pass_stage = dict(held.passes), ""
+            state.pass_jobs, state.result, state.result_binding = [], "", False
         self._restore(held)
 
     def _restore(self, held: CropSet) -> None:
@@ -1484,6 +1493,7 @@ class MiaDataDataset:
             held.binding_hash,
         )
         state.pr, state.snippet_issue, state.tests = held.pr, held.snippet_issue, [held.test]
+        state.snippet_name, state.seed = held.snippet_name, held.seed
 
     async def _approve_held(self, by: str, at: str, said: str, found: str) -> None:
         """The held set is approved by `by`, an author that is not a person (`policy:developer`: the developer
@@ -1551,6 +1561,9 @@ class MiaDataDataset:
         state, held = self.state, self.state.held
         if held is None or event.set != held.set_id:  # superseded while the rework was being stopped
             return await self._refuse(APPROVE, "that set can no longer be accepted: a newer set was approved", event)
+        # a pull request the rework opened for a set that had none: closed with the issue it answers
+        opened = held.pr is None and held.opened_issue and state.snippet_issue == held.snippet_issue
+        rework_pr = state.pr if opened else None
         await self._switch_to(held, f"Ended: {event.actor} accepted the set of an earlier round.")
         state.pending, state.waiting_since, state.revised_at = [], None, None
         who = JUDGE_NAME if held.sent_back_by == JUDGE else held.sent_back_by
@@ -1562,12 +1575,16 @@ class MiaDataDataset:
             if not written.authorized:
                 return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
             held.test.approved_at, held.test.approved_by = event.at, event.actor
-            said = f"Accepted by {event.actor}: the set that {who} sent back is taken as it is; the rework is ended."
+            said = (
+                f"Accepted by {event.actor}: the set `{held.set_id}` that {who} sent back is taken as it is; the "
+                "rework is ended."
+            )
             self._found(said)
             await self._act("comment", state.issue, f"**{said}**", f"accept {held.round_id} {event.event_id}")
             if held.pr is None:
                 if held.opened_issue:  # the reader the send-back asked for is not wanted any more
-                    await self._close_issue(f"The crops this issue was opened for were accepted by {event.actor}.")
+                    why = f"The crops this issue was opened for were accepted by {event.actor}."
+                    await self._close_issue(why, rework_pr)
                 step = "saving the crops"
                 return await self._publish_set(held.test)  # a matched set's sha is its pinned snippets commit
             step = "asking autodev to merge"
@@ -1603,6 +1620,8 @@ class MiaDataDataset:
             state.binding_hash,
             state.pr,
             state.snippet_issue,
+            snippet_name=state.snippet_name,
+            seed=state.seed,
         )
 
     async def _produce(self) -> None:
@@ -1719,10 +1738,7 @@ class MiaDataDataset:
             f"autodev is writing {what} in mia-snippets issue #{state.snippet_issue}; each PR head's crops come "
             "back here for review",
         )
-        await self._follow_pr()
-        if state.stage == "review" and not state.pr and state.held:
-            # the developer answered that nothing needs changing (`_answered`): the same set waits for a verdict
-            await self._from_review()
+        await self._follow()
 
     async def _resume_pr(self, snippet_issue: int, pr_number: int) -> bool:
         """A `go` after a develop round stopped: pick its snippet PR up again if it is still open,
@@ -1742,6 +1758,15 @@ class MiaDataDataset:
         if not await self._on_pr(pr_number, pr):
             await self._follow_pr()
         return True
+
+    async def _follow(self) -> None:
+        """Follow the developer's work to the round's end (`_follow_pr`). When its answer brought a set with no
+        pull request back to review (`_answered`), that set waits here for its verdict: in the run that asked for
+        the rework and in one that took the round over after a rollover alike."""
+        await self._follow_pr()
+        state = self.state
+        if state.stage == "review" and not state.pr and state.held:
+            await self._from_review()
 
     async def _follow_pr(self) -> None:
         """The develop round's one wait: wake on pr_update and on labels until the round ends. At `review` (the
@@ -1867,14 +1892,14 @@ class MiaDataDataset:
         await self._stage("review", detail, extra=extra)
         return True
 
-    async def _close_issue(self, why: str) -> None:
-        """Close the snippets issue the round follows, which nothing waits for any more, and forget it. Best
-        effort: an issue that stays open holds nothing up."""
+    async def _close_issue(self, why: str, pr: int | None = None) -> None:
+        """Close the snippets issue the round follows (and `pr`, the pull request made for it), which nothing
+        waits for any more, and forget it. Best effort: an issue that stays open holds nothing up."""
         state = self.state
         if state.snippet_issue is None:
             return
         try:
-            await self._act("close_snippet_issue", state.snippet_issue, None, why, seconds=300)
+            await self._act("close_snippet_issue", state.snippet_issue, pr, why, seconds=300)
         except ActivityError as error:
             workflow.logger.warning("issue #%d: snippets issue not closed: %s", state.issue, error_message(error))
         state.snippet_issue = None

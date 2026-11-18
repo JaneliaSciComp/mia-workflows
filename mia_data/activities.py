@@ -1577,7 +1577,8 @@ class Activities:
                 return remembered["number"]
         # ponytail: lists every issue; one call per round.
         for existing in await gh.list_issues(state="all"):
-            if ours(existing, marker):
+            # a closed one is done with (merged, or answered "nothing needs changing"): what is asked now is new
+            if existing.get("state") != "closed" and ours(existing, marker):
                 return existing["number"]
         record = self._record(round_id)
         urls = record_urls(record)

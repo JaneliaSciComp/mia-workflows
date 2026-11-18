@@ -573,6 +573,20 @@ async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(
         await t.a.open_snippet_issue(1, "i1-e100", {}, None, str(other))  # another dataset's round
 
 
+async def test_a_request_made_after_the_rounds_snippets_issue_was_closed_opens_a_new_issue(tmp_path):
+    """Review finding: the developer answered "nothing needs changing", the issue was closed, the person rejected
+    again. The round's marker must not find the closed issue, or the new comments reach nobody."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    binding = t.a._round_dir(ROUND) / "binding-1.yaml"
+    binding.write_text(yaml.safe_dump(BINDING))
+    first = await t.a.open_snippet_issue(1, ROUND, {"what_fails": "Request: r#1"}, None, str(binding))
+    assert await t.a.open_snippet_issue(1, ROUND, {"what_fails": "Request: r#1"}, None, str(binding)) == first
+    await t.a.close_snippet_issue(first, None, "answered")
+    second = await t.a.open_snippet_issue(1, ROUND, {"what_fails": "Request: r#2"}, None, str(binding))
+    assert second != first and "Request: r#2" in t.snip.created[1][1] and len(t.snip.created) == 2
+
+
 async def test_open_snippet_issue_reuses_the_remembered_issue_in_a_new_round(tmp_path):
     t = _setup(tmp_path)
     for event_id in ("99", "100", "101"):

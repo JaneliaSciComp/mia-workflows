@@ -120,6 +120,11 @@ class CropSet:
     request: str = ""  # the id of the rework request the developer answers: "<set_id>#<n>"
     opened_issue: bool = False  # the send-back opened the snippets issue: accepting the set closes it
     findings: list[dict] = field(default_factory=list)  # the judge's findings that are not `ok`, as it wrote them
+    # what the set's round needs when it becomes the dataset's round again: the snippet a merge looks for, the
+    # round's seed, and the stage passes the round had begun (their numbers go on, so no entry is written twice)
+    snippet_name: str | None = None
+    seed: str | None = None
+    passes: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
