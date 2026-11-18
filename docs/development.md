@@ -761,7 +761,8 @@ registry state. `cancelled`: a person cancelled it.
 **What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or shelved settles
 the record. A dataset that stopped (`needs-human`) is sent a `go`, and so is a prepared one when the request says
 `again`; its row is set to `in-progress` at once, so the request follows the new round instead of settling on
-what the last one left. A dataset whose crops wait for a review is in a round, so it is left to it. Otherwise the dataset's
+what the last one left. A stopped dataset whose jobs were refused a host that no one approved yet is sent none
+(its note names the hosts, which Run again on its page lists to check). A dataset whose crops wait for a review is in a round, so it is left to it. Otherwise the dataset's
 subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
 any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity

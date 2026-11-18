@@ -707,8 +707,9 @@ class Activities:
         """nudge_dataset's work, and whether the dataset was started for the first time. The dataset's subject
         says where it stands; a dataset that needs a round gets a `go` sent to buffer-api with the worker token:
         actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
-        `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). No issue is
-        searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
+        `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). A stopped
+        dataset whose jobs were refused a host that is still unapproved gets none. No issue is searched, opened
+        or labelled. `DatasetIssue.number` is the dataset's number."""
         entry = self._record(round_id, record)
         if gaps := start_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
             raise ValueError(f"{record}: the record cannot be run: {'; '.join(gaps)}")
@@ -724,6 +725,12 @@ class Activities:
             return DatasetIssue(number, stage, False, note, folder), False
         if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
             return DatasetIssue(number, stage, False, folder=folder), False
+        if subject and subject["status"] == "stuck" and (waiting := subject.get("hosts")):
+            # only a person's click approves a host: a new round would be refused the same ones
+            raise ValueError(
+                f"{record}: its jobs were refused hosts no one approved yet: {', '.join(waiting)}; "
+                "press Run again on its page and check them"
+            )
         pins = self._pins(round_id)
         kind = "prep" if round_id.startswith("p") else "buffer"
         go = functools.partial(

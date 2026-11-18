@@ -119,7 +119,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   that run's jobs need (records' URL hosts, bindings' too if the record names them, redirect targets, package hosts,
   the hosts a dataset's jobs were refused; never an IP or the deployment's own host); nothing writes the operator's
   `broker.toml`. A job that is refused a host notes it for its dataset; noting approves nothing, and the dataset's
-  jobs get the host only once the policy allows it. No job reaches a GitHub host, except that a person may approve
+  jobs get the host only once the policy allows it; until then a request sends that dataset no `go` once it has
+  stopped, and the cleaner says which hosts wait. No job reaches a GitHub host, except that a person may approve
   `raw.githubusercontent.com` for one dataset at a time: the policy allowing it grants it to no other dataset's
   jobs. `policy_dir` is under home, apart from every directory a worker sandbox binds read-write, and its
   `broker.toml` is not the base policy file.

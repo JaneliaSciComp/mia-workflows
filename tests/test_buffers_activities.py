@@ -1807,6 +1807,20 @@ async def test_a_request_starts_a_stopped_dataset_without_saying_again(acts, gat
     assert acts.registry.dataset(BCSS)["state"] == "in-progress"
 
 
+async def test_a_request_starts_no_stopped_dataset_whose_host_waits_for_approval(acts, gateway):
+    """Incident 2026-11-17: a dataset stopped because its jobs were refused a host, and the next request that
+    named it ran the same round into the same refusal, two hours of an agent. Only a person's click approves a
+    host, so the request says which hosts wait and sends no go."""
+    prep_issue(acts, records=[BCSS])
+    await acts.prep_admit(8, "21")
+    acts.registry.put_dataset(BCSS, state="needs-human", issue=6)
+    acts.registry.adopt_subject("dataset", 6, BCSS, stage="blocked")
+    acts.registry.add_refused_hosts(BCSS, ["s3.example.org"])
+    with pytest.raises(ApplicationError, match="hosts no one approved yet: s3.example.org") as refused:
+        await acts.prep_nudge(PREP_ROUND, BCSS)
+    assert refused.value.non_retryable and not gateway.sent
+
+
 async def test_prep_nudge_sends_no_go_for_a_record_that_cannot_be_run(acts, gateway, monkeypatch):
     """buffer-api would refuse the go: the request hears why at once and settles the dataset as needing a human."""
     acts.registry.put_dataset(U937, state="in-progress")
