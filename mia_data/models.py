@@ -147,6 +147,9 @@ class DatasetState:
     pr: int | None = None
     tests: list[Test] = field(default_factory=list)
     attempts: dict[str, int] = field(default_factory=dict)  # stage -> attempts used
+    # which attempt of its steps the round is on: a step that runs again under the same round takes the next
+    # one, and with it a job key, a workspace, a test id and timeline markers of its own
+    attempt: int = 1
     pending: list[PrUpdate] = field(default_factory=list)  # PR updates not yet acted on
     published: bool = False  # some round of this issue published crops: there is something a data:revoke withdraws
     restart: LabelEvent | None = None  # the go a run was rolled over for: the new run's first step is its round

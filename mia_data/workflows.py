@@ -679,6 +679,7 @@ class MiaDataDataset:
                 state.pins,
                 failure,
                 state.binding,
+                state.attempt,
                 seconds=600,
                 result_type=str,
             )
@@ -715,11 +716,22 @@ class MiaDataDataset:
         if not await self._go_within(GO_PATIENCE):
             await self._finish("failed", f"{failure}\n\nThe debugger's new round did not start.", debug=False)
 
+    def _test_id(self, sha: str) -> str:
+        """The id of the set the round makes at `sha` on this attempt: a set made again at the same commit is a
+        set of its own (spec resume-restart §4.4)."""
+        again = f"-a{self.state.attempt}" if self.state.attempt > 1 else ""
+        return f"{self.state.round_id}-{sha[:12]}{again}"
+
+    def _marker(self, text: str) -> str:
+        """`text` as the marker of an entry this attempt writes: the timeline keeps one body per marker, so what
+        a step says when it runs again needs a marker of its own."""
+        return f"{text} a{self.state.attempt}" if self.state.attempt > 1 else text
+
     async def _prepare(self, kind: str) -> str:
         """Make the workspace for a smoke/crop/verify job. Returns its path."""
         state = self.state
         return await self._act(
-            "prepare_job", state.issue, state.round_id, kind, 1, state.binding, seconds=300, result_type=str
+            "prepare_job", state.issue, state.round_id, kind, state.attempt, state.binding, seconds=300, result_type=str
         )
 
     async def _job(
@@ -740,7 +752,7 @@ class MiaDataDataset:
         the job and links it (`own_entry`): a record is linked once, by the entry that says what the job found."""
         state = self.state
         assert state.round_id and state.pins  # a round is admitted before any job runs
-        key = job_key(state.issue, state.round_id, workspace_kind or kind, 1)
+        key = job_key(state.issue, state.round_id, workspace_kind or kind, state.attempt)
         limits = await self._limits()
         budgeted = workflow.patched("l-budget")
         if budgeted:  # the operator's switches first: the pause, then the root budget (spec autonomous-gates §8)
@@ -934,7 +946,6 @@ class MiaDataDataset:
         verify), replayed only.
 
         Returns (the Test record, descriptions of failed jobs, the markdown report for the issue)."""
-        state = self.state
         n = n_crops or (await self._limits()).test_n
         crop_workspace, verify_workspace, verify, crop_job, verify_job = await self._crop(
             sha, sha, n, seed, 0, trusted, existing=bool(n_crops)
@@ -955,7 +966,7 @@ class MiaDataDataset:
         gallery = await self._gallery(sha, crop_workspace, verify_workspace, verify) if verify.crops else None
         test = Test(
             sha,
-            f"{state.round_id}-{sha[:12]}",
+            self._test_id(sha),
             passed,
             workflow.now().isoformat(),
             gallery.prefix if gallery else None,
@@ -1093,7 +1104,7 @@ class MiaDataDataset:
 
         # Match: the agent picks a snippet and writes a binding; the worker's crop job is what tests that binding.
         workspace = await self._act(
-            "prepare_match", state.issue, state.round_id, state.pins, 1, seconds=600, result_type=str
+            "prepare_match", state.issue, state.round_id, state.pins, state.attempt, seconds=600, result_type=str
         )
         if not job_succeeded(job := await self._job("match", workspace)):
             return await self._finish("failed", describe_failure("match", job))
@@ -1130,7 +1141,7 @@ class MiaDataDataset:
             n_crops=(await self._limits()).per_round,
         )
         state.tests.append(test)
-        await self._report(report, f"test {state.round_id} {sha}")
+        await self._report(report, self._marker(f"test {state.round_id} {sha}"))
         if not test.ok:
             return await self._finish("failed", "; ".join(["the crops failed; nothing is saved", *failed_jobs]))
         await self._stage("review")
@@ -1269,7 +1280,7 @@ class MiaDataDataset:
             return None
         state = self.state
         assert state.round_id
-        marker, failed, workspace = f"judge crops {state.round_id} {test.sha}", "", ""
+        marker, failed, workspace = self._marker(f"judge crops {state.round_id} {test.sha}"), "", ""
         try:
             verify = await self._act(
                 "read_verify", test.verify_workspace, test.crop_workspace, result_type=VerifyResult
@@ -1282,7 +1293,7 @@ class MiaDataDataset:
                 test.crop_workspace,
                 test.verify_workspace,
                 verify.crops,
-                1,
+                state.attempt,
                 test.sha[:12],
                 seconds=600,
                 result_type=str,
@@ -1358,7 +1369,7 @@ class MiaDataDataset:
                 f"The crop judge found {judged.worst or 'doubtful'} crops and has sent this dataset back "
                 f"{state.reworks} time(s) already (`judge.crops.max_reworks` is {limits.max_reworks}): the set "
                 "waits for your verdict.",
-                f"judge limit {state.round_id} {test.sha}",
+                self._marker(f"judge limit {state.round_id} {test.sha}"),
             )
             return False
         state.reworks += 1
@@ -2006,7 +2017,7 @@ class MiaDataDataset:
         try:
             binding = await self._act("adopt_pr_binding", state.round_id, pr.pr, head, seconds=600, result_type=dict)
             if binding["errors"]:
-                test = Test(head, f"{state.round_id}-{head[:12]}", False, workflow.now().isoformat())
+                test = Test(head, self._test_id(head), False, workflow.now().isoformat())
                 report = "\n".join(
                     [
                         f"Test crops at `{head}`: **failed**, the PR's example binding was not adopted:",
@@ -2027,7 +2038,7 @@ class MiaDataDataset:
                 await self._act("set_crop_status", head, "error", None, budget=timedelta(minutes=10))
             raise
         state.tests.append(test)
-        marker = f"test {state.round_id} {head}"
+        marker = self._marker(f"test {state.round_id} {head}")
         pr_report = (
             report if test.ok or not loop else f"/revise the crops at `{head}` failed; make them pass:\n\n{report}"
         )
@@ -2084,7 +2095,7 @@ class MiaDataDataset:
             )
             test.tree_sha = tree
             state.tests.append(test)
-            await self._report(report, f"test {state.round_id} {merge_sha}")
+            await self._report(report, self._marker(f"test {state.round_id} {merge_sha}"))
             if not test.ok:
                 return await self._finish(
                     "failed", "; ".join(["the merge commit's crops failed; nothing is saved", *failed_jobs])
@@ -2103,7 +2114,7 @@ class MiaDataDataset:
             )
             test.tree_sha = await self._act("tree_sha", merge_sha, binding["name"])
             state.tests.append(test)
-            await self._report(report, f"test {state.round_id} {merge_sha}")
+            await self._report(report, self._marker(f"test {state.round_id} {merge_sha}"))
             if not test.ok:
                 return await self._finish(
                     "failed",

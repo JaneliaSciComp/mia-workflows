@@ -170,6 +170,15 @@ async def test_prepare_debug_gives_the_agent_what_the_rounds_jobs_left(tmp_path)
         await t.a.prepare_debug(1, ROUND, pins, failure, str(tmp_path / "elsewhere.json"))
 
 
+async def test_prepare_debug_makes_a_workspace_per_attempt(tmp_path):
+    t = _setup(tmp_path)
+    pins = await t.a.admit(1, "99")
+    first = Path(await t.a.prepare_debug(1, ROUND, pins, "it failed", None, 1))
+    second = Path(await t.a.prepare_debug(1, ROUND, pins, "it failed again", None, 2))
+    assert (first.name, second.name) == ("debug-1", "debug-2") and first.parent == second.parent
+    assert "it failed again" in (second / "failure.md").read_text()
+
+
 async def test_read_debug_takes_one_of_two_outcomes(tmp_path):
     t = _setup(tmp_path)
     ws = Path(await t.a.prepare_debug(1, ROUND, await t.a.admit(1, "99"), "it failed", None))

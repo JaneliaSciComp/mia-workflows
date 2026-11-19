@@ -193,9 +193,11 @@ class Mocks:
             return f"/w/{round_id}/match-{attempt}"
 
         @activity.defn(name="prepare_debug")
-        async def prepare_debug(issue: int, round_id: str, pins: Pins, failure: str, binding: str | None) -> str:
+        async def prepare_debug(
+            issue: int, round_id: str, pins: Pins, failure: str, binding: str | None, attempt: int = 1
+        ) -> str:
             rec("prepare_debug", round_id, failure, binding)
-            return f"/w/{round_id}/debug-1"
+            return f"/w/{round_id}/debug-{attempt}"
 
         @activity.defn(name="read_debug")
         async def read_debug(issue: int, round_id: str, ws: str) -> DebugResult:
@@ -779,6 +781,30 @@ async def test_continue_as_new_keeps_handled(env, monkeypatch):
     assert m.of("admit") == [("11",), ("12",)]
 
 
+async def test_a_round_on_its_second_attempt_names_every_job_test_and_marker_for_it(env):
+    m = Mocks(crop_judge="shadow")
+    async with started(env, m, state=DatasetState(7, attempt=2)) as h:
+        await idle(h, m, "review")
+        await until(lambda: any(c[1].startswith("judge crops") for c in m.of("comment")))
+        st = await h.query(MiaDataDataset.status)
+    keys = [a[0] for a in m.of("submit")]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "judge"]
+    assert all(key.endswith("-2") for key in keys)
+    assert all(a[2].workspace.endswith("-2") for a in m.of("submit"))
+    assert st.tests[-1].test_id == f"i7-e11-{SHA[:12]}-a2"
+    assert any(c[1] == f"judge crops i7-e11 {SHA} a2" for c in m.of("comment"))
+
+
+async def test_a_first_attempt_keeps_the_names_it_has(env):
+    m = Mocks(crop_judge="shadow")
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        await until(lambda: any(c[1].startswith("judge crops") for c in m.of("comment")))
+        st = await h.query(MiaDataDataset.status)
+    assert all(a[0].endswith("-1") for a in m.of("submit")) and st.tests[-1].test_id == f"i7-e11-{SHA[:12]}"
+    assert any(c[1] == f"judge crops i7-e11 {SHA}" for c in m.of("comment"))
+
+
 async def test_a_restart_starts_its_round_in_a_new_run(env):
     """A dataset's go arrives as `restart`. A run that has carried a round rolls over first, so the round runs in a
     new run (one that takes every code path of today); the round a run starts with stays in it."""
@@ -898,6 +924,7 @@ async def test_a_failed_round_is_debugged_and_run_again(env):
     assert (round_id, binding) == ("i7-e11", "/s/binding-1.yaml") and "the crops failed" in failure
     assert "debugging agent" not in failure  # the debugger reads why the round failed, not what happens next
     assert [a[1] for a in m.of("submit")][:4] == ["match", "crop", "verify", "debug"]
+    assert m.of("submit")[3][0].endswith("-debug-1")
     assert [a[3] for a in m.of("reserve") if a[2] == "debug"] == [5.0]  # an agent run, reserved like the match
     assert m.of("debug_go") == [("i7-e11", "bind the first volume only")]
     stage, found, then, jobs, _ = next(r for r in m.of("result") if r[0] == "debugging")
