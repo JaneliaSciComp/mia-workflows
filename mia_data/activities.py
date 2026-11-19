@@ -311,6 +311,7 @@ class Activities:
         return [
             self.admit,
             self.resume_root,
+            self.ask_autodev,
             self.limits,
             self.poll,
             self.set_stage,
@@ -1685,6 +1686,16 @@ class Activities:
             ]
             title = f"New snippet for {self._clean(data_format)}/{container}: {self._clean(pins.record)}"
         return (await gh.create_issue(title, "\n\n".join(parts), ["snippets:go"]))["number"]
+
+    @activity.defn(name="ask_autodev")
+    @mia_permanent_errors
+    async def ask_autodev(self, snippet_issue: int, marker: str) -> None:
+        """Ask autodev to try a snippets issue again, for a resumed round whose developer had stopped before a
+        pull request: one comment per `marker`, and the label autodev starts on."""
+        full_marker = self.cfg.marker(marker)
+        said = "mia-data asks autodev to try this issue again: its dataset's round was resumed."
+        await self._comment_once(self.gh_snippets, int(snippet_issue), f"{said}\n\n{full_marker}", full_marker)
+        await self.gh_snippets.add_labels(int(snippet_issue), ["snippets:go"])
 
     @activity.defn(name="pr_state")
     @mia_permanent_errors

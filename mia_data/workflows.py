@@ -64,6 +64,11 @@ GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:re
 RESUME = "data:resume"
 NO_RESUME_REVOKED = "its saved crops were revoked, and a resume would save them again: Restart repairs it"
 JUDGE_LOOKS = "the crop judge is looking at these crops: its verdict decides"
+# what a resumed round asks of autodev on a pull request it had stopped on
+RESUME_REVISE = (
+    "This dataset's round in mia-data was resumed after autodev stopped here. Merge `main` into this branch, "
+    "resolve what conflicts, and make the reader pass; change nothing else."
+)
 # what a resumed round says it kept and runs, by the step it starts at (`resume_step`)
 RESUMES = {
     "restart": "the round has nothing to keep, so it starts from the beginning.",
@@ -1235,7 +1240,7 @@ class MiaDataDataset:
         state.pins, state.attempt, self.resumed = dataclasses.replace(state.pins, root=root), state.attempt + 1, True
         await self._act("comment", state.issue, said, marker)
         if step == "follow":
-            await self._follow()
+            await self._resume_follow(event)
         elif step == "match":
             await self._match(None, None, False)
         elif step == "crops":
@@ -1876,6 +1881,70 @@ class MiaDataDataset:
             await self._follow_pr()
         return True
 
+    async def _resume_follow(self, event: LabelEvent) -> None:
+        """A resumed round that follows a snippets issue (spec resume-restart §4.2): it looks at the pull request
+        as it is now and goes on from there, keeping every set made for it.
+
+        A merge is acted on as any round acts on one; an untested head is tested. A head the round has tested
+        is not tested again: a passing one waits at `review` (the crop judge looks first if it never did), an
+        approved one for its merge, a failing one for autodev's next head. If autodev has stopped, it is asked
+        again: for the issue with `snippets:go`, on an open pull request with a revision request. A pull
+        request closed unmerged leaves the round with no reader, and it matches again."""
+        state = self.state
+        look = await self._act("autodev_look", state.snippet_issue, state.pr, result_type=AutodevLook)
+        number = look.pr or state.pr
+        pr = await self._act("pr_state", number, result_type=PrUpdate) if number else None
+        if pr is not None and pr.snippet_issue != state.snippet_issue:
+            pr = None  # another issue's pull request: this round has none
+        asked = f"resume {state.round_id} {event.event_id}"
+        if pr is None:
+            again = ""
+            if look.stopped:
+                await self._act("ask_autodev", state.snippet_issue, asked)
+                again = "autodev had stopped and is asked again; "
+            await self._stage(
+                "developing",
+                f"{again}autodev is writing the snippet in mia-snippets issue #{state.snippet_issue}; each PR "
+                "head's crops come back here for review",
+            )
+            return await self._follow()
+        state.pr, where = pr.pr, f"snippet PR {pr.url or f'#{pr.pr}'}"
+        if pr.state == "merged":
+            return await self._merged(pr)
+        if pr.state == "closed":
+            state.snippet_issue = state.pr = state.binding = state.binding_hash = state.snippet_name = None
+            self._found(f"The {where} was closed without merging: the round looks for a reader again.")
+            return await self._match(None, None, False)
+        if pr.needs_human:
+            state.revised_at = workflow.now().isoformat()
+            await self._act("comment", pr.pr, f"/revise {RESUME_REVISE}", asked, "snippets")
+            await self._stage(
+                "developing", f"autodev had stopped on the {where} and is asked again; its next head is tested here"
+            )
+            return await self._follow()
+        tested = next((test for test in reversed(state.tests) if test.sha == pr.head_sha), None)
+        if tested is None:
+            if not await self._on_pr(pr.pr, pr):
+                await self._follow()
+            return
+        if not tested.ok:
+            await self._stage("developing", f"the {where}'s head failed its crops; autodev's next head is tested here")
+        elif tested.approved_at:
+            await self._stage(
+                "merging",
+                f"the crops at `{tested.sha}` are approved; autodev merges the snippet PR, then they are saved",
+            )
+        else:
+            if state.stage != "review":
+                await self._stage("review", extra=f"**Snippet PR:** {pr.url or f'#{pr.pr}'}\n")
+            if not tested.evidence:  # the crop judge never looked at this head's set
+                judged = await self._judged(tested)
+                if self._judge_grants(judged):
+                    await self._pr_approved(tested, JUDGE_NAME, workflow.now().isoformat())
+                elif judged and self._sends_back(judged):
+                    await self._send_back(tested, judged)
+        await self._follow()
+
     async def _follow(self) -> None:
         """Follow the developer's work to the round's end (`_follow_pr`). When its answer brought a set with no
         pull request back to review (`_answered`), that set waits here for its verdict: in the run that asked for
@@ -2203,7 +2272,8 @@ class MiaDataDataset:
                 )
             await self._stage("review")
             await self._refuse_queued(approves=False)
-            return await self._from_review()
+            # a resumed round has the crop judge look at this set too (spec resume-restart §9, call 7)
+            return await (self._decide(test) if self.resumed else self._from_review())
         # Pre-§14: the set is made at the merge commit and published without a review. Pre-I histories skipped the
         # test when the merged tree was the tested one.
         carried = tree and any(test.ok and test.sha == pr.head_sha and test.tree_sha == tree for test in state.tests)

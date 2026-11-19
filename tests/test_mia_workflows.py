@@ -151,6 +151,10 @@ class Mocks:
             rec("resume_root", event_id)
             return self.resume_root or PINS.root
 
+        @activity.defn(name="ask_autodev")
+        async def ask_autodev(snippet_issue: int, marker: str) -> None:
+            rec("ask_autodev", snippet_issue, marker)
+
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
             rec("limits")
@@ -406,6 +410,7 @@ class Mocks:
         return [
             admit,
             resume_root,
+            ask_autodev,
             limits,
             close_snippet_issue,
             share_evidence,
@@ -1708,6 +1713,163 @@ async def test_go_after_needs_human_with_a_finished_pr_matches_again(env, now):
 
 
 # --- the poll activity -------------------------------------------------------------------------
+
+
+# --- resume on a round that follows a reader's pull request (spec resume-restart §4.2, line 2) ------------------
+
+
+async def to_blocked_after_the_approve(h, m):
+    """h1's set approved, then autodev stops on the pull request (its merge was refused): blocked."""
+    await to_review(h, m)
+    await approve_review(h, m)
+    await idle(h, m, "merging")
+    await wake(h, m, head(H1, needs_human=True))
+    await idle(h, m, "blocked")
+
+
+async def test_resume_after_the_pull_request_merged_saves_the_approved_crops_and_runs_no_job(env):
+    """The incident: the reader was approved, its merge was refused, the round was blocked, and the merge came
+    afterwards."""
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"})
+    async with started(env, m) as h:
+        await to_blocked_after_the_approve(h, m)
+        jobs = len(m.of("submit"))
+        m.pr_now = head(H1, "merged", MC)
+        await h.signal(MiaDataDataset.restart, resumed("13"))
+        await idle(h, m, "done")
+        st = await h.query(MiaDataDataset.status)
+    assert len(m.of("submit")) == jobs and m.of("admit") == [("11",)] and not m.of("ask_autodev")
+    assert [(a[0], a[2]) for a in m.of("publish_crops")] == [(f"/w/i7-e11/crop-{H1}-1", MC)]
+    assert st.saved and st.pins.snippets_commit == MC and m.stages[-2:] == ["blocked", "done"]
+
+
+async def test_resume_tests_a_head_the_round_never_tested(env):
+    m = Mocks(outcome="needs_snippet", states={f"crop-{H1}": ("UNKNOWN", None)})
+    async with started(env, m) as h:
+        await to_needs_human_in_develop(h, m)
+        m.states = {}  # the infrastructure is fixed
+        await h.signal(MiaDataDataset.restart, resumed())
+        await idle(h, m, "review")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages == ["matching", "developing", "testing", "failed", "testing", "review"]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "crop", "verify"] and m.of("admit") == [("11",)]
+    assert m.of("submit")[2][0].endswith("-2") and m.of("open_snippet_issue") == [("i7-e11", None)]
+    assert [t.test_id for t in st.tests] == [f"i7-e11-{H1[:12]}-a2"] and (st.snippet_issue, st.pr) == (100, 5)
+
+
+async def test_resume_brings_a_passing_head_back_to_review_and_has_it_judged(env):
+    """The judge was refused its budget for the head's set; autodev stopped meanwhile and is back."""
+    skipped = [Reservation(False, "would exceed max_usd 1"), Reservation(True)]
+    m = Mocks(outcome="needs_snippet", crop_judge="shadow", reservations={"judge": skipped})
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await wake(h, m, head(H1, needs_human=True))
+        await idle(h, m, "blocked")
+        crops = len([a for a in m.of("submit") if a[1] == "crop"])
+        m.pr_now = head(H1)
+        await h.signal(MiaDataDataset.restart, resumed())
+        await until(lambda: len(judge_markers(m)) == 2)
+        await idle(h, m, "review")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages[-3:] == ["review", "blocked", "review"] and PR_URL in m.of("set_stage")[-1][2]
+    assert len([a for a in m.of("submit") if a[1] == "crop"]) == crops and m.of("submit")[-1][1] == "judge"
+    assert st.tests[-1].evidence and len(st.tests) == 1 and not pr_comments(m)[-1].startswith("/revise")
+
+
+async def test_resume_asks_autodev_again_when_it_stopped_before_a_pull_request(env):
+    stopped = AutodevLook(None, False, True, "snippets: stopped. agent job 1 ended EXIT")
+    m = Mocks(outcome="needs_snippet", look=[stopped, stopped, AutodevLook(None, True, False, "")])
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        await idle(h, m, "blocked")
+        await h.signal(MiaDataDataset.restart, resumed())
+        await until(lambda: m.stages.count("developing") == 2)
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))  # autodev took it: its pull request is followed
+        await idle(h, m, "review")
+    assert m.of("ask_autodev") == [(100, "resume i7-e11 12")] and m.of("open_snippet_issue") == [("i7-e11", None)]
+    assert m.stages == ["matching", "developing", "blocked", "developing", "testing", "review"]
+    assert "asked again" in m.of("set_stage")[3][1] and m.of("admit") == [("11",)]
+
+
+async def test_resume_asks_autodev_to_revise_a_pull_request_it_stopped_on(env):
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await to_blocked_after_the_approve(h, m)
+        await h.signal(MiaDataDataset.restart, resumed("13"))
+        await until(lambda: m.stages.count("developing") == 2)
+        await idle(h, m, "developing")
+        await wake(h, m, head(H2))  # autodev's answer: a new head, tested for review
+        await idle(h, m, "review")
+    assert pr_comments(m)[-2].startswith("/revise ") and "resumed" in pr_comments(m)[-2]
+    assert not m.of("ask_autodev") and m.stages[-4:] == ["blocked", "developing", "testing", "review"]
+
+
+async def test_resume_of_a_closed_pull_request_matches_again(env):
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await wake(h, m, head(H1, "closed"))
+        await idle(h, m, "blocked")
+        await h.signal(MiaDataDataset.restart, resumed())
+        await until(lambda: m.stages.count("developing") == 2)
+        await idle(h, m, "developing")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages[-3:] == ["blocked", "matching", "developing"] and m.of("admit") == [("11",)]
+    assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "match"]
+    assert m.of("submit")[-1][0].endswith("-match-2") and m.of("open_snippet_issue") == [("i7-e11", None)] * 2
+    assert (st.pr, st.binding, st.round_id) == (None, None, "i7-e11")
+
+
+async def test_resume_waits_for_a_new_head_after_a_failing_one(env):
+    m = Mocks(outcome="needs_snippet", test_ok_by={H1: 0})
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await until(lambda: statuses(m)[-1:] == [(H1, "failure")])
+        await wake(h, m, head(H1, "closed"))  # something stops the round: here, a pull request closed ...
+        await idle(h, m, "blocked")
+        jobs = len(m.of("submit"))
+        m.pr_now = head(H1)  # ... and reopened
+        await h.signal(MiaDataDataset.restart, resumed())
+        await until(lambda: m.stages.count("developing") == 2)
+        await idle(h, m, "developing")
+        assert len(m.of("submit")) == jobs and not m.of("ask_autodev")  # the failing head is not tested again
+        await wake(h, m, head(H2))
+        await idle(h, m, "review")
+    assert m.stages[-4:] == ["blocked", "developing", "testing", "review"]
+
+
+async def merge_commits_own_set(h, m):
+    """The judge approves h1's set, and what merges is not h1's tree: the merge commit gets a set of its own."""
+    await idle(h, m, "developing")
+    await wake(h, m, head(H1))
+    await idle(h, m, "merging")
+
+
+async def test_a_resumed_round_has_the_judge_look_at_the_merge_commits_own_set(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T1", MC: "T2"}, crop_judge="active", judge_result=GRANTED)
+    async with started(env, m) as h:
+        await merge_commits_own_set(h, m)
+        await wake(h, m, head(H1, needs_human=True))
+        await idle(h, m, "blocked")
+        m.pr_now = head(H1, "merged", MC)
+        await h.signal(MiaDataDataset.restart, resumed())
+        await idle(h, m, "done")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages[-4:] == ["blocked", "testing", "review", "done"] and st.tests[-1].approved_by == "judge"
+    assert [a[1] for a in m.of("submit")].count("judge") == 2 and not m.of("assess")
+    assert [(a[0], a[2]) for a in m.of("publish_crops")] == [(f"/w/i7-e11/crop-{MC}-2", MC)]
+
+
+async def test_a_round_that_never_stopped_leaves_the_merge_commits_own_set_to_a_person(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T1", MC: "T2"}, crop_judge="active", judge_result=GRANTED)
+    async with started(env, m) as h:
+        await merge_commits_own_set(h, m)
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "review")
+    assert [a[1] for a in m.of("submit")].count("judge") == 1 and not m.of("publish_crops")
 
 
 class PollGH(FakeGH):

@@ -1523,6 +1523,16 @@ async def test_close_snippet_issue_closes_what_is_open_with_one_comment(tmp_path
     assert not t.snip.comments.get(81)
 
 
+async def test_ask_autodev_comments_once_and_labels_the_issue(tmp_path):
+    t = _setup(tmp_path)
+    t.snip.issues[72] = {"number": 72, "state": "open", "labels": [{"name": "snippets:needs-human"}]}
+    await t.a.ask_autodev(72, "resume i1-e99 12")
+    await t.a.ask_autodev(72, "resume i1-e99 12")  # a retried activity
+    (said,) = t.snip.comments[72]
+    assert "asks autodev to try this issue again" in said["body"] and "resume i1-e99 12" in said["body"]
+    assert {"name": "snippets:go"} in t.snip.issues[72]["labels"]
+
+
 async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp_path):
     """What a round that waits for autodev finds: no PR and a stopped issue, then the open PR of a working one."""
     t = _setup(tmp_path)
