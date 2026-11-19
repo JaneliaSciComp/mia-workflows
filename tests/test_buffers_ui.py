@@ -148,8 +148,84 @@ def test_the_docs_describe_the_system_as_it_is() -> None:
         assert needle in docs, needle
 
 
-def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
-    assert has('data-tab="cleaner"') and has('data-view="cleaner"') and has("cleaner: viewCleaner")
+LOCAL_STORAGE = """
+globalThis.localStorage = {
+  store: {}, getItem(key) { return this.store[key] ?? null; }, setItem(key, value) { this.store[key] = String(value); },
+};
+"""
+
+
+def test_overview_is_the_landing_page_and_names_seven_folding_sections() -> None:
+    """spec overview §5: one page for the whole system; the tabs Needs you and Cleaner are gone."""
+    index = FILES["index.html"]
+    tabs = re.findall(r'data-tab="(\w+)"', index)
+    assert tabs == ["overview", "datasets", "buffers", "cache", "decisions", "docs"]
+    assert 'data-view="overview"' in index and 'data-view="needs"' not in index and 'data-view="cleaner"' not in index
+    assert has("overview: viewOverview") and has('VIEWS[name] ? name : "overview"')
+    assert not has("viewNeeds") and not has("viewCleaner")
+    assert run_js("print(SECTIONS);", {"overview.js": "SECTIONS"}) == [
+        "system", "counts", "needs", "repair", "working", "repairs", "shelved",
+    ]  # fmt: skip
+    for title in ("System", "Counts", "Needs human", "In repair", "Working", "Repairs in the last week", "Shelved"):
+        assert has(f'"{title}"', squeezed(FILES["overview.js"])), title
+
+
+def test_a_section_folds_and_stays_as_it_was_left() -> None:
+    body = (
+        LOCAL_STORAGE
+        + """
+    const first = fold("needs", "Needs human", 3, "");
+    const was = [first.tag, "open" in first.attrs, textOf(first)];
+    first.open = false;
+    first.fire("toggle");
+    const again = fold("needs", "Needs human", 3, "");
+    again.open = true;
+    again.fire("toggle");
+    print([was, localStorage.store, "open" in again.attrs, "open" in fold("needs", "Needs human", 3, "").attrs]);
+    """
+    )
+    was, stored, closed, reopened = run_js(body, {"overview.js": "fold"})
+    assert was == ["details", True, "Needs human3"]
+    assert stored == {"mia-fold-needs": "1"} and (closed, reopened) == (False, True)
+
+
+def test_overview_sorts_the_cases_by_what_a_person_does_with_them() -> None:
+    now = 1_800_000_000.0
+    cases = [
+        {"id": 1, "kind": "job", "key": "issue-9/i9-e1/crops-1", "state": "gave-up", "updated": now - 40 * 86400},
+        {"id": 2, "kind": "dataset", "key": "rec-a", "state": "open", "updated": now - 60},
+        {"id": 3, "kind": "dataset", "key": "rec-b", "state": "waiting", "updated": now - 60},
+        {"id": 4, "kind": "dataset", "key": "rec-c", "state": "resolved", "updated": now - 86400},
+        {"id": 5, "kind": "dataset", "key": "rec-d", "state": "gave-up", "updated": now - 30 * 86400},
+        {"id": 6, "kind": "run", "key": "mia-buffers/old/1", "state": "working", "updated": now - 60},
+        {"id": 7, "kind": "dataset", "key": "rec-e", "state": "gave-up", "updated": now - 3600},
+    ]
+    repairing = [{"kind": "dataset", "key": "rec-a", "repair": {"id": 2}}]
+    body = """
+    const ids = found => Object.fromEntries(Object.entries(found).map(([name, list]) => [name, list.map(c => c.id)]));
+    print([true, false].map(acting => ids(overviewCases(input.cases, input.repairing, acting, input.now))));
+    """
+    acting, reporting = run_js(
+        body, {"overview.js": "overviewCases"}, {"cases": cases, "repairing": repairing, "now": now}
+    )
+    # a left-behind thing the agent gave up on is the installation's problem; a case in work is shown while its
+    # subject is in repair; what ended in the last week is the record of the repairs
+    assert acting == {"system": [1], "repair": [2, 6], "ended": [4, 7]}
+    assert reporting == {"system": [1], "repair": [2, 3, 6], "ended": [4, 7]}  # nothing is carried out: all are listed
+
+
+def test_what_needs_a_human_says_why() -> None:
+    subjects = [
+        {"stage": "blocked", "repair": {"id": 3, "state": "gave-up", "needs": "approve the host"}},
+        {"stage": "review", "repair": None},
+        {"stage": "blocked", "repair": {"id": 4, "state": "open", "needs": None}},
+    ]
+    gave_up, review, blocked = run_js("print(input.map(whyOf));", {"overview.js": "whyOf"}, subjects)
+    assert gave_up == "approve the host"
+    assert "verdict" in review and "decides or changes something" in blocked  # the stage's sentence
+
+
+def test_the_banner_says_the_sweeps_findings_and_a_case_is_a_short_row() -> None:
     assert resolve("GET", "/cleaner") == "read" and resolve("GET", "/cases") == "read"
     findings = [
         {"id": "worker snippets", "text": "no worker polls `snippets`"},  # the health check says this itself
@@ -351,15 +427,14 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
 
 
 def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
-    view = squeezed(FILES["subjects.js"][FILES["subjects.js"].index("function viewNeeds(") :])
+    view = squeezed(FILES["overview.js"])
     assert (
         has('"aria-pressed": String(kind === needsKind)', view)
         and not has("<select", view)
         and not has('"select"', view)
     )
     assert has(
-        'pageOf("/subjects", "subjects", () => ({ ...(needsKind ? { kind: needsKind } : {}),'
-        ' ...(needsShelved ? { status: "shelved" } : {}) }))',
+        'pageOf("/subjects", "subjects", () => ({ status: "needs human", ...(needsKind ? { kind: needsKind } : {}) }))',
         view,
     )
     assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffers"], ["prep", "Requests"]')
@@ -864,7 +939,9 @@ def test_shelving_is_offered_for_every_kind_and_asks_for_its_reason() -> None:
     assert {"shelve", "unshelve"} <= set(order)
     assert has('shelve: "Shelve…"') and has("if (dialog) return askNote(subject, dialog, note => start({ note }))")
     assert has("if (subject.shelved) parts.push(shelvedNotice(subject.shelved))")
-    assert has('"aria-pressed": String(needsShelved)') and has('"shelved": "Set aside by a person')
+    assert has('pageOf("/subjects", "subjects", () => ({ status: "shelved" }))') and has(
+        '"shelved": "Set aside by a person'
+    )
     assert has('dialog.cancels && subject.actions.includes("cancel")')  # a round at review is said to be cancelled
 
 

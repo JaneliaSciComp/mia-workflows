@@ -181,8 +181,9 @@ const UNDELIVERED_AFTER_S = 10; // an action still pending this long was not del
 // ---- sending an action
 // What is on screen, kept by whoever draws it: `subject` is the subject page's {kind, key, number} (what the
 // stream refetches), `view` the view's name, and `refresh()` redraws it the way the stream does. A view that
-// redraws itself (a buffer's page) sets `redraw`, which `refresh()` then calls.
-export const onScreen = { subject: null, view: "", refresh: () => {}, redraw: null };
+// redraws itself (a buffer's page) sets `redraw`, which `refresh()` then calls; a view that follows the stream
+// puts its redraw under its name in `streams`.
+export const onScreen = { subject: null, view: "", refresh: () => {}, redraw: null, streams: {} };
 let askedTimer = 0; // looks again when an asked action's wait ends, should its workflow never answer
 export async function sendAction(subject, body, after) {
   // the answer is shown by the redraw that follows (`after`), a refusal by the banner

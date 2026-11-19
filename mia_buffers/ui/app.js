@@ -7,9 +7,10 @@ import { onScreen } from "./actions.js";
 import { bindControls } from "./designer.js";
 import { viewBuffers } from "./buffers.js";
 import { viewDatasetList } from "./datasets.js";
-import { viewCache, viewCleaner, viewDecisions, viewPreparation } from "./operations.js";
+import { viewCache, viewDecisions, viewPreparation } from "./operations.js";
 import { viewJob } from "./job.js";
-import { viewFind, viewNeeds, viewSubject } from "./subjects.js";
+import { viewFind, viewSubject } from "./subjects.js";
+import { viewOverview } from "./overview.js";
 import { viewFlow } from "./flow.js";
 
 // ---- the Docs view
@@ -83,7 +84,7 @@ function followStream() {
     if (onScreen.subject) {
       if (change.kind !== onScreen.subject.kind) return;
       if (onScreen.subject.number != null && change.number !== onScreen.subject.number) return;
-    } else if (onScreen.view !== "needs") return;
+    } else if (!onScreen.streams[onScreen.view]) return;
     clearTimeout(timer);
     timer = setTimeout(refresh, 150);
   };
@@ -91,11 +92,10 @@ function followStream() {
 
 // ---- hash routing, the top bar, the theme and boot
 const VIEWS = {
-  needs: viewNeeds,
+  overview: viewOverview,
   datasets: viewDatasetList,
   buffers: viewBuffers,
   cache: viewCache,
-  cleaner: viewCleaner,
   preparation: viewPreparation,
   decisions: viewDecisions,
   docs: viewDocs,
@@ -120,7 +120,7 @@ function route() {
   const fresh = name === "buffers" && rest[0] === "new",
     flow = fresh || (name === "buffer" && !!rest[0]);
   const kind = arg ? SUBJECT_VIEWS[name] : null; // #datasets/<record>, #requests/<key>: its own page
-  const view = flow ? "buffer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "needs";
+  const view = flow ? "buffer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "overview";
   const tab = flow ? "buffers" : kind ? SUBJECT_TAB[name] : view === "preparation" ? "datasets" : view;
   document.querySelectorAll("[data-view]").forEach(s => {
     s.hidden = s.dataset.view !== view;
@@ -191,7 +191,7 @@ export async function boot() {
       if (a.getAttribute("href") === location.hash) route();
     }),
   );
-  for (const id of ["subjectBody", "needsBody"])
+  for (const id of ["subjectBody", "overviewBody"])
     $(id).addEventListener("input", () => {
       $(id).dataset.dirty = "1";
     });

@@ -998,6 +998,7 @@ above it in this table, never in a circle:
 | `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
 | `job.js` | a job's record, every value of it inserted as text |
 | `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views; `designer.js` is steps 1 and 2 of a buffer (its definition and that definition's plan) |
+| `overview.js` | Overview, the landing page: the system, the counts by status, what needs a human, what is in repair, what is working, the week's repairs and what is shelved, each a section that folds |
 | `flow.js` | a buffer's page: its heading, the strip of steps, the step shown with its way back and forward, steps 3 to 6, the timeline |
 | `app.js` | the Docs view, health, the stream, hash routing and boot |
 

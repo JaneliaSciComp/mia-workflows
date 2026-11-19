@@ -1,7 +1,6 @@
-// The operator's views: Cache, Cleaner, Preparation and Decisions.
+// The operator's views: Cache, Preparation and Decisions; and the repair agent's cases as Overview lists them.
 import {
   $,
-  ago,
   assetPill,
   bufferCount,
   card,
@@ -212,7 +211,6 @@ const STEP_WORDS = {
   diagnose: "diagnose it",
   report_defect: "report the defect",
 };
-const plain = text => String(text || "").replaceAll("`", "");
 // a rule (mia_buffers.cleaner) for someone who has not read the rules: the problem in a few words, then what it
 // means and what the cleaner does about it
 const RULE_HELP = {
@@ -347,7 +345,7 @@ export function caseRows(cases) {
 }
 // what a job or a record wrote, as inline markdown: text, never HTML
 const said = text => el("p", {}, ...mdInline(String(text)));
-function caseDetail(row) {
+export function caseDetail(row) {
   const part = (title, ...kids) => (kids.some(Boolean) ? el("section", {}, el("h4", {}, title), ...kids) : null);
   return el(
     "div",
@@ -405,7 +403,7 @@ function caseDetail(row) {
   );
 }
 // the cases of one card: a short row each, which opens into the case's full description
-function caseList(cases, empty) {
+export function caseList(cases, empty) {
   if (!cases.length) return el("div", { class: "empty" }, empty);
   return el(
     "div",
@@ -433,43 +431,6 @@ function caseList(cases, empty) {
         caseDetail(row),
       );
     }),
-  );
-}
-export async function viewCleaner() {
-  const root = $("cleanerBody");
-  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
-  const [report, listed] = await Promise.all([load("/cleaner"), load("/cases?days=7")]);
-  const cases = listed?.cases || [];
-  const inState = (...states) => cases.filter(c => states.includes(c.state));
-  const findings = report?.findings || [];
-  // act mode is the normal one and goes unsaid
-  const modes = { off: " The cleaner is off.", report: " Report mode: cases are listed and nothing is done." };
-  root.replaceChildren(
-    card(
-      "System status",
-      report
-        ? `Last checked ${ago(report.at)}.${modes[report.mode] || ""}${findings.length ? " The subjects behind a problem listed here are left alone until it clears." : ""}`
-        : "The cleaner has not reported a sweep yet.",
-      findings.length
-        ? el("div", {}, ...findings.map(finding => el("div", { class: "notice" }, plain(finding.text))))
-        : el("div", { class: "empty" }, "All services operating, no problems found."),
-      report?.errors?.length ? kv([["errors of the last sweep", list(report.errors)]]) : null,
-    ),
-    card(
-      "Needs you",
-      "The cleaner could not resolve these. Each opens to what it takes: a decision, a correction to a record, a fix in the code.",
-      caseList(inState("gave-up"), "Nothing."),
-    ),
-    card(
-      "In work",
-      "What the cleaner is resolving now, or would resolve in act mode.",
-      caseList(inState("open", "working", "waiting"), "Nothing is stuck."),
-    ),
-    card(
-      "Closed in the last week",
-      "Resolved, or dropped because somebody acted on the subject.",
-      caseList(inState("resolved", "dropped"), "Nothing yet."),
-    ),
   );
 }
 // ---- preparation
