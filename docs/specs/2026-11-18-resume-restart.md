@@ -1,7 +1,8 @@
 # MIA: resume or restart — Spec
 
-**Status:** v0.3 · approved 2026-11-19 · nothing built. Rests on the stage tables and action routes
-of the webapp-actions spec, on the round's pins (`Pins`, `BufferPins`), on the crop judge of the judge-decides
+**Status:** v0.4 · approved 2026-11-19 · §2 to §5 and §10 built on the branch `resume` (plan:
+`docs/plans/2026-11-19-resume-restart.md`), not merged; §6 (buffer rounds) not built. Rests on the stage
+tables and action routes of the webapp-actions spec, on the round's pins (`Pins`, `BufferPins`), on the crop judge of the judge-decides
 spec and on the cleaner spec. §2 and §3 are the user's decisions of 2026-11-18; §9 lists the calls that are
 the writer's and still the user's to change. It replaces the ruling of 2026-11-14 that running a dataset again
 is always from scratch.
@@ -99,9 +100,10 @@ nothing else of the pins), counts as a person's or a sender's action exactly as 
 2. **A snippets issue is followed** (`snippet_issue`). The round looks at the pull request as it is now and acts
    on it as a round that never stopped would (`_on_pr`, `_follow`): a merge saves the approved head's crops
    under the merge commit, or makes the merge commit's own; an untested head is tested; a tested, passing,
-   current head waits at `review`. If autodev has stopped
-   and the pull request is open (or there is none yet), the round asks autodev again as the cleaner's
-   `snippets_go` step does, and follows. A pull request closed unmerged leaves the round with no reader: line 6.
+   current head waits at `review`. If autodev has stopped, the round asks it again and follows: with no pull
+   request yet as the cleaner's `snippets_go` step does, and on an open pull request with a revision request
+   (merge `main`, make the reader pass), since autodev's run is still watching that pull request and a
+   `snippets:go` there starts nothing. A pull request closed unmerged leaves the round with no reader: line 6.
    A set this leaves at `review` with no verdict (a head's, or the merge commit's own) is line 4's.
 3. **A passing set, approved, not saved** (a matched binding's). It is saved.
 4. **A passing set with no verdict.** The judge looks if it has not (`evidence` empty and the judge is on); the
@@ -211,6 +213,12 @@ it. Nothing records that now.
    never stopped takes that set to `review` unjudged, and that stays.
 8. **A buffer resumes at `staged` too** (§6): that is where a round with failed datasets rests.
 9. **A request's `restart` key** replaces `again` in what the page writes (§5).
+10. **A resume while the crop judge looks is refused.** A label that arrives then makes the judge's verdict
+    one on record only; a resume must not cost the set its judge.
+11. **A dataset at `review` that a request resumes keeps its registry row.** The request settles it as
+    waiting for a person and looks again when it is prepared.
+12. **The cleaner sends a request no `go`**: after §5 a request's later `go` starts every dataset it names
+    over. A `go` in a stored or proposed plan for a request is carried out as a `resume`.
 
 ## 10. The page
 

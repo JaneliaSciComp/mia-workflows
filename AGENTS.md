@@ -56,6 +56,16 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   (a changed definition, where the buffer rests) is in the table too, and buffer-api carries it out itself.
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
+- **A round is resumed or restarted.** A dataset and a request take two actions that run them again. `go`
+  (*Restart*) wipes the round's state and pins anew. `resume` (*Resume*) keeps the round id, the pins and every
+  result on the state, and starts at the first step with none (`resume_step` in `mia_data/models.py`, the one
+  place that decides it); it is accepted where a round stopped or waits for its verdict, never after a revoke.
+  A step that runs again takes the next attempt (`DatasetState.attempt`), which names its job key, workspace,
+  test id and timeline markers: the ledger keeps one body per marker. So a new step of a round records its
+  result on the state and gets a line in `resume_step`, and builds its keys and markers through `_job`,
+  `_test_id` and `_marker`. The round's results live in its workflow: a force stop loses them, and a resume
+  after one starts from the beginning. A request passes the choice to each dataset (`_nudge`), and the cleaner
+  resumes; it sends a `go` only where the remedy needs more than the round's pins hold, and never to a request.
 - **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
   `shelve` (with a reason); a shelved one reads the status `shelved` and takes `unshelve` alone (`_rules` in
   `mia_buffers/api.py`). The subject's workflow hears of neither, except that a shelve of a subject whose round

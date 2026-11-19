@@ -97,7 +97,21 @@ posting it to GitHub.
 **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
 `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there. buffer-api
 refuses any other action and the page offers only these; a round in progress accepts only `cancel` (and, for a
-buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round). A new stage or action goes into the table first.
+buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round).
+A new stage or action goes into the table first.
+
+**Resume and Restart.** A dataset and a preparation request are run again in one of two ways (spec
+`2026-11-18-resume-restart.md`). **Restart** is the action `go`: the round's state is wiped, it is pinned anew
+(catalog, readers, harness) and every step runs. **Resume** is the action `resume`: the round keeps its id, its
+pins and every result on its state, and goes on from the first step with none, which `resume_step`
+(`mia_data/models.py`) names: the match, the crops, the judge, the save, or the reader's pull request as it is
+now. A step that failed, was refused, cancelled or skipped has no result and runs; a step that finished is kept
+whatever changed since. So a step that failed because of a fault in the pinned harness or reader fails again on
+Resume, and the fix is picked up by Restart. `resume` is taken at `failed`, `blocked`, `needs-human`, `cancelled`
+and `review`, and never by a dataset whose saved crops were revoked. The resumed round is charged to whoever
+asked for it, runs its steps as a new attempt (`DatasetState.attempt`: its own job keys, workspaces, test ids
+and markers), and says in its first entry what it kept. A round's results are in its workflow's state: a force
+stop ends the workflow, and a Resume after one starts from the beginning.
 
 **Shelving is beside the stage tables** (spec `docs/specs/2026-11-14-shelved-subjects.md`). A person sets a
 subject of any kind aside with a reason: `shelve`, with the reason in `note`, is accepted whenever the subject's
@@ -414,9 +428,9 @@ the reason.
 
 | subject | routes | actions |
 |---|---|---|
-| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*, at `review` *Restart*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
+| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Restart*, at `debugging` *Restart now*), `resume` (*Resume*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
 | buffer (`#buffer/<key>`) | `POST /specs`, `POST /specs/<key>/actions` | `edit` with `spec`, `go` (*Continue* on step 3, *Plan a new version*), `approve` (*Run* at the plan, *Approve and serve* at `staged`), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel` (also the way back from steps 4 and 5), `stop` |
-| preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go`, `cancel`, `stop` |
+| preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go` (*Restart*), `resume` (*Resume*), `cancel`, `stop` |
 
 `POST /specs` with `{spec}` saves a buffer as a new subject, every time, at `new`: the `name` in its definition
 (the text the code calls its spec) is a label and need not be unique (the first subject of a name has it as its
@@ -803,12 +817,17 @@ action carries, once.
 registry state. `cancelled`: a person cancelled it.
 
 **What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or shelved settles
-the record. A dataset that stopped (`needs-human`) is sent a `go`, and so is a prepared one, or one whose crops wait for a
-review, when the request says `again`; its row is set to `in-progress` at once, so the request follows the new round instead of settling on
-what the last one left. A stopped dataset whose jobs were refused a host that no one approved yet is sent none
-(its note names the hosts, which Run again on its page lists to check). Without `again` a dataset whose crops wait for a review is in a round, so it is left to it. Otherwise the dataset's
-subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
-any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
+the record. How the round runs its datasets is `PrepPins.again`: the text's `restart` (a stored request's
+`again` reads the same) for the request's first round; after that the action decides, a `resume` resuming them
+and a `go` restarting each. A round that resumes sends a dataset that never ran a `go`, and one that stopped or
+whose crops wait for a review a `resume`, which keeps what its round has. A round that restarts sends every
+dataset a `go`, a prepared one and one at review too. A dataset that is sent something has its row set to
+`in-progress` at once, so the request follows the round instead of settling on what the last one left; one
+resumed at review keeps its row, since it waits for a verdict unless its judge still has to look. A stopped
+dataset whose jobs were refused a host that no one approved yet is sent nothing (its note names the hosts,
+which Resume on its page lists to check). Otherwise the dataset's subject says where it stands: one in a round
+is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is
+`done-unpublished`, and any other is sent its action through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity
 sends no second go. The outcome is `opened` for a dataset started for the first time and `nudged` otherwise, and
 `unknown` for a go that failed (its error is the note). One entry lists each record with its outcome. A failed go
@@ -867,11 +886,13 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
 action since the case opened drops the case, and so does a subject that moved before the case did anything. An
 action goes to buffer-api as the actor `cleaner` with the revision just read (buffer-api refuses any action whose
 `revision` is not the subject's), the key `cleaner/<case>/<step>` and, for a `stop`, the run id the sweep saw
-(`run`). A `go` after a `cancel` that found no run, or after a `stop`, waits for `kill_jobs`: every job of the
-ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses while a
-job may still write. A dataset's `go` after a command to autodev waits until the snippets issue has lost
-`snippets:needs-human` (`await_autodev`). A request gets a `go` only when that starts no dataset round
-(`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The cleaner never
+(`run`). A subject is run again with a `resume`; a `go` stays for a buffer, and where the remedy needs more
+than the round's pins hold (a changed record, a pull request the plan closed, a run with the diagnosing
+agent's advice). Either, after a `cancel` that found no run or after a `stop`, waits for `kill_jobs`: every job
+of the ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses
+while a job may still write. A dataset's `resume` after a command to autodev waits until the snippets issue has
+lost `snippets:needs-human` (`await_autodev`). A request gets no `go` from the cleaner, and a `resume` only when
+that runs no dataset round (`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The cleaner never
 sends a `stop` to a buffer spec (it retires the spec's buffers), kills a left-over job only where no job of the
 round can be wanted any more (never at a person's turn or at `ready`), acts on a snippets issue only when its
 first line names the dataset and the bot wrote it, and judges a remedy's outcome only once the subject has moved
