@@ -1,7 +1,8 @@
 # MIA: one Overview, one "needs human", the repair agent — Spec
 
-**Status:** v0.2 draft, not approved · §2 holds the user's decisions of 2026-11-19; §10 lists the calls that
-are the writer's and the user's to change. Rests on the stage tables and action routes of the webapp-actions
+**Status:** v0.3 · approved 2026-11-19 · §2 holds the user's decisions of 2026-11-19; §10 lists the calls
+the writer made, which the user approved with the spec. Plan for slices 1 and 2:
+`docs/plans/2026-11-19-overview-status.md`. Rests on the stage tables and action routes of the webapp-actions
 spec, on the shelved-subjects spec, on the cleaner spec (whose actor this spec renames) and on the
 judge-decides spec.
 
@@ -214,8 +215,7 @@ A case is the record of one repair: what was found, the steps taken, and how it 
 
 ## 5. Overview
 
-The landing page. The tabs read Overview, Datasets, Buffers, Cache, Decisions, Docs. `#needs` and `#cleaner`
-open Overview.
+The landing page. The tabs read Overview, Datasets, Buffers, Cache, Decisions, Docs.
 
 Each section is a fold with its title and a count in the heading. A section stays as the viewer left it (kept
 in the browser).
@@ -286,7 +286,7 @@ Until slice 4 is live the page shows the stage `needs-human` under its present n
 
 - autodev's stages and labels.
 - The cache page, spend and the decisions page: they keep their tabs and are not summarised on Overview.
-- A redirect for `#needs/shelved`.
+- Any mapping of the addresses `#needs` and `#cleaner`: they are addresses the page does not know.
 
 ## 10. Calls that are the writer's
 
@@ -314,7 +314,6 @@ Until slice 4 is live the page shows the stage `needs-human` under its present n
    with two names.
 10. **A left-behind thing the agent could not remove is a System problem**, and its case ends when the thing
     is gone (§4). That is the one change to what the sweep does.
-11. **Old addresses** `#needs` and `#cleaner` open Overview.
 
 ## 11. Left to the builder
 
