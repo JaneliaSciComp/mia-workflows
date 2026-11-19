@@ -61,7 +61,8 @@ STEP_WORDS = {
     "cancel": "cancel the round",
     "stop": "force-stop the run",
     "kill_jobs": "end the round's cluster jobs",
-    "go": "run it again",
+    "go": "run it again from the beginning",
+    "resume": "resume it",
     "recheck": "tell the request to look at its datasets again",
     "terminate": "terminate the run",
     "kill_job": "kill the job",
@@ -313,15 +314,20 @@ def leftover_reason(view: dict | None, labels: set[str], newer: bool, leftover_d
 
 
 def plan_for(found: dict, item: dict) -> list[dict]:
-    """The steps for a sighting, in order. A step is {do, ...}; `needs` ends a plan with what a person must do."""
+    """The steps for a sighting, in order. A step is {do, ...}; `needs` ends a plan with what a person must do.
+
+    A subject is run again with a `resume`, which keeps what its round has (spec resume-restart §9): a dataset
+    and a request take one, a buffer is planned again with a `go`. A `go` stays where the remedy needs more
+    than the round's pins hold: a changed record, a pull request the plan closed."""
     rule, kind = found["rule"], item["subject"]["kind"]
+    again = {"do": "go" if kind == "buffer" else "resume"}
     if rule == "no run":
-        return [{"do": "cancel"}, {"do": "kill_jobs"}, {"do": "go"}]
+        return [{"do": "cancel"}, {"do": "kill_jobs"}, again]
     if rule == "frozen run":
         if kind == "buffer":  # a stop retires every buffer of the spec, also one that is served: a person's call
             text = "its run is frozen: Force stop on its page ends it and retires the spec's buffers, then Plan again"
             return [{"do": "needs", "text": text}]
-        return [{"do": "stop"}, {"do": "kill_jobs"}, {"do": "go"}]
+        return [{"do": "stop"}, {"do": "kill_jobs"}, again]
     if rule == "request behind":
         return [{"do": "recheck"}]
     party = item.get("party") or {}
@@ -331,30 +337,32 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         tried = [step for case in earlier for step in case["data"].get("steps", ())]
         if any(step["do"] == "snippets_go" and step.get("issue") == issue for step in tried):  # once per issue
             return [{"do": "diagnose"}]
-        return [{"do": "snippets_go", "issue": issue}, {"do": "await_autodev", "issue": issue}, {"do": "go"}]
+        return [{"do": "snippets_go", "issue": issue}, {"do": "await_autodev", "issue": issue}, again]
     if rule == "merge conflict":
         issue, pr = party["issue"], party["pr"]
         if REVISION_LIMIT_RE.search(party.get("last_word") or ""):  # no revision left: start over from the match
             why = "the pull request cannot be merged and autodev has no revision left"
             return [{"do": "close", "issue": issue, "pr": pr, "why": why}, {"do": "go"}]
-        return [{"do": "revise", "issue": issue, "pr": pr}, {"do": "await_autodev", "issue": issue}, {"do": "go"}]
+        return [{"do": "revise", "issue": issue, "pr": pr}, {"do": "await_autodev", "issue": issue}, again]
     if rule == "merged since":
         if any((case["data"].get("party") or {}).get("pr") == party.get("pr") for case in earlier):
             return [{"do": "diagnose"}]  # once per pull request
-        return [{"do": "go"}]  # the reader is on main: the round matches it, makes its crops and has them judged
+        return [again]  # the round finds the merge: the crops that were approved are saved, or the merge's own made
     if rule == "passing cause":
         if len(earlier) >= 2:  # at most twice
             return [{"do": "diagnose"}]
-        return [{"do": "wait", "hours": item["retry_hours"] * (SECOND_RETRY if earlier else 1)}, {"do": "go"}]
+        return [{"do": "wait", "hours": item["retry_hours"] * (SECOND_RETRY if earlier else 1)}, again]
     if rule == "fixed since":
         commit = (item.get("worker") or {}).get("commit")
         if any(case["data"].get("commit") == commit for case in earlier):  # once per commit
             return [{"do": "diagnose"}]
-        return [{"do": "go"}]
+        return [again]
     if rule == "budget used up":
         refusal = BUDGET_RE.search(found["seen"])
         named = refusal.group(1) if refusal else "see its page"
-        text = f"its budget is used up ({named}): raise that cap (`autonomy.root`) and restart the workers, then run it again"
+        text = (
+            f"its budget is used up ({named}): raise that cap (`autonomy.root`) and restart the workers, then resume it"
+        )
         return [{"do": "needs", "text": text}]
     if rule == "host not approved":
         hosts = HOSTS_RE.search(found["seen"])
@@ -363,7 +371,7 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         text = f"approve the hosts its jobs need ({named}): press Resume on its page and check them"
         return [{"do": "needs", "text": text}]
     if rule == "record gap":
-        text = "its catalog record needs a decision or a correction; the round runs again once the record changes"
+        text = "its catalog record needs a decision or a correction; the dataset is restarted once the record changes"
         return [{"do": "needs", "text": text}]
     if rule == "input changed":
         return [{"do": "go"}]

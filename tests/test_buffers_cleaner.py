@@ -105,7 +105,11 @@ def test_no_run_behind_a_working_subject_is_cancelled_and_run_again():
     evidence = item(run=None)
     found = sighting(evidence, CFG, NOW)
     assert found["rule"] == "no run" and "no open run" in found["seen"] and "45 min" in found["seen"]
-    assert [step["do"] for step in plan_for(found, evidence)] == ["cancel", "kill_jobs", "go"]
+    assert [step["do"] for step in plan_for(found, evidence)] == ["cancel", "kill_jobs", "resume"]
+    request = item(kind="prep", stage="requested", run=None)
+    assert [step["do"] for step in plan_for(sighting(request, CFG, NOW), request)][-1] == "resume"
+    buffer = item(kind="buffer", stage="sourcing", run=None)  # a buffer round takes no resume: it is planned again
+    assert [step["do"] for step in plan_for(sighting(buffer, CFG, NOW), buffer)][-1] == "go"
     assert (
         sighting(item(run={"status": "TERMINATED", "run_id": "r", "task": None, "activities": []}), CFG, NOW)["rule"]
         == "no run"
@@ -118,8 +122,7 @@ def test_a_run_whose_workflow_task_keeps_failing_is_stopped_and_run_again():
     found = sighting(evidence, CFG, NOW)
     assert found["rule"] == "frozen run" and "40 times" in found["seen"]
     assert (
-        plan_words(plan_for(found, evidence))
-        == "force-stop the run, then end the round's cluster jobs, then run it again"
+        plan_words(plan_for(found, evidence)) == "force-stop the run, then end the round's cluster jobs, then resume it"
     )
 
 
@@ -218,7 +221,7 @@ def test_autodevs_failed_run_is_asked_for_again_once_per_issue():
     }
     rule, plan = stopped(said, party)
     assert rule == "autodev's run failed"
-    assert plan == [{"do": "snippets_go", "issue": 72}, {"do": "await_autodev", "issue": 72}, {"do": "go"}]
+    assert plan == [{"do": "snippets_go", "issue": 72}, {"do": "await_autodev", "issue": 72}, {"do": "resume"}]
     before = [{"rule": rule, "data": {"steps": [{"do": "snippets_go", "issue": 72}]}}]
     assert stopped(said, party, earlier=before)[1] == [{"do": "diagnose"}]
     other = [{"rule": rule, "data": {"steps": [{"do": "snippets_go", "issue": 49}]}}]
@@ -229,9 +232,10 @@ def test_a_merge_refused_for_conflicts_asks_autodev_to_merge_main():
     # empiar-10070 waited seven hours at `merging` for a pull request that could not merge
     party = {**AUTODEV_STOPPED, "pr": 44, "mergeable": False, "last_word": "Approved, but merging failed: conflicts"}
     rule, plan = stopped("snippet PR #44: its issue has `snippets:needs-human`", party)
-    assert rule == "merge conflict" and [step["do"] for step in plan] == ["revise", "await_autodev", "go"]
+    assert rule == "merge conflict" and [step["do"] for step in plan] == ["revise", "await_autodev", "resume"]
     spent = {**party, "last_word": "Needs a human: revision limit (3) reached; merging failed: conflicts"}
     rule, plan = stopped("snippet PR #44: its issue has `snippets:needs-human`", spent)
+    # with the pull request closed the round has no reader to keep: it starts over, on today's readers
     assert rule == "merge conflict" and [step["do"] for step in plan] == ["close", "go"] and plan[0]["pr"] == 44
 
 
@@ -239,7 +243,8 @@ def test_a_pull_request_that_merged_after_the_stop_runs_the_dataset_again_once()
     # zenodo-8235843: stopped on autodev's needs-human 46 seconds before autodev's next try merged the pull request
     said = "snippet PR #230: its issue has `snippets:needs-human`. Its last comment: merging failed: 405"
     party = {"issue": 229, "state": "closed", "stopped": True, "pr": 230, "mergeable": None, "merged": True}
-    assert stopped(said, party) == ("merged since", [{"do": "go"}])
+    # resumed: the round finds the merge and saves the crops that were approved, with no job
+    assert stopped(said, party) == ("merged since", [{"do": "resume"}])
     before = [{"rule": "merged since", "data": {"party": {"issue": 229, "pr": 230}}}]
     assert stopped(said, party, earlier=before)[1] == [{"do": "diagnose"}]
     # a stop that came after the merge is not about the merge: the crops at the merge commit failed
@@ -267,16 +272,16 @@ def test_a_passing_cause_is_run_again_later_and_at_most_twice():
         "IncompleteRead(0 bytes read)",
         "HTTP 403 for https://ftp.example.org/x",
     ):
-        assert stopped(said) == ("passing cause", [{"do": "wait", "hours": 2.0}, {"do": "go"}]), said
+        assert stopped(said) == ("passing cause", [{"do": "wait", "hours": 2.0}, {"do": "resume"}]), said
     once = [{"rule": "passing cause", "data": {}}]
-    assert stopped("read timed out", earlier=once)[1] == [{"do": "wait", "hours": 12.0}, {"do": "go"}]
+    assert stopped("read timed out", earlier=once)[1] == [{"do": "wait", "hours": 12.0}, {"do": "resume"}]
     assert stopped("read timed out", earlier=once * 2)[1] == [{"do": "diagnose"}]
 
 
 def test_a_stop_of_the_workers_own_is_run_again_once_the_worker_runs_a_new_commit():
     # a 310 KB binding in a comment: GitHubError 422, fixed and restarted the same day
     said = "GitHubError: 422 body is too long (maximum is 65536 characters)"
-    assert stopped(said, worker={"commit": "new", "since": NOW - 3600}) == ("fixed since", [{"do": "go"}])
+    assert stopped(said, worker={"commit": "new", "since": NOW - 3600}) == ("fixed since", [{"do": "resume"}])
     assert stopped(said, worker={"commit": "old", "since": NOW - 3 * 3600})[0] is None  # no new commit since the stop
     tried = [{"rule": "fixed since", "data": {"commit": "new"}}]
     assert stopped(said, worker={"commit": "new", "since": NOW - 3600}, earlier=tried)[1] == [{"do": "diagnose"}]
@@ -380,7 +385,14 @@ def test_only_remedies_on_the_menu_are_kept_with_the_cases_own_issue_and_pull_re
     request = reduce_outcome(
         {"diagnosis": "d", "remedies": [{"do": "stop"}, {"do": "go"}, {"do": "recheck"}]}, "prep", None
     )
-    assert [step["do"] for step in request["plan"]] == ["stop", "kill_jobs", "go", "recheck"]
+    # a request is never set going from scratch by the cleaner: a proposed go is a resume of it
+    assert [step["do"] for step in request["plan"]] == ["stop", "kill_jobs", "resume", "recheck"]
+    resumed = reduce_outcome(
+        {"diagnosis": "d", "remedies": [{"do": "cancel"}, {"do": "resume", "note": "dropped"}]}, "dataset", None
+    )
+    assert resumed["plan"] == [{"do": "cancel"}, {"do": "kill_jobs"}, {"do": "resume"}]  # on the menu; no note
+    buffer = reduce_outcome({"diagnosis": "d", "remedies": [{"do": "resume"}]}, "buffer", None)
+    assert buffer["plan"] == []  # a buffer round takes none
 
 
 def test_a_buffer_spec_is_never_stopped_by_the_cleaner():
