@@ -214,6 +214,29 @@ def test_overview_sorts_the_cases_by_what_a_person_does_with_them() -> None:
     assert reporting == {"system": [1], "repair": [2, 3, 6], "ended": [4, 7]}  # nothing is carried out: all are listed
 
 
+def test_overviews_system_section_says_what_is_away_and_a_repair_agent_gone_quiet() -> None:
+    """Review of the overview branch: with a worker down the banner said so while System said all was well, and
+    a repair agent that had stopped reporting still read as at work."""
+    now = 1_800_000_000
+    finding = {"id": "restart mia-data", "text": "the `mia-data` worker runs commit `aaaaaaa`: a restart is owed"}
+    payload = {
+        "now": now,
+        "quiet": {"at": now - 7200, "every_s": 600, "mode": "act", "findings": [finding]},
+        "fresh": {"at": now - 60, "every_s": 600, "mode": "act", "findings": []},
+        "away": {"temporal": True, "queues": {"mia-buffers": False}},
+    }
+    body = """
+    print([systemLines(input.quiet, input.away, input.now), systemLines(input.fresh, input.away, input.now),
+      systemLines(input.fresh, null, input.now), systemLines(null, null, input.now),
+      overdue(input.quiet, input.now), overdue(input.fresh, input.now)]);
+    """
+    quiet, away, well, never, late, on_time = run_js(body, {"overview.js": "systemLines, overdue"}, payload)
+    assert quiet[0].startswith("No worker is running for mia-buffers") and "a restart is owed" in quiet[1]
+    assert quiet[2].startswith("The repair agent last reported") and "nothing is being repaired" in quiet[2]
+    assert len(away) == 1 and (well, never) == ([], []) and (late, on_time) == (True, False)
+    assert has("onScreen.streams[onScreen.view]?.()", squeezed(FILES["app.js"]))  # each health check redraws it
+
+
 def test_what_needs_a_human_says_why() -> None:
     subjects = [
         {"stage": "blocked", "repair": {"id": 3, "state": "gave-up", "needs": "approve the host"}},
@@ -242,7 +265,7 @@ def test_the_banner_says_the_sweeps_findings_and_a_case_is_a_short_row() -> None
     health = {"temporal": True, "queues": {"mia-data": True}}
     lines = run_js(
         "print(downLines(input.health, input.findings));",
-        {"app.js": "downLines"},
+        {"api.js": "downLines"},
         {"health": health, "findings": findings},
     )
     assert lines == ["the mia-data worker runs commit aaaaaaa: a restart is owed"]
@@ -424,7 +447,9 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
         {"temporal": True, "queues": {"mia-data": True}},
         {"temporal": False, "queues": {}},
     ]
-    both, one, none, no_temporal = run_js("print(input.map(downLines));", {"app.js": "downLines"}, healths)
+    both, one, none, no_temporal = run_js(
+        "print(input.map(health => downLines(health)));", {"api.js": "downLines"}, healths
+    )
     assert len(both) == 1 and both[0].startswith(
         "No worker is running for snippets, autodev: nothing that waits on them"
     )

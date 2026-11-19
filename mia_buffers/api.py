@@ -373,6 +373,10 @@ def status_of(phase: str, shelved: bool, repair: dict | None, acting: bool) -> s
     return phase if phase in ("done", "not started", "working") else "needs human"
 
 
+REPORT_STALE = 3  # a sweep's report is overdue once this many of its periods passed with none after it
+REPORT_EVERY_S = 600.0  # the period of a report that names none
+
+
 class Repairs(NamedTuple):
     """What the repair agent has on the subjects, read once for many views."""
 
@@ -1095,7 +1099,11 @@ class BufferService:
         for case in self.ledger.cases(CASES_OPEN):  # newest first
             if case["number"] is not None:
                 cases.setdefault((case["kind"], case["number"]), case)
-        return Repairs((self.ledger.kv("cleaner") or {}).get("mode") == "act", cases)
+        report = self.ledger.kv("cleaner") or {}
+        # the agent acts while its sweeps report in `act` mode: a report that is overdue (the schedule is off, the
+        # worker is away) repairs nothing, whatever mode it was in
+        fresh = time.time() - (report.get("at") or 0) <= REPORT_STALE * (report.get("every_s") or REPORT_EVERY_S)
+        return Repairs(report.get("mode") == "act" and fresh, cases)
 
     @staticmethod
     def _repair_of(row: dict, case: dict | None) -> dict | None:
@@ -1210,10 +1218,19 @@ class BufferService:
         status = query.get("status", "needs human")
         if status not in STATUSES:
             raise HttpError(422, f"status must be one of {list(STATUSES)}, got {status!r}")
-        holds = self.ledger.shelved()
-        repairs = self._repairs()
-        views = [self._subject_view(row, holds, repairs) for row in self.ledger.find_subjects()]
+        holds, repairs = self.ledger.shelved(), self._repairs()
+        waits = status == "needs human"
+        counts: dict[str, dict[str, int]] = {kind: {} for kind in SUBJECT_RULES}
+        views = []
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
+        for row in self.ledger.find_subjects():
+            # the status needs no view: one is built only for a subject this list may hold
+            hold = holds.get((row["kind"], row["number"]))
+            repair = self._repair_of(row, repairs.cases.get((row["kind"], row["number"])))
+            is_now = status_of(SUBJECT_RULES[row["kind"]][row["stage"]][0], hold is not None, repair, repairs.acting)
+            counts[row["kind"]][is_now] = counts[row["kind"]].get(is_now, 0) + 1
+            if is_now == status or (waits and row["kind"] == "buffer"):  # a buffer may wait for files while working
+                views.append(self._subject_view(row, holds, repairs))
         for index, view in enumerate(views):
             if view["kind"] == "buffer" and "dropped" in view["actions"]:
                 # the round's buffer has the id of the go that started it
@@ -1225,10 +1242,6 @@ class BufferService:
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
             failed.append({**action, "subject": self._subject_view(found[0], holds, repairs) if found else None})
-        counts: dict[str, dict[str, int]] = {kind: {} for kind in SUBJECT_RULES}
-        for view in views:
-            counts[view["kind"]][view["status"]] = counts[view["kind"]].get(view["status"], 0) + 1
-        waits = status == "needs human"
         needs = [view for view in views if view["status"] == status or (waits and view.get("drops"))]
         kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
         if (kind := query.get("kind")) is not None:
@@ -1930,7 +1943,7 @@ class BufferService:
         return 200, case, {}
 
     def _case_changed(self, case: dict) -> None:
-        if case["kind"] in SUBJECT_RULES and case["number"] is not None:  # the subject's row in Needs you
+        if case["kind"] in SUBJECT_RULES and case["number"] is not None:  # the subject's status may have changed
             self.changes.announce(case["kind"], case["number"])
 
     def _cases(self, *, query: dict[str, str], body: bytes) -> Response:

@@ -1,7 +1,7 @@
 // Overview, the landing page: the whole system in sections that fold (spec overview §5).
 import { $, ago, el, KIND_WORDS, kv, num, stageHelp, stagePill, SUBJECT_HASH, when } from "./dom.js";
-import { load, newKey } from "./api.js";
-import { pagedTable, pageOf, reloadTables, TABLE_STATE } from "./table.js";
+import { downLines, load, newKey } from "./api.js";
+import { pagedTable, pageOf, TABLE_STATE } from "./table.js";
 import { actionBar, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
 import { caseDetail, caseList, caseRows } from "./operations.js";
 import { keepTyping } from "./subjects.js";
@@ -275,8 +275,20 @@ function countsTable(counts, open) {
     ),
   );
 }
-function systemBody(report, left) {
+// a sweep's report is overdue once three of its periods passed with none after it (`REPORT_STALE` in buffer-api)
+export const overdue = (report, now) => !!report && now - report.at > 3 * (report.every_s || 600);
+export function systemLines(report, health, now) {
+  // what is wrong with the installation: what the health check says is away, what the last sweep found, and a
+  // repair agent that has stopped reporting, in which case nothing is being repaired
   const findings = report?.findings || [];
+  return [
+    ...(health ? downLines(health, findings) : findings.map(finding => plain(finding.text))),
+    ...(overdue(report, now)
+      ? [`The repair agent last reported ${ago(report.at)}: nothing is being repaired until it reports again.`]
+      : []),
+  ];
+}
+function systemBody(report, left, lines) {
   // act mode is the normal one and goes unsaid
   const modes = { off: " The repair agent is off.", report: " Report mode: cases are listed and nothing is done." };
   return [
@@ -284,11 +296,11 @@ function systemBody(report, left) {
       "div",
       { class: "sub" },
       report
-        ? `Last checked ${ago(report.at)}.${modes[report.mode] || ""}${findings.length ? " The subjects behind a problem listed here are left alone until it clears." : ""}`
+        ? `The repair agent last looked ${ago(report.at)}.${modes[report.mode] || ""}${lines.length ? " The subjects behind a problem listed here are left alone until it clears." : ""}`
         : "The repair agent has not reported a sweep yet.",
     ),
-    findings.length
-      ? el("div", {}, ...findings.map(finding => el("div", { class: "notice" }, plain(finding.text))))
+    lines.length
+      ? el("div", {}, ...lines.map(line => el("div", { class: "notice" }, line)))
       : el("div", { class: "empty" }, "All services operating, no problems found."),
     report?.errors?.length
       ? kv([["errors of the last sweep", el("div", {}, ...report.errors.map(x => el("div", { class: "mono" }, x)))]])
@@ -297,17 +309,22 @@ function systemBody(report, left) {
     left.length ? caseList(left, "") : null,
   ].filter(Boolean);
 }
-async function fill(shown) {
+const CASES_MS = 60000; // how long the cases are kept while only the stream asks: each load reads their job records
+async function fill(shown, stream) {
   // what the tables do not load themselves: the last sweep, the cases, and the counts of every status
+  const kept = stream && shown.listed && Date.now() - shown.listedAt < CASES_MS;
   const [report, listed, repairing] = await Promise.all([
     load("/cleaner", true),
-    load("/cases?days=7"),
+    kept ? shown.listed : load("/cases?days=7"),
     load(`/subjects?${new URLSearchParams({ status: "in repair" })}`),
   ]);
   if (parts !== shown) return; // another draw took over while this one loaded
-  const cases = listed?.cases || [],
-    acting = report?.mode === "act",
-    found = overviewCases(cases, repairing?.subjects || [], acting, Date.now() / 1000),
+  if (!kept) [shown.listed, shown.listedAt] = [listed, Date.now()];
+  const now = Date.now() / 1000,
+    cases = listed?.cases || [],
+    acting = report?.mode === "act" && !overdue(report, now),
+    lines = systemLines(report, onScreen.health, now),
+    found = overviewCases(cases, repairing?.subjects || [], acting, now),
     counts = repairing?.counts || {},
     total = status => Object.values(counts).reduce((sum, kind) => sum + (kind[status] || 0), 0);
   shown.cases = new Map(cases.map(c => [c.id, c]));
@@ -315,7 +332,7 @@ async function fill(shown) {
   const set = (id, ...kids) => {
     if (!shown.bodies[id].querySelector("details.case[open]")) shown.bodies[id].replaceChildren(...kids);
   };
-  set("system", ...systemBody(report, found.system));
+  set("system", ...systemBody(report, found.system, lines));
   shown.bodies.counts.replaceChildren(countsTable(counts, shown.open));
   set(
     "repair",
@@ -329,7 +346,7 @@ async function fill(shown) {
     caseList(found.repair, "Nothing is in repair."),
   );
   set("repairs", caseList(found.ended, "Nothing yet."));
-  const problems = (report?.findings || []).length + found.system.length;
+  const problems = lines.length + found.system.length;
   shown.folds.system.count(problems || null);
   shown.folds.needs.count(total("needs human"));
   shown.folds.repair.count(found.repair.length);
@@ -339,14 +356,29 @@ async function fill(shown) {
 }
 export async function viewOverview(arg, refresh) {
   // `arg`: the kind Needs human is narrowed to (`#overview/dataset`). A refresh keeps the sections and what is
-  // open in them: the tables load their page again and the rest is filled anew.
+  // open in them: a table loads its page again unless a fold in it is open (a case under "why", a menu of
+  // actions), and the rest is filled anew.
   const root = $("overviewBody");
   if (refresh === "stream" && keepTyping(root, again)) return;
   delete root.dataset.dirty;
   if (!refresh || !parts) {
     needsKind = NEEDS_KINDS.some(([kind]) => kind === arg) ? arg : "";
     parts = build(root);
-  } else reloadTables(root);
-  await fill(parts);
+  } else for (const box of root.querySelectorAll(".paged")) if (!box.querySelector("details[open]")) box.reload();
+  await fill(parts, refresh === "stream");
 }
-onScreen.streams.overview = () => viewOverview("", "stream");
+// The stream tells of every stage write: the page follows it at most once in STREAM_MS, at the end of which it
+// draws what changed meanwhile. A draw a person asked for (a route, a button) is never held back.
+const STREAM_MS = 10000;
+let streamAt = 0,
+  streamTimer = 0;
+onScreen.streams.overview = () => {
+  const wait = streamAt + STREAM_MS - Date.now();
+  clearTimeout(streamTimer);
+  if (wait > 0) {
+    streamTimer = setTimeout(onScreen.streams.overview, wait);
+    return;
+  }
+  streamAt = Date.now();
+  if (onScreen.view === "overview") viewOverview("", "stream");
+};

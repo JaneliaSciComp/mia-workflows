@@ -874,3 +874,58 @@ def test_a_left_behind_run_the_agent_gave_up_on_stays_until_a_pass_that_looked_f
     worker(world.service, "PUT", "/workers/mia-buffers", {"commit": "c" * 40, "code": "b" * 16})
     world.sweep()
     assert (world.cases()[0]["state"], world.cases()[0]["data"]["note"]) == ("resolved", "it is gone")
+
+
+def test_a_case_that_gives_up_right_after_its_own_cancel_ends_once_the_round_answers(tmp_path, monkeypatch):
+    """Review of the overview branch: the weekly limit refused the resume in the pass that sent the cancel. The
+    case ended at the revision before the round wrote `cancelled`, so the dataset read `done` and was on no list."""
+    world = World(tmp_path, monkeypatch, max_remedies=1)
+    number = world.dataset(run=False)
+    world.sweep()  # no run: cancel, resume (the one remedy of the week)
+    world.temporal.runs[number] = dict(RUN)
+    world.stage("dataset", number, "matching")  # the resumed round runs, and then writes nothing
+    world.sweep(6.0)  # not helped: a diagnosis
+    world.answer({"diagnosis": "it hangs", "cause": "unknown", "remedies": [{"do": "cancel"}, {"do": "go"}]})
+    world.sweep(9.0)
+    view = lambda: call(world.service, "GET", "/subjects/dataset/rec-a")[1]  # noqa: E731
+    (case,) = world.cases()
+    assert "started work on this subject 1 times" in case["data"]["needs"]
+    assert (case["state"], view()["status"]) == ("working", "in repair")  # its cancel is not answered yet
+    world.temporal.runs.pop(number, None)
+    world.stage("dataset", number, "cancelled")  # the round answers the cancel
+    world.sweep(9.2)
+    (case,) = world.cases()
+    assert case["state"] == "gave-up" and case["data"]["ended_revision"] == view()["revision"]
+    assert (view()["phase"], view()["status"]) == ("done", "needs human")
+    assert [row["key"] for row in call(world.service, "GET", "/subjects")[1]["subjects"]] == ["rec-a"]
+
+
+def test_a_round_the_agent_ended_and_runs_nothing_after_needs_a_human(world):
+    """Review of the overview branch: a diagnosis that proposed a cancel alone ended its case `resolved`, and the
+    dataset rested at `cancelled` on no list, with what the diagnosis asked of a person dropped."""
+    number = world.dataset(stage="matching")  # its workflow runs, and writes nothing for hours
+    world.sweep()
+    needs = "fix the record, then restart"
+    world.answer(
+        {"diagnosis": "the record has no labels", "cause": "data", "remedies": [{"do": "cancel"}], "needs": needs}
+    )
+    world.sweep()
+    assert cleaner_actions(world, number) == ["cancel"]
+    world.temporal.runs.pop(number, None)
+    world.stage("dataset", number, "cancelled")
+    world.sweep(3.2)
+    (case,) = world.cases()
+    view = call(world.service, "GET", "/subjects/dataset/rec-a")[1]
+    assert (case["state"], case["data"]["needs"]) == ("gave-up", needs)
+    assert (view["status"], view["repair"]["needs"]) == ("needs human", needs)
+    said = [entry["body"] for entry in world.timeline("dataset", number)["entries"]]
+    assert sum(f"could not repair this: {needs}" in body for body in said) == 1  # said once, not at each pass
+
+
+def test_the_diagnosing_agent_is_told_where_the_round_stands_not_the_status_a_person_reads(tmp_path):
+    from mia_buffers.diagnose import EVIDENCE_DIR, write_evidence
+
+    subject = {"kind": "dataset", "key": "rec-a", "stage": "blocked", "phase": "stopped", "shelved": None}
+    item = {"subject": {**subject, "status": "in repair"}, "entries": [], "actions": []}
+    write_evidence(tmp_path, {"id": 1, "data": {"seen": "it stopped"}}, item, [], {})
+    assert "at `blocked` (stopped)" in (tmp_path / EVIDENCE_DIR / "case.md").read_text()

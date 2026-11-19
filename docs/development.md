@@ -382,11 +382,12 @@ from one table per kind (`STAGE_ACTIONS` in `mia_data/config.py`, `STAGE_ACTIONS
 **status** is who moves it next, the one word a person reads and the only thing that says a human is needed:
 `shelved`, `in repair`, `needs human`, `done`, `not started` or `working`. buffer-api computes it for each view
 (`status_of`) from the phase, the hold and `repair`, the repair agent's case about the subject as it stands: a case
-in work while the agent acts makes it `in repair`, one the agent gave up on makes it `needs human` until the
+in work while the agent acts (its last sweep reported in `act` mode, and that report is not overdue by three of
+its periods) makes it `in repair`, one the agent gave up on makes it `needs human` until the
 subject's revision moves, and a phase of `waiting` or `stopped` with neither is `needs human`. `GET /subjects/<kind>/<key>` reads one,
 `GET /subjects/<kind>` lists a kind, `GET /subjects?status=` lists the subjects of every kind with one status
 (`needs human` when none is named), with every kind's count by status and the actions of the last day that did not
-reach Temporal, `GET /lookup?q=` finds subjects from an issue number, an issue URL or a
+reach Temporal; it builds a view only for the subjects it lists, `GET /lookup?q=` finds subjects from an issue number, an issue URL or a
 key, and `GET /stream` is a server-sent event per change (`{kind, number}`; the reader fetches the subject again).
 A subject's number comes from the clock (whole seconds since 2026-01-01; action ids are milliseconds since the
 epoch), so a ledger restored from a backup issues no id twice.
@@ -892,7 +893,10 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
    and does nothing; at most `max_parallel` cases are in work. A case records a repair and nothing more: it ends
    `resolved`, `dropped` (somebody acted) or `gave-up`, and a `gave-up` case about a subject records the revision
    the subject stood at (`ended_revision`), which is how long buffer-api shows it as the subject's `repair`. A
-   left-over thing the agent gave up on is resolved once it is gone.
+   left-over thing the agent gave up on is resolved once it is gone. A case that gives up while the subject has
+   not yet answered the agent's own last action (a cancel whose stage write is still to come) stays in work
+   until it has, so that it ends at the revision the answer leaves. A round the agent ended (`cancel`, `stop`)
+   with nothing run after it ends its case `gave-up`: nobody decided that, so the subject needs a human.
 
 **What keeps a remedy on the round it was decided about.** Before a step the subject is read again; a person's
 action since the case opened drops the case, and so does a subject that moved before the case did anything. An
@@ -1027,7 +1031,9 @@ Each tab is one kind of thing, and each thing has one page:
   kind's subjects by status), *Needs human* (`/subjects`: the subjects with that status, why, and the buttons that
   answer it; also the actions that were not delivered), *In repair* and *Repairs in the last week* (`/cases`),
   *Working* and *Shelved* (`/subjects?status=`). *Shelve…* on a row (or on the subject's page) takes it out of
-  *Needs human* with a reason; *Shelved* lists those, each with its reason and *Unshelve*.
+  *Needs human* with a reason; *Shelved* lists those, each with its reason and *Unshelve*. Overview follows the
+  stream at most once in ten seconds and is redrawn by each health check; a redraw keeps the sections, leaves a
+  table or a case list alone while a fold in it is open, and loads the cases again at most once a minute.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
   download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
   (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, `anything` or `nothing`; `record_row` names them,

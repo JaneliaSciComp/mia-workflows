@@ -20,6 +20,7 @@ from mia_core.judge.evidence import EVIDENCE_DIR, QUESTION_FILE
 from mia_core.judge.evidence import command as agent_command
 from mia_core.untrusted import loads, neutralize
 
+from .cleaner import standing
 from .config import Config
 
 CAUSES = ("passing", "data", "record", "defect", "service", "autodev", "unknown")
@@ -132,7 +133,7 @@ def write_evidence(workspace: Path, case: dict, item: dict, findings: list[dict]
     subject = item["subject"]
     (evidence / QUESTION_FILE).write_text(QUESTION)
     (evidence / "case.md").write_text(
-        f"# {subject['kind']} `{subject['key']}`, at `{subject['stage']}` ({subject['status']})\n\n"
+        f"# {subject['kind']} `{subject['key']}`, at `{subject['stage']}` ({standing(subject)})\n\n"
         f"## What was seen\n\n{data.get('seen', '')}\n\n## What the repair agent did before\n\n{tried}\n"
     )
     entries = "\n\n".join(

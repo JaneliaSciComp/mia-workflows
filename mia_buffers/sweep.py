@@ -80,6 +80,7 @@ class Sweep:
         self.activities, self.cfg, self.rules = activities, activities.cfg, activities.cfg.cleaner
         self.registry, self.now = activities.registry, now or time.time()
         self.report: dict[str, Any] = {"mode": self.rules.mode, "findings": [], "opened": [], "did": [], "errors": []}
+        self.report["every_s"] = self.rules.minutes * 60  # how soon the next report is due: what makes this one stale
         self.cases: list[dict] = []
         self.working = 0  # cases in work, against `max_parallel`
         self.workers: dict = {}  # service -> {commit, at, since}
@@ -471,10 +472,17 @@ class Sweep:
         if note:
             case["data"]["note"] = note
         if state == "gave-up" and case["kind"] in ALL_KINDS:
-            # where the subject stands now, after the agent's last write: the result holds until it moves
-            view = await self._ask(self.registry.subject, case["kind"], case["key"])
-            if view is not None:
-                case["data"]["ended_revision"] = view["revision"]
+            data, view = case["data"], await self._ask(self.registry.subject, case["kind"], case["key"])
+            went = data.get("went")
+            unanswered = view is not None and went is not None and view["revision"] == went["revision"]
+            if unanswered and self.now - went["at"] <= STEP_WAIT_S:
+                # the subject has not answered the agent's last action yet (a cancel's stage write is still to
+                # come): the case stays in work and ends once it has, at the revision the answer leaves
+                data["giving_up"], state = True, "working"
+            elif view is not None:
+                # where the subject stands after the agent's last write: the result holds until it moves
+                data.pop("giving_up", None)
+                data["ended_revision"] = view["revision"]
         saved = await self._ask(self.registry.update_case, case["id"], state=state, data=case["data"])
         if state != case["state"]:
             self.report["did"].append(f"{case['key']}: {state}" + (f": {note}" if note else ""))
@@ -505,6 +513,8 @@ class Sweep:
         acted = last_person(timeline["actions"])
         if acted is not None and acted > case["opened"]:
             return await self._save(case, "dropped", "somebody acted on it")
+        if data.get("giving_up"):  # it gave up while its own last action was unanswered: ended once that is settled
+            return await self._save(case, "gave-up")
         if not _acted(data) and timeline["subject"]["revision"] != data.get("revision"):  # since the pass began
             return await self._save(case, "resolved", "it moved on by itself")
         await self._work(case, timeline)
@@ -555,6 +565,12 @@ class Sweep:
                 timeline = await self._ask(self.registry.timeline, case["kind"], case["number"])
         else:
             state = "waiting" if any(step["do"] in (*STARTS_WORK, "recheck") for step in data["steps"]) else "resolved"
+            changed = [step["do"] for step in data["steps"] if step["do"] in (*ACTIONS, *STARTS_WORK)]
+            if case["kind"] in ALL_KINDS and changed and changed[-1] in ("cancel", "stop"):
+                # the agent ended the round and runs nothing after it: nobody decided that, so a person has to
+                asked = (data.get("diagnosis") or {}).get("needs")
+                data["needs"] = asked or "the round was ended and nothing runs it again: restart it once it can pass"
+                state = "gave-up"
             if data["steps"] and data["steps"][-1]["do"] == "wait":
                 data["revision"] = None  # the wait is over: the subject is looked at again as it stands
         if state == "gave-up" and not told:

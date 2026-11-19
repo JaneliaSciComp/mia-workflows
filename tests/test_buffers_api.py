@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import threading
+import time
 from urllib.parse import quote
 
 import httpx
@@ -1787,6 +1788,8 @@ def test_a_subjects_status_merges_its_stage_with_the_repair_agents_case(tmp_path
     assert view()["status"] == "needs human"  # no sweep has said the agent acts
     worker(s, "PUT", "/cleaner", {"mode": "report"})
     assert view()["status"] == "needs human"
+    worker(s, "PUT", "/cleaner", {"mode": "act", "at": time.time() - 3 * 3600, "every_s": 600})
+    assert view()["status"] == "needs human"  # no sweep has reported for hours: nobody is repairing
     worker(s, "PUT", "/cleaner", {"mode": "act"})
     assert (view()["status"], view()["repair"]["id"], view()["repair"]["state"]) == ("in repair", case["id"], "open")
     assert [row["status"] for row in call(s, "GET", "/subjects/dataset")[1]["subjects"]] == ["in repair"]
@@ -2855,6 +2858,18 @@ def test_subjects_of_every_kind_are_listed_by_status_with_their_counts(tmp_path)
     assert [row["key"] for row in call(s, "GET", "/subjects", {"status": "shelved"})[1]["subjects"]] == ["prep-9"]
     assert call(s, "GET", "/subjects", {"status": "stuck"})[0] == 422
     assert call(s, "GET", "/needs")[0] == 404
+
+
+def test_listing_a_status_builds_only_the_views_it_lists(tmp_path, monkeypatch):
+    """What a dataset's record lacks is read for the subjects that are listed, not for every subject counted."""
+    s, _ = _acting(tmp_path)
+    for number, (key, stage) in enumerate({"rec-a": "blocked", "rec-b": "matching", "rec-c": "done"}.items()):
+        worker(s, "PUT", f"/subjects/dataset/{number + 1}", {"key": key, "stage": stage})
+    read, gaps = [], s._gaps
+    monkeypatch.setattr(s, "_gaps", lambda key: read.append(key) or gaps(key))
+    out = call(s, "GET", "/subjects", {"status": "working"})[1]
+    assert [row["key"] for row in out["subjects"]] == ["rec-b"] and read == ["rec-b"]
+    assert out["counts"]["dataset"] == {"needs human": 1, "working": 1, "done": 1}
 
 
 def test_subjects_and_needs_paged(tmp_path):

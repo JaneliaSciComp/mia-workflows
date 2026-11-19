@@ -1,6 +1,7 @@
 # MIA: one Overview, one "needs human", the repair agent — Spec
 
-**Status:** v0.3 · approved 2026-11-19 · §2 holds the user's decisions of 2026-11-19; §10 lists the calls
+**Status:** v0.4 · v0.3 approved 2026-11-19; what v0.4 adds (§10 calls 11 to 14, from the review of slices 1
+and 2) is the writer's and the user's to change · §2 holds the user's decisions of 2026-11-19; §10 lists the calls
 the writer made, which the user approved with the spec. Plan for slices 1 and 2:
 `docs/plans/2026-11-19-overview-status.md`. Rests on the stage tables and action routes of the webapp-actions
 spec, on the shelved-subjects spec, on the cleaner spec (whose actor this spec renames) and on the
@@ -314,6 +315,15 @@ Until slice 4 is live the page shows the stage `needs-human` under its present n
    with two names.
 10. **A left-behind thing the agent could not remove is a System problem**, and its case ends when the thing
     is gone (§4). That is the one change to what the sweep does.
+
+11. **The agent acts only while its sweeps report.** `in repair` needs the last report to be in `act` mode and
+    not overdue by three of its periods: with the schedule off or the worker away nothing is repaired.
+12. **A case that gives up before its own last action is answered stays in work until it is**, so that it ends
+    at the revision the answer leaves (a cancel's stage write comes seconds after the cancel).
+13. **A round the agent ended and runs nothing after ends its case `gave-up`**, not `resolved`: the subject
+    needs a human, with what the diagnosis asked of one.
+14. **Overview follows the stream at most once in ten seconds**, and each health check redraws it. On the live
+    installation one list of subjects takes about 0.4 s and the cases 0.2 to 0.5 s.
 
 ## 11. Left to the builder
 
