@@ -349,6 +349,9 @@ CASES_OPEN = ("open", "working", "waiting", "gave-up")
 CaseState = Literal["open", "working", "waiting", "resolved", "gave-up", "dropped"]
 
 
+STATUSES = ("shelved", "in repair", "needs human", "done", "not started", "working")  # what `status_of` gives
+
+
 def status_of(phase: str, shelved: bool, repair: dict | None, acting: bool) -> str:
     """Who moves the subject next, the one word a person reads and the only one that says a human is needed
     (spec overview §3.2): `shelved`, `in repair`, `needs human`, `done`, `not started` or `working`. `repair` is
@@ -625,7 +628,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)$"), "adopt_subject", "worker"),
     ("GET", re.compile(r"^/subjects/([a-z]+)$"), "list_subjects", "read"),
     ("GET", re.compile(r"^/subjects/([a-z]+)/(.+)$"), "get_subject", "read"),
-    ("GET", re.compile(r"^/needs$"), "needs", "read"),
+    ("GET", re.compile(r"^/subjects$"), "by_status", "read"),
     ("GET", re.compile(r"^/lookup$"), "lookup", "read"),
     ("GET", re.compile(r"^/stream$"), "stream", "read"),
     ("POST", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "append_entry", "worker"),
@@ -1197,12 +1200,16 @@ class BufferService:
                 serving[number] = buffer["id"]
         return serving
 
-    def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
-        """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
-        for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
-        last day that did not reach Temporal (each with its subject, for the Retry). A shelved subject is not
-        among them: `shelved` counts those, and `?shelved=1` lists them instead. `kind` narrows the list to
-        one kind of subject; `kinds` counts every kind's share of the whole list."""
+    def _by_status(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The subjects of every kind with one status (`status`; `needs human` when none is named), which is
+        Overview's lists (spec overview §5). Under `needs human` also a buffer round whose dataset waits for
+        its files (`drops`: the round is working, but only a person can copy them). `kind` narrows the list to
+        one kind of subject; `kinds` counts every kind's share of the list, `counts` every kind's subjects by
+        status. `failed`: the actions of the last day that did not reach Temporal, each with its subject, for
+        the Retry."""
+        status = query.get("status", "needs human")
+        if status not in STATUSES:
+            raise HttpError(422, f"status must be one of {list(STATUSES)}, got {status!r}")
         holds = self.ledger.shelved()
         repairs = self._repairs()
         views = [self._subject_view(row, holds, repairs) for row in self.ledger.find_subjects()]
@@ -1218,20 +1225,22 @@ class BufferService:
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
             failed.append({**action, "subject": self._subject_view(found[0], holds, repairs) if found else None})
-        if query.get("shelved"):
-            needs = [view for view in views if view["shelved"]]
-        else:
-            needs = [view for view in views if view["status"] == "needs human" or view.get("drops")]
+        counts: dict[str, dict[str, int]] = {kind: {} for kind in SUBJECT_RULES}
+        for view in views:
+            counts[view["kind"]][view["status"]] = counts[view["kind"]].get(view["status"], 0) + 1
+        waits = status == "needs human"
+        needs = [view for view in views if view["status"] == status or (waits and view.get("drops"))]
         kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
         if (kind := query.get("kind")) is not None:
             if kind not in SUBJECT_RULES:
                 raise HttpError(422, f"kind must be one of {list(SUBJECT_RULES)}, got {kind!r}")
             needs = [view for view in needs if view["kind"] == kind]
         page = self._page_of(query, SUBJECT_SORTS)
+        out = {"failed": failed, "kinds": kinds, "counts": counts}
         if page is None:
-            return 200, {"needs": needs, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
+            return 200, {"subjects": needs, **out}, {}
         rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
-        return 200, {"needs": rows, "total": total, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
+        return 200, {"subjects": rows, "total": total, **out}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own

@@ -1101,7 +1101,7 @@ def test_case_routes(tmp_path):
     worker(s, "POST", "/cases", {**opened, "state": "gave-up", "data": {"needs": "approve the host"}})
     listed = [row["state"] for row in call(s, "GET", "/cases")[1]["cases"]]
     assert listed == ["gave-up", "open"]  # a case the agent gave up on is listed whatever its age
-    assert [row["repair"]["needs"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["approve the host"]
+    assert [row["repair"]["needs"] for row in call(s, "GET", "/subjects")[1]["subjects"]] == ["approve the host"]
 
 
 def test_a_case_lists_the_records_of_its_rounds_jobs_and_of_its_own(tmp_path):
@@ -1381,19 +1381,22 @@ def test_needs_lists_what_waits_on_a_person(tmp_path):
     call(s, "PUT", "/subjects/dataset/2", payload={"key": "rec-b", "stage": "testing"})
     call(s, "PUT", "/subjects/buffer/8", payload={"key": "pool", "stage": "needs-human"})
     call(s, "PUT", "/subjects/prep/9", payload={"key": "prep-9", "stage": "done"})
-    needs = call(s, "GET", "/needs")[1]["needs"]
+    needs = call(s, "GET", "/subjects")[1]["subjects"]
     assert sorted((row["kind"], row["key"], row["status"]) for row in needs) == [
         ("buffer", "pool", "needs human"),
         ("dataset", "rec-a", "needs human"),
     ]
     # one kind at a time, with every kind's count for the page's toggle buttons
     call(s, "PUT", "/subjects/dataset/3", payload={"key": "rec-c", "stage": "failed"})
-    only = call(s, "GET", "/needs", {"kind": "dataset", "limit": "1"})[1]
-    assert len(only["needs"]) == 1 and only["needs"][0]["kind"] == "dataset" and only["total"] == 2
-    assert sorted(row["key"] for row in call(s, "GET", "/needs", {"kind": "dataset"})[1]["needs"]) == ["rec-a", "rec-c"]
+    only = call(s, "GET", "/subjects", {"kind": "dataset", "limit": "1"})[1]
+    assert len(only["subjects"]) == 1 and only["subjects"][0]["kind"] == "dataset" and only["total"] == 2
+    assert sorted(row["key"] for row in call(s, "GET", "/subjects", {"kind": "dataset"})[1]["subjects"]) == [
+        "rec-a",
+        "rec-c",
+    ]
     assert only["kinds"] == {"dataset": 2, "buffer": 1, "prep": 0}
-    assert call(s, "GET", "/needs", {"kind": "prep"})[1]["needs"] == []
-    assert call(s, "GET", "/needs", {"kind": "issue"})[0] == 422
+    assert call(s, "GET", "/subjects", {"kind": "prep"})[1]["subjects"] == []
+    assert call(s, "GET", "/subjects", {"kind": "issue"})[0] == 422
 
 
 def test_lookup_by_number_url_and_key(tmp_path):
@@ -1417,7 +1420,7 @@ def test_lookup_by_number_url_and_key(tmp_path):
 def test_adopting_needs_the_token_and_reading_does_not(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
     assert call(s, "PUT", "/subjects/dataset/1", payload={"key": "rec-a"})[0] == 401
-    assert call(s, "GET", "/needs")[0] == 200 and call(s, "GET", "/lookup", {"q": "1"})[0] == 200
+    assert call(s, "GET", "/subjects")[0] == 200 and call(s, "GET", "/lookup", {"q": "1"})[0] == 200
 
 
 def test_stream_over_http_and_a_reader_that_leaves(tmp_path):
@@ -1843,10 +1846,10 @@ def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(
     # nobody starts it, a worker included; it is not in Needs you, and no plan or request finds it prepared
     assert act(s, "/datasets/rec-a/actions", {"action": "go"})[0] == 409
     assert act(s, "/datasets/rec-a/actions", {"action": "go", "actor": "prep:9", "root": "prep:9"}, AUTH)[0] == 409
-    needs = call(s, "GET", "/needs")[1]
-    assert needs["needs"] == [] and needs["shelved"] == 1
-    held = call(s, "GET", "/needs", {"shelved": "1"})[1]
-    assert [row["key"] for row in held["needs"]] == ["rec-a"] and held["kinds"]["dataset"] == 1
+    needs = call(s, "GET", "/subjects")[1]
+    assert needs["subjects"] == [] and needs["counts"]["dataset"] == {"shelved": 1, "working": 1}
+    held = call(s, "GET", "/subjects", {"status": "shelved"})[1]
+    assert [row["key"] for row in held["subjects"]] == ["rec-a"] and held["kinds"]["dataset"] == 1
     row = call(s, "GET", "/datasets/rec-a")[1]
     assert (row["state"], row["reason"], row["folder"]) == ("shelved", "the masks @need work", "f")
     assert call(s, "GET", "/datasets", {"state": "prepared"})[1]["datasets"] == []
@@ -1859,7 +1862,7 @@ def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(
     assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202
     view = call(s, "GET", "/subjects/dataset/rec-a")[1]
     assert (view["phase"], view["actions"], view["shelved"]) == ("stopped", ["go", "resume", "revoke", "shelve"], None)
-    assert [row["key"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["rec-a"]
+    assert [row["key"] for row in call(s, "GET", "/subjects")[1]["subjects"]] == ["rec-a"]
     assert call(s, "GET", "/datasets/rec-a")[1]["state"] == "prepared"
     assert [e["body"].split("\n")[0] for e in call(s, "GET", "/timeline/dataset/7")[1]["entries"]] == [
         "**Action:** `shelve` by `page`",
@@ -1953,7 +1956,10 @@ def test_shelving_covers_specs_requests_and_a_dataset_that_never_ran(tmp_path):
     assert act(s, "/specs/pool/actions", {"action": "shelve", "note": "n"})[0] == 202
     assert act(s, "/prep/10/actions", {"action": "shelve", "note": "n"})[0] == 202
     assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "no reader yet"})[0] == 202
-    assert gateway.sent == [] and call(s, "GET", "/needs")[1]["shelved"] == 3
+    assert (
+        gateway.sent == []
+        and sum(kind.get("shelved", 0) for kind in call(s, "GET", "/subjects")[1]["counts"].values()) == 3
+    )
     assert act(s, "/specs/wait/actions", {"action": "shelve", "note": "n"})[0] == 202  # at its review: cancelled
     assert [sent[:3] for sent in gateway.sent] == [("buffer", 9, "cancel")]
     assert [v["status"] for v in call(s, "GET", "/subjects/buffer")[1]["subjects"]] == ["shelved", "shelved"]
@@ -2493,11 +2499,11 @@ def test_needs_names_the_actions_that_were_not_delivered(tmp_path):
     s, gateway = _acting(tmp_path)
     gateway.fail = "Temporal is away"
     failed = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "k"})[1]["action"]
-    needs = call(s, "GET", "/needs")[1]
+    needs = call(s, "GET", "/subjects")[1]
     assert [(row["id"], row["subject"]["key"]) for row in needs["failed"]] == [(failed["id"], "rec-a")]
     gateway.fail = None
     act(s, "/datasets/rec-a/actions", {"action": "go", "key": "k"})  # retried: delivered
-    assert call(s, "GET", "/needs")[1]["failed"] == []
+    assert call(s, "GET", "/subjects")[1]["failed"] == []
 
 
 def test_a_kinds_subjects_are_listed_and_a_number_finds_its_subject(tmp_path):
@@ -2557,17 +2563,17 @@ def test_needs_lists_a_buffer_whose_dataset_waits_for_its_files(tmp_path):
     go = act(s, "/specs", {"spec": SPEC_TEXT, "action": "go"})[1]
     number, buffer = go["number"], f"i{go['number']}-e{go['id']}"
     _stage(s, "buffer", number, "sourcing")
-    assert call(s, "GET", "/needs")[1]["needs"] == []  # working, and nothing waits on a person
+    assert call(s, "GET", "/subjects")[1]["subjects"] == []  # working, and nothing waits on a person
     worker(s, "PUT", f"/buffers/{buffer}", CFG)
     worker(s, "PUT", f"/buffers/{buffer}/datasets/rec-a", {"status": "waiting-drop", "reason": "", "job": None})
     worker(s, "PUT", f"/buffers/{buffer}/datasets/rec-b", {"status": "staging", "reason": "", "job": None})
-    (waiting,) = call(s, "GET", "/needs")[1]["needs"]
+    (waiting,) = call(s, "GET", "/subjects")[1]["subjects"]
     assert (waiting["key"], waiting["status"], waiting["drops"]) == (SPEC_NAME, "working", ["rec-a"])
     _stage(s, "buffer", number, "ready")  # approved as it is: the waiting dataset joins when its files land
-    (waiting,) = call(s, "GET", "/needs")[1]["needs"]
+    (waiting,) = call(s, "GET", "/subjects")[1]["subjects"]
     assert (waiting["status"], waiting["drops"]) == ("done", ["rec-a"])
     _stage(s, "buffer", number, "retired")
-    assert call(s, "GET", "/needs")[1]["needs"] == []  # the round is over: a waiting row of it asks for nothing
+    assert call(s, "GET", "/subjects")[1]["subjects"] == []  # the round is over: a waiting row of it asks for nothing
 
 
 # --- one page of a list (docs/plans/2026-11-12-ui-domain-flow.md): with `limit`, a route answers a page and a total
@@ -2827,6 +2833,30 @@ def test_a_kept_plan_is_rebuilt_when_a_dataset_changes_state(tmp_path):
     assert call(s, "POST", "/plan", payload={"spec": text.replace(REF_A, "c" * 40), "page": {}})[0] == 409  # not synced
 
 
+def test_subjects_of_every_kind_are_listed_by_status_with_their_counts(tmp_path):
+    s, _ = _acting(tmp_path)
+    for number, (key, stage) in enumerate(
+        {"rec-blocked": "blocked", "rec-run": "matching", "rec-done": "done"}.items()
+    ):
+        worker(s, "PUT", f"/subjects/dataset/{number + 1}", {"key": key, "stage": stage})
+    worker(s, "PUT", "/subjects/buffer/8", {"key": "pool", "stage": "plan-review"})
+    worker(s, "PUT", "/subjects/prep/9", {"key": "prep-9", "stage": "done"})
+    assert act(s, "/prep/9/actions", {"action": "shelve", "note": "later"})[0] == 202
+    out = call(s, "GET", "/subjects")[1]  # what needs a human, unless a status is named
+    assert sorted(row["key"] for row in out["subjects"]) == ["pool", "rec-blocked"]
+    assert out["counts"] == {
+        "dataset": {"needs human": 1, "working": 1, "done": 1},
+        "buffer": {"needs human": 1},
+        "prep": {"shelved": 1},
+    }
+    assert out["kinds"] == {"dataset": 1, "buffer": 1, "prep": 0}
+    working = call(s, "GET", "/subjects", {"status": "working"})[1]
+    assert [row["key"] for row in working["subjects"]] == ["rec-run"] and working["kinds"]["dataset"] == 1
+    assert [row["key"] for row in call(s, "GET", "/subjects", {"status": "shelved"})[1]["subjects"]] == ["prep-9"]
+    assert call(s, "GET", "/subjects", {"status": "stuck"})[0] == 422
+    assert call(s, "GET", "/needs")[0] == 404
+
+
 def test_subjects_and_needs_paged(tmp_path):
     s = _subjects(tmp_path)
     for number, key, stage in ((1, "rec-b", "review"), (2, "rec-a", "testing"), (3, "rec-c", "needs-human")):
@@ -2838,9 +2868,9 @@ def test_subjects_and_needs_paged(tmp_path):
     assert [
         row["key"] for row in call(s, "GET", "/subjects/dataset", {"limit": "5", "q": "needs-human"})[1]["subjects"]
     ] == ["rec-c"]
-    out = call(s, "GET", "/needs", {"limit": "1", "sort": "key"})[1]
-    assert [row["key"] for row in out["needs"]] == ["rec-b"] and out["total"] == 2 and out["failed"] == []
-    assert "total" not in call(s, "GET", "/needs")[1]
+    out = call(s, "GET", "/subjects", {"limit": "1", "sort": "key"})[1]
+    assert [row["key"] for row in out["subjects"]] == ["rec-b"] and out["total"] == 2 and out["failed"] == []
+    assert "total" not in call(s, "GET", "/subjects")[1]
 
 
 def test_buffers_paged_name_their_spec_and_which_round_is_newest(tmp_path):

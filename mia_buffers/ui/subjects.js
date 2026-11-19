@@ -422,9 +422,9 @@ export function viewNeeds(arg, refresh) {
     kinds,
     failed,
     pagedTable("needs", {
-      source: pageOf("/needs", "needs", () => ({
+      source: pageOf("/subjects", "subjects", () => ({
         ...(needsKind ? { kind: needsKind } : {}),
-        ...(needsShelved ? { shelved: 1 } : {}),
+        ...(needsShelved ? { status: "shelved" } : {}),
       })),
       sort: "updated",
       dir: "desc",
@@ -435,7 +435,8 @@ export function viewNeeds(arg, refresh) {
           : "Nothing waits on you.",
       onPage: page => {
         count((needsCounts = page.out.kinds || {}));
-        countShelved((shelvedCount = page.out.shelved ?? null));
+        const held = Object.values(page.out.counts || {}).reduce((sum, kind) => sum + (kind.shelved || 0), 0);
+        countShelved((shelvedCount = page.out.counts ? held : null));
         failed.replaceChildren(
           ...(page.out.failed || [])
             .filter(a => a.subject)
@@ -463,7 +464,7 @@ export function viewNeeds(arg, refresh) {
               {},
               actionBar(x, again, x.kind === "buffer" ? ["go", "revoke"] : []),
               x.shelved ? el("div", { class: "small" }, x.shelved.reason) : "",
-              x.cleaner ? el("div", { class: "small" }, "Cleaner: " + x.cleaner) : "",
+              x.repair?.needs ? el("div", { class: "small" }, "Cleaner: " + x.repair.needs) : "",
               ...(x.drops || []).map(record =>
                 el(
                   "div",

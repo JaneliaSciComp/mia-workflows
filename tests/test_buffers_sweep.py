@@ -526,7 +526,7 @@ def test_a_record_gap_waits_for_a_person_and_runs_again_once_the_record_changed(
     world.sweep()
     (case,) = world.cases()
     assert case["rule"] == "record gap" and case["state"] == "gave-up" and cleaner_actions(world, number) == []
-    assert call(world.service, "GET", "/needs")[1]["needs"][0]["repair"]["needs"].startswith(
+    assert call(world.service, "GET", "/subjects")[1]["subjects"][0]["repair"]["needs"].startswith(
         "its catalog record needs a decision"
     )
     world.sweep()

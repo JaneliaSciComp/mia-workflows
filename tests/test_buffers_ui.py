@@ -88,7 +88,7 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
         "/subjects/prep",
         "/assets/raw",
         "/assets/staged",
-        "/needs",
+        "/subjects",
         "/buffers",
         "/keeper",
         "/locks",
@@ -107,7 +107,7 @@ def test_the_pages_buttons_call_action_routes_and_it_follows_the_stream() -> Non
     for path in ("/datasets/x/actions", "/specs", "/specs/x/actions", "/prep", "/prep/x/actions"):
         assert ("POST", path) in requested and resolve("POST", path) == "action", path
     assert ("POST", "/specs/parse") in requested and resolve("POST", "/specs/parse") == "read"  # it writes nothing
-    for path in ("/needs", "/subjects/buffer", "/subjects/prep"):
+    for path in ("/subjects", "/subjects/buffer", "/subjects/prep"):
         assert ("GET", path) in requested, path
     assert not has("issues/new")  # nothing is started by opening a GitHub issue
     for path in ("/subjects/x/x", "/timeline/x/x", "/run/x/x", "/lookup?q=x", "/health"):
@@ -358,8 +358,8 @@ def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
         and not has('"select"', view)
     )
     assert has(
-        'pageOf("/needs", "needs", () => ({ ...(needsKind ? { kind: needsKind } : {}),'
-        " ...(needsShelved ? { shelved: 1 } : {}) }))",
+        'pageOf("/subjects", "subjects", () => ({ ...(needsKind ? { kind: needsKind } : {}),'
+        ' ...(needsShelved ? { status: "shelved" } : {}) }))',
         view,
     )
     assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffers"], ["prep", "Requests"]')
