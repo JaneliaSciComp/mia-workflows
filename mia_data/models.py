@@ -171,6 +171,7 @@ class DatasetState:
     saved: CropSet | None = None
     reworks: int = 0  # how often the crop judge sent this dataset's sets back since a person last acted
     accepting: str | None = None  # the PR head whose set a person accepted: autodev merges it, other heads are ignored
+    revoked: bool = False  # a person's revoke ended the round: it takes no resume, and a new round clears this
 
 
 def sets_view(state: DatasetState, stage: str) -> dict:
@@ -190,7 +191,29 @@ def sets_view(state: DatasetState, stage: str) -> dict:
         if held
         else None,
         "saved": {"set": saved.set_id, "approved_by": saved.test.approved_by} if saved else None,
+        "revoked": state.revoked,  # buffer-api offers no resume for it (spec resume-restart §4.3)
     }
+
+
+def resume_step(state: DatasetState, judge_on: bool) -> str:
+    """Where a resumed round starts: its first step with no result on `state` (spec resume-restart §4.2). A step
+    that finished is kept whatever changed since; a rule that voids a result when something changed is a
+    condition here (§8).
+
+    `restart`: the round was never admitted and has nothing to keep. `follow`: it follows a reader's snippets
+    issue, and acts on that as it is now. `save`: its set is approved and not saved. `judge`: its set passed and
+    the crop judge (`judge_on`) never looked. `review`: its set waits for a verdict. `crops`: it has a binding
+    and no passing set. `match`: it has no binding."""
+    if state.pins is None:
+        return "restart"
+    if state.snippet_issue:
+        return "follow"
+    last = state.tests[-1] if state.tests else None
+    if last and last.ok:
+        if last.approved_at:
+            return "save"
+        return "judge" if judge_on and not last.evidence else "review"
+    return "crops" if state.binding else "match"
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:

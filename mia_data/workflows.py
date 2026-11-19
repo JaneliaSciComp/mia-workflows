@@ -56,10 +56,24 @@ with workflow.unsafe.imports_passed_through():
         Test,
         VerifyResult,
         job_key,
+        resume_step,
         set_id,
     )
 
 GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:revoke"
+RESUME = "data:resume"
+NO_RESUME_REVOKED = "its saved crops were revoked, and a resume would save them again: Restart repairs it"
+JUDGE_LOOKS = "the crop judge is looking at these crops: its verdict decides"
+# what a resumed round says it kept and runs, by the step it starts at (`resume_step`)
+RESUMES = {
+    "restart": "the round has nothing to keep, so it starts from the beginning.",
+    "match": "the pins are kept; the match runs again.",
+    "crops": "the binding and the pins are kept; the crops are made again.",
+    "judge": "the crops are kept; the crop judge looks at them.",
+    "review": "nothing is left to run: the crops wait for a verdict.",
+    "save": "the approved crops are kept; they are saved.",
+    "follow": "the reader's pull request and every set made for it are kept.",
+}
 JUDGE = "judge"  # the crop judge as the author of a verdict
 JUDGE_NAME = "the crop judge"  # ... and as a timeline entry names it
 CANCEL = "data:cancel"
@@ -147,6 +161,9 @@ class MiaDataDataset:
         # rejects that name the saved set: each revokes it and starts its rework (see _rework_saved)
         self.rework_events: list[LabelEvent] = []
         self.restarts: set[str] = set()  # ids of the gos that came as `restart`: each starts its round in a new run
+        # resumes that came while the crop judge looked beside the round: refused once it has ended (`restart`)
+        self.busy_resumes: list[LabelEvent] = []
+        self.resumed = False  # the round in progress was resumed (`_resume`); not durable
         # a cancel in progress (see _cancel_round): the round starts no new activity, the one in flight answers
         self.cancelling = False
         self.unwinding = False  # the round's task has been told to stop: what it runs from here on is clean-up
@@ -169,7 +186,14 @@ class MiaDataDataset:
     def restart(self, event: LabelEvent) -> None:
         """A go whose round starts in a new run of this workflow (see `run`). A run keeps the code paths it began
         with for as long as it lives (its patches), so only a new run does everything today's code does. At
-        `review` it also ends the round that waits there, whichever path made its crops."""
+        `review` it also ends the round that waits there, whichever path made its crops.
+
+        An event of kind `resume` asks for the round to be resumed (`_resume`). While the crop judge looks beside
+        the round it is not queued: a queued label ends the wait for the judge and leaves its verdict on record
+        only (`_judged`), and a resume must not cost the set its judge."""
+        if event.kind == "resume" and self.judging is not None and not self.judging.done():
+            self.busy_resumes.append(event)
+            return
         self.restarts.add(event.event_id)
         self.go_events.append(event)
 
@@ -494,6 +518,7 @@ class MiaDataDataset:
         extra = f"**Quarantined artifacts:** {artifacts}\n**Buffers that drew from it:** {buffers}\n"
         count = len(out.artifacts)
         detail = REVOKED.format(actor=event.actor, count=count, plural="" if count == 1 else "s")
+        state.revoked = True
         await self._finish("blocked", detail, extra=extra)
         return True
 
@@ -606,7 +631,8 @@ class MiaDataDataset:
             queued += [(REJECT, NOT_REVIEW, event) for event in self.reject_events]
             self.approve_events, self.reject_events = [], []
         if gos:
-            queued, self.go_events = queued + [(GO, BUSY, event) for event in self.go_events], []
+            busy = [(RESUME if event.kind == "resume" else GO, BUSY, event) for event in self.go_events]
+            queued, self.go_events = queued + busy, []
         for label, reason, event in queued:
             if not self._seen(event):
                 await self._refuse(label, reason, event)
@@ -998,6 +1024,7 @@ class MiaDataDataset:
         state.round_id, state.seed = f"i{state.issue}-e{event.event_id}", str(workflow.random().getrandbits(64))
         state.pins = state.binding = state.binding_hash = state.snippet_name = state.snippet_issue = state.pr = None
         state.tests, state.attempts, state.pending, state.waiting_since = [], {}, [], None
+        state.attempt, state.revoked, self.resumed = 1, False, False
         state.passes, state.pass_stage, state.pass_jobs, state.result, state.result_binding = {}, "", [], "", False
         try:
             state.pins = await self._act("admit", state.issue, event.event_id, seconds=300, result_type=Pins)
@@ -1074,6 +1101,8 @@ class MiaDataDataset:
         remembered while its PR is open or not yet opened, so a retry never opens a second one; once that PR
         was merged or closed, a round that needs a reader opens a new issue."""
         state = self.state
+        if event.kind == "resume" and await self._resume(event):
+            return
         snippet_issue, snippet_pr = None, None  # what the previous round's develop path left behind, if anything
         # (a cancelled develop round left its snippet issue and PR open too: autodev is not asked twice)
         # (a restart at review leaves them open as well)
@@ -1100,6 +1129,14 @@ class MiaDataDataset:
             if await self._resume_pr(snippet_issue, snippet_pr):
                 return
             snippet_issue = None  # its PR was merged or closed: autodev is done there, a reader is asked for anew
+        await self._match(snippet_issue, snippet_pr, advised)
+
+    async def _match(self, snippet_issue: int | None, snippet_pr: int | None, advised: bool) -> None:
+        """The round from its match on: the agent picks a reader and writes a binding, or asks for a reader.
+        `snippet_issue` and `snippet_pr` are what an earlier round's develop path left open, `advised` whether
+        this round matches although that pull request is open (see `_round`)."""
+        state = self.state
+        assert state.pins and state.seed  # the round is admitted
         await self._stage("matching")
 
         # Match: the agent picks a snippet and writes a binding; the worker's crop job is what tests that binding.
@@ -1130,14 +1167,19 @@ class MiaDataDataset:
         )
         if not workflow.patched("crop-checks-binding") and await self._smoke(match, no_size_verdict):
             return  # a history without the patch ran a smoke job first
+        await self._set_for_review(("", "Binding reasons:", *(f"- {reason}" for reason in match.reasons)))
 
-        # The round's crops at the matched snippets commit, shown on the issue for review; approved, they are published.
+    async def _set_for_review(self, notes: tuple) -> None:
+        """The round from its crops on: the set at the round's snippets commit for its binding, shown for review
+        with `notes` under its report; approved, it is saved."""
+        state = self.state
+        assert state.pins and state.seed  # the round is admitted
         sha = state.pins.snippets_commit
         await self._stage("testing")
         test, failed_jobs, report = await self._test(
             sha,
             state.seed + "-t",
-            notes=("", "Binding reasons:", *(f"- {reason}" for reason in match.reasons)),
+            notes=notes,
             n_crops=(await self._limits()).per_round,
         )
         state.tests.append(test)
@@ -1146,7 +1188,11 @@ class MiaDataDataset:
             return await self._finish("failed", "; ".join(["the crops failed; nothing is saved", *failed_jobs]))
         await self._stage("review")
         await self._refuse_queued(approves=False)  # gos that came while the round ran; verdicts are judged below
-        # after the gate opens, and a person's verdict that comes while the judge looks is acted on at once
+        await self._decide(test)
+
+    async def _decide(self, test: Test) -> None:
+        """The round from its judge on, with `test`'s set at review: the crop judge approves it, sends it back or
+        leaves it to a person, and a person's verdict that comes while the judge looks is acted on at once."""
         judged = await self._judged(test)
         if self._judge_grants(judged):
             test.approved_at, test.approved_by = workflow.now().isoformat(), JUDGE
@@ -1155,6 +1201,52 @@ class MiaDataDataset:
         if judged and self._sends_back(judged) and await self._send_back(test, judged):
             return  # the round went on as a develop round and ended there
         await self._from_review()
+
+    async def _resume(self, event: LabelEvent) -> bool:
+        """Resume the round (spec resume-restart §4.2): nothing of its state is cleared, and it goes on from its
+        first step with no result (`resume_step`), on the same pins, as a new attempt. False when the round has
+        nothing to keep (it was never admitted): the caller then runs it as a go.
+
+        The round is charged to whoever asked for the resume. A set a person revoked is never saved again by
+        one, and a set that waits for a verdict with nothing left to run stays where it is."""
+        state = self.state
+        if state.revoked:
+            await self._refuse(RESUME, NO_RESUME_REVOKED, event)
+            return True
+        if event.actor != DEBUGGER:
+            state.debugs = 0  # somebody asked for this: the round has its own debugging cycles
+        if event.actor not in RERUNNERS:
+            state.reworks = 0  # ... and the crop judge may send its sets back anew
+        self.limits = limits = await self._act("limits", result_type=RoundLimits)
+        step = resume_step(state, limits.crop_judge != "off")
+        marker = f"resume {state.round_id} {event.event_id}" if state.round_id else f"resume {event.event_id}"
+        said = f"Resumed by {event.actor}: {RESUMES[step]}"
+        if step == "restart":
+            await self._act("comment", state.issue, said, marker)
+            return False
+        if step == "review" and state.stage == "review":  # nothing is left to run: the wait for a verdict goes on
+            await self._act("comment", state.issue, said, marker)
+            await self._from_review()
+            return True
+        assert state.pins and state.round_id  # every other step is an admitted round's
+        if await self._act("paused", result_type=bool):
+            raise RoundFailed(PAUSED, blocked=True)
+        root = await self._act("resume_root", state.issue, event.event_id, result_type=str)
+        state.pins, state.attempt, self.resumed = dataclasses.replace(state.pins, root=root), state.attempt + 1, True
+        await self._act("comment", state.issue, said, marker)
+        if step == "follow":
+            await self._follow()
+        elif step == "match":
+            await self._match(None, None, False)
+        elif step == "crops":
+            await self._set_for_review(())
+        elif step == "save":
+            await self._publish_set()
+        else:  # a passing set with no verdict: the judge looks if it never did, then a person may
+            if state.stage != "review":
+                await self._stage("review")
+            await (self._decide(state.tests[-1]) if step == "judge" else self._from_review())
+        return True
 
     async def _smoke(self, match: MatchResult, no_size_verdict: bool) -> bool:
         """A smoke job on the matched binding, before the crops; True when it ended the round. Replayed only: a
@@ -1252,6 +1344,7 @@ class MiaDataDataset:
             self.verdict_first = True
             return None
         self.judging = None
+        await self._refuse_resumes()
         return judging.result()  # or what ended the judge: a refusal at an active gate, a cancel
 
     async def _judge_ended(self, stop: bool = False) -> None:
@@ -1267,6 +1360,14 @@ class MiaDataDataset:
         self.judging = None
         if not judging.cancelled() and (error := judging.exception()) is not None:
             workflow.logger.warning("issue #%d: the crop judge ended with: %s", self.state.issue, error)
+        await self._refuse_resumes()
+
+    async def _refuse_resumes(self) -> None:
+        """Answer the resumes that came while the crop judge looked: its verdict is what decides the set."""
+        refused, self.busy_resumes = self.busy_resumes, []
+        for event in refused:
+            if not self._seen(event):
+                await self._refuse(RESUME, JUDGE_LOOKS, event)
 
     async def _judge_crops(self, test: Test) -> JudgeResult | None:
         """The crop judge over a passing set (spec autonomous-gates §4.2, §9): evidence, the job, the assessment,
@@ -1449,7 +1550,7 @@ class MiaDataDataset:
         )
         state.published = True
         if workflow.patched("judge-decides"):  # the saved set outlives its round; a set sent back is superseded
-            state.saved, state.held = self._set_of(test), None
+            state.saved, state.held, state.revoked = self._set_of(test), None, False
         extra = (
             f"**Totals:** {len(published['published'])} crops saved this round ({verify.ok_count} verified); "
             f"{published['total']} in the dataset\n"

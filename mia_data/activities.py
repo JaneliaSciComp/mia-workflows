@@ -310,6 +310,7 @@ class Activities:
         """The main queue's activities; await_job runs on the -await queue."""
         return [
             self.admit,
+            self.resume_root,
             self.limits,
             self.poll,
             self.set_stage,
@@ -553,6 +554,16 @@ class Activities:
         write_atomic(round_dir / "downloads.json", json.dumps(entry, indent=1))
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted
         return pins
+
+    @activity.defn(name="resume_root")
+    @mia_permanent_errors
+    async def resume_root(self, issue: int, event_id: str) -> str:
+        """Who a resumed round is charged to: the root the resume's action carries, else the dataset itself, as
+        `admit` reads it for a go."""
+        action = await self._action(issue, event_id)
+        if action is None:
+            raise ValueError(f"event {event_id} is not an action: a round is resumed by one")
+        return action["payload"].get("root") or self.cfg.root_of(issue)
 
     @activity.defn(name="limits")
     async def limits(self) -> RoundLimits:

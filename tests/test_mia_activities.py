@@ -101,6 +101,15 @@ def put_action(t, action_id: int, number: int = 1, action: str = "go", payload: 
         db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
 
 
+async def test_resume_root_is_the_actions_root_or_the_datasets_own(tmp_path):
+    t = _setup(tmp_path)
+    put_action(t, 98, payload={"root": "o/buffers#9"})
+    assert await t.a.resume_root(1, "98") == "o/buffers#9"
+    assert await t.a.resume_root(1, "11") == f"{t.cfg.github.data_repo}#1"
+    with pytest.raises(ApplicationError, match="not an action"):
+        await t.a.resume_root(1, "nothing")
+
+
 async def test_admit_is_idempotent(tmp_path):
     t = _setup(tmp_path)
     p1 = await t.a.admit(1, "99")
@@ -1362,7 +1371,7 @@ async def test_a_stage_write_tells_the_page_which_sets_a_verdict_may_name(tmp_pa
     state = DatasetState(1, round_id=ROUND, pins=pins, tests=[test])
     await t.a.set_stage(1, "review", state)
     sets = t.ledger.subject("dataset", "rec-1")["data"]["sets"]
-    assert sets == {"review": f"{ROUND}:t1", "held": None, "saved": None}
+    assert sets == {"review": f"{ROUND}:t1", "held": None, "saved": None, "revoked": False}
     findings = [{"item": "c1", "severity": "suspect", "note": "shifted <!-- x -->"}]
     state.held = CropSet(f"{ROUND}:t1", ROUND, test, pins, sent_back_by="judge", worst="suspect", findings=findings)
     state.saved = CropSet("i1-e5:t0", "i1-e5", test, pins)
