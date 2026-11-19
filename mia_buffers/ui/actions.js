@@ -26,7 +26,9 @@ export const BUTTON_HELP = {
     "Withdraw the checked datasets from this buffer: their volumes are unregistered and their staged pyramids are quarantined. Nothing is deleted.",
   retry: "Send the same action again. It carries the same key, so it cannot run twice.",
   prepare:
-    "File one preparation request for the checked datasets: each one gets a new run of the preparation workflow, also one that is already prepared or whose crops wait at review, which are dropped. One whose round is running is left to it.",
+    "Prepare the selected datasets: one that never ran starts, one that stopped runs what is left, one that is prepared is left alone. Crops that wait at review are kept, and judged if the judge never looked. One whose round is running is left to it.",
+  prepareRestart:
+    "Prepare every selected dataset from scratch, also one that is prepared or waits for review: its crops are dropped and made again on today's catalog, readers and harness. One whose round is running is left to it.",
   specFrom:
     "Open New buffer on a definition that selects exactly these datasets. Only the prepared ones are in a plan; step 2 there says which fit.",
   sendReject: "Send the rejection with this feedback to the agent that fixes the dataset's reader.",
@@ -97,7 +99,9 @@ export const ACTION_HELP = {
   },
   prep: {
     ...SHELF_HELP,
-    go: "Run the request again: each of its datasets that stopped or never started gets a new run of the preparation workflow. One that is prepared, shelved or in a round is left as it is.",
+    resume:
+      "Run the request again: each of its datasets that never ran starts, and each that stopped runs what is left of its round. One that is prepared, shelved or in a round is left as it is.",
+    go: "Run the request again from scratch: every dataset it names starts over on today's catalog, readers and harness, also one that is prepared or waits for review. One that is shelved or in a round is left as it is.",
     cancel: "Stop the request, and the dataset rounds it started.",
     stop: "For a request that does not answer Cancel: its workflow is terminated. The dataset rounds it started keep running.",
     recheck: "Look at the request's datasets again: it is done once each of them is prepared or shelved.",
@@ -153,8 +157,8 @@ export const actionWord = (subject, action) =>
                   ? "Start again"
                   : "Start"
                 : "Run"
-              : action === "go" && subject.kind === "dataset"
-                ? "Restart" // from scratch; Resume, where it is offered, goes on with the round that stopped
+              : action === "go" && (subject.kind === "dataset" || subject.kind === "prep")
+                ? "Restart" // from scratch; Resume, where it is offered, goes on with what stopped
                 : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {
   revoke: "Revoke this dataset's saved crops? Buffers that drew from it are degraded; nothing is deleted.",
@@ -361,7 +365,7 @@ export const hostsRun = (subject, action) =>
   (action === "go" || action === "resume" || (action === "reject" && subject.stage === "done")) &&
   subject.kind === "dataset"
     ? { records: [subject.key] }
-    : action === "go" && subject.kind === "prep"
+    : (action === "go" || action === "resume") && subject.kind === "prep"
       ? { prep: subject.number }
       : action === "approve" && subject.kind === "buffer" && subject.stage === "plan-review"
         ? { spec: subject.key }
@@ -521,9 +525,11 @@ export function undelivered(subject, actions, after) {
 
 // ---- the Prepare button: a preparation request is posted to the service, which runs it
 const PREP_MAX = 200; // the most datasets one preparation request takes (mia_buffers.spec.MAX_PREP_RECORDS)
-// Every dataset of `all` gets a round (the request says `again`), also one that is prepared, stopped or at review.
+// One preparation request for the datasets of `all`. It resumes each (one that never ran starts, one that stopped
+// runs what is left, a prepared one is left alone); with `restart` it says so, and every one starts over from
+// scratch, also one that is prepared or at review.
 // `owner` (a buffer's Prepare step): the number of the buffer the request is filed for; the person stays on that step.
-export function prepareButton(container, all, blocker, done, text, owner) {
+export function prepareButton(container, all, blocker, done, text, owner, restart) {
   // `text`: the button's word, where the count stands beside it
   // a request takes at most PREP_MAX datasets: a longer list is prepared in parts, the first PREP_MAX now
   const todo = all.slice(0, PREP_MAX),
@@ -531,7 +537,7 @@ export function prepareButton(container, all, blocker, done, text, owner) {
   let checking = false; // a click while the host check or its dialog is open starts nothing
   const label =
     all.length > PREP_MAX
-      ? `Prepare the first ${PREP_MAX} of ${num(all.length)} datasets`
+      ? `${text || "Prepare"} the first ${PREP_MAX} of ${num(all.length)} datasets`
       : text || (todo.length === 1 ? "Prepare this dataset" : `Prepare these ${num(todo.length)} datasets`);
   if (why) {
     container.replaceChildren(
@@ -546,7 +552,7 @@ export function prepareButton(container, all, blocker, done, text, owner) {
       {
         type: "button",
         class: "btn",
-        title: BUTTON_HELP.prepare,
+        ...(restart ? { title: BUTTON_HELP.prepareRestart } : { title: BUTTON_HELP.prepare }),
         onclick: async e => {
           if (checking) return;
           checking = true;
@@ -563,7 +569,7 @@ export function prepareButton(container, all, blocker, done, text, owner) {
     // more than 25 records need the count written into the request: the button's label names it
     const yaml =
       toPrepYaml(todo, S.ref, S.meta.catalog_repo) +
-      "again: true\n" +
+      (restart ? "restart: true\n" : "") +
       (todo.length > 25 ? `max_records: ${todo.length}\n` : "");
     try {
       const action = await api("/prep", {

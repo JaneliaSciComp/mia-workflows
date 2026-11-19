@@ -2341,6 +2341,26 @@ def test_stop_terminates_the_run_retires_the_subjects_buffers_and_says_what_it_l
     assert "workflow stopped" in said and f"`{mine}`" in said and "cluster job" in said
 
 
+@pytest.mark.parametrize("stage", ["done", "needs-human", "cancelled"])
+def test_a_request_takes_a_resume_where_it_takes_a_go_and_hears_it_as_its_go_signal(tmp_path, stage):
+    """spec resume-restart §5: the request's round reads from its action how it runs its datasets."""
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/prep", {"spec": PREP_TEXT, "key": "selection-1"})[1]["number"]
+    _stage(s, "prep", number, stage)
+    assert {"go", "resume"} <= set(call(s, "GET", f"/subjects/prep/prep-{number}")[1]["actions"])
+    status, action, _ = act(s, f"/prep/{number}/actions", {"action": "resume", "key": "click-2"})
+    assert status == 202 and (action["action"], action["payload"]) == ("resume", {"spec": PREP_TEXT})
+    kind, sent_to, signal, event = gateway.sent[-1]
+    assert (kind, sent_to, signal, event.kind) == ("prep", number, "go", "resume")
+
+
+def test_a_request_in_progress_takes_no_resume(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/prep", {"spec": PREP_TEXT, "key": "selection-1"})[1]["number"]
+    _stage(s, "prep", number, "requested")
+    assert act(s, f"/prep/{number}/actions", {"action": "resume"})[0] == 409 and len(gateway.sent) == 1
+
+
 def test_a_preparation_request_is_filed_and_run_in_one_post(tmp_path):
     s, gateway = _acting(tmp_path)
     status, action, _ = act(s, "/prep", {"spec": PREP_TEXT, "key": "selection-1"})

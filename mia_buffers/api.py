@@ -1530,7 +1530,7 @@ class BufferService:
         subject = self._numbered("prep", number)
         payload: dict = {}
         needed = None
-        if parsed.action == "go":
+        if parsed.action in ("go", "resume"):  # both run the request: its datasets from scratch, or resumed
             text = parsed.spec if parsed.spec is not None else subject["data"].get("spec")
             if not text:
                 raise HttpError(422, f"request {subject['key']} has no text to run: send one as `spec`")
@@ -1724,8 +1724,10 @@ class BufferService:
             else:
                 # a dataset's go and its resume are its workflow's `restart`: the round runs in a new run, on
                 # today's code, and the event's kind says which of the two it is
+                # a request's resume is its workflow's `go`: its round reads from the action how it runs
                 restarts = kind == "dataset" and signal in ("go", "resume")
-                self.dispatcher.send(kind, number, "restart" if restarts else signal, event)
+                name = "restart" if restarts else "go" if signal == "resume" else signal
+                self.dispatcher.send(kind, number, name, event)
         except DispatchError as error:
             self._asked.pop((kind, number), None)  # nothing was asked of any workflow
             failed = self.ledger.settle_action(action["id"], "failed", str(error))

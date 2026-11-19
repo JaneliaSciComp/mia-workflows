@@ -975,9 +975,10 @@ def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
     assert has('buffer: "Buffer workflow:"')
 
 
-def test_a_request_filed_from_either_list_gives_every_checked_dataset_a_round() -> None:
-    """The Datasets list and a buffer's Prepare step file the same request: it says `again`, so a checked dataset
-    that is prepared or at review gets a new round too. The buffer's request also names its buffer."""
+def test_a_request_filed_from_either_list_resumes_its_datasets_or_says_restart() -> None:
+    """The Datasets list and a buffer's Prepare step file the same two requests (spec resume-restart §5, §10):
+    Resume's says nothing of how it runs, Restart's says `restart`, so a checked dataset that is prepared or at
+    review starts over too. The buffer's request also names its buffer."""
     sent = run_js(
         "const { S } = await import(input.api);\n"
         "S.ref = 'a'.repeat(40); S.meta = { catalog_repo: 'o/catalog' };\n"
@@ -987,17 +988,24 @@ def test_a_request_filed_from_either_list_gives_every_checked_dataset_a_round() 
         "  const answer = path === '/prep' ? { number: 5 } : { hosts: [] };\n"
         "  return { ok: true, status: 200, text: async () => JSON.stringify(answer) };\n"
         "};\n"
-        "for (const owner of [undefined, 7]) {\n"
+        "const titles = [];\n"
+        "for (const owner of [undefined, 7]) for (const restart of [false, true]) {\n"
         "  const box = document.createElement('span');\n"
-        "  prepareButton(box, ['u937', 'bcss'], null, null, 'Prepare', owner);\n"
-        "  walk(box).find(node => node.tag === 'button').fire('click');\n"
+        "  prepareButton(box, ['u937', 'bcss'], null, null, restart ? 'Restart' : 'Resume', owner, restart);\n"
+        "  const button = walk(box).find(node => node.tag === 'button');\n"
+        "  titles.push(button.attrs.title);\n"
+        "  button.fire('click');\n"
         "  await new Promise(done => setTimeout(done, 20));\n"
         "}\n"
-        "print(posts.map(post => [post.spec.includes('\\nagain: true\\n'), post.buffer ?? null]));",
+        "print([posts.map(post => [post.spec.includes('\\nrestart: true\\n'), post.spec.includes('again'),"
+        " post.buffer ?? null]), titles]);",
         {"actions.js": "prepareButton"},
         {"api": (UI_DIR / "api.js").as_uri()},
     )
-    assert sent == [[True, None], [True, 7]]
+    posts, titles = sent
+    assert posts == [[False, False, None], [True, False, None], [False, False, 7], [True, False, 7]]
+    assert titles[0].startswith("Prepare the selected datasets: one that never ran starts")
+    assert titles[1].startswith("Prepare every selected dataset from scratch")
 
 
 def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> None:
@@ -1030,8 +1038,8 @@ def test_the_datasets_list_flags_and_filters_what_a_record_lacks() -> None:
 
 def test_a_list_of_datasets_shows_its_actions_only_when_something_is_ticked() -> None:
     """With nothing checked a list of datasets says nothing: the header's check takes the page, and no button
-    repeats it. With a check, a box of its own colour says how many datasets are selected and offers Prepare; the
-    Datasets list also offers Create buffer, a buffer's Prepare step files the request for its buffer. Both lists
+    repeats it. With a check, a box of its own colour says how many datasets are selected and offers Resume and
+    Restart; the Datasets list also offers Create buffer, a buffer's Prepare step files the request for its buffer. Both lists
     have the same columns, and none links a folder."""
     empty, lists, labels = run_js(
         "const { S } = await import(input.api);\n"
@@ -1048,7 +1056,7 @@ def test_a_list_of_datasets_shows_its_actions_only_when_something_is_ticked() ->
     )
     assert empty is True
     assert [(hidden, count) for hidden, count, _ in lists] == [(False, "2 datasets selected")] * 2
-    assert [text for _, _, text in lists] == ["PrepareCreate buffer", "Prepare"]
+    assert [text for _, _, text in lists] == ["ResumeRestartCreate buffer", "ResumeRestart"]
     assert labels[:5] == ["dataset", "issue", "preview", "state", "stage"] and "files" not in labels
     datasets, flow = squeezed(FILES["datasets.js"]), squeezed(FILES["flow.js"])
     assert has("cols: datasetCols()", datasets) and has("cols: datasetCols()", flow)
@@ -1217,8 +1225,8 @@ def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() 
     assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
     # any row can be checked, prepared or at review too
     assert has("select: { chosen, id: x => x.id, onchange: show }", flow)
-    # both lists file the same request: every checked dataset gets a round
-    assert has('"again: true\\n" +', actions) and not has("again == null", actions)
+    # both lists file the same requests: Restart's says so, Resume's says nothing
+    assert has('(restart ? "restart: true\\n" : "") +', actions) and not has("again: true", actions)
     assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
     assert count("plan_first: true") == 1 and has("title: BUTTON_HELP.plan", flow)  # every plan stops for its Run
     assert has("disabled: !!blocker || !!subject.asked", flow)

@@ -709,8 +709,13 @@ class Activities:
         says where it stands; a dataset that needs a round gets a `go` sent to buffer-api with the worker token:
         actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
         `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). A stopped
-        dataset whose jobs were refused a host that is still unapproved gets none. `again`: a dataset that is done,
-        or whose set waits at review, gets a go all the same. No issue is searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
+        dataset whose jobs were refused a host that is still unapproved gets none. No issue is searched, opened
+        or labelled. `DatasetIssue.number` is the dataset's number.
+
+        What is sent (spec resume-restart §5): a dataset that never ran gets a `go`. One that stopped, or whose
+        set waits at review, gets a `resume`, which keeps what its round has; where its stage takes none (its
+        saved crops were revoked) it gets a `go`. `again`: every dataset gets a `go`, a round from scratch,
+        also one that is done or at review."""
         entry = self._record(round_id, record)
         if gaps := start_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
             raise ValueError(f"{record}: the record cannot be run: {'; '.join(gaps)}")
@@ -724,10 +729,9 @@ class Activities:
                 "run it again from its page so mia-data saves both"
             )
             return DatasetIssue(number, stage, False, note, folder), False
-        # a round that is running is left to it, and so is one that waits at review, unless the request says
-        # `again`: its go starts the dataset over, and the set under review is dropped
-        if subject and (subject["status"] == "working" or (subject["status"] == "waiting" and not again)):
+        if subject and subject["status"] == "working":  # a round that is running is left to it
             return DatasetIssue(number, stage, False, folder=folder), False
+        resumes = not again and subject is not None and "resume" in subject["actions"]
         if subject and subject["status"] == "stuck" and (waiting := subject.get("hosts")):
             # only a person's click approves a host: a new round would be refused the same ones
             raise ValueError(
@@ -739,7 +743,7 @@ class Activities:
         go = functools.partial(
             registry.send_action,
             f"/datasets/{record}/actions",
-            "go",
+            "resume" if resumes else "go",
             key=f"{round_id}/{record}",
             actor=f"{kind}:{_issue_of(round_id)}",
             root=pins.root,
@@ -769,13 +773,19 @@ class Activities:
         """Pin a preparation request: the prep spec its action carries, the catalog at its ref
         and the records it names (or its `select` admits there). Written once to state_dir/rounds/p<issue>-e<event>/
         with a plan.json of {id, path} rows and buffer-shaped pins, so nudge_dataset reads the records as it does a
-        buffer round's; a retry returns the same pins."""
+        buffer round's; a retry returns the same pins.
+
+        `PrepPins.again` says how the round runs its datasets (spec resume-restart §5): the text's `restart` for
+        the request's first round; after that the action decides, a `resume` resuming them and a `go` starting
+        each over."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"p{int(issue)}-e{event_id}")
         if (round_dir / "prep.json").is_file():
             return PrepPins(**json.loads((round_dir / "prep.json").read_text()))
         text = await self._spec_text("prep", issue, event_id, "preparation request")
+        action = await self._action("prep", issue, event_id)
+        ran_before = any(round_dir.parent.glob(f"p{int(issue)}-e*/prep.json"))
         try:
             spec = load_prep_text(text)
         except SpecError as error:
@@ -810,7 +820,9 @@ class Activities:
         spec_hash, root = hashlib.sha256(text.encode()).hexdigest(), self.cfg.root_of(issue)
         buffer_pins = BufferPins(spec_hash, ref, "", "", root=root)
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(buffer_pins)))
-        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root, again=spec.again)
+        asked = action["action"] if action else "go"
+        again = asked != "resume" and (ran_before or spec.restart)
+        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root, again=again)
         write_atomic(round_dir / "prep.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the request admitted
         return pins
 
@@ -819,9 +831,11 @@ class Activities:
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
         """Hand one requested record to mia-data unless the registry says it is prepared or shelved; otherwise
         nudge_dataset, its result named for the request's entry. A dataset that stopped (`needs-human`) is handed
-        over, and so is a prepared one, or one whose set waits at review, when the request says `again`: the
-        dataset gets a new round, and its row says `in-progress` at once, so the request follows that round
-        instead of settling on what the last one left. A dataset whose round is running is left to it."""
+        over, and so is a prepared one when the round restarts its datasets (`PrepPins.again`): its row says
+        `in-progress` at once, so the request follows that round instead of settling on what the last one left.
+        A dataset at review that is resumed keeps its row: it waits for a verdict unless its judge still has to
+        look, and the request hears of a dataset that becomes prepared. A dataset whose round is running is
+        left to it."""
         again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
@@ -833,7 +847,8 @@ class Activities:
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
         found, created = await self._nudge(round_id, record, again=again)
-        if state in ("prepared", "needs-human") and found.nudged:
+        kept_at_review = found.stage == "review" and not again
+        if state in ("prepared", "needs-human") and found.nudged and not kept_at_review:
             await asyncio.to_thread(self.registry.put_dataset, record, state="in-progress")
         if found.nudged:
             outcome = "opened" if created else "nudged"

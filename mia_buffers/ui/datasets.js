@@ -103,7 +103,8 @@ export const datasetCols = () => [
 // `show` draws it for what `chosen` holds now. `owner`: the buffer the request is filed for (its Prepare step);
 // without one the box also opens New buffer on the checked. `done` runs once a request was filed.
 export function chosenBox(chosen, done, owner) {
-  const prepare = el("span"),
+  const resume = el("span"),
+    restart = el("span"),
     count = el("b");
   const spec =
     owner == null
@@ -113,7 +114,7 @@ export function chosenBox(chosen, done, owner) {
           "Create buffer",
         )
       : null;
-  const box = el("span", { class: "chosen", hidden: true }, count, prepare, spec);
+  const box = el("span", { class: "chosen", hidden: true }, count, resume, restart, spec);
   const filed = sent => {
     for (const id of sent) chosen.delete(id);
     if (done) done();
@@ -122,7 +123,8 @@ export function chosenBox(chosen, done, owner) {
     box.hidden = !chosen.size;
     if (!chosen.size) return;
     count.textContent = `${plural(chosen.size, "dataset")} selected`;
-    prepareButton(prepare, [...chosen], null, filed, "Prepare", owner);
+    prepareButton(resume, [...chosen], null, filed, "Resume", owner, false);
+    prepareButton(restart, [...chosen], null, filed, "Restart", owner, true);
   };
   return { box, show };
 }

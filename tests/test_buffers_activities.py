@@ -402,9 +402,9 @@ async def test_nudge_dataset_sends_a_go_through_the_registry_once(acts, gateway)
     assert len(acts.registry.timeline("dataset", info.number)["actions"]) == 1
 
 
-async def test_nudge_dataset_in_a_round_or_at_review_is_left_alone(acts, gateway):
+async def test_nudge_dataset_in_a_round_is_left_alone(acts, gateway):
     await acts.plan(7, ROUND, await admitted(acts))
-    for stage in ("testing", "review"):
+    for stage in ("testing", "debugging"):
         acts.registry.adopt_subject("dataset", 5, U937, stage=stage)
         info = await acts.nudge_dataset(ROUND, U937)
         assert (info.number, info.stage, info.nudged) == (5, stage, False)
@@ -420,12 +420,12 @@ async def test_nudge_dataset_done_without_binding_reports_it(acts, gateway):
 
 
 @pytest.mark.parametrize("stage", ["needs-human", "cancelled"])
-async def test_nudge_dataset_that_stopped_gets_a_go_again(acts, gateway, stage):
+async def test_nudge_dataset_that_stopped_is_resumed(acts, gateway, stage):
     await acts.plan(7, ROUND, await admitted(acts))
     acts.registry.adopt_subject("dataset", 5, U937, stage=stage)
     info = await acts.nudge_dataset(ROUND, U937)
     assert (info.number, info.stage, info.nudged) == (5, stage, True)
-    assert [(sent[1], sent[2]) for sent in gateway.sent] == [(5, "restart")]
+    assert [(sent[1], sent[2], sent[3].kind) for sent in gateway.sent] == [(5, "restart", "resume")]
 
 
 async def test_nudge_for_a_record_buffer_api_has_not_seen_syncs_the_rounds_catalog_first(acts, gateway):
@@ -1803,8 +1803,42 @@ async def test_a_request_starts_a_stopped_dataset_without_saying_again(acts, gat
     acts.registry.adopt_subject("dataset", 6, BCSS, stage="needs-human")
     assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "prepared")
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
-    assert [sent[:3] for sent in gateway.sent] == [("dataset", 6, "restart")]
+    assert [(*sent[:3], sent[3].kind) for sent in gateway.sent] == [("dataset", 6, "restart", "resume")]
     assert acts.registry.dataset(BCSS)["state"] == "in-progress"
+    (asked,) = acts.registry.timeline("dataset", 6)["actions"]
+    assert (asked["action"], asked["actor"], asked["key"]) == ("resume", "prep:8", f"{PREP_ROUND}/{BCSS}")
+    assert asked["payload"]["root"] == f"{acts.cfg.github.buffers_repo}#8"  # the resumed round is charged to it
+
+
+async def test_a_request_resumes_a_dataset_at_review_and_leaves_its_row_as_it_is(acts, gateway):
+    """spec resume-restart §5: a set at review is kept, and judged if the judge never looked. Its row stays
+    `needs-human`: the request settles it there, and looks again when the dataset is prepared."""
+    prep_issue(acts, records=[U937])
+    await acts.prep_admit(8, "21")
+    acts.registry.put_dataset(U937, state="needs-human", issue=5)
+    acts.registry.adopt_subject("dataset", 5, U937, stage="review")
+    assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "nudged", 5)
+    assert [(sent[1], sent[3].kind) for sent in gateway.sent] == [(5, "resume")]
+    assert acts.registry.dataset(U937)["state"] == "needs-human"
+
+
+async def test_a_request_starts_a_dataset_that_never_ran_with_a_go(acts, gateway):
+    acts.registry.put_dataset(U937, state="in-progress")  # not prepared: mia-data has work to do
+    prep_issue(acts, records=[U937])
+    await acts.prep_admit(8, "21")
+    assert (await acts.prep_nudge(PREP_ROUND, U937)).outcome == "opened"
+    assert [sent[3].kind for sent in gateway.sent] == ["go"]
+
+
+async def test_a_requests_later_actions_say_how_it_runs_whatever_its_text_said(acts, gateway):
+    """spec resume-restart §5: the text decides the round of the action that filed the request; after that a
+    `resume` resumes and a `go` restarts."""
+    prep_issue(acts, records=[U937])  # filed by action 21, its text says nothing
+    assert (await acts.prep_admit(8, "21")).again is False
+    put_action(acts, "prep", 8, 31, {"spec": prep_spec(records=[U937])})
+    assert (await acts.prep_admit(8, "31")).again is True  # a later go: a restart
+    put_action(acts, "prep", 8, 32, {"spec": prep_spec(records=[U937], restart=True)}, action="resume")
+    assert (await acts.prep_admit(8, "32")).again is False  # a resume, whatever the text says
 
 
 async def test_a_request_starts_no_stopped_dataset_whose_host_waits_for_approval(acts, gateway):
@@ -1846,6 +1880,7 @@ async def test_a_request_that_says_again_starts_prepared_and_stopped_datasets_to
     assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "nudged", 5)
     assert await acts.prep_nudge(PREP_ROUND, BCSS) == PrepOutcome(BCSS, "nudged", 6)
     assert [sent[:3] for sent in gateway.sent] == [("dataset", 5, "restart"), ("dataset", 6, "restart")]
+    assert [sent[3].kind for sent in gateway.sent] == ["go", "go"]  # from scratch, the stopped one too
     assert [acts.registry.dataset(record)["state"] for record in (U937, BCSS)] == ["in-progress", "in-progress"]
     acts.registry.adopt_subject("dataset", 5, U937, stage="testing")  # a round is running: it is left to it
     assert (await acts.prep_nudge(PREP_ROUND, U937)).outcome == "in-progress" and len(gateway.sent) == 2
@@ -1859,7 +1894,7 @@ async def test_a_request_that_says_again_starts_a_dataset_at_review_over(acts, g
     acts.registry.put_dataset(U937, state="needs-human", issue=5)
     acts.registry.adopt_subject("dataset", 5, U937, stage="review")
     assert await acts.prep_nudge(PREP_ROUND, U937) == PrepOutcome(U937, "nudged", 5)
-    assert [sent[:2] for sent in gateway.sent] == [("dataset", 5)]
+    assert [(*sent[:2], sent[3].kind) for sent in gateway.sent] == [("dataset", 5, "go")]
     assert acts.registry.dataset(U937)["state"] == "in-progress"
 
 

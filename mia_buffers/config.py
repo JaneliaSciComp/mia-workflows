@@ -49,7 +49,10 @@ PREP_STAGES = {
     "needs-human": ("d93f0b", "mia-buffers: the request stopped, needs a human"),
     "cancelled": ("cccccc", "mia-buffers: the request was cancelled"),
 }
-PREP_HUMAN_LABELS = {"go": ("0e8a16", "Prepare the datasets this request names")}
+PREP_HUMAN_LABELS = {
+    "go": ("0e8a16", "Prepare the datasets this request names, each from scratch"),
+    "resume": ("0e8a16", "Prepare the datasets this request names: each runs what it has left"),
+}
 # stage -> (status word, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
 # A round in progress (`working`) accepts `cancel`, what feeds it (`dropped`) and the force stop; a new go, a
 # revoke or a retire waits until it has ended or been cancelled. `ready` takes `dropped` too: a dataset that
@@ -74,9 +77,10 @@ CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")  # the buffer st
 PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),  # a request has no `new` label: a subject before its first stage
     "requested": ("working", frozenset({"cancel", "stop"})),
-    "done": ("done", frozenset({"go"})),
-    "needs-human": ("stuck", frozenset({"go", "recheck"})),  # recheck: look at its datasets again
-    "cancelled": ("done", frozenset({"go"})),
+    # go: every dataset of the request starts over; resume: each runs what it has left (spec resume-restart §5)
+    "done": ("done", frozenset({"go", "resume"})),
+    "needs-human": ("stuck", frozenset({"go", "resume", "recheck"})),  # recheck: look at its datasets again
+    "cancelled": ("done", frozenset({"go", "resume"})),
 }
 # What a round is doing at each stage it works or waits at: the sentence of the stage's start entry when the round
 # has nothing more specific to say.

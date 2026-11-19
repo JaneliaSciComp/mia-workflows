@@ -13,7 +13,16 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 class SpecError(ValueError):
@@ -309,10 +318,18 @@ class PrepSpec(_Strict):
     catalog: CatalogRef
     records: list[str] = []
     select: Select | None = None
-    again: bool = False  # also give a new round to the datasets that are prepared (one that stopped always gets one)
+    # how the request runs its datasets (spec resume-restart §5): without it each is resumed (one that never ran
+    # starts, one that stopped runs what is left, a prepared one is left alone); with it every one starts over
+    # from scratch, also a prepared one and one at review. A stored request that says `again` reads the same.
+    restart: bool = Field(default=False, validation_alias=AliasChoices("restart", "again"))
     timeout_days: float = Field(default=14, gt=0)  # after this long, the request needs a human
     # each record costs an agent run: more than this many need the number written into the request
     max_records: int = Field(default=25, ge=1, le=MAX_PREP_RECORDS)
+
+    @property
+    def again(self) -> bool:
+        """`restart`, under the name the round's pins carry it by (`PrepPins.again`)."""
+        return self.restart
 
     @model_validator(mode="after")
     def _records_or_select(self) -> PrepSpec:

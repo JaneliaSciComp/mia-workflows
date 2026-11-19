@@ -198,11 +198,16 @@ def test_every_buffer_and_prep_stage_has_a_rule():
         "cancel",
         "recheck",
         "edit",
-    }  # plan is an option of go (§4.2); edit is settled by buffer-api and is no signal
+        "resume",
+    }  # plan is an option of go (§4.2); edit is settled by buffer-api and is no signal; resume is a request's
     for status, actions in [*STAGE_ACTIONS.values(), *PREP_STAGE_ACTIONS.values()]:
         assert status in STATUS_WORDS and actions <= vocabulary
     assert STAGE_ACTIONS["idle"] == ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"}))
     assert PREP_STAGE_ACTIONS["requested"] == ("working", frozenset({"cancel", "stop"}))
+    # a request is resumed wherever it can be run again (spec resume-restart §5); a buffer takes no resume
+    reruns = {stage for stage, (_, actions) in PREP_STAGE_ACTIONS.items() if "go" in actions} - {"new"}
+    assert {stage for stage, (_, actions) in PREP_STAGE_ACTIONS.items() if "resume" in actions} == reruns
+    assert not any("resume" in actions for _, actions in STAGE_ACTIONS.values())
     # the definition changes exactly where the buffer rests: no round open, not serving (spec buffer-flow §3.2)
     resting = {"new", "retired", "needs-human", "cancelled"}
     assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "edit" in actions} == resting
