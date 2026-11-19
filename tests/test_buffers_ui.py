@@ -144,7 +144,7 @@ def test_the_docs_describe_the_system_as_it_is() -> None:
     assert has("send(`/ui/${doc}.html`)") and resolve("GET", "/ui/guide.html") == "read"
     assert not re.search(r"\b(buffer|data|prep|autodev):[a-z]", docs)
     assert not re.search(r"\b(no longer|any more|anymore|used to|as before|previously|read-only log)\b", docs, re.I)
-    for needle in ("Needs you", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):
+    for needle in ("Needs human", "Overview", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):
         assert needle in docs, needle
 
 
@@ -223,6 +223,14 @@ def test_what_needs_a_human_says_why() -> None:
     gave_up, review, blocked = run_js("print(input.map(whyOf));", {"overview.js": "whyOf"}, subjects)
     assert gave_up == "approve the host"
     assert "verdict" in review and "decides or changes something" in blocked  # the stage's sentence
+
+
+def test_the_page_names_the_repair_agent_and_one_status_for_a_humans_turn() -> None:
+    shown = "\n".join(text for name, text in FILES.items() if name != "app.css")
+    said = re.sub(r"//[^\n]*|<!--.*?-->", "", shown, flags=re.S)  # a comment may name the module
+    for old in ("Cleaner", "the cleaner", "Needs you", "needs you", "waits for you", "needs a person"):
+        assert old not in said, old
+    assert "Repair agent" in said and "repair agent" in said and "needs human" in said
 
 
 def test_the_banner_says_the_sweeps_findings_and_a_case_is_a_short_row() -> None:

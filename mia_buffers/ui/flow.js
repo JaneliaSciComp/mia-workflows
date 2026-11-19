@@ -566,7 +566,7 @@ async function sourceStep(pane, subject, redraw, wanted) {
       {},
       el("b", {}, `${num(onDisk)} of ${num(board.length)}`),
       " datasets of this version are on disk.",
-      subject.stage === "staged" ? " No job is left to run: it waits for your approve." : "",
+      subject.stage === "staged" ? " No job is left to run: it waits for an approve." : "",
     ),
     el("div", { class: "progress" }, bar),
     ...droppedNotices(subject, board, redraw),

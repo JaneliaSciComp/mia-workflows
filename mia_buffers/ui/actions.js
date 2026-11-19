@@ -39,7 +39,7 @@ export const BUTTON_HELP = {
   cancelShelve: "Close this without shelving anything.",
   approveHosts: "Allow jobs to download from the checked hosts, then start.",
   startUnapproved:
-    "Start with the policy as it is. A dataset on one of these hosts stops and needs a person; a buffer waits for that dataset's files to be copied in by hand, or refuses its job.",
+    "Start with the policy as it is. A dataset on one of these hosts stops and needs a human; a buffer waits for that dataset's files to be copied in by hand, or refuses its job.",
   cancelHosts: "Close this without starting anything.",
   showChange: "Redraw the page with what changed; what you typed here is dropped.",
 };
@@ -47,7 +47,7 @@ export const BUTTON_HELP = {
 // cancel of a round that was waiting for a verdict.
 const SHELF_HELP = {
   shelve:
-    "Set this aside with a reason. It leaves Needs you and nothing can be asked of it until someone unshelves it; a shelved dataset is also left out of every buffer plan and started by no preparation request. A round that waits for a verdict is cancelled first; otherwise its stage stays as it is.",
+    "Set this aside with a reason. It leaves what Overview lists as needing a human, and nothing can be asked of it until someone unshelves it; a shelved dataset is also left out of every buffer plan and started by no preparation request. A round that waits for a verdict is cancelled first; otherwise its stage stays as it is.",
   unshelve: "Take this back: it is listed, planned and started again as its stage says.",
 };
 // how a dataset's Restart differs from its Resume: the first words of its tooltip at every stage
@@ -229,7 +229,7 @@ const NOTE_DIALOGS = {
   shelve: {
     title: "Shelve this",
     about:
-      "It leaves Needs you, and no request or buffer plan takes it until it is unshelved. The reason is shown wherever it is listed, and in its timeline.",
+      "It leaves what Overview lists as needing a human, and no request or buffer plan takes it until it is unshelved. The reason is shown wherever it is listed, and in its timeline.",
     cancels: "Its round is waiting for a verdict: shelving cancels that round first, as Cancel does.",
     ask: "Why can it wait?",
     sending: "Shelving…",

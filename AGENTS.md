@@ -64,8 +64,16 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   test id and timeline markers: the ledger keeps one body per marker. So a new step of a round records its
   result on the state and gets a line in `resume_step`, and builds its keys and markers through `_job`,
   `_test_id` and `_marker`. The round's results live in its workflow: a force stop loses them, and a resume
-  after one starts from the beginning. A request passes the choice to each dataset (`_nudge`), and the cleaner
+  after one starts from the beginning. A request passes the choice to each dataset (`_nudge`), and the repair agent
   resumes; it sends a `go` only where the remedy needs more than the round's pins hold, and never to a request.
+- **Only a subject's status says that a human is needed.** A stage table gives each stage a phase (`not started`,
+  `working`, `waiting`, `stopped`, `done`: what a round does there). buffer-api alone computes the status a person
+  reads (`status_of` in `mia_buffers/api.py`: `shelved`, `in repair`, `needs human`, `done`, `not started`,
+  `working`) from the phase, the hold and the repair agent's case about the subject as it stands. A worker decides
+  by the phase and the hold (`mia_buffers.cleaner.standing`), never by the status. A case records a repair and ends
+  `resolved`, `dropped` or `gave-up`; no case state is a call for attention. Anything new that wants a person's
+  attention moves the subject to a stage whose phase is `waiting` or `stopped`: it adds no flag, state or list of
+  its own.
 - **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
   `shelve` (with a reason); a shelved one reads the status `shelved` and takes `unshelve` alone (`_rules` in
   `mia_buffers/api.py`). The subject's workflow hears of neither, except that a shelve of a subject whose round
@@ -111,7 +119,7 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `authorized()` ignores what the judge and `policy:developer` wrote about a set once a person gave a verdict
   on it, whenever each was written. Anything new that approves or rejects crops names the set and writes an
   assessment; it never infers approval from silence.
-- **The cleaner asks, like anyone, and service problems come first.** `MiaCleaner` (the buffers worker's `sweep`;
+- **The repair agent asks, like anyone, and service problems come first.** `MiaCleaner` (the buffers worker's `sweep`;
   rules in `mia_buffers/cleaner.py`) names what is wrong with the installation before it looks at a subject, and
   leaves alone every subject behind a finding: it never cancels or re-runs what waits on a worker that is down or
   on old code. What it does to a subject goes through the action routes as the actor `cleaner`, with the
@@ -155,7 +163,7 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `broker.toml`. A job that is refused a host notes it for its dataset; noting approves nothing, and the dataset's
   jobs, and the job of the reader autodev writes for it (its snippets issue names them), get the host only once
   the policy allows it; until then a request sends that dataset no `go` once it has
-  stopped, and the cleaner says which hosts wait. No job reaches a GitHub host, except that a person may approve
+  stopped, and the repair agent says which hosts wait. No job reaches a GitHub host, except that a person may approve
   `raw.githubusercontent.com` for one dataset at a time: the policy allowing it grants it to no other dataset's
   jobs. `policy_dir` is under home, apart from every directory a worker sandbox binds read-write, and its
   `broker.toml` is not the base policy file.

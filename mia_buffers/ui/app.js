@@ -47,7 +47,7 @@ async function viewDocs(arg) {
 // ---- health and the stream
 const HEALTH_MS = 60000; // how often the page asks whether Temporal and every worker are still there
 export function downLines(health, findings) {
-  // what is away, in words; a service's task queue carries its name. `findings`: what the cleaner's last sweep
+  // what is away, in words; a service's task queue carries its name. `findings`: what the repair agent's last sweep
   // found wrong with the installation, less what the health check says itself
   const away = Object.keys(health.queues || {}).filter(queue => !health.queues[queue]);
   return [
@@ -61,9 +61,9 @@ export function downLines(health, findings) {
 }
 async function checkHealth() {
   // so that "working" is true: these lines stay until a later check finds everything back
-  const [health, cleaner] = await Promise.all([load("/health"), load("/cleaner", true)]);
+  const [health, sweep] = await Promise.all([load("/health"), load("/cleaner", true)]);
   if (health)
-    $("down").replaceChildren(...downLines(health, cleaner?.findings).map(line => el("div", {}, el("span", {}, line))));
+    $("down").replaceChildren(...downLines(health, sweep?.findings).map(line => el("div", {}, el("span", {}, line))));
 }
 function followStream() {
   // told what changed, the page refetches it; a lost stream reconnects by itself

@@ -274,7 +274,7 @@ def test_a_round_with_no_run_is_cancelled_and_run_again(world):
         "kill_jobs",
         "resume",
     ]
-    said = [entry["body"] for entry in out["entries"] if entry["body"].startswith("**Cleaner:**")]
+    said = [entry["body"] for entry in out["entries"] if entry["body"].startswith("**Repair agent:**")]
     assert len(said) == 1 and "no open run" in said[0] and "Doing: cancel the round" in said[0]
     world.temporal.runs[number] = dict(RUN)
     world.stage("dataset", number, "matching")
@@ -452,7 +452,7 @@ def test_autodevs_failed_run_is_asked_for_again_and_the_dataset_follows_once_aut
     assert case["rule"] == "autodev's run failed" and case["state"] == "working"
     assert [step["do"] for step in case["data"]["steps"]] == ["snippets_go"] and cleaner_actions(world, number) == []
     assert "snippets:go" in world.snippets.labels(72) and len(world.snippets.comments[72]) == 2
-    assert "**Cleaner:**" in world.timeline("dataset", number)["entries"][-1]["body"]
+    assert "**Repair agent:**" in world.timeline("dataset", number)["entries"][-1]["body"]
     world.snippets.issues[72]["labels"] = [{"name": "snippets:working"}]  # autodev read the label
     world.sweep()
     (case,) = world.cases()
@@ -651,7 +651,7 @@ def test_what_no_rule_covers_is_diagnosed_and_only_the_menu_is_carried_out(world
         "cleaner/case-"
     )
     (said,) = [
-        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Cleaner:**" in entry["body"]
+        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Repair agent:**" in entry["body"]
     ]
     assert "Diagnosis (defect): the round waits on a signal that was lost" in said and "#job/cleaner/case-" in said
     world.temporal.runs.pop(number)
@@ -672,7 +672,7 @@ def test_a_diagnosis_that_proposes_nothing_says_what_a_person_must_do(world):
     (case,) = world.cases()
     assert case["state"] == "gave-up" and case["data"]["needs"] == "drop it"
     (said,) = [
-        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Cleaner:**" in entry["body"]
+        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Repair agent:**" in entry["body"]
     ]
     assert "Diagnosis (data): the dataset has no labels at all What it takes: drop it" in said  # once, in one entry
     spent = call(world.service, "GET", "/budgets")[1]["budgets"]  # the job counted 0.5
@@ -737,7 +737,7 @@ def test_a_defect_is_filed_once_in_the_repository_named_for_it(tmp_path, monkeyp
         world.csub.alive.discard(job["id"])
         world.sweep()
     (filed,) = [issue for issue in world.issues.issues.values() if "title" in issue]
-    assert filed["title"] == "cleaner: The look never fires" and "run.json has no timer" in filed["body"]
+    assert filed["title"] == "repair agent: The look never fires" and "run.json has no timer" in filed["body"]
     assert [comment["body"].split(".")[0] for comment in world.issues.comments[filed["number"]]] == ["Seen again"]
     results = [
         step["result"] for case in world.cases() for step in case["data"]["steps"] if step["do"] == "report_defect"

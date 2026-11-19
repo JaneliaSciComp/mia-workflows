@@ -141,7 +141,7 @@ class Sweep:
         try:
             await work
         except Exception as error:
-            log.warning("cleaner: %s failed: %s", what, error, exc_info=not isinstance(error, RegistryError))
+            log.warning("repair agent: %s failed: %s", what, error, exc_info=not isinstance(error, RegistryError))
             self.report["errors"].append(f"{what}: {type(error).__name__}: {error}"[:500])
 
     async def _service_findings(self) -> list[dict]:
@@ -221,7 +221,7 @@ class Sweep:
                 live = bool(statuses) and not statuses[0].terminal
                 state = statuses[0].state if statuses else "GONE"
             except Exception as error:
-                log.warning("cleaner: csub status of job %s failed: %s", job_id, error)
+                log.warning("repair agent: csub status of job %s failed: %s", job_id, error)
             submitted = _epoch(record.get("submitted_at"))
             jobs.append(
                 {"address": record["address"], "job_id": job_id, "live": live, "state": state, "submitted": submitted}
@@ -521,7 +521,7 @@ class Sweep:
             step, failure = data["plan"][0], None
             try:
                 if step["do"] in STARTS_WORK and (tried := self._remedies(case)) >= self.rules.max_remedies:
-                    raise Refused(f"the cleaner has started work on this subject {tried} times in seven days")
+                    raise Refused(f"the repair agent has started work on this subject {tried} times in seven days")
                 if not _acted(data) and step["do"] not in QUIET_STEPS and "diagnosis" not in data:
                     await self._say(case, f"{data['seen']}. Doing: {plan_words(data['plan'])}.", "start")
                 result = await self._do(case, step, timeline)
@@ -592,7 +592,7 @@ class Sweep:
         if case["kind"] not in ALL_KINDS:
             return
         marker = f"<!-- mia: cleaner {case['id']} {mark} -->"
-        body = f"**Cleaner:** {neutralize(text)}\n\n{marker}"
+        body = f"**Repair agent:** {neutralize(text)}\n\n{marker}"
         await self._ask(self.registry.append_entry, case["kind"], case["number"], body=body, marker=marker)
 
     # --- steps -------------------------------------------------------------------------------------------------
@@ -608,7 +608,7 @@ class Sweep:
                 raise Refused("this worker has no job runner")
             return await self._kill(case, step, self.activities.jobs.client)
         if do == "terminate":
-            reason = f"no worker runs this workflow type (cleaner case {case['id']})"
+            reason = f"no worker runs this workflow type (repair case {case['id']})"
             ended = await self._ask(
                 self.registry.terminate_run, step["namespace"], step["workflow_id"], step["run_id"], reason
             )
@@ -625,7 +625,7 @@ class Sweep:
             return await self._diagnose(case, timeline)
         if do == "report_defect":
             return await self._report_defect(case, step)
-        raise Refused(f"`{do}` is not a step the cleaner knows")
+        raise Refused(f"`{do}` is not a step the repair agent knows")
 
     async def _kill(self, case: dict, step: dict, cluster: Any) -> str | None:
         """End the jobs of the case's round (`kill_jobs`) or one job (`kill_job`): done only once the cluster
@@ -752,13 +752,13 @@ class Sweep:
         gh = copy.copy(self.activities.gh_issues)  # ponytail: the issue repo's client pointed at another repo
         gh.repo = repo
         marker = f"<!-- mia: defect {hashlib.sha256(step['title'].lower().encode()).hexdigest()[:12]} -->"
-        about = f"Cleaner case {case['id']} (`{case['key']}`): {case['data'].get('seen', '')}"
+        about = f"Repair case {case['id']} (`{case['key']}`): {case['data'].get('seen', '')}"
         for issue in await gh.list_issues(state="open", creator=self.activities.bot):
             if marker in (issue.get("body") or ""):
                 await gh.comment(issue["number"], f"Seen again. {neutralize(about)}")
                 return f"added to issue #{issue['number']}"
         body = f"{step['evidence']}\n\n{neutralize(about)}\n\n{marker}"
-        created = await gh.create_issue(f"cleaner: {step['title']}", body, [])
+        created = await gh.create_issue(f"repair agent: {step['title']}", body, [])
         return f"filed as issue #{created['number']}"
 
     async def _request_may_go(self, subject: dict) -> bool:
@@ -804,7 +804,7 @@ class Sweep:
         if do == "snippets_go":
             await say(
                 step["issue"],
-                "The cleaner asks autodev to try this issue again: its last run stopped before a pull request.",
+                "The repair agent asks autodev to try this issue again: its last run stopped before a pull request.",
             )
             await gh.add_labels(step["issue"], ["snippets:go"])
             return f"asked on issue #{step['issue']}"
@@ -813,7 +813,7 @@ class Sweep:
             return f"asked on pull request #{step['pr']}"
         for number in (step.get("pr"), step.get("issue")):  # close: the pull request first, which ends autodev's run
             if number is not None and (await gh.get_issue(number)).get("state") == "open":
-                await say(number, f"Closed by the cleaner: {neutralize(step['why'])}.")
+                await say(number, f"Closed by the repair agent: {neutralize(step['why'])}.")
                 await gh.update_issue(number, state="closed")
         return "closed"
 
