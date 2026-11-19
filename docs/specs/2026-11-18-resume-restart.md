@@ -1,6 +1,6 @@
 # MIA: resume or restart — Spec
 
-**Status:** v0.2 · draft 2026-11-18 · not approved, nothing built. Rests on the stage tables and action routes
+**Status:** v0.3 · approved 2026-11-19 · nothing built. Rests on the stage tables and action routes
 of the webapp-actions spec, on the round's pins (`Pins`, `BufferPins`), on the crop judge of the judge-decides
 spec and on the cleaner spec. §2 and §3 are the user's decisions of 2026-11-18; §9 lists the calls that are
 the writer's and still the user's to change. It replaces the ruling of 2026-11-14 that running a dataset again
@@ -12,7 +12,7 @@ Every pipeline here (a dataset's preparation, a preparation request, a buffer ro
 whoever runs it again chooses how, as with Nextflow's `-resume`:
 
 - **Resume** keeps every result the round already has and runs only what has no result.
-- **Restart from scratch** redoes all the processing.
+- **Restart** redoes all the processing, from scratch.
 
 Today each of the three rounds begins by wiping its state and pinning anew, so running anything again repeats
 work that had finished: a set the judge was never shown is made again to get it judged, crops a person approved
@@ -62,7 +62,7 @@ the steps Resume runs; it invalidates no result.
 | | Action | A dataset's workflow hears | Where it is accepted |
 |---|---|---|---|
 | Resume | `resume` (new) | `restart` signal, event kind `resume` | §4.3, §5, §6 |
-| Restart from scratch | `go` | `restart` signal, event kind `go` | as today |
+| Restart | `go` | `restart` signal, event kind `go` | as today |
 
 `resume` goes into each `STAGE_ACTIONS` table and through the action routes like any action: its revision, its
 key, its actor. It is a start action: from the page it carries the hosts a person approved, and a request's or
@@ -217,16 +217,20 @@ it. Nothing records that now.
 A subject's page, where its actions hold `resume`:
 
 ```
-[ Resume ]  [ Restart from scratch ]
+[ Resume ]  [ Restart ]
 ```
 
 - **Resume**: "Run what is left: every step that finished is kept, on the same pins." Primary.
-- **Restart from scratch**: today's Run again text. At `debugging` it stays **Restart now**; at `new`, **Start**.
+- **Restart**: today's Run again text, which says it is from scratch and pins anew. At `debugging` it reads
+  **Restart now**; at `new`, **Start**.
+
+The buttons carry one word each. What sets the two apart is in their tooltips, the guide and
+`docs/development.md`.
 
 The blue box of the Datasets list and of a buffer's Prepare table:
 
 ```
-3 selected   [ Resume ]  [ Restart from scratch ]  [ Create buffer ]
+3 selected   [ Resume ]  [ Restart ]  [ Create buffer ]
 ```
 
 Both file one preparation request over the selection, the second with `restart: true`; hosts are approved in
