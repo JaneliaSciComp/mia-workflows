@@ -1097,7 +1097,10 @@ def test_case_routes(tmp_path):
     # what the cleaner could not resolve is on the subject's row in Needs you
     worker(s, "PUT", "/subjects/dataset/224", {"key": "rec-a"})
     worker(s, "POST", "/timeline/dataset/224", {"stage": "blocked"})
-    worker(s, "POST", "/cases", {**opened, "state": "needs-person", "data": {"needs": "approve the host"}})
+    assert worker(s, "PUT", f"/cases/{left['id']}", {"state": "needs-person"})[0] == 422  # no such ending
+    worker(s, "POST", "/cases", {**opened, "state": "gave-up", "data": {"needs": "approve the host"}})
+    listed = [row["state"] for row in call(s, "GET", "/cases")[1]["cases"]]
+    assert listed == ["gave-up", "open"]  # a case the agent gave up on is listed whatever its age
     assert [row["cleaner"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["approve the host"]
 
 

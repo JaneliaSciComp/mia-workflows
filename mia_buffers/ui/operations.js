@@ -298,7 +298,7 @@ const CASE_STATUS = {
   "open": ["queued", "", "Found, and not started on. In report mode a case stays here."],
   "working": ["working", "", "The cleaner is part-way through its steps."],
   "waiting": ["waiting", "", "The steps are done; the cleaner is watching whether the subject moves on."],
-  "needs-person": ["needs you", "warn", "The cleaner cannot resolve it; the case says what it takes."],
+  "gave-up": ["gave up", "warn", "The cleaner could not repair it; the case says what it takes."],
   "resolved": ["resolved", "pool", "The subject moved on, or the left-over thing is gone."],
   "dropped": ["dropped", "", "Somebody acted on the subject, so the cleaner let go of it."],
 };
@@ -336,7 +336,7 @@ export function caseRows(cases) {
         evidence: step.evidence,
       })),
       next: plan.map(stepWords),
-      needs: c.state === "needs-person" ? data.needs || null : null,
+      needs: c.state === "gave-up" ? data.needs || null : null,
       note: data.note || null,
       diagnosis: found ? { cause: found.cause, text: found.diagnosis ?? String(found) } : null,
       jobs: (c.jobs || []).map(where => ({ href: "#job/" + where, name: jobName(where) })),
@@ -458,7 +458,7 @@ export async function viewCleaner() {
     card(
       "Needs you",
       "The cleaner could not resolve these. Each opens to what it takes: a decision, a correction to a record, a fix in the code.",
-      caseList(inState("needs-person"), "Nothing."),
+      caseList(inState("gave-up"), "Nothing."),
     ),
     card(
       "In work",

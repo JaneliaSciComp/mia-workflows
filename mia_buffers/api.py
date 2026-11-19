@@ -341,9 +341,13 @@ class IssueBody(_Strict):
     issue: int
 
 
-CASE_STATES = ("open", "working", "waiting", "resolved", "needs-person", "dropped")
-CASES_OPEN = ("open", "working", "waiting", "needs-person")  # what `GET /cases` lists whatever its age
-CaseState = Literal["open", "working", "waiting", "resolved", "needs-person", "dropped"]
+# a case is in work (`open`, `working`, `waiting`) or has ended: `resolved`, `dropped` (somebody acted), or
+# `gave-up` (the repair agent could not repair it; the case says what it takes). Whether a human is needed is the
+# subject's status to say, never a case's (spec overview §4).
+CASE_STATES = ("open", "working", "waiting", "resolved", "gave-up", "dropped")
+# what `GET /cases` lists whatever its age: the sweep reads what it gave up on for as long as the case stands
+CASES_OPEN = ("open", "working", "waiting", "gave-up")
+CaseState = Literal["open", "working", "waiting", "resolved", "gave-up", "dropped"]
 
 
 class CaseBody(_Strict):
@@ -1155,7 +1159,7 @@ class BufferService:
                 if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
                     views[index] = {**view, "drops": drops}
         # what the cleaner could not resolve, on the subject's row
-        for case in self.ledger.cases(("needs-person",)):
+        for case in self.ledger.cases(("gave-up",)):
             for index, view in enumerate(views):
                 if (view["kind"], view["number"]) == (case["kind"], case["number"]) and "cleaner" not in view:
                     views[index] = {**view, "cleaner": case["data"].get("needs", "")}

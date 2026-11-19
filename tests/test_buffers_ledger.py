@@ -753,3 +753,11 @@ def test_cases_are_opened_updated_and_listed_by_state_or_age(tmp_path):
     assert [case["id"] for case in ledger.cases()] == [left["id"], first["id"]]  # newest first
     assert [case["id"] for case in ledger.cases(states=("open", "working"))] == [left["id"]]
     assert [case["id"] for case in ledger.cases(states=("open",), since=0.0)] == [left["id"], first["id"]]
+
+
+def test_a_case_stored_as_needs_person_is_read_as_gave_up(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    case = ledger.open_case("dataset", 7, "rec-a", "diagnosis", "open", {})
+    ledger._db.execute("UPDATE cases SET state = 'needs-person' WHERE id = ?", (case["id"],))
+    ledger.close()
+    assert [row["state"] for row in Ledger(tmp_path / "l.sqlite").cases()] == ["gave-up"]

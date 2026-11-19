@@ -167,7 +167,7 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
             "kind": "dataset",
             "key": "rec-a",
             "rule": "no run",
-            "state": "needs-person",
+            "state": "gave-up",
             "updated": 5.0,
             "opened": 4.0,
             "data": {
@@ -195,7 +195,7 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
     stuck, job = run_js("print(caseRows(input));", {"operations.js": "caseRows"}, cases)
     # the row is short: the subject, the problem in a few words, a status and how far the cleaner got
     assert (stuck["href"], stuck["about"], stuck["problem"]) == ("#datasets/rec-a", "rec-a", "No workflow run")
-    assert (stuck["status"], stuck["progress"]) == ("needs you", "2 done, 1 to go")
+    assert (stuck["status"], stuck["progress"]) == ("gave up", "2 done, 1 to go")
     assert (job["href"], job["problem"]) == ("#job/issue-9/i9-e1/crops-1", "Left-over cluster job")
     assert (job["status"], job["progress"]) == ("queued", "1 to go")
     # the long words are the drill-down's: what the problem is, what was found, each step with its result, what is

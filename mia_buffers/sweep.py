@@ -84,6 +84,7 @@ class Sweep:
         self.working = 0  # cases in work, against `max_parallel`
         self.workers: dict = {}  # service -> {commit, at, since}
         self.present: set[tuple[str, str]] = set()  # the left-over things this pass saw: (case kind, key)
+        self.ran: set[str] = set()  # the kinds of left-over thing this pass looked for to its end
 
     async def _ask(self, call: Any, *args: Any, **fields: Any) -> Any:
         """A registry call, off the event loop (the client is synchronous)."""
@@ -120,8 +121,10 @@ class Sweep:
         by_subject = {(view["kind"], view["number"]): view for view in views}
         if SNIPPETS not in skipped:
             await self._try("snippet work", self._left_snippets(by_subject))
-        for case in [case for case in self.cases if case["state"] == "needs-person" and case["rule"] == "record gap"]:
+        for case in [case for case in self.cases if case["state"] == "gave-up" and case["rule"] == "record gap"]:
             await self._try(case["key"], self._record_changed(case, by_subject))
+        for case in [case for case in self.cases if case["state"] == "gave-up" and case["kind"] not in ALL_KINDS]:
+            await self._try(case["key"], self._gone(case))
         for case in [case for case in self.cases if case["state"] in ACTIVE]:
             await self._try(case["key"], self._advance(case, by_subject, skipped))
         return await self._done()
@@ -372,6 +375,7 @@ class Sweep:
             step = {"do": "terminate", "namespace": run["namespace"], "workflow_id": run["id"], "run_id": run["run_id"]}
             seen = f"an open run of the workflow type `{run['type']}`, which no worker registers"
             await self._open("run", None, key, "unrunnable run", {"seen": seen, "plan": [step], "steps": []})
+        self.ran.add("run")
 
     async def _left_jobs(self, view: dict) -> None:
         """Jobs still alive after their round ended (a round ended from outside kills none). Only where no job
@@ -442,12 +446,35 @@ class Sweep:
                 await self._open(
                     "snippets", None, key, "pull request of a closed issue", {"seen": seen, "plan": [step], "steps": []}
                 )
+        self.ran.add("snippets")
+
+    async def _gone(self, case: dict) -> None:
+        """A left-over thing the agent gave up on is resolved once it is gone: a job when the cluster no longer
+        runs it, a run or snippet work when a pass that looked for its kind to the end did not see it."""
+        data = case["data"]
+        if case["kind"] == "job":
+            job = next(
+                (step["job_id"] for step in [*data.get("plan", []), *data.get("steps", [])] if "job_id" in step), None
+            )
+            if job is None or self.activities.jobs is None:
+                return
+            statuses = await asyncio.to_thread(self.activities.jobs.client.status, [job])
+            gone = not statuses or statuses[0].terminal
+        else:
+            gone = case["kind"] in self.ran and (case["kind"], case["key"]) not in self.present
+        if gone:
+            await self._save(case, "resolved", "it is gone")
 
     # --- carrying cases on -------------------------------------------------------------------------------------
 
     async def _save(self, case: dict, state: str, note: str = "") -> None:
         if note:
             case["data"]["note"] = note
+        if state == "gave-up" and case["kind"] in ALL_KINDS:
+            # where the subject stands now, after the agent's last write: the result holds until it moves
+            view = await self._ask(self.registry.subject, case["kind"], case["key"])
+            if view is not None:
+                case["data"]["ended_revision"] = view["revision"]
         saved = await self._ask(self.registry.update_case, case["id"], state=state, data=case["data"])
         if state != case["state"]:
             self.report["did"].append(f"{case['key']}: {state}" + (f": {note}" if note else ""))
@@ -501,7 +528,7 @@ class Sweep:
             except Refused as refused:
                 data["steps"].append({**step, "at": self.now, "result": f"refused: {refused}"})
                 data["needs"] = f"{plan_words([step])} was refused: {refused}"
-                state = "needs-person"
+                state = "gave-up"
                 break
             except Exception as error:  # tried again next pass, like a step that is not possible yet
                 failure, result = error, None
@@ -513,8 +540,8 @@ class Sweep:
                     hours = STEP_WAIT_S // 3600
                     why = f"kept failing for {hours} h: {failure}" if failure else f"was not possible for {hours} h"
                     data["needs"] = f"{plan_words([step])} {why}"
-                    state = "needs-person"
-                if failure and state != "needs-person":
+                    state = "gave-up"
+                if failure and state != "gave-up":
                     await self._save(case, state)  # what the case did so far is kept
                     raise failure
                 break
@@ -522,7 +549,7 @@ class Sweep:
             data["plan"].pop(0)
             data.pop("waiting", None)
             if step["do"] == "needs":
-                data["needs"], state, told = step["text"], "needs-person", bool(step.get("told"))
+                data["needs"], state, told = step["text"], "gave-up", bool(step.get("told"))
                 break
             if step["do"] in ACTIONS and timeline is not None:  # the next step decides on the subject as it is now
                 timeline = await self._ask(self.registry.timeline, case["kind"], case["number"])
@@ -530,8 +557,8 @@ class Sweep:
             state = "waiting" if any(step["do"] in (*STARTS_WORK, "recheck") for step in data["steps"]) else "resolved"
             if data["steps"] and data["steps"][-1]["do"] == "wait":
                 data["revision"] = None  # the wait is over: the subject is looked at again as it stands
-        if state == "needs-person" and not told:
-            await self._say(case, f"needs a person: {data['needs']}", "needs")
+        if state == "gave-up" and not told:
+            await self._say(case, f"could not repair this: {data['needs']}", "needs")
         await self._save(case, state)
 
     async def _outcome(self, case: dict, view: dict) -> None:
@@ -553,8 +580,8 @@ class Sweep:
         data = case["data"]
         if data.get("diagnosed") or self.rules.mode != "act":
             data["needs"] = f"the remedy did not help: {seen}"
-            await self._say(case, f"needs a person: {data['needs']}", "needs")
-            return await self._save(case, "needs-person")
+            await self._say(case, f"could not repair this: {data['needs']}", "needs")
+            return await self._save(case, "gave-up")
         data["diagnosed"], data["plan"] = True, [{"do": "diagnose"}]
         data["seen"] = f"{data['seen']}. After the remedy: {seen}"
         data["round"] = data["run_id"] = None  # those were the round the remedy ended: the diagnosis reads today's
@@ -709,7 +736,7 @@ class Sweep:
         if plan:
             said += f" Doing: {plan_words(plan)}."
         if needs:
-            said += f" Needs a person: {needs[0]['text']}"
+            said += f" What it takes: {needs[0]['text']}"
         data["plan"][1:] = plan + needs  # after this step: what the diagnosis asks for replaces whatever was left
         link = f" [Its job]({job_link(self.cfg.service.url, record)})." if record else ""
         await self._say(case, said + link, f"diagnosis {len(data['steps'])}")
@@ -751,9 +778,9 @@ class Sweep:
         for view in await self._request_datasets(subject):
             if standing(view) in ("working", "waiting", "shelved") or view["stage"] == "done":
                 continue
-            stuck = [case for case in self._cases_of("dataset", view["number"]) if case["state"] == "needs-person"]
+            stuck = [case for case in self._cases_of("dataset", view["number"]) if case["state"] == "gave-up"]
             if stuck:
-                raise Refused(f"its dataset `{view['key']}` needs a person: {stuck[0]['data'].get('needs', '')}")
+                raise Refused(f"its dataset `{view['key']}` could not be repaired: {stuck[0]['data'].get('needs', '')}")
             return False
         return True
 
