@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -97,7 +97,6 @@ SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIO
 OFF_LINE = ("debugging", "failed", "blocked", "needs-human", "cancelled")
 # kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
 LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
-NEEDS_A_PERSON = ("waiting", "stopped")  # the phases `GET /needs` lists
 # Shelving (spec shelved-subjects): a person sets a subject aside with a reason. Its stage stays; its status reads
 # `shelved`, it takes `unshelve` alone, and a shelved dataset reads `shelved` to every plan and request. A subject
 # in one of these phases (no round open) also takes `shelve`; so does one whose round waits for a person's
@@ -348,6 +347,34 @@ CASE_STATES = ("open", "working", "waiting", "resolved", "gave-up", "dropped")
 # what `GET /cases` lists whatever its age: the sweep reads what it gave up on for as long as the case stands
 CASES_OPEN = ("open", "working", "waiting", "gave-up")
 CaseState = Literal["open", "working", "waiting", "resolved", "gave-up", "dropped"]
+
+
+def status_of(phase: str, shelved: bool, repair: dict | None, acting: bool) -> str:
+    """Who moves the subject next, the one word a person reads and the only one that says a human is needed
+    (spec overview §3.2): `shelved`, `in repair`, `needs human`, `done`, `not started` or `working`. `repair` is
+    the repair agent's case about the subject as it stands (`BufferService._repair_of`), `acting` whether the
+    agent carries its cases out. A case with steps left makes the subject `in repair` at any phase: a stage its
+    own step produced (`cancelled` before its resume) is part of the repair. One it gave up on needs a human
+    wherever it left the subject."""
+    if shelved:
+        return "shelved"
+    state = repair["state"] if repair else None
+    if acting and (
+        state == "working"
+        or (state == "open" and phase in ("working", "waiting", "stopped"))
+        or (state == "waiting" and phase in ("waiting", "stopped"))
+    ):
+        return "in repair"
+    if state == "gave-up":
+        return "needs human"
+    return phase if phase in ("done", "not started", "working") else "needs human"
+
+
+class Repairs(NamedTuple):
+    """What the repair agent has on the subjects, read once for many views."""
+
+    acting: bool  # its last sweep ran in `act` mode: a case in work is being carried out
+    cases: dict[tuple[str, int], dict]  # (kind, number) -> the subject's newest case in work or given up on
 
 
 class CaseBody(_Strict):
@@ -1060,17 +1087,44 @@ class BufferService:
             return None
         return {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
 
-    def _subject_view(self, row: dict, holds: dict[tuple[str, int], dict] | None = None) -> dict:
+    def _repairs(self) -> Repairs:
+        cases: dict[tuple[str, int], dict] = {}
+        for case in self.ledger.cases(CASES_OPEN):  # newest first
+            if case["number"] is not None:
+                cases.setdefault((case["kind"], case["number"]), case)
+        return Repairs((self.ledger.kv("cleaner") or {}).get("mode") == "act", cases)
+
+    @staticmethod
+    def _repair_of(row: dict, case: dict | None) -> dict | None:
+        """The repair result that holds for the subject as it stands: its newest case while that is in work, or
+        once the agent gave up on it for as long as the subject has not moved since. That is read from the
+        revision the case ended at; a case that ended with none holds until the subject is next written."""
+        if case is None:
+            return None
+        if case["state"] == "gave-up":
+            ended = case["data"].get("ended_revision")
+            holds = ended == row["revision"] if ended is not None else case["updated"] >= (row.get("updated") or 0)
+            if not holds:
+                return None
+        return {"id": case["id"], "rule": case["rule"], "state": case["state"], "needs": case["data"].get("needs")}
+
+    def _subject_view(
+        self, row: dict, holds: dict[tuple[str, int], dict] | None = None, repairs: Repairs | None = None
+    ) -> dict:
         """The row plus its name, its phase (what its round does at its stage: what a worker decides by), its
         status (what a person reads), the actions it accepts (`_rules`; sorted, for a stable page), its
         hold when it is shelved, a dataset's `hosts` (`_unapproved`), and `asked`: the action that was sent to its workflow and that the workflow has not
         answered yet. Until it does the stage is still the old one, and the page must not offer that stage's
-        buttons as if nothing was clicked. `holds`: `Ledger.shelved()`, read once by a caller with many rows."""
+        buttons as if nothing was clicked. `repair` is the repair agent's result for the subject as it stands.
+        `holds` (`Ledger.shelved()`) and `repairs` (`_repairs`) are read once by a caller with many rows."""
         hold = (self.ledger.shelved() if holds is None else holds).get((row["kind"], row["number"]))
         gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
         phase, actions = self._rules(row, hold, gaps)
         asked = self._asking(row["kind"], row["number"])
-        view = {**row, "phase": phase, "status": "shelved" if hold else phase}
+        repairs = self._repairs() if repairs is None else repairs
+        repair = self._repair_of(row, repairs.cases.get((row["kind"], row["number"])))
+        status = status_of(phase, hold is not None, repair, repairs.acting)
+        view = {**row, "phase": phase, "status": status, "repair": repair}
         view |= {"actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
         if row["kind"] == "dataset":
             view["hosts"] = self._unapproved(row["key"])
@@ -1119,7 +1173,8 @@ class BufferService:
             raise HttpError(404, f"no subjects of kind {kind!r}")
         page = self._page_of(query, SUBJECT_SORTS)
         holds = self.ledger.shelved()
-        subjects = [self._subject_view(row, holds) for row in self.ledger.find_subjects(kind=kind)]
+        repairs = self._repairs()
+        subjects = [self._subject_view(row, holds, repairs) for row in self.ledger.find_subjects(kind=kind)]
         if kind == "buffer":
             serving = self._served_versions()
             subjects = [{**view, "serving": serving.get(view["number"])} for view in subjects]
@@ -1149,7 +1204,8 @@ class BufferService:
         among them: `shelved` counts those, and `?shelved=1` lists them instead. `kind` narrows the list to
         one kind of subject; `kinds` counts every kind's share of the whole list."""
         holds = self.ledger.shelved()
-        views = [self._subject_view(row, holds) for row in self.ledger.find_subjects()]
+        repairs = self._repairs()
+        views = [self._subject_view(row, holds, repairs) for row in self.ledger.find_subjects()]
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
         for index, view in enumerate(views):
             if view["kind"] == "buffer" and "dropped" in view["actions"]:
@@ -1158,19 +1214,14 @@ class BufferService:
                 board = self.ledger.buffer_datasets(f"i{view['number']}-e{gos[-1]['id']}") if gos else []
                 if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
                     views[index] = {**view, "drops": drops}
-        # what the cleaner could not resolve, on the subject's row
-        for case in self.ledger.cases(("gave-up",)):
-            for index, view in enumerate(views):
-                if (view["kind"], view["number"]) == (case["kind"], case["number"]) and "cleaner" not in view:
-                    views[index] = {**view, "cleaner": case["data"].get("needs", "")}
         failed = []
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
-            failed.append({**action, "subject": self._subject_view(found[0], holds) if found else None})
+            failed.append({**action, "subject": self._subject_view(found[0], holds, repairs) if found else None})
         if query.get("shelved"):
             needs = [view for view in views if view["shelved"]]
         else:
-            needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+            needs = [view for view in views if view["status"] == "needs human" or view.get("drops")]
         kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
         if (kind := query.get("kind")) is not None:
             if kind not in SUBJECT_RULES:

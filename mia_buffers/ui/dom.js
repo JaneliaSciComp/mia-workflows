@@ -108,6 +108,10 @@ export const PILL_HELP = {
   "in-progress":
     "The preparation pipeline is working on it by itself: nothing here waits for a person. The stage says where it is.",
   "unprepared": "Nobody has asked for this dataset to be prepared.",
+  // who moves a subject next
+  "needs human":
+    "Nothing automatic will move it: a person has to look. The stage says why: a verdict or an approval is wanted, a step failed, or a decision is needed.",
+  "in repair": "It stopped and the repair agent is working on it. Nothing here waits for a person.",
   "cannot start":
     "The dataset's catalog record lacks what a preparation round needs; the lines below say what. No round can be started for it. It can be started once a catalog sync brings a record that has it.",
   "needs-human":

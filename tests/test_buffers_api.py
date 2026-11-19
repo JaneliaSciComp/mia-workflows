@@ -1101,7 +1101,7 @@ def test_case_routes(tmp_path):
     worker(s, "POST", "/cases", {**opened, "state": "gave-up", "data": {"needs": "approve the host"}})
     listed = [row["state"] for row in call(s, "GET", "/cases")[1]["cases"]]
     assert listed == ["gave-up", "open"]  # a case the agent gave up on is listed whatever its age
-    assert [row["cleaner"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["approve the host"]
+    assert [row["repair"]["needs"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["approve the host"]
 
 
 def test_a_case_lists_the_records_of_its_rounds_jobs_and_of_its_own(tmp_path):
@@ -1356,9 +1356,10 @@ def test_adopt_then_read_a_subject(tmp_path):
     status, row, _ = call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "stage": "review"})
     assert status == 200 and row["issue"] == 234
     status, row, _ = call(s, "GET", "/subjects/dataset/rec-a")
-    assert (status, row["status"], row["actions"]) == (
+    assert (status, row["phase"], row["status"], row["actions"]) == (
         200,
         "waiting",
+        "needs human",
         ["approve", "cancel", "go", "reject", "resume", "shelve"],
     )
     assert call(s, "GET", "/subjects/dataset/nope")[0] == 404
@@ -1382,8 +1383,8 @@ def test_needs_lists_what_waits_on_a_person(tmp_path):
     call(s, "PUT", "/subjects/prep/9", payload={"key": "prep-9", "stage": "done"})
     needs = call(s, "GET", "/needs")[1]["needs"]
     assert sorted((row["kind"], row["key"], row["status"]) for row in needs) == [
-        ("buffer", "pool", "stopped"),
-        ("dataset", "rec-a", "waiting"),
+        ("buffer", "pool", "needs human"),
+        ("dataset", "rec-a", "needs human"),
     ]
     # one kind at a time, with every kind's count for the page's toggle buttons
     call(s, "PUT", "/subjects/dataset/3", payload={"key": "rec-c", "stage": "failed"})
@@ -1742,6 +1743,67 @@ def test_only_the_actions_the_stage_accepts_are_taken(tmp_path):
     assert act(s, "/datasets/rec-a/actions", {"action": "revoke"})[0] == 409
     assert gateway.sent == [] and call(s, "GET", "/timeline/dataset/7")[1]["actions"] == []  # nothing recorded
     assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent[0][2] == "cancel"
+
+
+@pytest.mark.parametrize(
+    "phase, shelved, state, acting, status",
+    [
+        ("stopped", True, "working", True, "shelved"),
+        ("done", False, "working", True, "in repair"),  # the agent's own cancel, before its resume
+        ("stopped", False, "open", True, "in repair"),
+        ("working", False, "open", True, "in repair"),
+        ("done", False, "open", True, "done"),
+        ("stopped", False, "waiting", True, "in repair"),
+        ("working", False, "waiting", True, "working"),
+        ("stopped", False, "open", False, "needs human"),  # report mode repairs nothing
+        ("done", False, "gave-up", True, "needs human"),  # given up where the agent's own step left it
+        ("working", False, "gave-up", False, "needs human"),
+        ("done", False, None, True, "done"),
+        ("not started", False, None, True, "not started"),
+        ("working", False, None, True, "working"),
+        ("waiting", False, None, True, "needs human"),
+        ("stopped", False, None, True, "needs human"),
+    ],
+)
+def test_who_moves_a_subject_next(phase, shelved, state, acting, status):
+    from mia_buffers.api import status_of
+
+    repair = {"id": 1, "rule": "diagnosis", "state": state, "needs": None} if state else None
+    assert status_of(phase, shelved, repair, acting) == status
+
+
+def test_a_subjects_status_merges_its_stage_with_the_repair_agents_case(tmp_path):
+    """Only the status says a human is needed (spec overview §3.2, §4): a case in work makes the subject `in
+    repair` while the agent acts, and a case the agent gave up on is on the view until the subject moves."""
+    s, _ = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "blocked"})
+    view = lambda: call(s, "GET", "/subjects/dataset/rec-a")[1]  # noqa: E731
+    assert (view()["status"], view()["repair"]) == ("needs human", None)
+    opened = {"kind": "dataset", "number": 7, "key": "rec-a", "rule": "diagnosis", "data": {"seen": "it stopped"}}
+    case = worker(s, "POST", "/cases", opened)[1]
+    assert view()["status"] == "needs human"  # no sweep has said the agent acts
+    worker(s, "PUT", "/cleaner", {"mode": "report"})
+    assert view()["status"] == "needs human"
+    worker(s, "PUT", "/cleaner", {"mode": "act"})
+    assert (view()["status"], view()["repair"]["id"], view()["repair"]["state"]) == ("in repair", case["id"], "open")
+    assert [row["status"] for row in call(s, "GET", "/subjects/dataset")[1]["subjects"]] == ["in repair"]
+    data = {"needs": "approve the host", "ended_revision": view()["revision"]}
+    worker(s, "PUT", f"/cases/{case['id']}", {"state": "gave-up", "data": data})
+    assert (view()["status"], view()["repair"]["needs"]) == ("needs human", "approve the host")
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "done"})  # it moved: the case is history
+    assert (view()["status"], view()["repair"]) == ("done", None)
+
+
+def test_a_case_that_ended_before_it_recorded_a_revision_holds_until_the_subject_is_written(tmp_path):
+    s, _ = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "cancelled"})
+    opened = {"kind": "dataset", "number": 7, "key": "rec-a", "rule": "diagnosis", "state": "gave-up"}
+    worker(s, "POST", "/cases", {**opened, "data": {"needs": "look"}})
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["phase"], view["status"], view["repair"]["needs"]) == ("done", "needs human", "look")
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "done"})
+    view = call(s, "GET", "/subjects/dataset/rec-a")[1]
+    assert (view["status"], view["repair"]) == ("done", None)
 
 
 def test_a_subject_view_carries_the_phase_of_its_stage(tmp_path):
@@ -2774,7 +2836,7 @@ def test_subjects_and_needs_paged(tmp_path):
     out = call(s, "GET", "/subjects/dataset", {"limit": "2", "sort": "key"})[1]
     assert [row["key"] for row in out["subjects"]] == ["rec-a", "rec-b"] and out["total"] == 3
     assert [
-        row["key"] for row in call(s, "GET", "/subjects/dataset", {"limit": "5", "q": "stopped"})[1]["subjects"]
+        row["key"] for row in call(s, "GET", "/subjects/dataset", {"limit": "5", "q": "needs-human"})[1]["subjects"]
     ] == ["rec-c"]
     out = call(s, "GET", "/needs", {"limit": "1", "sort": "key"})[1]
     assert [row["key"] for row in out["needs"]] == ["rec-b"] and out["total"] == 2 and out["failed"] == []

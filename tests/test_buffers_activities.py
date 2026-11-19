@@ -757,7 +757,7 @@ async def test_set_stage_writes_the_subjects_stage_and_one_entry(acts):
     await acts.set_stage(7, "plan-review", state, "approve the plan")
     subject = acts.registry.timeline("buffer", 7)["subject"]
     assert (subject["key"], subject["stage"], subject["revision"]) == (SPEC_NAME, "plan-review", 2)
-    assert f"name: {SPEC_NAME}" in subject["data"]["spec"] and subject["status"] == "waiting"
+    assert f"name: {SPEC_NAME}" in subject["data"]["spec"] and subject["status"] == "needs human"
     bodies = posted(acts)
     assert len(bodies) == 1 and "`buffer:plan-review`" in bodies[0] and "approve the plan" in bodies[0]
     assert [x["name"] for x in acts.gh.issues[7]["labels"]] == ["buffer:planning"]  # the label is the mirror's

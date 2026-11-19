@@ -101,9 +101,7 @@ export function viewBuffers(id, refresh) {
           label: "status",
           cell: x => {
             const word = statusWord(x);
-            return pill(word, word === "needs you" ? "warn" : word === "waits for you" ? "pool" : "", [
-              { b: x.stage, t: " is its stage" },
-            ]);
+            return pill(word, word === "needs human" ? "warn" : "", [{ b: x.stage, t: " is its stage" }]);
           },
         },
         {

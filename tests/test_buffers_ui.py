@@ -1428,11 +1428,11 @@ def test_a_stage_opens_at_its_step() -> None:
             "strips": [["plan-review", "plan"], ["plan-review", "define"], [None, "define"], ["ready", "serve"]],
             "subjects": [
                 {"stage": "new", "status": "not started", "actions": ["edit", "go"]},
-                {"stage": "plan-review", "status": "waiting", "actions": ["approve"]},
+                {"stage": "plan-review", "status": "needs human", "actions": ["approve"]},
                 {"stage": "sourcing", "status": "working", "actions": ["cancel"]},
                 {"stage": "ready", "status": "done", "actions": ["go"]},
-                {"stage": "idle", "status": "waiting", "actions": ["keep"]},
-                {"stage": "needs-human", "status": "stopped", "actions": ["edit", "go"]},
+                {"stage": "idle", "status": "needs human", "actions": ["keep"]},
+                {"stage": "needs-human", "status": "in repair", "actions": ["edit", "go"]},
                 {"stage": "retired", "status": "done", "actions": ["edit", "go"]},
                 {"stage": "cancelled", "status": "shelved", "actions": ["unshelve"], "shelved": {"reason": "later"}},
             ],
@@ -1452,7 +1452,7 @@ def test_a_stage_opens_at_its_step() -> None:
         "done done done done done here",
     ]  # fmt: skip
     assert words == [
-        "saved, not started", "waits for you", "working", "serving", "serving", "needs you", "retired", "shelved",
+        "saved, not started", "needs human", "working", "serving", "serving", "in repair", "retired", "shelved",
     ]  # fmt: skip
     assert can == [True, False, False, False, False, True, True, False, True]  # an unsaved buffer is editable
 

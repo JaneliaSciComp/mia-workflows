@@ -35,16 +35,14 @@ export const stripOf = (stage, shown) =>
   }));
 // Whether the definition can change: an unsaved buffer (no subject), or a stage that takes `edit`.
 export const editable = subject => !subject || subject.actions.includes("edit");
-const STATUS_WORDS = {
-  waiting: "waits for you",
-  working: "working",
-  stopped: "needs you",
-  "not started": "saved, not started",
-};
 // What the Buffers list says a buffer is doing.
 export const statusWord = subject =>
   subject.shelved
     ? "shelved"
     : stepOf(subject.stage) === "serve"
       ? "serving"
-      : STATUS_WORDS[subject.status] || subject.stage;
+      : subject.status === "not started"
+        ? "saved, not started"
+        : subject.status === "done"
+          ? subject.stage
+          : subject.status;
