@@ -86,12 +86,12 @@ NO_ROUND = "there is no round in progress to cancel"
 ROUND_ENDED = "the round ended before the cancel reached it"
 CANCEL_PATIENCE = timedelta(minutes=15)  # how long a cancel waits for the round's activity in flight to answer
 NOTHING_TO_REVOKE = "nothing to revoke: this dataset has no saved crops"
-REVOKED = "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; running it again repairs it"
+REVOKED = "revoked by {actor}: the dataset row is `revoked`, {count} artifact{plural} quarantined; a Restart repairs it"
 BUSY = "busy, ignored: a round is already running. Cancel it first, or ask again once it has ended."
 NOT_REVIEW = "an approve or a reject counts only while the dataset is at `review`, for the set under review."
 DEBUG_NEXT = (
     "A debugging agent looks into this in {minutes} minutes and, if a new round can pass, runs one. Nothing is "
-    "needed from you; *Run again* skips the wait and the debugger."
+    "needed from you; *Restart now* skips the wait and the debugger."
 )
 DEBUGGED = "This round was the re-run after debugging; nothing more is tried automatically."
 LOOK_EVERY = timedelta(minutes=15)  # how often a round that waits for autodev looks at the snippets issue itself
@@ -696,7 +696,7 @@ class MiaDataDataset:
         `limits.debug_wait_min`, run the debugging agent over what the round's jobs left, and act on its outcome.
         `rerun`: its go starts a new round, whose match agent reads its advice. `blocked`, or a debugger that did
         not finish: the round stops there, with the failure and what the debugger said. A go that arrives
-        meanwhile (a person's *Run again*) ends the cycle at once: that round is what runs next."""
+        meanwhile (a person's *Restart now*) ends the cycle at once: that round is what runs next."""
         state = self.state
         assert state.round_id and state.pins  # _debuggable
         state.debugs += 1

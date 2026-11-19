@@ -732,7 +732,7 @@ class Activities:
             # only a person's click approves a host: a new round would be refused the same ones
             raise ValueError(
                 f"{record}: its jobs were refused hosts no one approved yet: {', '.join(waiting)}; "
-                "press Run again on its page and check them"
+                "press Resume on its page and check them"
             )
         pins = self._pins(round_id)
         kind = "prep" if round_id.startswith("p") else "buffer"

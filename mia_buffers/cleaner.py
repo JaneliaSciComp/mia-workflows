@@ -358,9 +358,9 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         return [{"do": "needs", "text": text}]
     if rule == "host not approved":
         hosts = HOSTS_RE.search(found["seen"])
-        waiting = ", ".join(item["subject"].get("hosts") or ())  # what Run again lists to check
+        waiting = ", ".join(item["subject"].get("hosts") or ())  # what Resume lists to check
         named = hosts.group(1).strip() if hosts else waiting or "see its page"
-        text = f"approve the hosts its jobs need ({named}): press Run again on its page and check them"
+        text = f"approve the hosts its jobs need ({named}): press Resume on its page and check them"
         return [{"do": "needs", "text": text}]
     if rule == "record gap":
         text = "its catalog record needs a decision or a correction; the round runs again once the record changes"

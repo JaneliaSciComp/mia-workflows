@@ -266,7 +266,7 @@ const RULE_HELP = {
   ],
   "host not approved": [
     "Host not approved",
-    "A job needs a host nobody has approved. Only a person approves hosts: Run again on the subject's page, and check them.",
+    "A job needs a host nobody has approved. Only a person approves hosts: Resume on the subject's page, and check them.",
   ],
   "record gap": [
     "Catalog record is incomplete",

@@ -2367,9 +2367,7 @@ async def test_revoke_after_done_ends_in_needs_human_and_lists_the_blast_radius(
         await idle(h, m, "blocked")
     assert m.of("revoke_dataset") == [("i7-e11", "alice", "77")]
     detail, extra = m.of("set_stage")[-1][1:3]
-    assert (
-        detail == "revoked by alice: the dataset row is `revoked`, 1 artifact quarantined; running it again repairs it"
-    )
+    assert detail == "revoked by alice: the dataset row is `revoked`, 1 artifact quarantined; a Restart repairs it"
     assert "art1" in extra and "i3-e4" in extra
 
 

@@ -370,9 +370,13 @@ def test_a_dataset_at_review_offers_a_restart_beside_its_verdicts() -> None:
     from mia_data.config import STAGE_ACTIONS
 
     assert "go" in STAGE_ACTIONS["review"][1]
-    assert has('action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"')
-    order = run_js("print(ACTION_ORDER);", {"actions.js": "ACTION_ORDER"})
-    assert order.index("approve") < order.index("reject") < order.index("go") < order.index("cancel")
+    order, word = run_js(
+        'print([ACTION_ORDER, actionWord({ kind: "dataset", stage: "review" }, "go")]);',
+        {"actions.js": "ACTION_ORDER, actionWord"},
+    )
+    assert word == "Restart"
+    assert order.index("approve") < order.index("reject") < order.index("resume") < order.index("go")
+    assert order.index("go") < order.index("cancel")
 
 
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
@@ -790,6 +794,42 @@ def test_a_set_that_was_sent_back_is_shown_with_its_findings_and_an_accept() -> 
     assert has("`${finding.item} [${finding.severity}]: ${finding.note}`")
 
 
+def test_a_stopped_dataset_offers_resume_first_and_restart_beside_it() -> None:
+    """spec resume-restart §10: one word on each button; what sets the two apart is in their tooltips."""
+    buttons, words, hosts = run_js(
+        """
+        const subject = { kind: "dataset", key: "rec-a", number: 7, stage: "blocked", status: "stuck", revision: 3,
+                          actions: ["go", "resume", "revoke"], asked: null };
+        const bar = actionBar(subject, () => {});
+        const buttons = walk(bar).filter(node => node.tag === "button")
+            .map(node => [textOf(node), node.attrs.class, node.attrs.title]);
+        const words = input.map(([subject, action]) => actionWord(subject, action));
+        print([buttons, words, [hostsRun(subject, "resume"), hostsRun({ ...subject, kind: "buffer" }, "resume")]]);
+        """,
+        {"actions.js": "actionBar, actionWord, hostsRun"},
+        [
+            [{"kind": "dataset", "stage": "failed"}, "resume"],
+            [{"kind": "dataset", "stage": "failed"}, "go"],
+            [{"kind": "dataset", "stage": "done"}, "go"],
+            [{"kind": "dataset", "stage": "review"}, "go"],
+            [{"kind": "dataset", "stage": "debugging"}, "go"],
+            [{"kind": "dataset", "stage": "new"}, "go"],
+        ],
+    )
+    assert [(word, style) for word, style, _ in buttons] == [
+        ("Resume", "btn primary"),
+        ("Restart", "btn"),
+        ("Revoke", "btn danger"),
+    ]
+    resume, restart = buttons[0][2], buttons[1][2]
+    assert resume.startswith("Run what is left. Every step that finished is kept") and "use Restart" in resume
+    assert restart.startswith("Start over from scratch on today's catalog, readers and harness.")
+    assert words == ["Resume", "Restart", "Restart", "Restart", "Restart now", "Start"]
+    assert hosts == [{"records": ["rec-a"]}, None]  # a resume starts jobs: it asks for the hosts they lack
+    for file in ("dom.js", "subjects.js", "operations.js"):  # what a dataset's page says of its buttons
+        assert "Run again" not in (UI_DIR / file).read_text(), file
+
+
 def test_a_reject_of_the_saved_set_asks_for_missing_hosts_like_a_start() -> None:
     """spec judge-decides §5.2: the rework's jobs need the dataset's hosts, so the reject carries their approval."""
     got = run_js(
@@ -855,7 +895,7 @@ def test_shelve_sends_its_reason_once_one_is_typed() -> None:
         """,
         {"actions.js": "actionBar"},
     )
-    assert words == ["Run again", "Revoke", "Shelve…"] and blocked == [True, False]
+    assert words == ["Restart", "Revoke", "Shelve…"] and blocked == [True, False]
     assert calls == [
         ["/datasets/rec-a/actions", "shelve", "it needs a reader of its own", False]
     ]  # the empty one: none

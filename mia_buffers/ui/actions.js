@@ -48,16 +48,23 @@ const SHELF_HELP = {
     "Set this aside with a reason. It leaves Needs you and nothing can be asked of it until someone unshelves it; a shelved dataset is also left out of every buffer plan and started by no preparation request. A round that waits for a verdict is cancelled first; otherwise its stage stays as it is.",
   unshelve: "Take this back: it is listed, planned and started again as its stage says.",
 };
+// how a dataset's Restart differs from its Resume: the first words of its tooltip at every stage
+const FROM_SCRATCH = "Start over from scratch on today's catalog, readers and harness. ";
 export const ACTION_HELP = {
   dataset: {
     ...SHELF_HELP,
+    resume:
+      "Run what is left. Every step that finished is kept (the match, the reader's pull request, the crops, the judge's verdict), and the round stays on the catalog, reader and harness versions it began with. A step that failed because of a fault in one of those fails again: use Restart.",
     go: s =>
       s.stage === "debugging"
-        ? "Run a new round now, without waiting for the debugging agent. Use it when you already know what was wrong and have fixed it."
+        ? FROM_SCRATCH +
+          "Run a new round now, without waiting for the debugging agent. Use it when you already know what was wrong and have fixed it."
         : s.stage === "review"
-          ? "Start over: the crops under review are dropped unsaved and a new round prepares the dataset again, with a judge's verdict on its crops. If a reader's pull request made these crops, its current head is tested again."
+          ? FROM_SCRATCH +
+            "The crops under review are dropped unsaved and a new round prepares the dataset again, with a judge's verdict on its crops. If a reader's pull request made these crops, its current head is tested again."
           : s.stage !== "new"
-            ? "Start a new round of the preparation workflow from the beginning. After a stop it picks up the reader's open pull request, if there is one." +
+            ? FROM_SCRATCH +
+              "A new round of the preparation workflow runs from the beginning. After a stop it picks up the reader's open pull request, if there is one." +
               (s.stage === "done"
                 ? " Until its new crops are approved the dataset is not prepared, and a new buffer plan leaves it out."
                 : "")
@@ -73,7 +80,7 @@ export const ACTION_HELP = {
         ? "Revoke the saved crops and send them back with your feedback: buffers stop drawing from the dataset, the agent fixes the reader, and new crops come back for review."
         : "Send the crops back with your feedback: the agent fixes the reader, and new crops come back for review.",
     revoke:
-      "Withdraw this dataset's saved crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Run again repairs it.",
+      "Withdraw this dataset's saved crops: its staged data is quarantined and buffers stop drawing from it. Nothing is deleted, and Restart repairs it.",
     cancel: "Stop the round in progress: its cluster jobs are killed and nothing is saved.",
     stop: "For a round that does not answer Cancel: its workflow is terminated. A cluster job already running is not killed.",
   },
@@ -104,6 +111,7 @@ export const ACTION_ORDER = [
   "approve",
   "reject",
   "keep",
+  "resume",
   "go",
   "recheck",
   "revoke",
@@ -117,6 +125,7 @@ const ACTION_WORDS = {
   approve: "Approve",
   reject: "Reject…",
   keep: "Keep",
+  resume: "Resume",
   go: "Run again",
   recheck: "Check again",
   revoke: "Revoke",
@@ -137,15 +146,15 @@ export const actionWord = (subject, action) =>
         : action === "dropped"
           ? "Files are in place" // a spec's own controls
           : action === "go" && subject.kind === "dataset" && subject.stage === "debugging"
-            ? "Run again now" // or wait: the debugger runs it again itself
-            : action === "go" && subject.kind === "dataset" && subject.stage === "review"
-              ? "Restart" // beside Approve and Reject: neither verdict, the set is dropped
-              : action === "go" && subject.stage === "new"
-                ? subject.kind === "dataset"
-                  ? subject.again
-                    ? "Start again"
-                    : "Start"
-                  : "Run"
+            ? "Restart now" // or wait: the debugger runs it again itself
+            : action === "go" && subject.stage === "new"
+              ? subject.kind === "dataset"
+                ? subject.again
+                  ? "Start again"
+                  : "Start"
+                : "Run"
+              : action === "go" && subject.kind === "dataset"
+                ? "Restart" // from scratch; Resume, where it is offered, goes on with the round that stopped
                 : ACTION_WORDS[action] || action;
 const ACTION_CONFIRM = {
   revoke: "Revoke this dataset's saved crops? Buffers that drew from it are degraded; nothing is deleted.",
@@ -349,7 +358,8 @@ export async function askHosts(run, send) {
 // what the service is asked about before this subject's action starts a run; null for the actions that start none
 export const hostsRun = (subject, action) =>
   // a reject of the saved set starts its rework's jobs, as a go starts a round's
-  (action === "go" || (action === "reject" && subject.stage === "done")) && subject.kind === "dataset"
+  (action === "go" || action === "resume" || (action === "reject" && subject.stage === "done")) &&
+  subject.kind === "dataset"
     ? { records: [subject.key] }
     : action === "go" && subject.kind === "prep"
       ? { prep: subject.number }
@@ -430,7 +440,8 @@ export function actionBar(subject, after, skip) {
         "button",
         {
           type: "button",
-          class: "btn" + (ACTION_CONFIRM[action] ? " danger" : ""),
+          // Resume is the one to press where it is offered: Restart beside it throws the round's work away
+          class: "btn" + (ACTION_CONFIRM[action] ? " danger" : action === "resume" ? " primary" : ""),
           title: actionHelp(subject, action),
           disabled: !!subject.asked,
           onclick: e => {

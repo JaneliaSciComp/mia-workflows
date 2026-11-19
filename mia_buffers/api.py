@@ -291,6 +291,7 @@ class ActionBody(_Strict):
 
     action: Literal[
         "go",
+        "resume",
         "approve",
         "reject",
         "revoke",
@@ -1027,7 +1028,7 @@ class BufferService:
             return "shelved", frozenset({"unshelve"})
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
         if gaps:
-            actions = actions - {"go"}
+            actions = actions - {"go", "resume"}
         if row["kind"] == "dataset":
             # away from `review` a verdict needs a set of its own: an approve the set that was sent back, a
             # reject the saved one (spec judge-decides §5)
@@ -1036,6 +1037,8 @@ class BufferService:
                 actions = actions - {"approve"}
             if row["stage"] == "done" and not sets.get("saved"):
                 actions = actions - {"reject"}
+            if sets.get("revoked"):  # a resume would save the revoked set again (spec resume-restart §4.3)
+                actions = actions - {"resume"}
         resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
         if resting and self._asking(row["kind"], row.get("number")) is None:
             actions = actions | {"shelve"}
@@ -1341,7 +1344,8 @@ class BufferService:
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
         actor = self._actor(headers, parsed)
-        if parsed.action == "go" and (gaps := self._gaps(record)):  # before a subject is created for it
+        runs = parsed.action in ("go", "resume")  # the actions that run a round: a go from scratch, a resume on
+        if runs and (gaps := self._gaps(record)):  # before a subject is created for it
             raise HttpError(409, f"the record cannot be run: {'; '.join(gaps)}")
         subject = self.ledger.subject("dataset", record)
         if subject is None:
@@ -1363,7 +1367,7 @@ class BufferService:
         fields = (("note", parsed.note), ("root", parsed.root), ("set", parsed.set))
         payload = {name: value for name, value in fields if value}
         # a reject of the saved set starts the rework's jobs, as a go starts a round's (spec judge-decides §5.2)
-        starts = parsed.action == "go" or (parsed.action == "reject" and subject["stage"] == "done")
+        starts = runs or (parsed.action == "reject" and subject["stage"] == "done")
         needed = (partial(self._needed, records=[record])) if starts else None
         return self._act_on(subject, parsed, actor, payload, needed)
 
@@ -1718,8 +1722,10 @@ class BufferService:
                 if not self.dispatcher.signal_running(kind, number, "recheck"):
                     raise DispatchError("no workflow is running for it")
             else:
-                # a dataset's go is its workflow's `restart`: the round starts in a new run, on today's code
-                self.dispatcher.send(kind, number, "restart" if (kind, signal) == ("dataset", "go") else signal, event)
+                # a dataset's go and its resume are its workflow's `restart`: the round runs in a new run, on
+                # today's code, and the event's kind says which of the two it is
+                restarts = kind == "dataset" and signal in ("go", "resume")
+                self.dispatcher.send(kind, number, "restart" if restarts else signal, event)
         except DispatchError as error:
             self._asked.pop((kind, number), None)  # nothing was asked of any workflow
             failed = self.ledger.settle_action(action["id"], "failed", str(error))
