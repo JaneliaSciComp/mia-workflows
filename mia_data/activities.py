@@ -152,6 +152,7 @@ LOG_BYTES = 64 << 10  # the end of a job's stdout and stderr
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
+SNIPPET_BRANCH_RE = re.compile(r"snippets/issue-(\d+)")  # the branch of the pull request autodev makes for an issue
 # the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
 NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
 MARKER_RE = re.compile(r"(?s)<!--.*?-->")
@@ -1625,6 +1626,8 @@ class Activities:
         # number (spec webapp-actions §4.1, §9)
         data_link = f"[{pins.record}]({self.page_url}/#datasets/{quote(pins.record, safe='')})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
+        # the number is this issue's own, which it gets when it is created: `adopt_pr_binding` holds the PR to it
+        naming = "Name the new snippet `<what-it-reads>-i<N>`, N being this issue's number (SPEC §1)."
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}
             names = sorted(
@@ -1644,7 +1647,7 @@ class Activities:
                 _fenced(self._clean(_text(draft.get("what_fails"), 16000))),
                 f"Read {spec_link} first. A merged snippet is never edited: add a new one that **supersedes** the "
                 f"one at fault (`supersedes: <name>` in its `snippet.yaml`, SPEC §1), and add the binding you test, "
-                f"using the new snippet, as `examples/{pins.record}.yaml`.",
+                f"using the new snippet, as `examples/{pins.record}.yaml`. {naming}",
                 reach_line,
                 "**Record** (at `{pins.record_commit}`):".replace("{pins.record_commit}", pins.record_commit),
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
@@ -1656,7 +1659,7 @@ class Activities:
             parts = [
                 marker,
                 f"For {data_link}: dataset `{pins.record}` has no snippet that reads it.",
-                f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`.",
+                f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`. {naming}",
                 reach_line,
                 f"**Record** (at `{pins.record_commit}`):",
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
@@ -1675,7 +1678,7 @@ class Activities:
     async def pr_state(self, pr: int) -> PrUpdate:
         """The PR's current head, state and merge SHA, read fresh, and whether its issue needs a human."""
         pr_data = await self.gh_snippets.get_pr(pr)
-        match = re.fullmatch(r"snippets/issue-(\d+)", pr_data["head"]["ref"])
+        match = SNIPPET_BRANCH_RE.fullmatch(pr_data["head"]["ref"])
         if not match or ((pr_data["head"].get("repo") or {}).get("full_name")) != self.gh_snippets.repo:
             raise ValueError(f"PR #{pr} is not on a snippets/issue-<K> branch of {self.gh_snippets.repo}")
         snippet_issue, merged = int(match.group(1)), bool(pr_data.get("merged"))
@@ -1747,7 +1750,9 @@ class Activities:
     @mia_permanent_errors
     async def adopt_pr_binding(self, round_id: str, pr: int, sha: str) -> dict:
         """Take the PR's example binding, `snippets/<name>/examples/<record>.yaml` at `sha` (a head or the merge
-        commit), where <name> is the one snippet directory the PR adds.
+        commit), where <name> is the one snippet directory the PR adds. While the PR is open, <name> must end in
+        `-i<K>`, K being the mia-snippets issue the PR is for (its branch is `snippets/issue-<K>`): an issue has
+        one pull request, which adds one snippet, so no two pull requests can add the same name.
 
         It is checked like the match agent's binding (this record, its hosts, the schema; it may name a snippet
         superseded since it was written, never a withdrawn one) and must use <name>,
@@ -1761,6 +1766,17 @@ class Activities:
         )
         if len(names) != 1 or not NAME_RE.fullmatch(name := names[0]):
             return {"errors": [_text(f"the PR must add exactly one snippets/<name>/ directory, not {names}", 500)]}
+        pr_data = await gh.get_pr(pr)
+        asked = SNIPPET_BRANCH_RE.fullmatch(pr_data["head"]["ref"])
+        # a merged snippet keeps the name it has: nothing can change it any more
+        if asked and not pr_data.get("merged") and not re.fullmatch(rf".+-i{asked[1]}", name):
+            return {
+                "errors": [
+                    f"the snippet is named `{name}`, but a new snippet's name ends in its issue's number, like "
+                    f"`<what-it-reads>-i{asked[1]}` (SPEC §1): rename the directory, and write the new name in "
+                    "its snippet.yaml and in every `snippet:` of its example binding"
+                ]
+            }
         if not await gh.dir_sha(f"snippets/{name}", sha):
             return {"errors": [f"snippets/{name} is not in {sha}"]}
         rel = f"snippets/{name}/examples/{pins.record}.yaml"

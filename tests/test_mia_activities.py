@@ -526,6 +526,7 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
     draft = {"draft_binding": BINDING, "what_fails": "no reader for <!-- x --> files", "tried": []}
     n = await t.a.open_snippet_issue(1, ROUND, draft)
     assert await t.a.open_snippet_issue(1, ROUND, draft) == n and len(t.snip.created) == 1
+    assert "Name the new snippet `<what-it-reads>-i<N>`, N being this issue's number" in t.snip.created[0][1]
     title, body, labels = t.snip.created[0]
     assert labels == ["snippets:go"] and title == "New snippet for tiff/zip: rec-1"
     assert (
@@ -628,22 +629,27 @@ async def test_open_snippet_issue_reuses_the_remembered_issue_in_a_new_round(tmp
     assert await t.a.open_snippet_issue(1, "i1-e101", draft, m) not in (n, m, other)  # not ours
 
 
-def _pr_binding(t, b, files=("snippets/new-snip/snippet.py", "snippets/new-snip/examples/rec-1.yaml")):
-    d = t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / "new-snip"  # the PR head's snapshot
+def _pr_binding(t, b, files=None, name="new-snip-i90", merged=False):
+    """PR 5, for mia-snippets issue 90, adds snippets/<name> with `b` as its example binding."""
+    files = files or (f"snippets/{name}/snippet.py", f"snippets/{name}/examples/rec-1.yaml")
+    d = t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / name  # the PR head's snapshot
     d.mkdir()
-    (d / "snippet.yaml").write_text("name: new-snip\n")
-    t.snip.files[("snippets/new-snip/examples/rec-1.yaml", SNIP_SHA)] = yaml.safe_dump(b).encode()
+    (d / "snippet.yaml").write_text(f"name: {name}\n")
+    t.snip.files[(f"snippets/{name}/examples/rec-1.yaml", SNIP_SHA)] = yaml.safe_dump(b).encode()
 
     async def pr_files(n):
         return list(files)
 
+    async def get_pr(n):
+        return {"number": n, "head": {"ref": "snippets/issue-90", "sha": SNIP_SHA}, "merged": merged}
+
     async def dir_sha(path, ref):
-        return "tree1" if (path, ref) == ("snippets/new-snip", SNIP_SHA) else None
+        return "tree1" if (path, ref) == (f"snippets/{name}", SNIP_SHA) else None
 
-    t.snip.pr_files, t.snip.dir_sha = pr_files, dir_sha
+    t.snip.pr_files, t.snip.dir_sha, t.snip.get_pr = pr_files, dir_sha, get_pr
 
 
-NEW = {**BINDING, "snippets_commit": "f" * 40, "raw": [{**BINDING["raw"][0], "snippet": "new-snip"}]}
+NEW = {**BINDING, "snippets_commit": "f" * 40, "raw": [{**BINDING["raw"][0], "snippet": "new-snip-i90"}]}
 
 
 async def test_adopt_pr_binding_pins_it_to_the_sha(tmp_path):
@@ -652,7 +658,7 @@ async def test_adopt_pr_binding_pins_it_to_the_sha(tmp_path):
     _pr_binding(t, NEW)
     r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
     p = Path(r["path"])
-    assert r["errors"] == [] and r["name"] == "new-snip" and p.name == f"binding-pr-{SNIP_SHA[:7]}.yaml"
+    assert r["errors"] == [] and r["name"] == "new-snip-i90" and p.name == f"binding-pr-{SNIP_SHA[:7]}.yaml"
     assert yaml.safe_load(p.read_text()) == {**NEW, "snippets_commit": SNIP_SHA}
     assert r["hash"] == hashlib.sha256(p.read_bytes()).hexdigest()
 
@@ -693,17 +699,39 @@ async def test_adopt_pr_binding_takes_an_example_that_names_a_snippet_superseded
     [
         ({**NEW, "record": "rec-2"}, None, "rec-2"),
         ({**NEW, "raw": [{**NEW["raw"][0], "urls": ["https://evil.example.com/a.tif"]}]}, None, "evil.example.com"),
-        (BINDING, None, "new-snip"),  # the example doesn't use the PR's snippet
-        (NEW, ["snippets/new-snip/a.py", "snippets/other/b.py"], "exactly one"),
+        (BINDING, None, "new-snip-i90"),  # the example doesn't use the PR's snippet
+        (NEW, ["snippets/new-snip-i90/a.py", "snippets/other/b.py"], "exactly one"),
     ],
 )
 async def test_adopt_pr_binding_rejects(tmp_path, b, files, why):
     t = _setup(tmp_path)
     await t.a.admit(1, "99")
-    _pr_binding(t, b, *([files] if files else []))
+    _pr_binding(t, b, files)
     r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
     assert "path" not in r and why in " ".join(r["errors"])
     assert not list((t.cfg.paths.state_dir / "rounds" / ROUND).glob("binding-*"))
+
+
+@pytest.mark.parametrize("name", ["tiff-zip-member-3", "tiff-zip-member-i9", "tiff-zip-member-i900", "i90"])
+async def test_adopt_pr_binding_wants_the_snippet_named_after_its_issue(tmp_path, name):
+    """mia-snippets#91 added `tiff-zip-member-3`, the next number when it was written; main got another snippet
+    of that name a day later, and the approved pull request could not merge. A name that ends in the issue's
+    number is one no other pull request can add. Another issue's number, or the number alone, is not it."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    _pr_binding(t, {**NEW, "raw": [{**NEW["raw"][0], "snippet": name}]}, name=name)
+    (error,) = (await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA))["errors"]
+    assert f"named `{name}`" in error and "`<what-it-reads>-i90`" in error and "rename the directory" in error
+
+
+async def test_adopt_pr_binding_takes_a_merged_snippet_under_the_name_it_has(tmp_path):
+    """The merge commit's binding is adopted after the merge: a snippet merged under a counted name keeps it."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    counted = {**NEW, "raw": [{**NEW["raw"][0], "snippet": "tiff-zip-member-3"}]}
+    _pr_binding(t, counted, name="tiff-zip-member-3", merged=True)
+    r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
+    assert r["errors"] == [] and r["name"] == "tiff-zip-member-3"
 
 
 async def test_comment_returns_its_url_once(tmp_path):

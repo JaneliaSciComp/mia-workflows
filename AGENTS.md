@@ -89,6 +89,11 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   pull request. An agent
   job Claude Code itself cut off (a lapsed login, an API error) is run once more by autodev before it stops.
   A new wait on something outside the round gets the same: a look and a limit.
+- **A new snippet is named after its issue.** `<what-it-reads>-i<K>`, K being the mia-snippets issue its pull
+  request is for: one issue has one pull request, which adds one snippet, so no two pull requests can add the
+  same name and a snippet PR cannot conflict with main. `adopt_pr_binding` fails an open PR's head whose
+  snippet is named otherwise, and the developer renames it; a merged snippet keeps the name it has. Nothing
+  reads a name for more than identity: lineage is `supersedes`.
 - **A person outranks the judge, and a verdict names its set.** An active crop judge approves a set or sends it
   back to the developer (`judge.crops.max_reworks` times since a person last acted); neither is final. The set
   that was sent back (`DatasetState.held`) and the saved one (`saved`) outlive their round: an approve of the
