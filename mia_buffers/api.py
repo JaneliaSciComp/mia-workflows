@@ -91,18 +91,18 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 # a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers;
 # an iterator of bytes is streamed chunk by chunk until its reader leaves (`GET /stream`)
 Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
-# kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
+# kind of subject -> its stage table: stage -> (phase, the actions it accepts) (spec webapp-actions §5.1)
 SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
 # where a round can go from any step: not steps of a lifecycle themselves
 OFF_LINE = ("debugging", "failed", "blocked", "needs-human", "cancelled")
 # kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
 LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
-NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
+NEEDS_A_PERSON = ("waiting", "stopped")  # the phases `GET /needs` lists
 # Shelving (spec shelved-subjects): a person sets a subject aside with a reason. Its stage stays; its status reads
 # `shelved`, it takes `unshelve` alone, and a shelved dataset reads `shelved` to every plan and request. A subject
-# with one of these status words (no round open) also takes `shelve`; so does one whose round waits for a person's
+# in one of these phases (no round open) also takes `shelve`; so does one whose round waits for a person's
 # verdict (`waiting`, and its stage takes `cancel`), and that shelve cancels the round first.
-SHELVABLE = ("not started", "stuck", "done")
+SHELVABLE = ("not started", "stopped", "done")
 HOLD_ACTIONS = ("shelve", "unshelve")  # carried out by this service: the subject's workflow hears of neither
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
@@ -1020,13 +1020,13 @@ class BufferService:
     # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
 
     def _rules(self, row: dict, hold: dict | None, gaps: list[str]) -> tuple[str, frozenset[str]]:
-        """A subject's status word and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
+        """A subject's phase and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
         dataset whose record cannot be run (`gaps`: no Start until a synced catalog holds one that can), with
         `shelve` while no round is working and none was just asked for (a round that waits for a verdict is
-        cancelled by the shelve, `_hold`). A shelved subject (`hold`) is `shelved` and takes `unshelve` alone."""
+        cancelled by the shelve, `_hold`). A shelved subject (`hold`) keeps its phase and takes `unshelve` alone."""
+        phase, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
         if hold is not None:
-            return "shelved", frozenset({"unshelve"})
-        status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
+            return phase, frozenset({"unshelve"})
         if gaps:
             actions = actions - {"go", "resume"}
         if row["kind"] == "dataset":
@@ -1041,10 +1041,10 @@ class BufferService:
             # revoked, or the dataset's row does, which also holds for a round that carries no such mark
             if sets.get("revoked") or (self.ledger.dataset(row["key"]) or {}).get("state") == "revoked":
                 actions = actions - {"resume"}
-        resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
+        resting = phase in SHELVABLE or (phase == "waiting" and "cancel" in actions)
         if resting and self._asking(row["kind"], row.get("number")) is None:
             actions = actions | {"shelve"}
-        return status, actions
+        return phase, actions
 
     def _asking(self, kind: str, number: int | None) -> dict | None:
         """The action that was sent to the subject's workflow and that the workflow has not answered yet, while
@@ -1057,15 +1057,17 @@ class BufferService:
         return {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
 
     def _subject_view(self, row: dict, holds: dict[tuple[str, int], dict] | None = None) -> dict:
-        """The row plus its name, its status word, the actions it accepts (`_rules`; sorted, for a stable page), its
+        """The row plus its name, its phase (what its round does at its stage: what a worker decides by), its
+        status (what a person reads), the actions it accepts (`_rules`; sorted, for a stable page), its
         hold when it is shelved, a dataset's `hosts` (`_unapproved`), and `asked`: the action that was sent to its workflow and that the workflow has not
         answered yet. Until it does the stage is still the old one, and the page must not offer that stage's
         buttons as if nothing was clicked. `holds`: `Ledger.shelved()`, read once by a caller with many rows."""
         hold = (self.ledger.shelved() if holds is None else holds).get((row["kind"], row["number"]))
         gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
-        status, actions = self._rules(row, hold, gaps)
+        phase, actions = self._rules(row, hold, gaps)
         asked = self._asking(row["kind"], row["number"])
-        view = {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
+        view = {**row, "phase": phase, "status": "shelved" if hold else phase}
+        view |= {"actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
         if row["kind"] == "dataset":
             view["hosts"] = self._unapproved(row["key"])
         view["name"] = (row.get("data") or {}).get("name") or row["key"]  # a buffer's name is not its key
@@ -1587,10 +1589,13 @@ class BufferService:
         kind, key, stage = subject["kind"], subject["key"], subject["stage"]
         number = subject.get("number")  # none yet for a buffer spec that its first go creates
         hold = self.ledger.shelved().get((kind, number)) if number is not None else None
-        status, accepted = self._rules(subject, hold, self._gaps(key) if kind == "dataset" else [])
+        phase, accepted = self._rules(subject, hold, self._gaps(key) if kind == "dataset" else [])
         if parsed.action not in accepted:
             takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
-            raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
+            standing = "shelved" if hold else phase
+            raise HttpError(
+                409, f"{kind} {key!r} is at `{stage}` ({standing}): it takes {takes}, not `{parsed.action}`"
+            )
         if parsed.action in ("approve", "reject") and parsed.revision is None:
             raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
         if parsed.revision is not None and parsed.revision != subject["revision"]:

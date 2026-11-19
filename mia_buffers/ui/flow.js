@@ -155,7 +155,7 @@ function notes(subject, entries, run, actions, redraw) {
   const said = gist(entries.at(-1)?.body);
   if (said.text) parts.push(el("div", { class: "latest" }, when(entries.at(-1).at), " · ", ...mdInline(said.text)));
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
-  if (subject.status === "working" && run && run.status !== "RUNNING")
+  if (subject.phase === "working" && run && run.status !== "RUNNING")
     parts.push(
       el(
         "div",

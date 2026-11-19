@@ -53,7 +53,7 @@ PREP_HUMAN_LABELS = {
     "go": ("0e8a16", "Prepare the datasets this request names, each from scratch"),
     "resume": ("0e8a16", "Prepare the datasets this request names: each runs what it has left"),
 }
-# stage -> (status word, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
+# stage -> (phase, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
 # A round in progress (`working`) accepts `cancel`, what feeds it (`dropped`) and the force stop; a new go, a
 # revoke or a retire waits until it has ended or been cancelled. `ready` takes `dropped` too: a dataset that
 # waited for its files at the approve keeps its place and joins when they land. The workflow stays the code that
@@ -70,7 +70,7 @@ STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "ready": ("done", frozenset({"go", "revoke", "retire", "dropped", "stop"})),
     "idle": ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"})),
     "retired": ("done", frozenset({"edit", "go"})),
-    "needs-human": ("stuck", frozenset({"edit", "go"})),
+    "needs-human": ("stopped", frozenset({"edit", "go"})),
     "cancelled": ("done", frozenset({"edit", "go"})),
 }
 CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")  # the buffer stages `cancel` ends a round at
@@ -79,7 +79,7 @@ PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "requested": ("working", frozenset({"cancel", "stop"})),
     # go: every dataset of the request starts over; resume: each runs what it has left (spec resume-restart §5)
     "done": ("done", frozenset({"go", "resume"})),
-    "needs-human": ("stuck", frozenset({"go", "resume", "recheck"})),  # recheck: look at its datasets again
+    "needs-human": ("stopped", frozenset({"go", "resume", "recheck"})),  # recheck: look at its datasets again
     "cancelled": ("done", frozenset({"go", "resume"})),
 }
 # What a round is doing at each stage it works or waits at: the sentence of the stage's start entry when the round

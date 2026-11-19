@@ -53,6 +53,7 @@ from mia_data.status import render_jobs, render_links, render_result, stage_entr
 
 from .api import BufferConfig
 from .assume import VOXEL_NM
+from .cleaner import standing
 from .config import (
     HUMAN_LABELS,
     PREP_HUMAN_LABELS,
@@ -729,10 +730,10 @@ class Activities:
                 "run it again from its page so mia-data saves both"
             )
             return DatasetIssue(number, stage, False, note, folder), False
-        if subject and subject["status"] == "working":  # a round that is running is left to it
+        if subject and standing(subject) == "working":  # a round that is running is left to it
             return DatasetIssue(number, stage, False, folder=folder), False
         resumes = not again and subject is not None and "resume" in subject["actions"]
-        if subject and subject["status"] == "stuck" and (waiting := subject.get("hosts")):
+        if subject and standing(subject) == "stopped" and (waiting := subject.get("hosts")):
             # only a person's click approves a host: a new round would be refused the same ones
             raise ValueError(
                 f"{record}: its jobs were refused hosts no one approved yet: {', '.join(waiting)}; "

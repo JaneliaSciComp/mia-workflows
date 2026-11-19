@@ -59,9 +59,11 @@ HUMAN_LABELS = {  # the actions a person takes
         "Revoke this dataset's saved crops: buffers that drew from it are degraded, nothing is deleted",
     ),
 }
-# `shelved` is no stage's word: buffer-api gives it to a subject a person has shelved, whatever its stage
-STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done", "shelved")
-# stage -> (status word, the actions it accepts); "working" means a round is in progress, and a round in progress
+# what a round does at a stage: none has run, one is in progress, one is open and waits for a person's answer,
+# none is open short of the lifecycle's end, the end (spec overview §3.1). A worker decides by it; the status a
+# person reads is buffer-api's, from the phase, the subject's hold and the repair agent's case about it.
+PHASES = ("not started", "working", "waiting", "stopped", "done")
+# stage -> (phase, the actions it accepts); "working" means a round is in progress, and a round in progress
 # accepts only `cancel` (spec webapp-actions §5.1). `debugging` is between two rounds, so it also takes the `go`
 # that runs the next one: the debugger's own, or a person's who does not want to wait for it. A verdict is also
 # taken away from `review` when it names a set of its own (spec judge-decides §5): an `approve` of the set that
@@ -80,9 +82,9 @@ STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "merging": ("working", frozenset({"cancel", "stop"})),
     "debugging": ("working", frozenset({"approve", "go", "cancel", "stop"})),
     "done": ("done", frozenset({"go", "reject", "revoke"})),
-    "failed": ("stuck", frozenset({"approve", "go", "resume", "revoke"})),
-    "blocked": ("stuck", frozenset({"approve", "go", "resume", "revoke"})),
-    "needs-human": ("stuck", frozenset({"approve", "go", "resume", "revoke"})),
+    "failed": ("stopped", frozenset({"approve", "go", "resume", "revoke"})),
+    "blocked": ("stopped", frozenset({"approve", "go", "resume", "revoke"})),
+    "needs-human": ("stopped", frozenset({"approve", "go", "resume", "revoke"})),
     "cancelled": ("done", frozenset({"approve", "go", "resume", "revoke"})),
 }
 

@@ -1379,7 +1379,7 @@ def test_needs_lists_what_waits_on_a_person(tmp_path):
     call(s, "PUT", "/subjects/prep/9", payload={"key": "prep-9", "stage": "done"})
     needs = call(s, "GET", "/needs")[1]["needs"]
     assert sorted((row["kind"], row["key"], row["status"]) for row in needs) == [
-        ("buffer", "pool", "stuck"),
+        ("buffer", "pool", "stopped"),
         ("dataset", "rec-a", "waiting"),
     ]
     # one kind at a time, with every kind's count for the page's toggle buttons
@@ -1741,6 +1741,14 @@ def test_only_the_actions_the_stage_accepts_are_taken(tmp_path):
     assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent[0][2] == "cancel"
 
 
+def test_a_subject_view_carries_the_phase_of_its_stage(tmp_path):
+    s, _ = _acting(tmp_path)
+    for number, (key, stage) in enumerate({"rec-a": "review", "rec-b": "blocked", "rec-c": "testing"}.items()):
+        worker(s, "PUT", f"/subjects/dataset/{number + 7}", {"key": key, "stage": stage})
+    phases = [call(s, "GET", f"/subjects/dataset/{key}")[1]["phase"] for key in ("rec-a", "rec-b", "rec-c")]
+    assert phases == ["waiting", "stopped", "working"]
+
+
 def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(tmp_path):
     """Shelving is a person's decision beside the stage (spec shelved-subjects): no workflow hears of it, the
     stage stays, and the dataset reads `shelved` to whatever asks which datasets are prepared."""
@@ -1761,6 +1769,7 @@ def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(
     assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "again", "key": "k"})[1]["id"] == action["id"]
     view = call(s, "GET", "/subjects/dataset/rec-a")[1]
     assert (view["stage"], view["status"], view["actions"]) == ("failed", "shelved", ["unshelve"])
+    assert view["phase"] == "stopped"  # the hold changes what is asked of it, not where its round stands
     assert view["shelved"]["reason"] == "the masks @need work" and view["shelved"]["by"] == "page"
     entries = call(s, "GET", "/timeline/dataset/7")[1]["entries"]
     assert len(entries) == 1 and entries[0]["body"].startswith(
@@ -1784,7 +1793,7 @@ def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(
 
     assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202
     view = call(s, "GET", "/subjects/dataset/rec-a")[1]
-    assert (view["status"], view["actions"], view["shelved"]) == ("stuck", ["go", "resume", "revoke", "shelve"], None)
+    assert (view["phase"], view["actions"], view["shelved"]) == ("stopped", ["go", "resume", "revoke", "shelve"], None)
     assert [row["key"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["rec-a"]
     assert call(s, "GET", "/datasets/rec-a")[1]["state"] == "prepared"
     assert [e["body"].split("\n")[0] for e in call(s, "GET", "/timeline/dataset/7")[1]["entries"]] == [
@@ -2761,9 +2770,9 @@ def test_subjects_and_needs_paged(tmp_path):
     assert len(whole["subjects"]) == 3 and "total" not in whole
     out = call(s, "GET", "/subjects/dataset", {"limit": "2", "sort": "key"})[1]
     assert [row["key"] for row in out["subjects"]] == ["rec-a", "rec-b"] and out["total"] == 3
-    assert [row["key"] for row in call(s, "GET", "/subjects/dataset", {"limit": "5", "q": "stuck"})[1]["subjects"]] == [
-        "rec-c"
-    ]
+    assert [
+        row["key"] for row in call(s, "GET", "/subjects/dataset", {"limit": "5", "q": "stopped"})[1]["subjects"]
+    ] == ["rec-c"]
     out = call(s, "GET", "/needs", {"limit": "1", "sort": "key"})[1]
     assert [row["key"] for row in out["needs"]] == ["rec-b"] and out["total"] == 2 and out["failed"] == []
     assert "total" not in call(s, "GET", "/needs")[1]

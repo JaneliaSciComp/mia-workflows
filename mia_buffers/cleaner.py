@@ -207,18 +207,24 @@ def last_person(actions: list[dict]) -> float | None:
     return max(times, default=None)
 
 
+def standing(view: dict) -> str:
+    """Where a subject stands, for a decision about it: `shelved` when a person set it aside, else the phase of
+    its stage. No decision reads the status a person is shown (spec overview §3.1)."""
+    return "shelved" if view.get("shelved") else view["phase"]
+
+
 def sighting(item: dict, cfg: CleanerCfg, now: float) -> dict | None:
     """Whether the subject is stuck, and how: {what: quiet | stopped, rule, seen}; None when it is not. `item`
     is the subject's evidence: {subject, entries, actions, run, jobs, party}. A rule of None is for the
     diagnosis."""
     subject, entries = item["subject"], item.get("entries") or []
-    status, stage = subject["status"], subject["stage"]
+    status, stage = standing(subject), subject["stage"]
     if status == "working":
         since = max((_at(entry) for entry in entries), default=subject.get("updated") or now)
         if now - since < cfg.quiet_minutes * 60:
             return None
         return _quiet(item, f"at `{stage}` with no write for {_age(now - since)}")
-    if status == "stuck":
+    if status == "stopped":
         stop = stop_entry(entries, stage)
         since = _at(stop) if stop else subject.get("updated") or now
         if now - since < cfg.stopped_minutes * 60:
@@ -300,12 +306,12 @@ def leftover_reason(view: dict | None, labels: set[str], newer: bool, leftover_d
         return None
     if newer:
         return "its dataset has opened a newer snippets issue"
-    if view["status"] == "shelved":
+    if view.get("shelved"):
         return "its dataset is shelved"
     if view["stage"] == "done":
         return "its dataset is prepared through another reader"
     rested = now - (view.get("updated") or now)
-    if view["status"] in ("stuck", "done") and rested >= leftover_days * 86400:
+    if view["phase"] in ("stopped", "done") and rested >= leftover_days * 86400:
         return f"its dataset has rested at `{view['stage']}` for {rested / 86400:.0f} days"
     return None
 

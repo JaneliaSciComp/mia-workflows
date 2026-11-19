@@ -289,7 +289,7 @@ async function viewBuffer(root, id, refresh) {
           meta.lines?.buffer.slice(1),
           stageOf(evs[0]),
           evs.map(stageOf),
-          spec?.status === "working" && spec.stage === stageOf(evs[0]),
+          spec?.phase === "working" && spec.stage === stageOf(evs[0]),
         ),
       ),
       retired

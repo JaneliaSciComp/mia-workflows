@@ -43,6 +43,7 @@ from .cleaner import (
     plan_words,
     service_findings,
     sighting,
+    standing,
 )
 from .diagnose import diagnose_job, parse_outcome, reduce_outcome, workspace_of, write_evidence
 
@@ -166,9 +167,9 @@ class Sweep:
         """Whether the subject is worth its evidence: working or stuck for long enough, and not looked at
         already as it stands (a case of its revision exists)."""
         age = self.now - (view.get("updated") or self.now)
-        if view["status"] == "working":
+        if standing(view) == "working":
             old = age >= self.rules.quiet_minutes * 60
-        elif view["status"] == "stuck":
+        elif standing(view) == "stopped":
             old = age >= self.rules.stopped_minutes * 60
         else:
             return False
@@ -189,10 +190,10 @@ class Sweep:
         kind, number = view["kind"], view["number"]
         item = {"subject": timeline["subject"], "entries": timeline["entries"], "actions": timeline["actions"]}
         item["round"] = next((entry["round"] for entry in reversed(item["entries"]) if entry.get("round")), None)
-        if view["status"] == "working":
+        if standing(view) == "working":
             item["run"] = await self._run(kind, number)
             item["jobs"] = await self._jobs(number, item["round"])
-        if view["status"] == "working" or kind in ("prep", "dataset"):
+        if standing(view) == "working" or kind in ("prep", "dataset"):
             item["party"] = await self._party(item, skipped)
         queue = self.cfg.datasets_pipeline.task_queue if kind == "dataset" else self.cfg.task_queue
         item |= {"worker": self.workers.get(queue), "retry_hours": self.rules.retry_hours}
@@ -228,7 +229,7 @@ class Sweep:
         """Who the working subject waits for, and whether they are at work: autodev for a dataset whose round
         waits on a snippet, its datasets for a request. None when it waits for nobody."""
         subject = item["subject"]
-        if subject["kind"] == "dataset" and (subject["stage"] in DEVELOP_STAGES or subject["status"] == "stuck"):
+        if subject["kind"] == "dataset" and (subject["stage"] in DEVELOP_STAGES or standing(subject) == "stopped"):
             issue = await self._snippet_issue(item)
             if issue is None:
                 return None
@@ -238,9 +239,9 @@ class Sweep:
         if subject["kind"] == "prep":
             datasets = await self._request_datasets(subject)
             return {
-                "working": not datasets or any(view["status"] in ("working", "waiting") for view in datasets),
+                "working": not datasets or any(standing(view) in ("working", "waiting") for view in datasets),
                 "settled": bool(datasets)
-                and all(view["status"] == "shelved" or view["stage"] == "done" for view in datasets),
+                and all(standing(view) == "shelved" or view["stage"] == "done" for view in datasets),
             }
         return None
 
@@ -378,7 +379,7 @@ class Sweep:
         that was cancelled or retired. A round at a person's turn and a serving buffer still run jobs."""
         ended = self.now - (view.get("updated") or self.now)
         over = {
-            "dataset": view["status"] == "stuck" or view["stage"] in ("cancelled", "done"),
+            "dataset": standing(view) == "stopped" or view["stage"] in ("cancelled", "done"),
             "buffer": view["stage"] in ("cancelled", "retired"),
         }
         if not over.get(view["kind"]) or not ROUND_ENDED_S <= ended <= RECENT_S:
@@ -468,7 +469,7 @@ class Sweep:
             return  # what is wrong with the installation comes first: nothing is concluded about its subjects
         if case["state"] == "waiting":
             return await self._outcome(case, view)
-        moved = view["revision"] != data.get("revision") or view["status"] not in ("working", "stuck")
+        moved = view["revision"] != data.get("revision") or standing(view) not in ("working", "stopped")
         if moved and not _acted(data):  # once the case acted, the changes are its own
             return await self._save(case, "resolved", "it moved on by itself")
         if not acting:
@@ -542,9 +543,9 @@ class Sweep:
             if self.now - went["at"] > STEP_WAIT_S:
                 await self._not_helped(case, f"nothing changed in {STEP_WAIT_S // 3600} h")
             return
-        if view["status"] == "stuck":
+        if standing(view) == "stopped":
             return await self._not_helped(case, f"stopped again at `{view['stage']}`")
-        if view["status"] != "working":
+        if standing(view) != "working":
             await self._save(case, "resolved", f"now at `{view['stage']}`")
 
     async def _not_helped(self, case: dict, seen: str) -> None:
@@ -748,7 +749,7 @@ class Sweep:
         if spec.select is not None or not spec.records:
             raise Refused("it selects its datasets: a resume would run the rounds of whatever it selects")
         for view in await self._request_datasets(subject):
-            if view["status"] in ("working", "waiting", "shelved") or view["stage"] == "done":
+            if standing(view) in ("working", "waiting", "shelved") or view["stage"] == "done":
                 continue
             stuck = [case for case in self._cases_of("dataset", view["number"]) if case["state"] == "needs-person"]
             if stuck:

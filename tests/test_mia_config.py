@@ -107,11 +107,11 @@ def test_judge_section_loads(tmp_path):
 
 
 def test_every_dataset_stage_has_a_rule():
-    from mia_data.config import HUMAN_LABELS, STAGE_ACTIONS, STAGES, STATUS_WORDS
+    from mia_data.config import HUMAN_LABELS, PHASES, STAGE_ACTIONS, STAGES
 
     assert set(STAGE_ACTIONS) == set(STAGES)
     for status, actions in STAGE_ACTIONS.values():
-        assert status in STATUS_WORDS and actions <= {*HUMAN_LABELS, "cancel", "stop"}
+        assert status in PHASES and actions <= {*HUMAN_LABELS, "cancel", "stop"}
     # a verdict, a restart that drops the set under review, or a resume that keeps it
     assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "go", "resume", "cancel"}))
     # a resume goes on with a round that stopped or waits for its verdict, and with no other
@@ -132,7 +132,7 @@ def test_every_dataset_stage_has_a_rule():
     assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"approve", "go", "resume", "revoke"}))
     assert STAGE_ACTIONS["done"] == ("done", frozenset({"go", "reject", "revoke"}))
     for stage in ("failed", "blocked", "needs-human"):
-        assert STAGE_ACTIONS[stage] == ("stuck", frozenset({"approve", "go", "resume", "revoke"}))
+        assert STAGE_ACTIONS[stage] == ("stopped", frozenset({"approve", "go", "resume", "revoke"}))
 
 
 def test_a_datasets_state_is_what_a_person_reads_and_the_stage_decides_it():

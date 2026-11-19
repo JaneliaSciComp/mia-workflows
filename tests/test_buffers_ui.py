@@ -1432,7 +1432,7 @@ def test_a_stage_opens_at_its_step() -> None:
                 {"stage": "sourcing", "status": "working", "actions": ["cancel"]},
                 {"stage": "ready", "status": "done", "actions": ["go"]},
                 {"stage": "idle", "status": "waiting", "actions": ["keep"]},
-                {"stage": "needs-human", "status": "stuck", "actions": ["edit", "go"]},
+                {"stage": "needs-human", "status": "stopped", "actions": ["edit", "go"]},
                 {"stage": "retired", "status": "done", "actions": ["edit", "go"]},
                 {"stage": "cancelled", "status": "shelved", "actions": ["unshelve"], "shelved": {"reason": "later"}},
             ],

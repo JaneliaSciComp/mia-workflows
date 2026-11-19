@@ -38,7 +38,7 @@ export const editable = subject => !subject || subject.actions.includes("edit");
 const STATUS_WORDS = {
   waiting: "waits for you",
   working: "working",
-  stuck: "needs you",
+  stopped: "needs you",
   "not started": "saved, not started",
 };
 // What the Buffers list says a buffer is doing.

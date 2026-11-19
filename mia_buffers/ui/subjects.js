@@ -183,7 +183,7 @@ export async function viewSubject(kind, key, refresh) {
     S.meta.lines?.[kind],
     subject.stage,
     [...entries].reverse().map(e => e.stage),
-    subject.status === "working",
+    subject.phase === "working",
   );
   const more = subjectLinks(subject, entries),
     row = links || (more.length ? el("div", { class: "links" }) : null);
@@ -219,7 +219,7 @@ export async function viewSubject(kind, key, refresh) {
       ),
     );
   // "working" must be true: a round the registry calls in progress whose workflow is not running is said so
-  if (subject.status === "working" && run && run.status !== "RUNNING")
+  if (subject.phase === "working" && run && run.status !== "RUNNING")
     parts.push(
       el(
         "div",
