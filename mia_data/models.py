@@ -201,19 +201,34 @@ def resume_step(state: DatasetState, judge_on: bool) -> str:
     condition here (§8).
 
     `restart`: the round was never admitted and has nothing to keep. `follow`: it follows a reader's snippets
-    issue, and acts on that as it is now. `save`: its set is approved and not saved. `judge`: its set passed and
-    the crop judge (`judge_on`) never looked. `review`: its set waits for a verdict. `crops`: it has a binding
-    and no passing set. `match`: it has no binding."""
+    issue, and acts on that as it is now. `saved`: its approved set is the saved one already, so nothing is left
+    (a set that was saved and then revoked reads so too, whatever marks the revoke). `save`: its set is approved
+    and not saved. `judge`: its set passed and the crop judge (`judge_on`) never looked. `review`: its set waits
+    for a verdict. `crops`: it has a binding and no passing set. `match`: it has no binding."""
     if state.pins is None:
         return "restart"
-    if state.snippet_issue:
+    if state.snippet_issue and not merge_taken(state):
         return "follow"
     last = state.tests[-1] if state.tests else None
     if last and last.ok:
         if last.approved_at:
-            return "save"
+            saved = state.saved is not None and state.saved.set_id == set_id(state.round_id, last)
+            return "saved" if saved else "save"
         return "judge" if judge_on and not last.evidence else "review"
     return "crops" if state.binding else "match"
+
+
+def merge_taken(state: DatasetState) -> bool:
+    """Whether the round has taken its reader's merge: it follows no pull request any more, its pins name the
+    merge commit, and its sets are its own, as a matched binding's are. Read from what the merge leaves on the
+    state: no `pr`, and a set made at a commit that is not the round's (a pull request's head).
+
+    # ponytail: a merge taken with no head ever tested leaves no such set and reads as not taken; the resumed
+    # round then waits on its closed issue and stops, and a Restart runs it. A `merged` field on the state
+    # when that is seen.
+    """
+    pins = state.pins
+    return state.pr is None and pins is not None and any(test.sha != pins.snippets_commit for test in state.tests)
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:

@@ -1659,6 +1659,16 @@ def test_a_dataset_whose_saved_crops_were_revoked_takes_a_go_and_no_resume(tmp_p
     assert act(s, "/datasets/rec-a/actions", {"action": "resume", "key": "click-2"})[0] == 409
 
 
+def test_a_dataset_whose_row_says_revoked_takes_no_resume_whatever_its_round_says(tmp_path):
+    """A round from before a revoke was marked on its sets: the registry row is what says it was revoked."""
+    s, gateway = _acting(tmp_path)
+    _dataset_at(s, "blocked", sets={"review": None, "held": None, "saved": {"set": "i1-e1:t", "approved_by": "a"}})
+    assert worker(s, "PUT", "/datasets/rec-a", {"state": "revoked", "data_stage": "blocked", "folder": "f"})[0] == 200
+    actions = call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"]
+    assert "go" in actions and "resume" not in actions
+    assert act(s, "/datasets/rec-a/actions", {"action": "resume", "key": "click-2"})[0] == 409
+
+
 def test_a_dataset_whose_record_cannot_be_run_takes_neither_go_nor_resume(tmp_path):
     s, gateway = _acting(tmp_path)
     _dataset_at(s, "blocked")

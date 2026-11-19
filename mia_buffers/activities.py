@@ -959,21 +959,22 @@ class Activities:
     @activity.defn(name="prep_cancel")
     @mia_permanent_errors
     async def prep_cancel(self, issue: int, records: list[str]) -> list[str]:
-        """A request was cancelled: cancel the dataset rounds it started and no others. A record counts when its
-        dataset is still in a round and that round's `go` was sent by this request (`prep:<issue>`); a dataset
-        somebody else started, or one that has settled, is left alone. Returns the records cancelled."""
+        """A request was cancelled: cancel the dataset rounds it runs and no others. A record counts when its
+        dataset is still in a round and what last ran that round, a `go` or a `resume`, was sent by this request
+        (`prep:<issue>`); a dataset somebody else started or resumed, or one that has settled, is left alone.
+        Returns the records cancelled."""
         registry, actor, cancelled = self.registry, f"prep:{int(issue)}", []
         for record in records:
             subject = await asyncio.to_thread(registry.subject, "dataset", record)
             if subject is None or "cancel" not in subject["actions"]:
                 continue
             found = await asyncio.to_thread(registry.timeline, "dataset", subject["number"])
-            # the debugger and the cleaner run a round again for whoever asked for the one before: their go is
+            # the debugger and the cleaner run a round again for whoever asked for the one before: theirs is
             # not looked at
             gos = [
                 a
                 for a in (found or {}).get("actions", [])
-                if a["action"] == "go" and a["state"] == "sent" and a["actor"] not in RERUNNERS
+                if a["action"] in ("go", "resume") and a["state"] == "sent" and a["actor"] not in RERUNNERS
             ]
             if not gos or gos[-1]["actor"] != actor:
                 continue

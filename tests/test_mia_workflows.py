@@ -23,6 +23,7 @@ from mia_data.activities import Activities
 from mia_data.models import (
     AssessmentWritten,
     AutodevLook,
+    CropSet,
     DatasetState,
     DebugResult,
     GalleryResult,
@@ -862,6 +863,9 @@ async def test_a_restart_at_review_of_a_pr_heads_set_tests_that_head_again(env):
 # --- resume (spec resume-restart §4): the round is kept, the first step with no result runs --------------------
 
 
+HEAD = "9" * 40  # a pull request's head: any commit that is not the round's own (`SHA`)
+
+
 def resumed(eid="12", actor="alice"):
     """A `resume` as buffer-api sends it: the `restart` signal with an event of that kind."""
     return ev("resume", eid, actor=actor)
@@ -1107,6 +1111,16 @@ async def test_a_resume_while_the_judge_looks_is_refused_and_the_judges_verdict_
         (DatasetState(7, pins=PINS, binding="/s/b.yaml", tests=[Test(SHA, "t", True, approved_at="x")]), True, "save"),
         (DatasetState(7, pins=PINS, snippet_issue=100, tests=[Test(SHA, "t", True)]), True, "follow"),
         (DatasetState(7, pins=PINS, snippet_issue=100), True, "follow"),
+        # a round that took its merge follows no pull request any more: its set is its own
+        (
+            DatasetState(7, pins=PINS, snippet_issue=100, tests=[Test(HEAD, "h", True), Test(SHA, "t", True)]),
+            True,
+            "judge",
+        ),
+        (DatasetState(7, pins=PINS, snippet_issue=100, tests=[Test(HEAD, "h", True, approved_at="x")]), True, "save"),
+        # a set sent back before any pull request: every set is at the round's own commit, and it follows
+        (DatasetState(7, pins=PINS, snippet_issue=100, tests=[Test(SHA, "t", True, evidence="/w/j")]), True, "follow"),
+        (DatasetState(7, pins=PINS, snippet_issue=100, pr=5, tests=[Test(HEAD, "h", True)]), True, "follow"),
     ],
 )
 def test_resume_step_is_the_first_step_with_no_result(state, judge_on, step):
@@ -1817,6 +1831,13 @@ async def test_resume_of_a_closed_pull_request_matches_again(env):
         await idle(h, m, "developing")
         st = await h.query(MiaDataDataset.status)
     assert m.stages[-3:] == ["blocked", "matching", "developing"] and m.of("admit") == [("11",)]
+    # the issue the round opened is closed first: left open, the round's next ask would find it again, and
+    # autodev has finished with it
+    closed, second_match = (
+        m.names().index("close_snippet_issue"),
+        len(m.names()) - 1 - m.names()[::-1].index("prepare_match"),
+    )
+    assert closed < second_match and m.of("close_snippet_issue")[0][:2] == (100, 5)
     assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "match"]
     assert m.of("submit")[-1][0].endswith("-match-2") and m.of("open_snippet_issue") == [("i7-e11", None)] * 2
     assert (st.pr, st.binding, st.round_id) == (None, None, "i7-e11")
@@ -1870,6 +1891,83 @@ async def test_a_round_that_never_stopped_leaves_the_merge_commits_own_set_to_a_
         await wake(h, m, head(H1, "merged", MC))
         await idle(h, m, "review")
     assert [a[1] for a in m.of("submit")].count("judge") == 1 and not m.of("publish_crops")
+
+
+# --- what the whole-branch review found: states the mocks above do not reach by themselves -----------------------
+
+
+async def test_resume_of_a_round_whose_crops_are_saved_already_is_refused(env):
+    """A dataset revoked before the `revoked` field existed carries no mark of it: its approved set is the saved
+    one, and saving it again would undo the revoke with no new verdict."""
+    done = Test(SHA, f"i7-e11-{SHA[:12]}", True, "2026-01-01T00:00:00+00:00", approved_at="x", approved_by="alice")
+    state = DatasetState(7, round_id="i7-e11", seed="1", stage="blocked", pins=PINS, binding="/s/binding-1.yaml")
+    state.tests, state.published = [done], True
+    state.saved = CropSet(f"i7-e11:{done.test_id}", "i7-e11", done, PINS, "/s/binding-1.yaml", "bh")
+    assert resume_step(state, True) == "saved"
+    m = Mocks()
+    async with started(env, m, first=resumed(), signal="restart", state=state) as h:
+        await until(lambda: m.of("refuse_label"))
+        st = await h.query(MiaDataDataset.status)
+    ((label, reason, eid),) = m.of("refuse_label")
+    assert (label, eid) == ("data:resume", "12") and "saved already" in reason and "Restart" in reason
+    assert not m.of("publish_crops") and not m.of("submit") and not m.stages and st.saved == state.saved
+
+
+async def test_resume_judges_a_merge_commits_own_set_that_waits_at_review(env):
+    """The round took the merge and follows no pull request any more (spec §9, call 7): the set is the round's
+    own, as a matched binding's is."""
+    m = Mocks(outcome="needs_snippet", trees={H1: "T1", MC: "T2"}, crop_judge="active", judge_result=GRANTED)
+    async with started(env, m) as h:
+        await merge_commits_own_set(h, m)
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "review")
+        m.look = AutodevLook(None, False, True, "")  # the issue is closed, and no open pull request is found
+        await h.signal(MiaDataDataset.restart, resumed())
+        await idle(h, m, "done")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages[-3:] == ["testing", "review", "done"] and not m.of("ask_autodev")
+    assert [a[1] for a in m.of("submit")].count("judge") == 2 and st.tests[-1].approved_by == "judge"
+    assert [(a[0], a[2]) for a in m.of("publish_crops")] == [(f"/w/i7-e11/crop-{MC}-1", MC)]
+
+
+async def test_resume_after_a_merge_whose_save_failed_saves_the_approved_crops_under_the_merge_commit(env):
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"}, publish_error="the dataset folder is another record's")
+    async with started(env, m) as h:
+        await to_review(h, m)
+        await approve_review(h, m)
+        await idle(h, m, "merging")
+        await wake(h, m, head(H1, "merged", MC))
+        await until(lambda: m.stages[-1] in ("failed", "blocked"))
+        await idle(h, m, m.stages[-1])
+        jobs, m.publish_error = len(m.of("submit")), None
+        m.look = AutodevLook(None, False, True, "")
+        await h.signal(MiaDataDataset.restart, resumed("13"))
+        await idle(h, m, "done")
+    assert len(m.of("submit")) == jobs and not m.of("ask_autodev") and "developing" not in m.stages[-2:]
+    assert [(a[0], a[2]) for a in m.of("publish_crops")] == [(f"/w/i7-e11/crop-{H1}-1", MC)] * 2
+
+
+async def test_a_resumed_round_starts_its_wait_for_autodev_afresh(env):
+    """What queued up and what was counted while the round rested is not the resumed round's: a pull request
+    update from before the resume, and the quiet time that ended the round."""
+    m = Mocks(outcome="needs_snippet")
+    async with started(env, m) as h:
+        await to_blocked_after_the_approve(h, m)
+        await h.signal(MiaDataDataset.pr_update, head("0" * 40))  # the poller, while the dataset rests
+        await h.signal(MiaDataDataset.restart, resumed("13"))
+        await until(lambda: m.stages.count("developing") == 2)
+        await idle(h, m, "developing")
+        st = await h.query(MiaDataDataset.status)
+    assert m.stages[-2:] == ["blocked", "developing"] and st.pending == []
+    quiet = DatasetState(7, pins=PINS, snippet_issue=100, waiting_since="2020-01-01T00:00:00+00:00")
+    quiet.round_id, quiet.seed, quiet.stage = "i7-e11", "1", "blocked"
+    m = Mocks(look=AutodevLook(None, True, False, ""))
+    async with started(env, m, first=resumed(), signal="restart", state=quiet) as h:
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        await until(lambda: len(m.of("autodev_look")) == 2)
+        await idle(h, m, "developing")  # not `blocked: nothing from autodev`
+        assert (await h.query(MiaDataDataset.status)).waiting_since > "2026"
 
 
 class PollGH(FakeGH):

@@ -1037,7 +1037,9 @@ class BufferService:
                 actions = actions - {"approve"}
             if row["stage"] == "done" and not sets.get("saved"):
                 actions = actions - {"reject"}
-            if sets.get("revoked"):  # a resume would save the revoked set again (spec resume-restart §4.3)
+            # a resume would save the revoked set again (spec resume-restart §4.3): the round says it was
+            # revoked, or the dataset's row does, which also holds for a round that carries no such mark
+            if sets.get("revoked") or (self.ledger.dataset(row["key"]) or {}).get("state") == "revoked":
                 actions = actions - {"resume"}
         resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
         if resting and self._asking(row["kind"], row.get("number")) is None:

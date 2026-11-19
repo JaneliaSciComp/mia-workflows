@@ -1,9 +1,10 @@
 # MIA: resume or restart — Spec
 
-**Status:** v0.4 · approved 2026-11-19 · §2 to §5 and §10 built on the branch `resume` (plan:
+**Status:** v0.4 · v0.3 approved 2026-11-19; what v0.4 adds (§4.2 line 2, §9 calls 10 to 14) is the
+writer's and the user's to change · §2 to §5 and §10 built on the branch `resume` (plan:
 `docs/plans/2026-11-19-resume-restart.md`), not merged; §6 (buffer rounds) not built. Rests on the stage
-tables and action routes of the webapp-actions spec, on the round's pins (`Pins`, `BufferPins`), on the crop judge of the judge-decides
-spec and on the cleaner spec. §2 and §3 are the user's decisions of 2026-11-18; §9 lists the calls that are
+tables and action routes of the webapp-actions spec, on the round's pins (`Pins`, `BufferPins`), on the crop
+judge of the judge-decides spec and on the cleaner spec. §2 and §3 are the user's decisions of 2026-11-18; §9 lists the calls that are
 the writer's and still the user's to change. It replaces the ruling of 2026-11-14 that running a dataset again
 is always from scratch.
 
@@ -219,6 +220,12 @@ it. Nothing records that now.
     waiting for a person and looks again when it is prepared.
 12. **The cleaner sends a request no `go`**: after §5 a request's later `go` starts every dataset it names
     over. A `go` in a stored or proposed plan for a request is carried out as a `resume`.
+13. **A round whose approved set is the saved one takes no resume**, whatever marks a revoke: nothing is
+    left to run, and saving the set again is what a resume after a revoke must never do. buffer-api also
+    withholds `resume` from a dataset whose registry row says `revoked`.
+14. **A round that took its merge is resumed as a matched round is** (its set is its own): the merge
+    commit's set is judged or waits for a verdict, and an approved head's set whose save failed is saved
+    under the merge commit. The round looks for no pull request then.
 
 ## 10. The page
 

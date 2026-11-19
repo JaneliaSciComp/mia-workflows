@@ -491,6 +491,19 @@ async def test_kill_job_kills_by_id(acts):
     assert killed == ["4242"]
 
 
+async def test_prep_cancel_counts_a_round_the_request_resumed_as_its_own(acts, gateway):
+    """A request that resumes sends `resume`: the round runs for it, and is charged to it, from then on."""
+    await acts.plan(7, ROUND, await admitted(acts))
+    for record, starter in ((U937, "page"), (BCSS, "prep:8")):
+        number = acts.registry.send_action(f"/datasets/{record}/actions", "go", actor=starter)["number"]
+        acts.registry.append_entry("dataset", number, stage="failed")
+    mine = acts.registry.send_action(f"/datasets/{U937}/actions", "resume", actor="prep:8", root="o/buffers#8")
+    theirs = acts.registry.send_action(f"/datasets/{BCSS}/actions", "resume", actor="page")
+    for action in (mine, theirs):
+        acts.registry.append_entry("dataset", action["number"], stage="testing")
+    assert await acts.prep_cancel(8, [U937, BCSS]) == [U937]  # the round a person resumed is theirs now
+
+
 async def test_prep_cancel_cancels_only_the_dataset_rounds_this_request_started(acts, gateway):
     await acts.plan(7, ROUND, await admitted(acts))  # syncs the catalog
     mine = acts.registry.send_action(f"/datasets/{U937}/actions", "go", actor="prep:8", root="o/buffers#8")

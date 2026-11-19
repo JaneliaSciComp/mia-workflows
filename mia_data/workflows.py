@@ -63,6 +63,10 @@ with workflow.unsafe.imports_passed_through():
 GO, APPROVE, REJECT, REVOKE = "data:go", "data:approve", "data:reject", "data:revoke"
 RESUME = "data:resume"
 NO_RESUME_REVOKED = "its saved crops were revoked, and a resume would save them again: Restart repairs it"
+NO_RESUME_SAVED = (
+    "this round's crops are saved already, so nothing is left to run; if they were revoked, a resume would save "
+    "them again: Restart repairs it"
+)
 JUDGE_LOOKS = "the crop judge is looking at these crops: its verdict decides"
 # what a resumed round asks of autodev on a pull request it had stopped on
 RESUME_REVISE = (
@@ -1224,6 +1228,9 @@ class MiaDataDataset:
             state.reworks = 0  # ... and the crop judge may send its sets back anew
         self.limits = limits = await self._act("limits", result_type=RoundLimits)
         step = resume_step(state, limits.crop_judge != "off")
+        if step == "saved":
+            await self._refuse(RESUME, NO_RESUME_SAVED, event)
+            return True
         marker = f"resume {state.round_id} {event.event_id}" if state.round_id else f"resume {event.event_id}"
         said = f"Resumed by {event.actor}: {RESUMES[step]}"
         if step == "restart":
@@ -1238,6 +1245,9 @@ class MiaDataDataset:
             raise RoundFailed(PAUSED, blocked=True)
         root = await self._act("resume_root", state.issue, event.event_id, result_type=str)
         state.pins, state.attempt, self.resumed = dataclasses.replace(state.pins, root=root), state.attempt + 1, True
+        # what queued up and what was counted while the round rested is not this attempt's: a pull request
+        # update is read anew, and the quiet time that waits for autodev starts over
+        state.pending, state.waiting_since = [], None
         await self._act("comment", state.issue, said, marker)
         if step == "follow":
             await self._resume_follow(event)
@@ -1245,8 +1255,8 @@ class MiaDataDataset:
             await self._match(None, None, False)
         elif step == "crops":
             await self._set_for_review(())
-        elif step == "save":
-            await self._publish_set()
+        elif step == "save":  # under the round's snippets commit: the merge commit, for a head's set that merged
+            await self._publish_set(state.tests[-1], state.pins.snippets_commit)
         else:  # a passing set with no verdict: the judge looks if it never did, then a person may
             if state.stage != "review":
                 await self._stage("review")
@@ -1912,7 +1922,10 @@ class MiaDataDataset:
         if pr.state == "merged":
             return await self._merged(pr)
         if pr.state == "closed":
-            state.snippet_issue = state.pr = state.binding = state.binding_hash = state.snippet_name = None
+            # the issue is closed with it: left open, the round's next ask would find it again (it carries the
+            # round's marker), and autodev has finished with it
+            await self._close_issue("its pull request was closed without merging; the round asks anew", pr.pr)
+            state.pr = state.binding = state.binding_hash = state.snippet_name = None
             self._found(f"The {where} was closed without merging: the round looks for a reader again.")
             return await self._match(None, None, False)
         if pr.needs_human:
