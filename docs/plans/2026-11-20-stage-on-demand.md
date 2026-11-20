@@ -7,62 +7,56 @@
 and no quota charge for the record's size upstream.
 
 **Architecture:** `harness stage` stops fetching every binding file before it reads, so its readers decide what
-to transfer, as in a crop job. `MiaBuffer` decides once per round, at admission, whether the round is on
-demand; such a round has no fetch phase and runs its stage job online. `check_quota` looks only at what the
-raw cache holds now.
+to transfer, as in a crop job. `MiaBuffer` loses its fetch phase outright and runs the stage job online behind
+a quota wait that looks only at what the raw cache holds. The raw row is written by the stage and by the scan
+of the roots, and the stage job's reservation is settled after its report is read.
 
-**Tech Stack:** Python, Temporal (`workflow.patched`, replay fixtures), pytest, the page's ES modules.
+**Tech Stack:** Python, Temporal (replay fixtures), pytest, the page's ES modules.
 
-**Spec:** `docs/specs/2026-11-20-stage-on-demand.md` (v0.2, approved 2026-11-20).
+**Spec:** `docs/specs/2026-11-20-stage-on-demand.md` (v0.3).
 
 ## Global Constraints
 
-- Two repositories. Tasks 1, 3 and 4 are in mia-workflows, in the worktree `.claude/worktrees/stage-on-demand`
-  (branch `stage-on-demand`). Task 2 is in mia-snippets: a new worktree and branch `stage-on-demand` cut from
-  `origin/main` of the developer checkout (which is behind origin; do not build on its `main`).
-- Run only the tests that cover a change, never the full suite, until the last step of Task 4.
-- Activity result dataclasses in `mia_buffers/models.py` are wire format: add fields with defaults, never
-  rename or remove (`QuotaCheck.expected`, `FetchResult`, `RawStatus` stay).
-- A round begun before the change replays as recorded: `buffer_history*.json` fixtures already in
-  `tests/fixtures/buffers/` are not re-recorded and must keep passing.
-- The fetch job spec, the fetch activities, `limits.fetch_*` and `limits.parallel_fetch` stay (spec §5.5): a
-  round admitted before the change still uses them.
+- **No backward compatibility** (the user's decision, 2026-11-20): no `workflow.patched` for this change, no
+  second path, no kept wire fields. What the fetch phase needed is deleted; the buffer replay fixtures are
+  recorded again. Patches and fields that belong to other changes are left alone.
+- Two repositories. Tasks 1 and 3 to 5 are in mia-workflows, in the worktree
+  `.claude/worktrees/stage-on-demand` (branch `stage-on-demand`). Task 2 is in mia-snippets: a new worktree
+  and branch `stage-on-demand` cut from `origin/main` of the developer checkout (its `main` is behind).
+- Run only the tests that cover a change, never the full suite, until the last step of Task 5.
 - No real paths or hostnames in tracked files: the check in AGENTS.md comes back empty.
 - Comments and docs say what the code does, never what it replaced.
 - Commit each task when its tests pass; stage explicit paths; never push.
 
 ## Review Focus
 
-1. **A round in flight at the deploy.** It pinned a harness that still prefetches, so it must keep its fetch
-   phase to the end, across replays and continue-as-new. Test in Task 3 (`on_demand` False runs the fetch).
-2. **A reader that cannot use ranges.** The file comes whole into the raw cache and the raw row's bytes count
-   toward the quota. Test in Task 2 (whole file in the cache) and Task 3 (`_record_assets` runs after an
-   online stage, already covered by the servable assertions).
-3. **A record whose files a person dropped.** Offline, read-only cache, and `RAW_GONE` on a rebuild when the
-   files left. Tests in Task 3.
-4. **A stage over its byte cap.** The dataset fails with the harness's message naming the url and the cap; no
-   retry, no fetch. Test in Task 3.
-5. **A raw row left with `wanted` by an earlier block** (the incident's row holds 3.07 TB). The keeper must
-   not evict toward it. Test in Task 1.
+1. **Two jobs pass the quota check together.** The cache goes over by what each takes whole; the next dataset
+   to reach a stage slot is checked again and waits. Test in Task 4 (the second check).
+2. **A stage that dies with no report.** Dataset failed, reservation closed with 0, raw row brought up to date
+   by the scan. Tests in Tasks 3 and 4.
+3. **A whole-file fallback that fails part way.** No cache entry; the failed stage's raw row is `ready` with
+   the bytes on disk. Tests in Tasks 2 and 3.
+4. **Raw rows left `partial` or `fetching`.** The scan makes them `ready`, so the keeper can take them. Test
+   in Task 3.
+5. **A hand-dropped record.** Offline, read-only, no quota wait, and `RAW_GONE` on a rebuild once its files
+   left. Tests in Task 4.
 
 ---
 
 ### Task 1: The quota looks at the cache, not at the record (mia-workflows)
 
-Deployable on its own: after a buffers worker restart the incident's round leaves `blocked` and the keeper
-stops evicting toward a 3 TB demand.
-
 **Files:**
 - Modify: `mia_buffers/activities.py` (`check_quota`, about line 1310; the keeper's `plan_evictions` call,
-  about line 1797)
-- Modify: `mia_buffers/keeper.py` (delete `demand`; delete `plan_evictions`' `demand_bytes` parameter and its
-  use)
+  about line 1797; `OVER_QUOTA` wording if it speaks of a fetch)
+- Modify: `mia_buffers/keeper.py` (delete `demand` and `plan_evictions`' `demand_bytes`)
+- Modify: `mia_buffers/models.py` (`QuotaCheck`: `ok`, `over_by`; `expected` goes)
 - Test: `tests/test_buffers_activities.py` (`test_check_quota`, line 952), `tests/test_buffers_keeper.py`
 
 **Interfaces:**
-- Produces: `check_quota(round_id, record) -> QuotaCheck` with `ok` False only while the raw cache's total is
-  over `quota.raw_bytes`; `over_by = total - limit`; `expected` always 0; no `wanted`/`blocked_at` written.
-  `plan_evictions(assets, *, quota_bytes, headroom_bytes, hold_s, now, in_round, kind, quarantine_s=0)`.
+- Produces: `check_quota(round_id: str, record: str) -> QuotaCheck`, `QuotaCheck(ok: bool, over_by: int = 0)`;
+  `ok` False only while the raw cache's registry total is over `quota.raw_bytes`, `over_by = total - limit`;
+  nothing written on the record's row. `plan_evictions(assets, *, quota_bytes, headroom_bytes, hold_s, now,
+  in_round, kind, quarantine_s=0)`.
 
 - [ ] **Step 1: Rewrite the quota test and add the incident's**
 
@@ -88,50 +82,47 @@ async def test_a_record_far_larger_upstream_than_the_quota_is_not_blocked(acts, 
 Keep the existing case that a `RegistryError` propagates. Use the fixtures the current test uses for the
 quota, the rows and the plan row; `raw_row` is whatever the file already uses to read a raw asset row.
 
-- [ ] **Step 2: Run them, expect FAIL** — `pixi run pytest tests/test_buffers_activities.py -k "check_quota or larger_upstream" -q`
-- [ ] **Step 3: Change `check_quota`** to `over_by = int(listing["bytes"]) - limit`, return
-  `QuotaCheck(over_by <= 0, max(over_by, 0))`, drop the `_row` read, the own-row arithmetic and the
+- [ ] **Step 2: Run, expect FAIL** — `pixi run pytest tests/test_buffers_activities.py -k "check_quota or larger_upstream" -q`
+- [ ] **Step 3: Change `check_quota`** to `over_by = int(listing["bytes"]) - limit` and
+  `QuotaCheck(over_by <= 0, max(over_by, 0))`; drop the `_row` read, the own-row arithmetic and the
   `mark_asset` call. Docstring: whether the raw cache is within `quota.raw_bytes` (0 is no limit); a
   RegistryError propagates.
-- [ ] **Step 4: Keeper test** — in `tests/test_buffers_keeper.py` delete the `demand` assertions and import,
-  and add:
+- [ ] **Step 4: Keeper test** — delete the `demand` assertions and import in `tests/test_buffers_keeper.py`
+  and add, shaped on the eviction test at line 42:
 
 ```python
-def test_a_row_marked_wanted_by_an_earlier_block_asks_for_nothing():
-    rows = [...]  # as the file's eviction test builds them, one row with data {"wanted": 3e12, "blocked_at": now}
+def test_a_row_marked_wanted_asks_the_keeper_for_nothing():
+    rows = [...]  # one row carries data {"wanted": 3e12, "blocked_at": now}
     picked = plan_evictions(rows, quota_bytes=100, headroom_bytes=10, **rules)
-    assert live_bytes(rows) - live_bytes(picked) <= 90  # down to the quota minus the headroom
-    assert len(picked) < len([row for row in rows if is_free(row)])  # and no further
+    assert live_bytes(rows) - live_bytes(picked) <= 90          # down to the quota minus the headroom
+    assert len(picked) < len(free_assets(rows, **rules))        # and no further
 ```
 
-Shape it on the test at line 42; the point is that the evictions stop at quota minus headroom.
-
-- [ ] **Step 5: Delete `demand` and `demand_bytes`** from `keeper.py` and the keeper's call in
-  `activities.py`. `plan_evictions` evicts until under `quota_bytes - headroom_bytes`.
-- [ ] **Step 6: Run** `pixi run pytest tests/test_buffers_activities.py tests/test_buffers_keeper.py -q` and
-  `pixi run pytest tests/test_buffers_workflows.py -k "blocked or quota" -q` — PASS (the workflow tests mock
-  `check_quota`, so they are untouched).
+- [ ] **Step 5: Delete `demand` and `demand_bytes`**; `plan_evictions` evicts until under
+  `quota_bytes - headroom_bytes`.
+- [ ] **Step 6: Run** `pixi run pytest tests/test_buffers_activities.py tests/test_buffers_keeper.py -q` — PASS.
 - [ ] **Step 7: Commit** — `mia-buffers quota: a record waits only while the raw cache is over its quota`
 
 ### Task 2: `harness stage` reads on demand (mia-snippets)
 
 **Files:**
 - Modify: `harness/src/mia_harness/stage.py` (delete `prefetch` and its call in `stage`; `stage`'s docstring)
-- Modify: `SPEC.md` and `harness/` docs wherever they say a stage fetches every source first (grep `prefetch`,
-  "Fetch every source")
-- Test: `harness/tests/test_stage.py`
+- Modify: `SPEC.md` and the harness docs wherever they say a stage fetches every source first (grep
+  `prefetch`, "Fetch every source")
+- Test: `harness/tests/test_stage.py`, `harness/tests/rangeserver.py` if it lacks the switches below
 
 **Interfaces:**
-- Produces: `stage(...)` unchanged in signature. Its report's `bytes_fetched` is what the readers transferred.
+- Produces: `stage(...)` unchanged in signature. Its report's `bytes_fetched` is what the readers
+  transferred, in a failed report too.
 
-- [ ] **Step 1: Write the tests** (in `test_stage.py`, with the file's `io`, `make_io`, `server` fixtures)
+- [ ] **Step 1: Write the tests** (with the file's `io`, `make_io`, `server` fixtures)
 
 ```python
 def test_stage_transfers_what_its_crops_touch_and_keeps_no_whole_file(tmp_path, io, server):
     # a source of at least 8 MiB read by range (BLOCK is 1 MiB) and a plan of one crop
     rep = stage(...)
     assert rep["ok"] and 0 < rep["bytes_fetched"] < source_bytes
-    assert io._local(url) is None   # no whole file in the dataset cache
+    assert io._local(url) is None                      # no whole file in the dataset cache
 
 
 def test_stage_takes_a_file_whole_where_ranges_will_not_do(tmp_path, io, server):
@@ -141,20 +132,27 @@ def test_stage_takes_a_file_whole_where_ranges_will_not_do(tmp_path, io, server)
     assert url in json.loads((cache_dir / "files.json").read_text())
 
 
+def test_a_whole_file_that_fails_part_way_leaves_no_cache_entry(tmp_path, io, server):
+    # the server ignores Range and cuts the body short on every attempt
+    rep = stage(...)
+    assert not rep["ok"] and rep["errors"] and io._local(url) is None
+    assert not [p for p in cache_dir.iterdir() if p.name.startswith(".tmp-")]
+
+
 def test_an_offline_stage_reads_the_cache(tmp_path, make_io, server):
-    fetch(binding, record, make_io())              # `harness fetch`, by hand
+    fetch(binding, record, make_io())                  # `harness fetch`, by hand
     gets = len(server.gets())
     offline = make_io(hosts=())
     rep = stage(binding, ..., offline, ...)
     assert rep["ok"] and offline.bytes_fetched == 0 and len(server.gets()) == gets
 ```
 
-The third replaces `test_prefetch_expands_member_globs_so_an_offline_stage_reads_the_cache` (line 315) and
-keeps its `<zip>::<glob>` binding. If `rangeserver.py` cannot ignore Range per url, add that switch to it.
-Fix the two assertions that expect every source fetched once (lines 74 and 127): the stage transfers at most
-the source, `0 < bytes_fetched <= source_bytes`.
+The last replaces `test_prefetch_expands_member_globs_so_an_offline_stage_reads_the_cache` (line 315) and
+keeps its `<zip>::<glob>` binding. Fix the two assertions that expect every source fetched once (lines 74
+and 127): `0 < bytes_fetched <= source_bytes`. Patch `time.sleep` in the failing-download test so the retry
+waits cost nothing.
 
-- [ ] **Step 2: Run, expect FAIL** — the repository's harness test command on `tests/test_stage.py` (see its
+- [ ] **Step 2: Run, expect FAIL** — the repository's harness test command on `tests/test_stage.py` (its
   README; from `harness/`).
 - [ ] **Step 3: Delete `prefetch` and its call.** `stage`'s docstring: open the arrays, share the record's
   crops among its raws, plan, refuse a plan over `stage_bytes` before any voxel is written, then write; each
@@ -162,72 +160,149 @@ the source, `0 < bytes_fetched <= source_bytes`.
 - [ ] **Step 4: Run** `tests/test_stage.py`, `tests/test_fetch.py`, `tests/test_io.py` — PASS.
 - [ ] **Step 5: Commit** — `harness stage: the readers decide what is transferred`
 
-### Task 3: An on-demand round has no fetch phase (mia-workflows)
+### Task 3: The raw row is the stage's and the scan's (mia-workflows)
 
 **Files:**
-- Modify: `mia_buffers/models.py` (`BufferState`)
-- Modify: `mia_buffers/workflows.py` (admission at line 631, the rebuild check at line 1144,
-  `_source_locked`, `_quota`, `_job`; the docstring of `_source_cached`)
-- Test: `tests/test_buffers_workflows.py`; new fixture `tests/fixtures/buffers/buffer_history_o.json`
+- Modify: `mia_buffers/activities.py` (`_record_assets`, about line 1231: the raw row's state)
+- Modify: `mia_buffers/ledger.py` (`sync_assets`, line 1210: `becomes_ready`; the state list at line 36 and
+  the skip list at line 1216 lose `fetching`)
+- Modify: `mia_buffers/keeper.py` (`BUILDING`, line 13; the stale-job rule at line 115 if it names `fetching`)
+- Test: `tests/test_buffers_activities.py` (beside `test_read_stage_records_the_staged_and_raw_assets`, line
+  869), `tests/test_buffers_ledger.py` (beside line 209)
 
 **Interfaces:**
-- Consumes: `check_quota` of Task 1.
-- Produces: `BufferState.on_demand: bool = False`, set once per round where the pins are:
-  `state.on_demand = workflow.patched("on-demand")` directly after the `admit` activity returns. Every other
-  place reads `state.on_demand`; `workflow.patched("on-demand")` is called nowhere else.
+- Produces: after `read_stage` of any readable report, the record's raw row holds `path`, `bytes`, `files`,
+  `last_used` and `state == "ready"`. `sync_assets` sets a raw row found on disk to `ready` when it has no
+  row or its row is at none, `missing`, `evicted`, `partial` or `fetching`.
 
-Behaviour of a round with `on_demand` (spec §5.2):
-
-1. `_source_locked` calls neither `raw_status` nor `_fetch`. For a binding that is not `manual` it calls
-   `self._quota(dataset, owner)` and returns when that says the dataset was dropped.
-2. The stage job gets `hosts=binding.hosts, cache_writable=True`; for a `manual` binding `hosts=[]`,
-   `cache_writable=False`.
-3. `_quota` words the block for such a round: reason `raw cache over its quota by {over_by} bytes`; comment
-   "`<record>` is blocked: <reason>. It is staged once the keeper frees space or the quota is raised."
-4. The rebuild check: `raw_ready` is asked, and `RAW_GONE` given, only for `dataset.manual`.
-5. The stage job's reservation is closed with what it transferred: `_job` takes `settle: bool = True`; an
-   on-demand call passes False and the caller closes it, with `staged.bytes_fetched` once `read_stage`
-   returned and with 0 on every earlier exit (a job that did not end `DONE`/`EXIT`, an exception). A closed
-   reservation ignores a second settle, so the reservation must still be open when the bytes are known.
-6. No dataset of such a round is set to `fetching`.
-
-- [ ] **Step 1: Write the live tests** (they run with the patch taken, as every non-replay test does)
+- [ ] **Step 1: Write the tests**
 
 ```python
-async def test_an_on_demand_round_stages_online_with_no_fetch(env):
+async def test_read_stage_of_a_failed_stage_leaves_the_raw_row_ready_with_its_bytes(acts, server):
+    ...  # a failed stage.json; 3 bytes of a whole file and a files.json entry in the record's cache
+    await acts.read_stage(ROUND, U937)
+    row = raw_row(server, U937)
+    assert row["state"] == "ready" and row["bytes"] > 0 and U937_URL in row["files"]
+
+
+def test_sync_assets_readies_a_raw_row_left_partial_or_fetching(tmp_path):
+    ...  # raw rows "a" at partial and "b" at fetching, both directories on disk with a file
+    ledger.sync_assets(found, ...)
+    assert ledger.asset("raw", "a")["state"] == ledger.asset("raw", "b")["state"] == "ready"
+
+
+def test_sync_assets_brings_a_raw_row_up_to_date_after_a_stage_with_no_report(tmp_path):
+    ...  # row with bytes 3 and an old scanned_at; the scan finds 10 bytes
+    assert ledger.asset("raw", "a")["bytes"] == 10 and ledger.asset("raw", "a")["state"] == "ready"
+
+
+def test_a_staged_row_at_partial_stays_partial(tmp_path):   # a failed build is not an artifact
+    ...
+```
+
+- [ ] **Step 2: Run, expect FAIL** — `pixi run pytest tests/test_buffers_activities.py -k "raw_row_ready" tests/test_buffers_ledger.py -k sync_assets -q`
+- [ ] **Step 3: Implement.** `_record_assets` writes `raw["state"] = "ready"` in place of deleting the state;
+  its docstring says the raw cache is recorded as it is on disk, at rest. `sync_assets`: `becomes_ready` also
+  for a raw row at `partial` or `fetching`. `BUILDING` is `("staging",)`.
+- [ ] **Step 4: Run** the two test files — PASS.
+- [ ] **Step 5: Commit** — `mia-buffers raw: a raw cache at rest is ready, whoever wrote it`
+
+### Task 4: The round has no fetch phase (mia-workflows)
+
+**Files:**
+- Modify: `mia_buffers/workflows.py`: `_source_locked` (line 1420), `_quota` (line 1563), `_job` (line 1722),
+  the rebuild check (line 1144), the three `fetch_slots` semaphores (lines 765, 839, 1153) and every
+  signature that passes one; delete `_fetch` and `_fetch_jobs`; docstrings of `_source_cached` and the
+  module's header where they tell the flow
+- Modify: `mia_buffers/activities.py`: delete `prepare_fetch`, `submit_fetch`, `read_fetch`, the `raw_status`
+  activity (keep what `raw_ready` needs as a private helper), the limits at lines 590 to 592, and their
+  registrations in the worker
+- Modify: `mia_buffers/jobspec.py` (delete `fetch_job`), `mia_buffers/models.py` (delete `FetchJobArgs`,
+  `FetchResult`, `RawStatus` if nothing else uses it, the three fetch fields at lines 219 to 221, `fetching`
+  in the status list at line 242), `mia_buffers/config.py:152` (`parallel_fetch`), `mia_data/config.py:199-201`
+  (`fetch_bytes`, `fetch_walltime_min`, `fetch_attempts`) and whatever key builder made a fetch job's key
+- Test: `tests/test_buffers_workflows.py`, `tests/test_buffers_jobspec.py`, `tests/test_buffers_config.py`,
+  `tests/test_buffers_activities.py`; fixtures `tests/fixtures/buffers/buffer_history*.json`
+
+**Interfaces:**
+- Consumes: `check_quota` and `QuotaCheck` of Task 1; the raw row of Task 3.
+- Produces: the sourcing of one record under its raw lock (spec §5.2, §5.3, §5.5):
+
+```
+binding = read_binding
+manual: stage offline (hosts [], cache_writable False), no quota wait
+else, repeat:
+    _quota(dataset, owner)            -> False: dropped, return
+    waited = semaphore.locked()
+    with the stage slot:
+        _retake(dataset, owner)
+        if waited and not check_quota.ok: give the slot back, repeat
+        stage online (hosts binding.hosts, cache_writable True)
+register
+```
+
+  `_quota` sets the reason `raw cache over its quota by {over_by} bytes` and says once: "`<record>` is
+  blocked: <reason>. It is staged once the keeper frees space or the quota is raised."
+
+  The stage job's reservation is closed exactly once, by the code that submits the job: with the report's
+  `bytes_fetched` when the job ended `DONE` or `EXIT` and `read_stage` returned (a failed report included),
+  with 0 on every other exit (another job state, a cancel, an activity error).
+
+  The rebuild check asks `raw_ready` and gives `RAW_GONE` only for `dataset.manual`.
+
+- [ ] **Step 1: Write the live tests**
+
+```python
+async def test_a_round_stages_online_with_no_fetch(env):
     m = Mocks(plan=ONLY_U937)
     ...  # go, ready
-    assert not m.of("submit_fetch") and not m.of("raw_status")
-    args = m.of("submit")[0][1]                      # StageJobArgs
+    args = m.of("submit")[0][1]                              # StageJobArgs
     assert args.hosts == U937_HOSTS and args.cache_writable is True
     assert "fetching" not in statuses_seen(m, "u937")
 
 
-async def test_a_dropped_record_is_staged_offline(env):
-    ...  # bcss, dropped by hand
-    assert args.hosts == [] and args.cache_writable is False
+async def test_a_dropped_record_is_staged_offline_without_a_quota_wait(env):
+    ...  # bcss, dropped by hand; check_quota would say over
+    assert args.hosts == [] and args.cache_writable is False and status(m, "bcss") == "servable"
 
 
 async def test_a_record_waits_while_the_cache_is_over_quota_then_stages(env):
     m = Mocks(plan=ONLY_U937, quota=[QuotaCheck(False, over_by=10), QuotaCheck(True)])
     ...
-    assert blocked_reason(m, "u937") == "raw cache over its quota by 10 bytes"
-    assert not m.of("submit_fetch") and m.of("submit")
+    assert blocked_reason(m, "u937") == "raw cache over its quota by 10 bytes" and m.of("submit")
+
+
+async def test_a_dataset_that_waited_for_a_stage_slot_is_checked_again_and_waits_again(env):
+    # limits.parallel 1, two records: the first holds the slot; when the second gets it the cache is over
+    m = Mocks(quota={"second": [QuotaCheck(True), QuotaCheck(False, over_by=5), QuotaCheck(True)]})
+    ...
+    assert blocked_reason(m, "second") == "raw cache over its quota by 5 bytes"
+    assert len(m.of("submit")) == 2                          # and it staged once the cache had room
+
+
+async def test_a_blocked_dataset_leaves_its_stage_slot_to_others(env): ...   # from the fetch-slot test, line 1413
 
 
 async def test_a_stage_over_its_byte_cap_fails_the_dataset_with_the_harness_message(env):
     m = Mocks(plan=ONLY_U937, staged=StageResult(False, errors=["<url>: 6000000000 more bytes would pass the cap"]))
     ...
-    assert "would pass the cap" in failed_reason(m, "u937") and not m.of("submit_fetch")
+    assert "would pass the cap" in failed_reason(m, "u937")
 
 
-async def test_the_stage_reservation_is_settled_with_what_it_transferred(env):
-    m = Mocks(plan=ONLY_U937, staged=StageResult(True, volumes=1, bytes_fetched=1234))
+async def test_a_stage_reservation_is_settled_once_with_what_the_report_says(env):
+    m = Mocks(plan=ONLY_U937, staged=StageResult(False, errors=["x"], bytes_fetched=1234))   # a failed report
     ...
-    assert [call for call in m.of("settle") if call[3] == 1234]   # (root, key, usd, fetched_bytes)
+    assert [call[3] for call in m.of("settle")] == [1234]    # (root, key, usd, fetched_bytes)
 
 
-async def test_a_rebuild_of_an_on_demand_record_does_not_ask_for_the_raw_cache(env):
+async def test_a_stage_killed_with_no_report_fails_the_dataset_and_settles_zero(env):
+    m = Mocks(plan=ONLY_U937, jobs={"u937": JobDone(state="KILLED")})
+    ...
+    assert status(m, "u937") == "failed" and not m.of("read_stage")
+    assert [call[3] for call in m.of("settle")] == [0]
+
+
+async def test_a_rebuild_does_not_ask_for_the_raw_cache(env):
     ...  # as the d_rebuild scenario, raw_ready False
     assert not m.of("raw_ready") and status(m, "u937") == "servable"
 
@@ -235,64 +310,58 @@ async def test_a_rebuild_of_an_on_demand_record_does_not_ask_for_the_raw_cache(e
 async def test_a_rebuild_of_a_dropped_record_without_its_files_is_raw_gone(env):
     ...  # manual record, raw_ready False
     assert failed_reason(m, "bcss") == RAW_GONE
-
-
-async def test_a_round_admitted_before_on_demand_keeps_its_fetch_phase(env):
-    ...  # start the workflow from a BufferState at stage plan-review with pins set and on_demand False
-    assert m.of("submit_fetch")
 ```
 
 Use the helpers the file has (`Mocks`, `started`, `approve`, `ready`, `until`); the accessor names above
-stand for whatever it already uses to read statuses, reasons and a mock's calls.
+stand for whatever it already uses to read statuses, reasons and a mock's calls. Add to the ledger's tests,
+if it has none, that a second `settle` of a closed reservation leaves `fetched_bytes` unchanged.
 
-- [ ] **Step 2: Sort the existing live tests of the fetch phase.** Delete those whose subject is the fetch job
-  (lines 1233, 1259, 1272, 1292, 1413: fetch then offline stage, stream urls, partial fetch, host not allowed
-  in a fetch, fetch slots). Adapt those whose subject survives: the blocked/timeout/go-while-blocked tests
-  (1304, 1359, 1373, 1463) lose their fetch expectations; 2279 keeps the stage half; 2518 is renamed
-  without "fetched". The recorded fixtures keep covering the fetch path.
-- [ ] **Step 3: Run, expect FAIL** — `pixi run pytest tests/test_buffers_workflows.py -k "on_demand or dropped_record or over_quota or byte_cap or reservation or rebuild" -q`
-- [ ] **Step 4: Implement** the six points above. `_source_cached`'s docstring says both shapes in the
-  present tense: an on-demand round goes binding → (drop) → lock → quota wait → online stage → register →
-  release.
-- [ ] **Step 5: Run** `pixi run pytest tests/test_buffers_workflows.py -q` — PASS, the replay tests included
-  (none re-recorded).
-- [ ] **Step 6: Record the new fixture** — add `test_replay_buffer_history_o` beside the others (a `go` round
-  of `ONLY_U937` to `ready`, written to `buffer_history_o.json`, docstring telling how to re-record it
-  alone), then `MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_o`
-  and once more without the variable — PASS. `git status` shows no other fixture changed.
-- [ ] **Step 7: Commit** — `mia-buffers: an on-demand round stages online and has no fetch phase`
+- [ ] **Step 2: Sort the existing tests.** Delete those whose subject is the fetch job (lines 1233, 1259,
+  1272, 1292: fetch then offline stage, stream urls, partial fetch, host not allowed in a fetch) and the
+  activity, jobspec and config tests of what is deleted. The blocked, timeout and go-while-blocked tests
+  (1304, 1359, 1373, 1463) lose their fetch expectations; 2279 becomes the settle test above; 2518 loses
+  "fetched" from its name.
+- [ ] **Step 3: Run, expect FAIL** — `pixi run pytest tests/test_buffers_workflows.py -k "not replay" -q`
+- [ ] **Step 4: Implement** the Interfaces block and the deletions. Then `grep -rn "fetch_slots\|submit_fetch\|read_fetch\|prepare_fetch\|fetch_attempts\|parallel_fetch\|FetchResult\|FetchJobArgs" mia_buffers mia_data mia_core tests`
+  finds nothing, and `grep -rn '"fetching"' mia_buffers --include=*.py` finds nothing.
+- [ ] **Step 5: Record the fixtures again** — drop `raw=RawStatus(...)` from the recording scenarios (lines
+  1038, 1068 and the `d` ones) and reword their docstrings to the flow as it is, then
+  `MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay`. The prep
+  fixtures (`prep_history*.json`) are recorded by the same command; `git diff --stat` on them should show
+  them unchanged in substance, and if a prep replay now differs, find out why before keeping it.
+- [ ] **Step 6: Run** `pixi run pytest tests/test_buffers_workflows.py tests/test_buffers_activities.py tests/test_buffers_jobspec.py tests/test_buffers_config.py -q`
+  and `pixi run typecheck` — PASS.
+- [ ] **Step 7: Commit** — `mia-buffers: a round stages online behind the quota wait; the fetch phase is gone`
 
-### Task 4: The page and the docs say what happens (mia-workflows)
+### Task 5: The page and the docs say what happens (mia-workflows)
 
 **Files:**
 - Modify: `mia_buffers/explore.py:404` (drop `bytes_to_fetch`), `tests/test_buffers_explore.py:120`
 - Modify: `mia_buffers/ui/designer.js:522-523`, `mia_buffers/ui/dom.js:129` and the `staging`/`blocked`
   entries beside it, `mia_buffers/ui/flow.js:576`, `mia_buffers/ui/buffers.js:117,401`
-- Modify: `AGENTS.md` (line 12 and the quota/keeper wording), `README.md:56`, `docs/development.md`, the
-  `limits:` and `quota:` comments of the example `mia.yaml`
+- Modify: `mia_buffers/plan.py:72` (the comment on `bytes`: the record's size upstream)
+- Modify: `AGENTS.md` (line 12 and the keeper and quota wording), `README.md:56`, `docs/development.md`, the
+  `limits:` and `quota:` blocks of the example `mia.yaml`
 - Test: `tests/test_buffers_explore.py`, `tests/test_buffers_ui.py`
 
 - [ ] **Step 1: Explore summary** — the test asserts `"bytes_to_fetch" not in summary`; remove the key.
-- [ ] **Step 2: Designer line** — `designer.js` shows `bytes_pool / bytes_fitting` under the caption
-  "size upstream: the prepared datasets now / every fitting dataset".
-- [ ] **Step 3: Help texts** — `staging`: "A stage job reads what the planned crops need from the source and
-  writes the pyramid." `blocked`: "The raw cache is over its quota; the dataset is staged once the keeper
-  frees space or the quota is raised." `fetching` keeps its text. The datasets tables' captions list
-  "staging, blocked by quota" without "fetching with its job" for what a round does now.
+- [ ] **Step 2: Designer line** — `bytes_pool / bytes_fitting` under the caption "size upstream: the
+  prepared datasets now / every fitting dataset".
+- [ ] **Step 3: Help texts** — `fetching` is removed. `staging`: "A stage job reads what the planned crops
+  need from the source and writes the pyramid." `blocked`: "The raw cache is over its quota; the dataset is
+  staged once the keeper frees space or the quota is raised." The datasets tables' captions list "staging,
+  blocked by quota" and no fetching.
 - [ ] **Step 4: Docs** — AGENTS.md "How the pieces meet": a buffer plans over prepared rows only and stages
   one sparse pyramid per volume, the stage job reading from the source what the planned samples touch; a
-  file its reader takes whole lands in the shared raw cache. README and `docs/development.md` likewise. The
-  `mia.yaml` example: `job_bytes` caps what a crop or stage job transfers; `headroom_bytes` should stay above
-  `limits.parallel` × `limits.job_bytes`.
+  file its reader takes whole lands in the shared raw cache. Its quota rule: the quota is where staging
+  waits and the keeper evicts, not a ceiling. README and `docs/development.md` likewise. The `mia.yaml`
+  example: the four fetch limits go; `job_bytes` caps what a crop or stage job transfers.
 - [ ] **Step 5: Run** `pixi run pytest tests/test_buffers_explore.py tests/test_buffers_ui.py -q`, then
   `pixi run fmt && pixi run lint && pixi run typecheck && pixi run test` — clean.
 - [ ] **Step 6: Commit** — `page and docs: a stage reads from the source; no fetch figure`
 
-## Rollout (the user's to start; nothing here is pushed or deployed by the builder)
+## Rollout (the user's to start; the builder pushes and deploys nothing)
 
-1. Task 1 alone can go live first (merge, restart the buffers worker): buffer-27716818's dharani leaves
-   `blocked` and takes its recorded path, a whole-file fetch of the binding's 13 GB.
-2. mia-snippets Task 2 merged and the live harness checkout updated.
-3. mia-workflows Tasks 3 and 4 merged, workers restarted. A round admitted after that is on demand.
-4. Check on the first on-demand round: no fetch job among its job records, `bytes_fetched` on a stage record
-   far below the binding's file sizes, the raw cache not grown by a range-read record.
+As spec §7: cancel buffer-27716818's round now; harness first; before the mia-workflows deploy no buffer
+round is sourcing or rebuilding and the live `mia.yaml` loses the four fetch limits; then merge, restart,
+start the buffer again, and check the first round as §7.5 says.
