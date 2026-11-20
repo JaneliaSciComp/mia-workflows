@@ -114,7 +114,7 @@ export function viewBuffers(id, refresh) {
     }),
   );
 }
-// A version's datasets, one row each: on disk (`servable`), fetching with its job, staging, blocked by quota,
+// A version's datasets, one row each: on disk (`servable`), staging with its job, blocked by quota,
 // waiting for its files, failed with the reason. `levelsKey`: the folder of its staged pyramids (jobspec.levels_key).
 export const poolTable = (id, levelsKey) =>
   pagedTable("buffer-pool:" + id, {
@@ -398,7 +398,7 @@ async function viewBuffer(root, id, refresh) {
       status
         ? card(
             "Dataset pool",
-            "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.",
+            "One row per dataset of the plan's pool: servable, staging with its job, blocked by quota, waiting for a drop, failed with the reason.",
             poolTable(id, levelsKey),
           )
         : null,

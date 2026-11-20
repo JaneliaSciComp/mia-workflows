@@ -69,10 +69,10 @@ paths:
 harness:
   dir: /path/to/mia-snippets-checkout
 
-# Per job: what one csub job may read, write and run for. `job_bytes` caps a crop or stage job's input;
-# `stage_bytes` caps one staged artifact's uncompressed planned bytes and defaults to job_bytes; a spec's
-# `sampling.max_crops_per_dataset` crops must fit under it. The fetch_* values
-# bound one fetch job and how many fetch attempts a dataset gets. Also here, outside the per-job rule:
+# Per job: what one csub job may read, write and run for. `job_bytes` caps what a crop or stage job transfers
+# from a dataset's source (a stage reads what its planned crops touch, and takes a file whole only where its
+# reader must); `stage_bytes` caps one staged artifact's uncompressed planned bytes and defaults to job_bytes; a
+# spec's `sampling.max_crops_per_dataset` crops must fit under it. Also here, outside the per-job rule:
 # `agent_max_budget_usd` (one match-agent run, default 5) and `max_pr_revisions` (one round, default 5).
 # `debug_cycles` (default 1): how often a failed dataset round is handed to a debugging agent and run again before
 # it stops as `failed`; 0 turns that off. `debug_wait_min` (default 5): the wait before the debugging agent starts.
@@ -82,9 +82,6 @@ limits:
   job_bytes: 5e9
   # stage_bytes: 2e9
   job_walltime_min: 120
-  fetch_bytes: 50e9
-  fetch_walltime_min: 480
-  fetch_attempts: 4
 
 # Hosts the sandbox lets jobs reach. `package_hosts` are the package indexes every job may use.
 # `redirect_hosts` names hosts a data host redirects to (exact hosts, no patterns) ahead of a run; one it does not
@@ -113,6 +110,8 @@ service:
 # Per disk root: how much the shared caches may hold. The buffers worker's keeper evicts free assets (unreferenced,
 # unused for `hold_hours`) until a root is under its quota minus `headroom_bytes`; 0 = unlimited. `raw_bytes` is
 # paths.raw_root, `staged_bytes` is paths.staged_root. Older .building-* directories are removed on the same pass.
+# The raw quota is where staging waits and the keeper evicts, not a ceiling: a dataset is `blocked` while the raw
+# cache is over it, and jobs already running can each add up to `limits.job_bytes` of whole files.
 quota:
   raw_bytes: 0
   staged_bytes: 0
@@ -256,7 +255,7 @@ services:
 
   # mia-buffers: training buffers. `buffers_repo` receives one issue per buffer spec and per preparation request,
   # a copy of its timeline (they are created and run on the page); `datasets_repo` is mia-data's issue repo.
-  # `sourcing`: stage jobs (`parallel`) and fetch jobs (`parallel_fetch`) in flight per buffer, the tensorizer under
+  # `sourcing`: stage jobs in flight per buffer (`parallel`), the tensorizer under
   # <harness.dir>/tensorizers/, and the frozen val and test list lengths.
   mia-buffers:
     app: mia-buffers
@@ -266,5 +265,4 @@ services:
       datasets_repo: JaneliaSciComp/mia-workflow-data
     sourcing:
       parallel: 4
-      parallel_fetch: 2
       tensorizer: muvit-2d

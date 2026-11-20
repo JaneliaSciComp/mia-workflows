@@ -53,7 +53,8 @@ datasets by catalog fields, patch size and pyramid levels, splits, weighting, ho
 created and run on the buffers page (*Create buffer*, *Run*); its issue in
 [mia-buffers](https://github.com/JaneliaSciComp/mia-buffers) is a copy of its timeline. On *Run* the worker plans it
 against the catalog at a pinned commit and the registry's **prepared** datasets, then sources every dataset of the
-pool in parallel: the raw files are fetched into a shared raw cache (one writer per record), and a harness job
+pool in parallel: a harness job reads from the source what the planned samples touch (a file its reader must
+take whole lands in a shared raw cache, one writer per record) and
 stages one **sparse OME-Zarr 0.6 pyramid per volume**, holding only the chunks that cover the planned samples, with
 the derivation (source bytes, code commits, plan, voxel size, verification) recorded in the Zarr itself and
 checked against the 0.6 schemas before it is saved. Each volume is registered with buffer-api as it becomes

@@ -9,9 +9,10 @@ buffer-api service with its ledger, registry and page, and the `BufferDataset` c
 Full guide: [`docs/development.md`](docs/development.md); what each part is for: the [README](README.md).
 
 How the pieces meet: mia-data prepares a dataset (approved binding, reviewed crops) and writes its row to buffer-api's
-registry; a buffer plans over prepared rows only, fetches raw files into the shared raw cache, stages one **sparse
+registry; a buffer plans over prepared rows only and stages one **sparse
 OME-Zarr 0.6 pyramid per volume** (only the chunks of the planned samples; provenance under `attributes.mia`; the
-stage job runs `harness stage` then `harness check-stage`), registers the volumes, and buffer-api serves planned
+stage job runs `harness stage` then `harness check-stage`, reading from the source what the samples touch; a file
+its reader takes whole lands in the shared raw cache), registers the volumes, and buffer-api serves planned
 samples by weight and split. The harness (writer, reader, planner, tensorizer) lives in mia-snippets at `harness.dir`;
 a round pins its HEAD, so the harness deploys first. Dated specs and plans are under `docs/specs/` and `docs/plans/`;
 `notes/` is local scratch and is not tracked.
@@ -137,6 +138,12 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   `<local_root>/locks/raw/<record>` (`mia_core.locks`; TTL 900 s, heartbeat with every `await_job` poll). A wait
   whose heartbeat finds the lock gone kills its job (`csub kill`) and fails the round; a stale lease is never
   evidence that its writer stopped. Hand-run harness commands bypass it.
+- **A buffer reads what its crops touch.** No job of a buffer round downloads a record or a file ahead of its
+  reads: the stage job is online and its readers decide (`io.open` by range, `io.fetch` whole), within
+  `limits.job_bytes`. `check_quota` looks at what the raw cache holds, never at a record's size upstream, and the
+  raw quota is where staging waits and the keeper evicts, not a ceiling. A raw row has no state but at rest
+  (`ready`): the record's lock, not the row, says a job is writing. Anything new that transfers data is sized by
+  what the planned crops touch.
 - **Only the keeper deletes.** The buffers worker's `MiaCacheKeeper` is the only code that removes anything under
   `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.
 - **A staged artifact is saved by the worker's rename and never written again.** Stage jobs write

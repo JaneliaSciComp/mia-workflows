@@ -764,9 +764,7 @@ class MiaBuffer:
         starts = list(range(len(datasets)))
         if workflow.patched("c-cache"):  # the heaviest first, so they take the first stage slots
             starts = sorted(starts, key=lambda index: (-datasets[index].weight, datasets[index].record))
-        created = {
-            index: asyncio.create_task(self._source(datasets[index], semaphore)) for index in starts
-        }
+        created = {index: asyncio.create_task(self._source(datasets[index], semaphore)) for index in starts}
         tasks = [created[index] for index in range(len(datasets))]  # in state.datasets order, as the zips below need
         self.sourcing_tasks = tasks
         deadline = workflow.now() + timedelta(days=state.timeout_days)
@@ -833,9 +831,7 @@ class MiaBuffer:
         semaphore = asyncio.Semaphore(max(1, limits.parallel))
         datasets = state.datasets
         starts = sorted(range(len(datasets)), key=lambda index: (-datasets[index].weight, datasets[index].record))
-        created = {
-            index: asyncio.create_task(self._source(datasets[index], semaphore)) for index in starts
-        }
+        created = {index: asyncio.create_task(self._source(datasets[index], semaphore)) for index in starts}
         tasks = [created[index] for index in range(len(datasets))]
         self.sourcing_tasks = tasks
         # one timer for the round's day limit: the waits below start none of their own (a timer per wake would

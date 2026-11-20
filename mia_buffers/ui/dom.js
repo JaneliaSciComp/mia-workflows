@@ -125,12 +125,11 @@ export const PILL_HELP = {
     "Set aside by a person, with a reason (Shelve): no preparation request starts it and no buffer plan takes it. Unshelve on its page takes it back.",
   // a cache directory or a staged pyramid
   "cached":
-    "The dataset's raw files are in the shared cache and no job is writing them; a buffer checks them against its binding before reusing them.",
-  "fetching": "A fetch job is downloading the dataset's raw files into the cache.",
-  "staging": "A stage job is converting the raw files into an OME-Zarr pyramid.",
+    "Files a reader took whole are in the shared cache and no job is writing them; the keeper may evict them once nothing holds them.",
+  "staging": "A stage job is reading what the planned crops need from the source and writing an OME-Zarr pyramid.",
   "waiting-drop":
     "The files cannot be fetched by a job; a person has to place them in the dataset's incoming/ directory.",
-  "partial": "A fetch ended before the cache was complete; the next fetch resumes it.",
+  "partial": "A stage job failed before its pyramid was complete; the keeper removes what it left.",
   "missing": "Expected on disk but not found by the last scan.",
   "evicted": "Removed by the keeper to stay under quota; a buffer that needs it fetches or stages again.",
   "staged": "At least one pyramid of this dataset exists in the staged cache.",
@@ -149,7 +148,8 @@ export const PILL_HELP = {
   "pending": "Not started yet; waits for a sourcing slot.",
   "waiting-dataset": "No approved binding yet; the preparation pipeline is working on the dataset.",
   "waiting-lock": "Another job holds the dataset's raw-cache lock; this one waits for it.",
-  "blocked": "The raw cache is over its quota; the fetch waits for the keeper to make room.",
+  "blocked":
+    "The raw cache is over its quota; the dataset is staged once the keeper frees space or the quota is raised.",
   "servable": "Its volumes are registered and the service can draw crops from them.",
   "failed": "The fetch or stage job failed; the reason is in the row and in the buffer's timeline.",
   "dropped": "Left out of the round: still waiting when the day limit passed.",

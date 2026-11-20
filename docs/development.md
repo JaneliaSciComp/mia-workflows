@@ -285,7 +285,7 @@ gets the state with every write, writes the open pass's result before the next s
 fails or is cancelled reports itself and no stage ends silently; with no pass open the resting stage has an entry
 of its own. Where a pass ends and no stage write follows (a PR head whose crops failed, a round started over a
 pass still open), `_flush` writes the result through `stage_result`. A buffer round's passes are `planning`,
-`plan-review`, `sourcing` (its result counts the pool's datasets by status and links the fetch and stage jobs),
+`plan-review`, `sourcing` (its result counts the pool's datasets by status and links the stage jobs),
 `staged` and `idle`; a request's one pass is `requested`. Entries an activity writes by itself (the plan, the
 staged board, a request's outcomes table, per-dataset notices, a judge's verdict) stay entries of their own. All
 of it is behind `workflow.patched("stage-results")`; a run that takes the patch mid-round has no pass open and
@@ -560,7 +560,7 @@ harness refuses a host (`host_not_allowed` in `smoke.json` or the crop job's `re
 debug agent's `outcome.json`) has it noted for its dataset (`PUT /datasets/<record>/hosts`, worker token; the `kv` row
 `refused_hosts`). From then on it is one of the hosts the dataset's runs need: the dataset's page says so, and its next
 start (or a request's that names it) lists the host to check. A noted host the policy allows is granted to every job of
-that dataset that reaches any host (`with_hosts` in `submit`; a buffer's fetch and stage jobs through `read_binding`),
+that dataset that reaches any host (`with_hosts` in `submit`; a buffer's stage jobs through `read_binding`),
 and to no other dataset's. `network.redirect_hosts` names such targets ahead of the first refusal.
 
 No job reaches GitHub: a GitHub host among a record's or a binding's URLs is left out of the job's hosts
@@ -604,7 +604,7 @@ the round ends `blocked` saying which host to approve (`NoReachableFiles`).
 4. **Sourcing.** The buffer is created in buffer-api (id = round id, `i<number>-e<action id>`). Per dataset, in
    parallel (`sourcing.parallel` stage jobs at a time, heaviest first): the binding is read from
    `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data saved for
-   it (`mia_data.publish.prepared_row`, the registry's rule too); the raw files are fetched and the pyramid staged
+   it (`mia_data.publish.prepared_row`, the registry's rule too); the quota is waited for and the pyramid staged
    (see "The cache"); then every volume is registered. `read_stage` registers what the job left with the registry
    (`PUT assets/staged/<staged dir>` with the binding hash it was built from, `PUT assets/raw/<record>` from
    `files.json`), and registering a volume references both for the buffer (`refs`); `read_binding` asks the
@@ -656,7 +656,7 @@ file with `{owner, taken_at, heartbeat_at, ttl_s}` (TTL 900 s). Every `await_job
 is renamed aside as `<key>.stale-<time>`. A wait whose heartbeat finds the lock gone (`mia_core.locks.LockLost`)
 kills its job (`csub kill`) and fails the round; a stale lease is never evidence that its writer stopped. mia-data
 takes it around trusted crop jobs (owner `mia-data <round> crop`); mia-buffers from before the
-fetch through the stage (owner `mia-buffers <round> <record>`), released while the dataset is blocked on quota and
+quota wait through the stage (owner `mia-buffers <round> <record>`), released while the dataset is blocked on quota and
 re-taken after; the keeper takes it (owner `keeper`) before evicting a record's assets and skips a held record.
 Snapshot extraction uses `snapshot/<sha>`. `GET /locks` lists the holders. A worker waiting for a lock (or for
 quota) polls after `poll_minutes`, doubling each try up to 30 minutes. A re-take that had to wait for another
@@ -664,20 +664,21 @@ owner re-reads the binding and the raw cache before going on. Hand-run harness c
 them only on records no round is touching. `assets sync` on a host other than the workers' sees none of their
 locks, so there it refuses to run without `--dry-run`.
 
-**The fetch phase.** Per dataset the worker runs `harness fetch binding.yaml --record record.yaml --out
-fetch.json` with the cache read-write, the byte cap `limits.fetch_bytes` and the walltime
-`limits.fetch_walltime_min`, up to `limits.fetch_attempts` attempts that resume from the cache (`partial`),
-`sourcing.parallel_fetch` fetch jobs per buffer. `fetch.json` lists one outcome per URL: `cached`, `fetched`,
-`stream`, `pending` or `failed`; a missing `fetch.json` counts as partial. The fetch is skipped when the cache
-holds every binding url (`mia_core.assets.cache_missing`): a plain file counts when `files.json` lists it and its
+**The quota wait.** Before its stage slot a dataset waits while the raw cache is over `quota.raw_bytes`
+(`check_quota`: the registry's total, nothing charged for the record, nothing written on its row), holding no
+slot and with its lock released; once it has waited for a slot the quota is asked again, and over means back to
+waiting without the slot. A record whose files a person dropped has no quota wait. The quota is where staging
+waits and the keeper evicts, not a ceiling: a stage job writes the raw cache only when a reader takes a file
+whole, at most `limits.job_bytes` of it, and jobs that passed the check together, or mia-data's crop jobs, which
+ask nothing, can take the cache past the quota by that much each. The binding is re-read under the lock: if the
+previous holder built the artifact, it is reused ("staged by <holder> while this buffer waited"). `mia-buffers
+check` verifies the harness checkout has `harness stage`.
+
+**What a raw cache holds.** `mia_core.assets.cache_missing` says whether a cache holds a binding's urls, which
+`raw_ready` asks before a dropped record is staged again: a plain file counts when `files.json` lists it and its
 entry is on disk, as a HEAD lists a file before a byte of it is kept and a read by range keeps none; a
 `<zip>::<member or glob>` url counts once `harness fetch` has every matching member in the cache and lists it
-(source `members`); the zip's own entry proves nothing about members, as mia-data's verify reads only a sample of
-them. The harness also caches the zip's
-directory, so the offline stage expands a glob without a request. The binding is re-read under the lock: if the
-previous holder built the artifact, it is reused ("staged by <holder> while this buffer waited"). A fetch still
-partial after its attempts names the last job's id, state and exit code; `mia-buffers check` verifies the harness
-checkout has `harness fetch`.
+(source `members`); the zip's own entry proves nothing about members.
 
 **Reading a raw cache by hand.** A cache entry is the upstream file's own bytes (a zip member inflated and
 CRC-checked) under a hash of its URL and validators. `mia-buffers raw <raw_root>/<record id>` prints each entry
@@ -685,9 +686,15 @@ with the name it had upstream (`<zip name>/<member path>` for a member), and `--
 a symlink per file, which any viewer opens by its own name. With `--copy` the folder holds copies instead: they
 outlast an eviction and open over a share that does not follow links.
 
-**Staging.** The stage job runs `harness stage`, then `harness check-stage`, offline (cache read-only, no hosts),
-unless a URL streams: then the stage keeps the cache read-write and the hosts. A dropped (hand-placed) dataset
-stages offline. The job writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned
+**Staging.** The stage job runs `harness stage`, then `harness check-stage`, with the binding's hosts and the
+record's raw cache read-write. Nothing is fetched ahead: each reader takes from the source what the planned crops
+touch, by range into blocks in the job's workspace, which go with it, or a file whole into the raw cache where
+ranges will not do (a server that ignores Range, a deflated zip member), all within `limits.job_bytes`; a stage
+that would pass it fails the dataset with the harness's message. A dropped (hand-placed) dataset stages offline,
+the cache read-only. A rebuild of a pyramid that vanished reads the source again; only for a dropped dataset does
+it ask whether the raw cache still holds the files (`raw_ready`), and fail `raw cache gone` when not. The stage
+job's reservation is settled once, after its report is read, with the report's `bytes_fetched` (a failed
+report's too) and with 0 when there is no report. The job writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned
 samples touch, with its derivation recorded in the Zarr's attributes; `check-stage` verifies it against the 0.6
 schemas. The stage job reads its byte cap from `MIA_HARNESS_STAGE_BYTES` (config `limits.stage_bytes`, default
 `limits.job_bytes`).
@@ -718,31 +725,32 @@ the harness: every input the artifact id hashes) names this job's artifact id, r
 foreign id, then renames the build to `<artifact>`. The saved directory is never written again. A rebuild
 lands under the same id through the same rename; a retry that finds the final directory reuses it.
 
-**Dataset statuses** during sourcing: `pending`, `waiting-dataset`, `waiting-lock`, `fetching`, `staging`,
+**Dataset statuses** during sourcing: `pending`, `waiting-dataset`, `waiting-lock`, `staging`,
 `blocked` (quota), `waiting-drop`, `servable`, `failed`, `dropped`. `blocked` and `waiting-drop` are dropped at
-`sourcing.dataset_timeout_days`, `waiting-lock` is not. A blocked dataset holds no fetch slot (it waits for quota
-first) and re-checks the quota once it has waited for one. `check_quota` records `wanted` (the record's catalog
-size) and `blocked_at` on the raw row; the next fetch clears them.
+`sourcing.dataset_timeout_days`, `waiting-lock` is not. A blocked dataset reads "raw cache over its quota by N
+bytes": it waits on what the cache holds, never on the record's size upstream, and stays blocked while too little
+of the cache is free to evict.
 
-**Asset rows.** `state` is one of `fetching`, `staging`, `waiting-drop`, `ready`, `partial`, `missing`, `evicted`;
-rows also carry `bytes`, `job`, `last_used` and `scanned_at`, and raw rows `stream` (URLs that stream) and
-`files`; a revoked staged row carries `quarantined`, `quarantined_at` and `quarantined_by`.
+**Asset rows.** A staged row's `state` is one of `staging`, `ready`, `partial` (a failed build), `missing`,
+`evicted`; a raw row's is `waiting-drop`, `ready` (at rest on disk, whatever jobs left in it), `missing` or
+`evicted`. A raw row is written when a stage's report is read and by the scan, which also makes `ready` a raw row
+it finds at `partial` or `fetching`; while a job writes a raw cache the record's lock, not the row, keeps the
+keeper off. Rows also carry `bytes`, `job`, `last_used` and `scanned_at`, and raw rows `files`; a revoked staged row carries `quarantined`, `quarantined_at` and `quarantined_by`.
 `PUT /assets/<kind>/<key>` merges fields into the row. `GET /assets/<kind>?state=&record=` filters and adds a
 `bytes` total. `POST /sync/assets` (worker token) scans the roots, skips a missing or empty root, lists
 `.building-*` directories (staged builds and eviction asides in both roots) and sets staged `last_used` from the
-draws; a row without `last_used` gets its first scan's time. `raw_status` and a reusable staged find touch
+draws; a row without `last_used` gets its first scan's time. `raw_ready` and a reusable staged find touch
 `last_used`.
 
 **The keeper.** `MiaCacheKeeper` runs on the schedule `<deployment>-keeper` every `keeper.minutes`
 (`mia-buffers schedule`, which `mia up` runs). One pass:
 
 1. datasets sync and assets sync (each with a 10-minute timeout);
-2. stale builds: a `fetching` or `staging` row whose csub job is gone becomes `partial` or `missing`;
+2. stale builds: a `staging` row whose csub job is gone becomes `missing`;
 3. `.building-*` directories older than `quota.hold_hours` are removed (a build whose artifact row says `staging`
    is spared, whatever its age), and so are empty raw directories (a job's mount point that never received a file;
    the scan does not register one, and drops the row of one it had);
-4. eviction per root until usage is under `quota.<kind>_bytes - quota.headroom_bytes` (for raw, minus the largest
-   `wanted` of a fetch blocked within `hold_hours` when that is more than the headroom), oldest `last_used` first,
+4. eviction per root until usage is under `quota.<kind>_bytes - quota.headroom_bytes`, oldest `last_used` first,
    free assets only: no refs, `ready`, unused for `hold_hours`, not within its quarantine hold, and for raw no
    mia-data round in progress on the record and the record's lock not held. An evicted row keeps `state: evicted`,
    `bytes: 0`. A directory is renamed to `.building-evicted-*` before removal, so a half-removed artifact is
