@@ -1117,8 +1117,8 @@ class MiaBuffer:
         return True
 
     async def _degraded(self, signal: DegradedSignal) -> bool:
-        """Start staging again, from the raw cache, the named servable datasets whose volumes buffer-api finds
-        missing now (a dataset whose raw cache is gone fails). The keeper re-sends while a pyramid stays missing:
+        """Start staging again the named servable datasets whose volumes buffer-api finds missing now. The keeper
+        re-sends while a pyramid stays missing:
         a record rebuilt since, being rebuilt or failed is left alone. False: the round is over."""
         state = self.state
         assert state.round_id and state.buffer_id
@@ -1131,12 +1131,6 @@ class MiaBuffer:
         self.degraded_reason = signal.reason
         for dataset in hit:
             self.degraded_records.add(dataset.record)
-            # files a person dropped exist nowhere else; any other record is read from its source again
-            if dataset.manual and not await self._act(
-                "raw_ready", state.round_id, dataset.record, seconds=300, result_type=bool
-            ):
-                await self._fail(dataset, RAW_GONE)
-                continue
             dataset.rebuilds += 1
             self._set(dataset, "pending")
             if self.rebuild_slots is None:  # the first of this rebuild: its slots and its ticker
@@ -1424,6 +1418,9 @@ class MiaBuffer:
                 again = f" The pyramid was rebuilt by {holder} while this buffer waited and reused." if holder else ""
                 return await self._reuse(dataset, semaphore, again or " The pyramid is back on disk and reused.")
         online = not binding.manual  # files a person dropped are read from the cache alone, and add nothing to it
+        if not online and dataset.rebuilds:  # they exist nowhere else: gone from the cache, they cannot be staged
+            if not await self._act("raw_ready", round_id, record, seconds=300, result_type=bool):
+                return await self._fail(dataset, RAW_GONE)
         while True:
             if online and not await self._quota(dataset, owner):
                 return  # dropped

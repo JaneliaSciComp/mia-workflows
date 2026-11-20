@@ -1209,7 +1209,8 @@ class Ledger:
                     fields = {"last_used": fields["scanned_at"], **fields}
                 at_rest = (None, "missing", "evicted") + (("partial", "fetching") if kind == "raw" else ())
                 becomes_ready = known is None or known[0].get("state") in at_rest  # no job holds a raw row
-                self._merge_asset(db, kind, key, {**fields, "state": "ready"} if becomes_ready else fields, now)
+                ready = {**fields, "state": "ready"} | ({"job": None} if kind == "raw" else {})
+                self._merge_asset(db, kind, key, ready if becomes_ready else fields, now)
             missing = dropped = 0
             for (kind, key), (data, updated) in rows.items():
                 if kind not in kinds or (kind, key) in found or (older_than is not None and updated >= older_than):

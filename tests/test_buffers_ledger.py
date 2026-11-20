@@ -404,7 +404,8 @@ def test_sync_assets_readies_a_raw_row_left_partial_or_fetching(tmp_path):
     ledger.sync_assets(found, older_than=time.time() + 1)
     half = ledger.asset("raw", "half")
     assert half["state"] == "ready" and half["bytes"] == 10 and half["last_used"] == 1.0
-    assert ledger.asset("raw", "busy")["state"] == "ready"
+    busy = ledger.asset("raw", "busy")
+    assert busy["state"] == "ready" and busy["job"] is None  # the job that held it is long gone
     assert ledger.asset("staged", "failed")["state"] == "partial"
     ledger.put_asset("raw", "gone", {"state": "fetching", "bytes": 3, "job": "1"})
     ledger.sync_assets({}, older_than=time.time() + 1, kinds=("raw",))

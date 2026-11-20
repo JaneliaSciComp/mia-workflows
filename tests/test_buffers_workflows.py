@@ -1617,6 +1617,39 @@ async def test_a_rebuild_reads_upstream_and_does_not_ask_for_the_raw_cache(env):
     assert rebuild.rebuild == 1 and rebuild.hosts == ["zenodo.org"] and rebuild.cache_writable is True
 
 
+async def test_a_rebuild_follows_the_binding_not_the_catalogs_download_method(env):
+    """The plan marks a record `manual` by its catalog download method; what the stage does is decided by the
+    binding. A record so marked whose binding is reachable is staged online, and its rebuild reads upstream."""
+    marked = replace(ONLY_U937, pool=[replace(ONLY_U937.pool[0], manual=True)])
+    reachable = BindingInfo(True, "/s/u937.yaml", "bh", ["zenodo.org"])
+    m = Mocks(plan=marked, bindings={"u937": reachable}, missing=[["u937"]], raw_ready={"u937": False})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert not m.of("raw_ready") and not m.of("comment_drop") and dataset(state, "u937").status == "servable"
+    assert [args[1].hosts for args in m.of("submit")] == [["zenodo.org"]] * 2
+
+
+async def test_a_rebuild_of_a_record_dropped_for_its_host_is_raw_gone_once_its_files_left(env):
+    """A record the plan does not mark, dropped by hand because the policy refuses its host: the stage is offline,
+    so a rebuild whose files left the raw cache fails as `raw cache gone` and submits no job that could only fail."""
+    refused_host = BindingInfo(True, "/s/u937.yaml", "bh", [], [["https://refused.example.org/a.zip", "a.zip"]])
+    m = Mocks(plan=ONLY_U937, bindings={"u937": refused_host}, missing=[["u937"]], raw_ready={"u937": False})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("comment_drop"), m=m)
+        await h.signal(MiaBuffer.dropped, "u937")
+        await ready(h, m)
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed" and dataset(state, "u937").reason == workflows.RAW_GONE
+    assert m.of("raw_ready") == [("u937",)] and len(m.of("submit")) == 1
+
+
 async def test_degraded_without_dropped_files_is_needs_human_only_below_the_floor(env):
     """Files a person dropped exist nowhere else: once they left the raw cache, a pyramid that vanished cannot be
     staged again."""

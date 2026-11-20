@@ -1249,13 +1249,12 @@ class Activities:
                 "last_used": now,
                 "job": None,
             }
-        raw = await asyncio.to_thread(raw_asset, cache, self._binding_urls(round_id, record))
-        raw["state"] = "ready"  # a raw cache at rest; while a job writes it, the record's lock keeps the keeper off
+        raw = await asyncio.to_thread(raw_asset, cache)  # at rest: while a job writes it, the lock spares it
         raw["last_used"] = now
         await asyncio.to_thread(self.registry.put_asset, "staged", artifact, staged)
         await asyncio.to_thread(self.registry.put_asset, "raw", record, raw)
 
-    # --- the fetch phase: locks, quota, the fetch job, raw-cache state ---------------------------
+    # --- locks, the quota, raw-cache state -------------------------------------------------------
 
     @activity.defn(name="take_lock")
     @mia_permanent_errors
@@ -1306,7 +1305,8 @@ class Activities:
     async def verify_drop(self, round_id: str, record: str) -> DropResult:
         """Move the files a human placed under raw_root/<record>/incoming/ into the cache under the harness's
         key and list them in files.json. A listed file that is missing, empty or a symlink stays missing. When none
-        is, the raw row becomes `ready` (best effort)."""
+        is, the raw row becomes `ready` and just used (best effort): these files exist nowhere else, and the
+        keeper's hold rule spares them while the record waits for its stage slot."""
         urls = self._binding_urls(round_id, record)
         cache, known = self._cache_dir(record), read_manifest(self._cache_dir(record))
         placed, missing, entries = [], [], {}
@@ -1336,8 +1336,8 @@ class Activities:
             placed.append(name)
         if entries:
             merge_manifest(cache, entries)
-        if not missing:  # the row said waiting-drop: the files are in (best effort)
-            await self.mark_asset("raw", record, {"state": "ready"})
+        if not missing:  # the row said waiting-drop: the files are in, and about to be used (best effort)
+            await self.mark_asset("raw", record, {"state": "ready", "last_used": time.time()})
         return DropResult(not missing, placed, missing)
 
     @activity.defn(name="create_buffer")
@@ -1687,7 +1687,7 @@ class Activities:
         }
         locks = lock_dir(self.cfg)
 
-        def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its fetch and stage of the record
+        def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its stage of the record
             return row["key"] if kind == "raw" else str((row.get("data") or {}).get("record") or row["key"])
 
         def spare(row: dict, owner: str) -> dict:  # a lock holder counts as a reference: plan around the row
@@ -1732,15 +1732,15 @@ class Activities:
         self, report: KeeperReport, kind: str, row: dict, roots: tuple[Path, ...], now: float
     ) -> bool:
         """Remove one asset's directory and mark its row `evicted`. A refusal leaves the row; a removal that failed
-        half way marks it damaged (`partial` raw, a fetch resumes it; `missing` staged, it is staged again)."""
+        half way marks it `missing` (nothing is left at its path: a staged artifact is staged again, a raw cache
+        is read from its source again)."""
         data, key, registry = row["data"], row["key"], self.registry
         path = data.get("path")
         try:
             removed = isinstance(path, str) and await asyncio.to_thread(evict_path, Path(path), roots)
         except OSError as error:
-            damaged = "partial" if kind == "raw" else "missing"
-            report.errors.append(text(f"evict {kind}: removing {key} at {path} failed, now {damaged}: {error}", 500))
-            await asyncio.to_thread(registry.put_asset, kind, key, {"state": damaged, "job": None})
+            report.errors.append(text(f"evict {kind}: removing {key} at {path} failed, now missing: {error}", 500))
+            await asyncio.to_thread(registry.put_asset, kind, key, {"state": "missing", "job": None})
             return False
         if not removed:
             report.errors.append(text(f"evict {kind}: refused to remove {key} at {path}", 500))

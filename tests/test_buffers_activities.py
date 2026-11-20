@@ -583,6 +583,8 @@ async def test_verify_drop_moves_files_and_writes_manifest(acts, server):
     cache = acts.cfg.paths.raw_root / BCSS
     (cache / "incoming").mkdir(parents=True)
     (cache / "incoming" / "b.zip").write_bytes(b"zipbytes")
+    acts.registry.put_asset("raw", BCSS, {"state": "waiting-drop", "last_used": 1.0})
+    before = time.time()
     result = await acts.verify_drop(ROUND, BCSS)
     validators = {"size": 8, "sha256": hashlib.sha256(b"zipbytes").hexdigest()}
     assert result.ok and result.placed == ["b.zip"] and result.missing == []
@@ -590,7 +592,8 @@ async def test_verify_drop_moves_files_and_writes_manifest(acts, server):
     assert not (cache / "incoming" / "b.zip").exists()
     entry = read_manifest(cache)["manual://x/b.zip"]
     assert entry["validators"] == validators and entry["source"] == "manual"
-    assert acts.registry.asset("raw", BCSS) == {"state": "ready"}  # no longer waiting-drop
+    row = acts.registry.asset("raw", BCSS)  # no longer waiting-drop, and just used: these files exist nowhere
+    assert row["state"] == "ready" and row["last_used"] >= before  # else, so the keeper's hold rule spares them
     assert (await acts.verify_drop(ROUND, BCSS)).ok  # idempotent: the manifest already has it
 
 
