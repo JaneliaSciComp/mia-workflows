@@ -143,11 +143,10 @@ class FetchResult:
 
 @dataclass
 class QuotaCheck:
-    """Whether the raw cache has room for a record: `expected` is its catalog size, `over_by` the bytes too many."""
+    """Whether the raw cache is within its quota; `over_by` is the bytes it holds too many."""
 
     ok: bool
     over_by: int = 0
-    expected: int = 0
 
 
 @dataclass

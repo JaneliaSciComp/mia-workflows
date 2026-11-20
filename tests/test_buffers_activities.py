@@ -961,32 +961,27 @@ async def test_check_quota(acts, server):
         await acts.check_quota(ROUND, U937)
     acts.registry = real
     real.put_asset("raw", "other-record", {"bytes": 90, "state": "ready"})
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(True)  # within the quota, whatever the record's size
+    assert real.asset("raw", U937) is None  # and nothing is written on the record's row
+    real.put_asset("raw", "other-record", {"bytes": 110, "state": "ready"})
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(False, over_by=10)  # over by what the cache holds
+    assert real.asset("raw", U937) is None
+    real.put_asset("raw", U937, {"bytes": 30, "state": "ready"})  # the record's own cache is part of the total
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(False, over_by=40)
+
+
+async def test_a_record_far_larger_upstream_than_the_quota_is_not_blocked(acts, server):
+    """buffer-27716818: a 3.07 TB record against a 200 GB quota with 77 GB in the raw cache."""
+    await bound_two_urls(acts)
+    acts.cfg.quota.raw_bytes = 200e9
+    acts.registry.put_asset("raw", "other-record", {"bytes": 76_974_997_628, "state": "ready"})
     plan_path = acts.cfg.paths.state_dir / "rounds" / ROUND / "plan.json"
     plan = json.loads(plan_path.read_text())
-    assert next(row for row in plan["rows"] if row["id"] == U937)["bytes"] == 1153470226  # from the record
     for row in plan["rows"]:
-        row["bytes"] = 20 if row["id"] == U937 else row["bytes"]
+        row["bytes"] = 3_065_477_030_677 if row["id"] == U937 else row["bytes"]
     plan_path.write_text(json.dumps(plan))
-    before = time.time()
-    assert await acts.check_quota(ROUND, U937) == QuotaCheck(False, over_by=10, expected=20)
-    row = real.asset("raw", U937)  # what the keeper frees room for
-    assert row["wanted"] == 20 and row["blocked_at"] >= before and "state" not in row
-    acts.cfg.quota.raw_bytes = 110
-    assert await acts.check_quota(ROUND, U937) == QuotaCheck(True, expected=20)
-    workspace = Path(await acts.prepare_fetch(7, ROUND, U937, 1))
-    await acts.read_fetch(ROUND, U937, str(workspace))  # the fetch ran: no longer blocked
-    row = real.asset("raw", U937)
-    assert row["wanted"] is None and row["blocked_at"] is None
-    # a resumed fetch: the record's own partial cache is not counted twice (other 60 + own 30 + expected 50)
-    real.put_asset("raw", "other-record", {"bytes": 60})
-    real.put_asset("raw", U937, {"bytes": 30, "state": "partial"})
-    for row in plan["rows"]:
-        row["bytes"] = 50 if row["id"] == U937 else row["bytes"]
-    plan_path.write_text(json.dumps(plan))
-    acts.cfg.quota.raw_bytes = 100
-    assert await acts.check_quota(ROUND, U937) == QuotaCheck(False, over_by=10, expected=50)
-    acts.cfg.quota.raw_bytes = 110
-    assert await acts.check_quota(ROUND, U937) == QuotaCheck(True, expected=50)
+    assert await acts.check_quota(ROUND, U937) == QuotaCheck(True)
+    assert acts.registry.asset("raw", U937) is None  # no `wanted` for the keeper to evict toward
 
 
 async def test_prepare_fetch_makes_a_workspace_per_attempt(acts):

@@ -29,17 +29,6 @@ def live_bytes(assets: list[dict]) -> float:
     )
 
 
-def demand(assets: list[dict], *, hold_s: float, now: float) -> float:
-    """The largest `wanted` among the rows a fetch is blocked on (check_quota marks them), blocked within `hold_s`."""
-    wanted = [0.0]
-    for row in assets:
-        data = row.get("data") or {}
-        blocked_at = data.get("blocked_at")
-        if isinstance(blocked_at, int | float) and blocked_at + hold_s > now:
-            wanted.append(_bytes(data, "wanted"))
-    return max(wanted)
-
-
 def _quarantined(data: dict, quarantine_s: float, now: float) -> bool:
     """A quarantined row is held for `quarantine_s` after it was quarantined: evidence outlives the revocation."""
     return bool(data.get("quarantined")) and _bytes(data, "quarantined_at") + quarantine_s > now
@@ -71,14 +60,13 @@ def plan_evictions(
     now: float,
     in_round: set[str],
     kind: str,
-    demand_bytes: float = 0,
     quarantine_s: float = 0,
 ) -> list[dict]:
-    """The free rows to evict, oldest first, until the kind is under its quota minus the headroom, or minus
-    `demand_bytes` (what a blocked fetch wants) when that is larger; none when the quota is 0 (unlimited)."""
+    """The free rows to evict, oldest first, until the kind is under its quota minus the headroom; none when the
+    quota is 0 (unlimited)."""
     if quota_bytes <= 0:
         return []
-    remaining, target, picked = live_bytes(assets), quota_bytes - max(headroom_bytes, demand_bytes), []
+    remaining, target, picked = live_bytes(assets), quota_bytes - headroom_bytes, []
     free = free_assets(assets, hold_s=hold_s, now=now, in_round=in_round, kind=kind, quarantine_s=quarantine_s)
     for row in free:
         if remaining <= target:

@@ -67,7 +67,7 @@ from .config import (
 from .drop import drop_names, merge_manifest, read_manifest
 from .explore import start_gaps
 from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
-from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
+from .keeper import evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
     MAX_POLL_MINUTES,
     BindingInfo,
@@ -1312,23 +1312,15 @@ class Activities:
     @activity.defn(name="check_quota")
     @mia_permanent_errors
     async def check_quota(self, round_id: str, record: str) -> QuotaCheck:
-        """Whether fetching the record (its catalog size) keeps the raw cache within `quota.raw_bytes` (0 is no
-        limit). The record's own row is left out of the total, so a resumed fetch does not count its partial
-        cache twice. Over: the row records `wanted` (the catalog size) and `blocked_at`, best effort, for the
-        keeper. A RegistryError propagates: the workflow retries rather than fetch past the quota."""
+        """Whether the raw cache, as the registry sums it, is within `quota.raw_bytes` (0 is no limit). The record
+        is charged nothing: what its stage adds is known only once its readers have run. A RegistryError
+        propagates: the workflow retries rather than stage past the quota."""
         limit = int(self.cfg.quota.raw_bytes)
         if limit == 0:
             return QuotaCheck(True)
-        expected = int(self._row(round_id, record).get("bytes") or 0)
         listing = await asyncio.to_thread(self.registry.assets, "raw")
-        own = next((asset.get("data") or {} for asset in listing["assets"] if asset.get("key") == record), {})
-        counted = own.get("state") not in ("missing", "evicted")  # the rows the registry's `bytes` total sums
-        own_bytes = own.get("bytes")
-        own_bytes = own_bytes if counted and type(own_bytes) is int else 0
-        over_by = int(listing["bytes"]) - own_bytes + expected - limit
-        if over_by > 0:  # the keeper frees room for the largest blocked fetch (`wanted`), not only the headroom
-            await self.mark_asset("raw", record, {"wanted": expected, "blocked_at": time.time()})
-        return QuotaCheck(over_by <= 0, max(over_by, 0), expected)
+        over_by = int(listing["bytes"]) - limit
+        return QuotaCheck(over_by <= 0, max(over_by, 0))
 
     @activity.defn(name="prepare_fetch")
     @mia_permanent_errors
@@ -1800,7 +1792,6 @@ class Activities:
             planned,
             quota_bytes=limit,
             headroom_bytes=self.cfg.quota.headroom_bytes,
-            demand_bytes=demand(rows, hold_s=hold_s, now=now) if kind == "raw" else 0,
             **rules,
         )
         evicted: list[dict] = []
