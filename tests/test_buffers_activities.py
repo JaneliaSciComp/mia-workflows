@@ -923,7 +923,7 @@ async def test_read_binding_reports_a_pyramid_staged_earlier_for_the_same_bindin
     assert info.found and not info.staged
 
 
-# -- the fetch phase: locks, quota, raw-cache state
+# -- locks, the quota, raw-cache state
 
 A_TIF, B_ZIP = "https://zenodo.org/a.tif", "https://zenodo.org/b.zip"
 

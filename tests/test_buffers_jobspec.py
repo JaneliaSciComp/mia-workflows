@@ -89,7 +89,7 @@ def test_stage_job_without_hosts_is_offline(tmp_path):
 
 
 def test_stage_job_with_a_read_only_cache(tmp_path):
-    """An offline stage after the fetch phase: the cache is read-only, the staged directory stays writable."""
+    """An offline stage (files a person dropped): the cache is read-only, the staged directory stays writable."""
     cfg = _cfg(tmp_path)
     args = _args(cfg, tmp_path / "ws", [], str(tmp_path / "out"))
     args.cache_writable = False
