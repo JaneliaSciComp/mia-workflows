@@ -204,6 +204,16 @@ input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
 .card{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:14px 14px 10px;min-width:0;margin-bottom:14px}
 .grid2 .card{margin-bottom:0}
 .card .sub{font-size:12.5px;color:var(--fg2);margin-bottom:8px}
+/* a section of Overview: a card that folds to its heading, with a count beside the title */
+.fold>summary{display:flex;align-items:baseline;gap:10px;cursor:pointer;list-style:none;margin-bottom:4px}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary::before{content:"▾";color:var(--muted);width:14px}
+.fold:not([open])>summary::before{content:"▸"}
+.fold:not([open])>summary{margin-bottom:0}
+.fold>summary h2{margin:0}
+.fold>summary .count{color:var(--fg2);font-size:13px;font-variant-numeric:tabular-nums}
+.fold>summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.why>summary{cursor:pointer}
 .card svg:not(.ghm){display:block;width:100%;height:auto;font-family:var(--sans)}  /* a card's chart; the GitHub mark in a link keeps its own size */
 .card svg text{fill:var(--fg2);font-size:12px}
 .card svg .lbl{fill:var(--fg)}

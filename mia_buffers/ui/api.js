@@ -71,3 +71,17 @@ export const S = { meta: {}, catalogs: [], ref: null, plan: null, planError: nul
 // ---- what an action route takes: JSON, and one key per click
 export const JSON_HEADERS = { "Content-Type": "application/json" };
 export const newKey = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10); // one per click; Retry sends it again
+// ---- what is away, in words: the banner's lines and Overview's System section
+export function downLines(health, findings) {
+  // what is away, in words; a service's task queue carries its name. `findings`: what the repair agent's last sweep
+  // found wrong with the installation, less what the health check says itself
+  const away = Object.keys(health.queues || {}).filter(queue => !health.queues[queue]);
+  return [
+    !health.temporal && "Temporal does not answer: nothing can be started or cancelled from this page right now.",
+    away.length &&
+      `No worker is running for ${away.join(", ")}: nothing that waits on ${away.length > 1 ? "them" : "it"} is moving. On the host: pixi run mia restart ${away.join(" ")}`,
+    ...(Array.isArray(findings) ? findings : [])
+      .filter(finding => finding.id !== "temporal" && !finding.id.startsWith("worker "))
+      .map(finding => finding.text.replaceAll("`", "")),
+  ].filter(Boolean);
+}

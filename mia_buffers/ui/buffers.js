@@ -101,9 +101,7 @@ export function viewBuffers(id, refresh) {
           label: "status",
           cell: x => {
             const word = statusWord(x);
-            return pill(word, word === "needs you" ? "warn" : word === "waits for you" ? "pool" : "", [
-              { b: x.stage, t: " is its stage" },
-            ]);
+            return pill(word, word === "needs human" ? "warn" : "", [{ b: x.stage, t: " is its stage" }]);
           },
         },
         {
@@ -289,7 +287,7 @@ async function viewBuffer(root, id, refresh) {
           meta.lines?.buffer.slice(1),
           stageOf(evs[0]),
           evs.map(stageOf),
-          spec?.status === "working" && spec.stage === stageOf(evs[0]),
+          spec?.phase === "working" && spec.stage === stageOf(evs[0]),
         ),
       ),
       retired

@@ -20,6 +20,7 @@ from mia_core.judge.evidence import EVIDENCE_DIR, QUESTION_FILE
 from mia_core.judge.evidence import command as agent_command
 from mia_core.untrusted import loads, neutralize
 
+from .cleaner import standing
 from .config import Config
 
 CAUSES = ("passing", "data", "record", "defect", "service", "autodev", "unknown")
@@ -33,7 +34,7 @@ WAIT_HOURS = (0.5, 48.0)
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)\n\s*```", re.DOTALL)
 
 QUESTION = """\
-You are the diagnosing agent of the MIA cleaner. One subject of the installation (a dataset being prepared, a
+You are the diagnosing agent of the MIA repair agent. One subject of the installation (a dataset being prepared, a
 buffer being built, or a request that prepares several datasets) is stuck, and no rule decided what to do.
 Find out why from the evidence in this directory, then say what should be done.
 
@@ -132,8 +133,8 @@ def write_evidence(workspace: Path, case: dict, item: dict, findings: list[dict]
     subject = item["subject"]
     (evidence / QUESTION_FILE).write_text(QUESTION)
     (evidence / "case.md").write_text(
-        f"# {subject['kind']} `{subject['key']}`, at `{subject['stage']}` ({subject['status']})\n\n"
-        f"## What was seen\n\n{data.get('seen', '')}\n\n## What the cleaner did before\n\n{tried}\n"
+        f"# {subject['kind']} `{subject['key']}`, at `{subject['stage']}` ({standing(subject)})\n\n"
+        f"## What was seen\n\n{data.get('seen', '')}\n\n## What the repair agent did before\n\n{tried}\n"
     )
     entries = "\n\n".join(
         f"## {entry.get('at')} round {entry.get('round')} stage {entry.get('stage')}\n\n{entry.get('body') or ''}"
@@ -219,7 +220,7 @@ def reduce_outcome(outcome: dict, kind: str, party: dict | None) -> dict:
                 continue
             step = {"do": do, "issue": party["issue"], "pr": party.get("pr")}
             if do == "close":
-                step["why"] = _text(remedy.get("why"), 300) or "the cleaner's diagnosis says it cannot be finished"
+                step["why"] = _text(remedy.get("why"), 300) or "the repair agent's diagnosis says it cannot be finished"
                 plan.append(step)
             else:
                 plan += [step, {"do": "await_autodev", "issue": party["issue"]}]

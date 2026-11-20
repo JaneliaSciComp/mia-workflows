@@ -108,6 +108,10 @@ export const PILL_HELP = {
   "in-progress":
     "The preparation pipeline is working on it by itself: nothing here waits for a person. The stage says where it is.",
   "unprepared": "Nobody has asked for this dataset to be prepared.",
+  // who moves a subject next
+  "needs human":
+    "Nothing automatic will move it: a person has to look. The stage says why: a verdict or an approval is wanted, a step failed, or a decision is needed.",
+  "in repair": "It stopped and the repair agent is working on it. Nothing here waits for a person.",
   "cannot start":
     "The dataset's catalog record lacks what a preparation round needs; the lines below say what. No round can be started for it. It can be started once a catalog sync brings a record that has it.",
   "needs-human":
@@ -178,6 +182,10 @@ const BAD = new Set(["failed", "needs-human", "missing", "blocked", "evicted", "
 export const statePill = s => (s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "");
 // a subject's stage as a pill. A stage that shares its name with another thing's state says what the stage means.
 const STAGE_HELP = {
+  "review": "The sample crops are ready and wait for a person's verdict: approve or reject them.",
+  "plan-review": "The plan is in the timeline and waits for an approval; no job has run yet.",
+  "idle": "No consumer has drawn for a while: Keep returns it to ready, otherwise the keeper retires it.",
+  "needs-human": "The round stopped; the newest entry of the timeline says why.",
   "staged": "No job is left to run and the board is in the timeline; the round waits for Approve.",
   "requested": "The request's datasets are handed to the preparation pipeline; it follows them until each has settled.",
   "cancelled": "A person cancelled the round.",
@@ -186,6 +194,8 @@ const STAGE_HELP = {
   "blocked":
     "The round stopped until a person decides or changes something; the newest entry of the timeline says what.",
 };
+// what a stage means, in a sentence
+export const stageHelp = s => STAGE_HELP[s] || PILL_HELP[s] || "";
 export const stagePill = s => {
   if (!s) return "";
   const node = el("span", { class: "pill" + (GOOD.has(s) ? " pool" : BAD.has(s) ? " warn" : "") }, s),

@@ -148,6 +148,8 @@ class Ledger:
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
+        # a case stored as `needs-person` ended with the repair agent giving up
+        self._db.execute("UPDATE cases SET state = 'gave-up' WHERE state = 'needs-person'")
 
     def close(self) -> None:
         with self._lock:

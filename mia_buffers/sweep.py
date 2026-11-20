@@ -43,6 +43,7 @@ from .cleaner import (
     plan_words,
     service_findings,
     sighting,
+    standing,
 )
 from .diagnose import diagnose_job, parse_outcome, reduce_outcome, workspace_of, write_evidence
 
@@ -79,10 +80,12 @@ class Sweep:
         self.activities, self.cfg, self.rules = activities, activities.cfg, activities.cfg.cleaner
         self.registry, self.now = activities.registry, now or time.time()
         self.report: dict[str, Any] = {"mode": self.rules.mode, "findings": [], "opened": [], "did": [], "errors": []}
+        self.report["every_s"] = self.rules.minutes * 60  # how soon the next report is due: what makes this one stale
         self.cases: list[dict] = []
         self.working = 0  # cases in work, against `max_parallel`
         self.workers: dict = {}  # service -> {commit, at, since}
         self.present: set[tuple[str, str]] = set()  # the left-over things this pass saw: (case kind, key)
+        self.ran: set[str] = set()  # the kinds of left-over thing this pass looked for to its end
 
     async def _ask(self, call: Any, *args: Any, **fields: Any) -> Any:
         """A registry call, off the event loop (the client is synchronous)."""
@@ -119,8 +122,10 @@ class Sweep:
         by_subject = {(view["kind"], view["number"]): view for view in views}
         if SNIPPETS not in skipped:
             await self._try("snippet work", self._left_snippets(by_subject))
-        for case in [case for case in self.cases if case["state"] == "needs-person" and case["rule"] == "record gap"]:
+        for case in [case for case in self.cases if case["state"] == "gave-up" and case["rule"] == "record gap"]:
             await self._try(case["key"], self._record_changed(case, by_subject))
+        for case in [case for case in self.cases if case["state"] == "gave-up" and case["kind"] not in ALL_KINDS]:
+            await self._try(case["key"], self._gone(case))
         for case in [case for case in self.cases if case["state"] in ACTIVE]:
             await self._try(case["key"], self._advance(case, by_subject, skipped))
         return await self._done()
@@ -137,7 +142,7 @@ class Sweep:
         try:
             await work
         except Exception as error:
-            log.warning("cleaner: %s failed: %s", what, error, exc_info=not isinstance(error, RegistryError))
+            log.warning("repair agent: %s failed: %s", what, error, exc_info=not isinstance(error, RegistryError))
             self.report["errors"].append(f"{what}: {type(error).__name__}: {error}"[:500])
 
     async def _service_findings(self) -> list[dict]:
@@ -166,9 +171,9 @@ class Sweep:
         """Whether the subject is worth its evidence: working or stuck for long enough, and not looked at
         already as it stands (a case of its revision exists)."""
         age = self.now - (view.get("updated") or self.now)
-        if view["status"] == "working":
+        if standing(view) == "working":
             old = age >= self.rules.quiet_minutes * 60
-        elif view["status"] == "stuck":
+        elif standing(view) == "stopped":
             old = age >= self.rules.stopped_minutes * 60
         else:
             return False
@@ -189,10 +194,10 @@ class Sweep:
         kind, number = view["kind"], view["number"]
         item = {"subject": timeline["subject"], "entries": timeline["entries"], "actions": timeline["actions"]}
         item["round"] = next((entry["round"] for entry in reversed(item["entries"]) if entry.get("round")), None)
-        if view["status"] == "working":
+        if standing(view) == "working":
             item["run"] = await self._run(kind, number)
             item["jobs"] = await self._jobs(number, item["round"])
-        if view["status"] == "working" or kind in ("prep", "dataset"):
+        if standing(view) == "working" or kind in ("prep", "dataset"):
             item["party"] = await self._party(item, skipped)
         queue = self.cfg.datasets_pipeline.task_queue if kind == "dataset" else self.cfg.task_queue
         item |= {"worker": self.workers.get(queue), "retry_hours": self.rules.retry_hours}
@@ -217,7 +222,7 @@ class Sweep:
                 live = bool(statuses) and not statuses[0].terminal
                 state = statuses[0].state if statuses else "GONE"
             except Exception as error:
-                log.warning("cleaner: csub status of job %s failed: %s", job_id, error)
+                log.warning("repair agent: csub status of job %s failed: %s", job_id, error)
             submitted = _epoch(record.get("submitted_at"))
             jobs.append(
                 {"address": record["address"], "job_id": job_id, "live": live, "state": state, "submitted": submitted}
@@ -228,7 +233,7 @@ class Sweep:
         """Who the working subject waits for, and whether they are at work: autodev for a dataset whose round
         waits on a snippet, its datasets for a request. None when it waits for nobody."""
         subject = item["subject"]
-        if subject["kind"] == "dataset" and (subject["stage"] in DEVELOP_STAGES or subject["status"] == "stuck"):
+        if subject["kind"] == "dataset" and (subject["stage"] in DEVELOP_STAGES or standing(subject) == "stopped"):
             issue = await self._snippet_issue(item)
             if issue is None:
                 return None
@@ -238,9 +243,9 @@ class Sweep:
         if subject["kind"] == "prep":
             datasets = await self._request_datasets(subject)
             return {
-                "working": not datasets or any(view["status"] in ("working", "waiting") for view in datasets),
+                "working": not datasets or any(standing(view) in ("working", "waiting") for view in datasets),
                 "settled": bool(datasets)
-                and all(view["status"] == "shelved" or view["stage"] == "done" for view in datasets),
+                and all(standing(view) == "shelved" or view["stage"] == "done" for view in datasets),
             }
         return None
 
@@ -371,6 +376,7 @@ class Sweep:
             step = {"do": "terminate", "namespace": run["namespace"], "workflow_id": run["id"], "run_id": run["run_id"]}
             seen = f"an open run of the workflow type `{run['type']}`, which no worker registers"
             await self._open("run", None, key, "unrunnable run", {"seen": seen, "plan": [step], "steps": []})
+        self.ran.add("run")
 
     async def _left_jobs(self, view: dict) -> None:
         """Jobs still alive after their round ended (a round ended from outside kills none). Only where no job
@@ -378,7 +384,7 @@ class Sweep:
         that was cancelled or retired. A round at a person's turn and a serving buffer still run jobs."""
         ended = self.now - (view.get("updated") or self.now)
         over = {
-            "dataset": view["status"] == "stuck" or view["stage"] in ("cancelled", "done"),
+            "dataset": standing(view) == "stopped" or view["stage"] in ("cancelled", "done"),
             "buffer": view["stage"] in ("cancelled", "retired"),
         }
         if not over.get(view["kind"]) or not ROUND_ENDED_S <= ended <= RECENT_S:
@@ -441,12 +447,42 @@ class Sweep:
                 await self._open(
                     "snippets", None, key, "pull request of a closed issue", {"seen": seen, "plan": [step], "steps": []}
                 )
+        self.ran.add("snippets")
+
+    async def _gone(self, case: dict) -> None:
+        """A left-over thing the agent gave up on is resolved once it is gone: a job when the cluster no longer
+        runs it, a run or snippet work when a pass that looked for its kind to the end did not see it."""
+        data = case["data"]
+        if case["kind"] == "job":
+            job = next(
+                (step["job_id"] for step in [*data.get("plan", []), *data.get("steps", [])] if "job_id" in step), None
+            )
+            if job is None or self.activities.jobs is None:
+                return
+            statuses = await asyncio.to_thread(self.activities.jobs.client.status, [job])
+            gone = not statuses or statuses[0].terminal
+        else:
+            gone = case["kind"] in self.ran and (case["kind"], case["key"]) not in self.present
+        if gone:
+            await self._save(case, "resolved", "it is gone")
 
     # --- carrying cases on -------------------------------------------------------------------------------------
 
     async def _save(self, case: dict, state: str, note: str = "") -> None:
         if note:
             case["data"]["note"] = note
+        if state == "gave-up" and case["kind"] in ALL_KINDS:
+            data, view = case["data"], await self._ask(self.registry.subject, case["kind"], case["key"])
+            went = data.get("went")
+            unanswered = view is not None and went is not None and view["revision"] == went["revision"]
+            if unanswered and self.now - went["at"] <= STEP_WAIT_S:
+                # the subject has not answered the agent's last action yet (a cancel's stage write is still to
+                # come): the case stays in work and ends once it has, at the revision the answer leaves
+                data["giving_up"], state = True, "working"
+            elif view is not None:
+                # where the subject stands after the agent's last write: the result holds until it moves
+                data.pop("giving_up", None)
+                data["ended_revision"] = view["revision"]
         saved = await self._ask(self.registry.update_case, case["id"], state=state, data=case["data"])
         if state != case["state"]:
             self.report["did"].append(f"{case['key']}: {state}" + (f": {note}" if note else ""))
@@ -468,7 +504,7 @@ class Sweep:
             return  # what is wrong with the installation comes first: nothing is concluded about its subjects
         if case["state"] == "waiting":
             return await self._outcome(case, view)
-        moved = view["revision"] != data.get("revision") or view["status"] not in ("working", "stuck")
+        moved = view["revision"] != data.get("revision") or standing(view) not in ("working", "stopped")
         if moved and not _acted(data):  # once the case acted, the changes are its own
             return await self._save(case, "resolved", "it moved on by itself")
         if not acting:
@@ -477,6 +513,8 @@ class Sweep:
         acted = last_person(timeline["actions"])
         if acted is not None and acted > case["opened"]:
             return await self._save(case, "dropped", "somebody acted on it")
+        if data.get("giving_up"):  # it gave up while its own last action was unanswered: ended once that is settled
+            return await self._save(case, "gave-up")
         if not _acted(data) and timeline["subject"]["revision"] != data.get("revision"):  # since the pass began
             return await self._save(case, "resolved", "it moved on by itself")
         await self._work(case, timeline)
@@ -493,14 +531,14 @@ class Sweep:
             step, failure = data["plan"][0], None
             try:
                 if step["do"] in STARTS_WORK and (tried := self._remedies(case)) >= self.rules.max_remedies:
-                    raise Refused(f"the cleaner has started work on this subject {tried} times in seven days")
+                    raise Refused(f"the repair agent has started work on this subject {tried} times in seven days")
                 if not _acted(data) and step["do"] not in QUIET_STEPS and "diagnosis" not in data:
                     await self._say(case, f"{data['seen']}. Doing: {plan_words(data['plan'])}.", "start")
                 result = await self._do(case, step, timeline)
             except Refused as refused:
                 data["steps"].append({**step, "at": self.now, "result": f"refused: {refused}"})
                 data["needs"] = f"{plan_words([step])} was refused: {refused}"
-                state = "needs-person"
+                state = "gave-up"
                 break
             except Exception as error:  # tried again next pass, like a step that is not possible yet
                 failure, result = error, None
@@ -512,8 +550,8 @@ class Sweep:
                     hours = STEP_WAIT_S // 3600
                     why = f"kept failing for {hours} h: {failure}" if failure else f"was not possible for {hours} h"
                     data["needs"] = f"{plan_words([step])} {why}"
-                    state = "needs-person"
-                if failure and state != "needs-person":
+                    state = "gave-up"
+                if failure and state != "gave-up":
                     await self._save(case, state)  # what the case did so far is kept
                     raise failure
                 break
@@ -521,16 +559,22 @@ class Sweep:
             data["plan"].pop(0)
             data.pop("waiting", None)
             if step["do"] == "needs":
-                data["needs"], state, told = step["text"], "needs-person", bool(step.get("told"))
+                data["needs"], state, told = step["text"], "gave-up", bool(step.get("told"))
                 break
             if step["do"] in ACTIONS and timeline is not None:  # the next step decides on the subject as it is now
                 timeline = await self._ask(self.registry.timeline, case["kind"], case["number"])
         else:
             state = "waiting" if any(step["do"] in (*STARTS_WORK, "recheck") for step in data["steps"]) else "resolved"
+            changed = [step["do"] for step in data["steps"] if step["do"] in (*ACTIONS, *STARTS_WORK)]
+            if case["kind"] in ALL_KINDS and changed and changed[-1] in ("cancel", "stop"):
+                # the agent ended the round and runs nothing after it: nobody decided that, so a person has to
+                asked = (data.get("diagnosis") or {}).get("needs")
+                data["needs"] = asked or "the round was ended and nothing runs it again: restart it once it can pass"
+                state = "gave-up"
             if data["steps"] and data["steps"][-1]["do"] == "wait":
                 data["revision"] = None  # the wait is over: the subject is looked at again as it stands
-        if state == "needs-person" and not told:
-            await self._say(case, f"needs a person: {data['needs']}", "needs")
+        if state == "gave-up" and not told:
+            await self._say(case, f"could not repair this: {data['needs']}", "needs")
         await self._save(case, state)
 
     async def _outcome(self, case: dict, view: dict) -> None:
@@ -542,9 +586,9 @@ class Sweep:
             if self.now - went["at"] > STEP_WAIT_S:
                 await self._not_helped(case, f"nothing changed in {STEP_WAIT_S // 3600} h")
             return
-        if view["status"] == "stuck":
+        if standing(view) == "stopped":
             return await self._not_helped(case, f"stopped again at `{view['stage']}`")
-        if view["status"] != "working":
+        if standing(view) != "working":
             await self._save(case, "resolved", f"now at `{view['stage']}`")
 
     async def _not_helped(self, case: dict, seen: str) -> None:
@@ -552,8 +596,8 @@ class Sweep:
         data = case["data"]
         if data.get("diagnosed") or self.rules.mode != "act":
             data["needs"] = f"the remedy did not help: {seen}"
-            await self._say(case, f"needs a person: {data['needs']}", "needs")
-            return await self._save(case, "needs-person")
+            await self._say(case, f"could not repair this: {data['needs']}", "needs")
+            return await self._save(case, "gave-up")
         data["diagnosed"], data["plan"] = True, [{"do": "diagnose"}]
         data["seen"] = f"{data['seen']}. After the remedy: {seen}"
         data["round"] = data["run_id"] = None  # those were the round the remedy ended: the diagnosis reads today's
@@ -564,7 +608,7 @@ class Sweep:
         if case["kind"] not in ALL_KINDS:
             return
         marker = f"<!-- mia: cleaner {case['id']} {mark} -->"
-        body = f"**Cleaner:** {neutralize(text)}\n\n{marker}"
+        body = f"**Repair agent:** {neutralize(text)}\n\n{marker}"
         await self._ask(self.registry.append_entry, case["kind"], case["number"], body=body, marker=marker)
 
     # --- steps -------------------------------------------------------------------------------------------------
@@ -580,7 +624,7 @@ class Sweep:
                 raise Refused("this worker has no job runner")
             return await self._kill(case, step, self.activities.jobs.client)
         if do == "terminate":
-            reason = f"no worker runs this workflow type (cleaner case {case['id']})"
+            reason = f"no worker runs this workflow type (repair case {case['id']})"
             ended = await self._ask(
                 self.registry.terminate_run, step["namespace"], step["workflow_id"], step["run_id"], reason
             )
@@ -597,7 +641,7 @@ class Sweep:
             return await self._diagnose(case, timeline)
         if do == "report_defect":
             return await self._report_defect(case, step)
-        raise Refused(f"`{do}` is not a step the cleaner knows")
+        raise Refused(f"`{do}` is not a step the repair agent knows")
 
     async def _kill(self, case: dict, step: dict, cluster: Any) -> str | None:
         """End the jobs of the case's round (`kill_jobs`) or one job (`kill_job`): done only once the cluster
@@ -708,7 +752,7 @@ class Sweep:
         if plan:
             said += f" Doing: {plan_words(plan)}."
         if needs:
-            said += f" Needs a person: {needs[0]['text']}"
+            said += f" What it takes: {needs[0]['text']}"
         data["plan"][1:] = plan + needs  # after this step: what the diagnosis asks for replaces whatever was left
         link = f" [Its job]({job_link(self.cfg.service.url, record)})." if record else ""
         await self._say(case, said + link, f"diagnosis {len(data['steps'])}")
@@ -724,13 +768,13 @@ class Sweep:
         gh = copy.copy(self.activities.gh_issues)  # ponytail: the issue repo's client pointed at another repo
         gh.repo = repo
         marker = f"<!-- mia: defect {hashlib.sha256(step['title'].lower().encode()).hexdigest()[:12]} -->"
-        about = f"Cleaner case {case['id']} (`{case['key']}`): {case['data'].get('seen', '')}"
+        about = f"Repair case {case['id']} (`{case['key']}`): {case['data'].get('seen', '')}"
         for issue in await gh.list_issues(state="open", creator=self.activities.bot):
             if marker in (issue.get("body") or ""):
                 await gh.comment(issue["number"], f"Seen again. {neutralize(about)}")
                 return f"added to issue #{issue['number']}"
         body = f"{step['evidence']}\n\n{neutralize(about)}\n\n{marker}"
-        created = await gh.create_issue(f"cleaner: {step['title']}", body, [])
+        created = await gh.create_issue(f"repair agent: {step['title']}", body, [])
         return f"filed as issue #{created['number']}"
 
     async def _request_may_go(self, subject: dict) -> bool:
@@ -748,11 +792,11 @@ class Sweep:
         if spec.select is not None or not spec.records:
             raise Refused("it selects its datasets: a resume would run the rounds of whatever it selects")
         for view in await self._request_datasets(subject):
-            if view["status"] in ("working", "waiting", "shelved") or view["stage"] == "done":
+            if standing(view) in ("working", "waiting", "shelved") or view["stage"] == "done":
                 continue
-            stuck = [case for case in self._cases_of("dataset", view["number"]) if case["state"] == "needs-person"]
+            stuck = [case for case in self._cases_of("dataset", view["number"]) if case["state"] == "gave-up"]
             if stuck:
-                raise Refused(f"its dataset `{view['key']}` needs a person: {stuck[0]['data'].get('needs', '')}")
+                raise Refused(f"its dataset `{view['key']}` could not be repaired: {stuck[0]['data'].get('needs', '')}")
             return False
         return True
 
@@ -776,7 +820,7 @@ class Sweep:
         if do == "snippets_go":
             await say(
                 step["issue"],
-                "The cleaner asks autodev to try this issue again: its last run stopped before a pull request.",
+                "The repair agent asks autodev to try this issue again: its last run stopped before a pull request.",
             )
             await gh.add_labels(step["issue"], ["snippets:go"])
             return f"asked on issue #{step['issue']}"
@@ -785,7 +829,7 @@ class Sweep:
             return f"asked on pull request #{step['pr']}"
         for number in (step.get("pr"), step.get("issue")):  # close: the pull request first, which ends autodev's run
             if number is not None and (await gh.get_issue(number)).get("state") == "open":
-                await say(number, f"Closed by the cleaner: {neutralize(step['why'])}.")
+                await say(number, f"Closed by the repair agent: {neutralize(step['why'])}.")
                 await gh.update_issue(number, state="closed")
         return "closed"
 

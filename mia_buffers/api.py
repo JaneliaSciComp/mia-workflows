@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -91,18 +91,17 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 # a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers;
 # an iterator of bytes is streamed chunk by chunk until its reader leaves (`GET /stream`)
 Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
-# kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
+# kind of subject -> its stage table: stage -> (phase, the actions it accepts) (spec webapp-actions §5.1)
 SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
 # where a round can go from any step: not steps of a lifecycle themselves
 OFF_LINE = ("debugging", "failed", "blocked", "needs-human", "cancelled")
 # kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
 LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
-NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
 # Shelving (spec shelved-subjects): a person sets a subject aside with a reason. Its stage stays; its status reads
 # `shelved`, it takes `unshelve` alone, and a shelved dataset reads `shelved` to every plan and request. A subject
-# with one of these status words (no round open) also takes `shelve`; so does one whose round waits for a person's
+# in one of these phases (no round open) also takes `shelve`; so does one whose round waits for a person's
 # verdict (`waiting`, and its stage takes `cancel`), and that shelve cancels the round first.
-SHELVABLE = ("not started", "stuck", "done")
+SHELVABLE = ("not started", "stopped", "done")
 HOLD_ACTIONS = ("shelve", "unshelve")  # carried out by this service: the subject's workflow hears of neither
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
@@ -341,9 +340,48 @@ class IssueBody(_Strict):
     issue: int
 
 
-CASE_STATES = ("open", "working", "waiting", "resolved", "needs-person", "dropped")
-CASES_OPEN = ("open", "working", "waiting", "needs-person")  # what `GET /cases` lists whatever its age
-CaseState = Literal["open", "working", "waiting", "resolved", "needs-person", "dropped"]
+# a case is in work (`open`, `working`, `waiting`) or has ended: `resolved`, `dropped` (somebody acted), or
+# `gave-up` (the repair agent could not repair it; the case says what it takes). Whether a human is needed is the
+# subject's status to say, never a case's (spec overview §4).
+CASE_STATES = ("open", "working", "waiting", "resolved", "gave-up", "dropped")
+# what `GET /cases` lists whatever its age: the sweep reads what it gave up on for as long as the case stands
+CASES_OPEN = ("open", "working", "waiting", "gave-up")
+CaseState = Literal["open", "working", "waiting", "resolved", "gave-up", "dropped"]
+
+
+STATUSES = ("shelved", "in repair", "needs human", "done", "not started", "working")  # what `status_of` gives
+
+
+def status_of(phase: str, shelved: bool, repair: dict | None, acting: bool) -> str:
+    """Who moves the subject next, the one word a person reads and the only one that says a human is needed
+    (spec overview §3.2): `shelved`, `in repair`, `needs human`, `done`, `not started` or `working`. `repair` is
+    the repair agent's case about the subject as it stands (`BufferService._repair_of`), `acting` whether the
+    agent carries its cases out. A case with steps left makes the subject `in repair` at any phase: a stage its
+    own step produced (`cancelled` before its resume) is part of the repair. One it gave up on needs a human
+    wherever it left the subject."""
+    if shelved:
+        return "shelved"
+    state = repair["state"] if repair else None
+    if acting and (
+        state == "working"
+        or (state == "open" and phase in ("working", "waiting", "stopped"))
+        or (state == "waiting" and phase in ("waiting", "stopped"))
+    ):
+        return "in repair"
+    if state == "gave-up":
+        return "needs human"
+    return phase if phase in ("done", "not started", "working") else "needs human"
+
+
+REPORT_STALE = 3  # a sweep's report is overdue once this many of its periods passed with none after it
+REPORT_EVERY_S = 600.0  # the period of a report that names none
+
+
+class Repairs(NamedTuple):
+    """What the repair agent has on the subjects, read once for many views."""
+
+    acting: bool  # its last sweep ran in `act` mode: a case in work is being carried out
+    cases: dict[tuple[str, int], dict]  # (kind, number) -> the subject's newest case in work or given up on
 
 
 class CaseBody(_Strict):
@@ -594,7 +632,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)$"), "adopt_subject", "worker"),
     ("GET", re.compile(r"^/subjects/([a-z]+)$"), "list_subjects", "read"),
     ("GET", re.compile(r"^/subjects/([a-z]+)/(.+)$"), "get_subject", "read"),
-    ("GET", re.compile(r"^/needs$"), "needs", "read"),
+    ("GET", re.compile(r"^/subjects$"), "by_status", "read"),
     ("GET", re.compile(r"^/lookup$"), "lookup", "read"),
     ("GET", re.compile(r"^/stream$"), "stream", "read"),
     ("POST", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "append_entry", "worker"),
@@ -1020,13 +1058,13 @@ class BufferService:
     # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
 
     def _rules(self, row: dict, hold: dict | None, gaps: list[str]) -> tuple[str, frozenset[str]]:
-        """A subject's status word and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
+        """A subject's phase and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
         dataset whose record cannot be run (`gaps`: no Start until a synced catalog holds one that can), with
         `shelve` while no round is working and none was just asked for (a round that waits for a verdict is
-        cancelled by the shelve, `_hold`). A shelved subject (`hold`) is `shelved` and takes `unshelve` alone."""
+        cancelled by the shelve, `_hold`). A shelved subject (`hold`) keeps its phase and takes `unshelve` alone."""
+        phase, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
         if hold is not None:
-            return "shelved", frozenset({"unshelve"})
-        status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
+            return phase, frozenset({"unshelve"})
         if gaps:
             actions = actions - {"go", "resume"}
         if row["kind"] == "dataset":
@@ -1041,10 +1079,10 @@ class BufferService:
             # revoked, or the dataset's row does, which also holds for a round that carries no such mark
             if sets.get("revoked") or (self.ledger.dataset(row["key"]) or {}).get("state") == "revoked":
                 actions = actions - {"resume"}
-        resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
+        resting = phase in SHELVABLE or (phase == "waiting" and "cancel" in actions)
         if resting and self._asking(row["kind"], row.get("number")) is None:
             actions = actions | {"shelve"}
-        return status, actions
+        return phase, actions
 
     def _asking(self, kind: str, number: int | None) -> dict | None:
         """The action that was sent to the subject's workflow and that the workflow has not answered yet, while
@@ -1056,16 +1094,49 @@ class BufferService:
             return None
         return {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
 
-    def _subject_view(self, row: dict, holds: dict[tuple[str, int], dict] | None = None) -> dict:
-        """The row plus its name, its status word, the actions it accepts (`_rules`; sorted, for a stable page), its
+    def _repairs(self) -> Repairs:
+        cases: dict[tuple[str, int], dict] = {}
+        for case in self.ledger.cases(CASES_OPEN):  # newest first
+            if case["number"] is not None:
+                cases.setdefault((case["kind"], case["number"]), case)
+        report = self.ledger.kv("cleaner") or {}
+        # the agent acts while its sweeps report in `act` mode: a report that is overdue (the schedule is off, the
+        # worker is away) repairs nothing, whatever mode it was in
+        fresh = time.time() - (report.get("at") or 0) <= REPORT_STALE * (report.get("every_s") or REPORT_EVERY_S)
+        return Repairs(report.get("mode") == "act" and fresh, cases)
+
+    @staticmethod
+    def _repair_of(row: dict, case: dict | None) -> dict | None:
+        """The repair result that holds for the subject as it stands: its newest case while that is in work, or
+        once the agent gave up on it for as long as the subject has not moved since. That is read from the
+        revision the case ended at; a case that ended with none holds until the subject is next written."""
+        if case is None:
+            return None
+        if case["state"] == "gave-up":
+            ended = case["data"].get("ended_revision")
+            holds = ended == row["revision"] if ended is not None else case["updated"] >= (row.get("updated") or 0)
+            if not holds:
+                return None
+        return {"id": case["id"], "rule": case["rule"], "state": case["state"], "needs": case["data"].get("needs")}
+
+    def _subject_view(
+        self, row: dict, holds: dict[tuple[str, int], dict] | None = None, repairs: Repairs | None = None
+    ) -> dict:
+        """The row plus its name, its phase (what its round does at its stage: what a worker decides by), its
+        status (what a person reads), the actions it accepts (`_rules`; sorted, for a stable page), its
         hold when it is shelved, a dataset's `hosts` (`_unapproved`), and `asked`: the action that was sent to its workflow and that the workflow has not
         answered yet. Until it does the stage is still the old one, and the page must not offer that stage's
-        buttons as if nothing was clicked. `holds`: `Ledger.shelved()`, read once by a caller with many rows."""
+        buttons as if nothing was clicked. `repair` is the repair agent's result for the subject as it stands.
+        `holds` (`Ledger.shelved()`) and `repairs` (`_repairs`) are read once by a caller with many rows."""
         hold = (self.ledger.shelved() if holds is None else holds).get((row["kind"], row["number"]))
         gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
-        status, actions = self._rules(row, hold, gaps)
+        phase, actions = self._rules(row, hold, gaps)
         asked = self._asking(row["kind"], row["number"])
-        view = {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
+        repairs = self._repairs() if repairs is None else repairs
+        repair = self._repair_of(row, repairs.cases.get((row["kind"], row["number"])))
+        status = status_of(phase, hold is not None, repair, repairs.acting)
+        view = {**row, "phase": phase, "status": status, "repair": repair}
+        view |= {"actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
         if row["kind"] == "dataset":
             view["hosts"] = self._unapproved(row["key"])
         view["name"] = (row.get("data") or {}).get("name") or row["key"]  # a buffer's name is not its key
@@ -1113,7 +1184,8 @@ class BufferService:
             raise HttpError(404, f"no subjects of kind {kind!r}")
         page = self._page_of(query, SUBJECT_SORTS)
         holds = self.ledger.shelved()
-        subjects = [self._subject_view(row, holds) for row in self.ledger.find_subjects(kind=kind)]
+        repairs = self._repairs()
+        subjects = [self._subject_view(row, holds, repairs) for row in self.ledger.find_subjects(kind=kind)]
         if kind == "buffer":
             serving = self._served_versions()
             subjects = [{**view, "serving": serving.get(view["number"])} for view in subjects]
@@ -1136,15 +1208,29 @@ class BufferService:
                 serving[number] = buffer["id"]
         return serving
 
-    def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
-        """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
-        for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
-        last day that did not reach Temporal (each with its subject, for the Retry). A shelved subject is not
-        among them: `shelved` counts those, and `?shelved=1` lists them instead. `kind` narrows the list to
-        one kind of subject; `kinds` counts every kind's share of the whole list."""
-        holds = self.ledger.shelved()
-        views = [self._subject_view(row, holds) for row in self.ledger.find_subjects()]
+    def _by_status(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The subjects of every kind with one status (`status`; `needs human` when none is named), which is
+        Overview's lists (spec overview §5). Under `needs human` also a buffer round whose dataset waits for
+        its files (`drops`: the round is working, but only a person can copy them). `kind` narrows the list to
+        one kind of subject; `kinds` counts every kind's share of the list, `counts` every kind's subjects by
+        status. `failed`: the actions of the last day that did not reach Temporal, each with its subject, for
+        the Retry."""
+        status = query.get("status", "needs human")
+        if status not in STATUSES:
+            raise HttpError(422, f"status must be one of {list(STATUSES)}, got {status!r}")
+        holds, repairs = self.ledger.shelved(), self._repairs()
+        waits = status == "needs human"
+        counts: dict[str, dict[str, int]] = {kind: {} for kind in SUBJECT_RULES}
+        views = []
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
+        for row in self.ledger.find_subjects():
+            # the status needs no view: one is built only for a subject this list may hold
+            hold = holds.get((row["kind"], row["number"]))
+            repair = self._repair_of(row, repairs.cases.get((row["kind"], row["number"])))
+            is_now = status_of(SUBJECT_RULES[row["kind"]][row["stage"]][0], hold is not None, repair, repairs.acting)
+            counts[row["kind"]][is_now] = counts[row["kind"]].get(is_now, 0) + 1
+            if is_now == status or (waits and row["kind"] == "buffer"):  # a buffer may wait for files while working
+                views.append(self._subject_view(row, holds, repairs))
         for index, view in enumerate(views):
             if view["kind"] == "buffer" and "dropped" in view["actions"]:
                 # the round's buffer has the id of the go that started it
@@ -1152,29 +1238,22 @@ class BufferService:
                 board = self.ledger.buffer_datasets(f"i{view['number']}-e{gos[-1]['id']}") if gos else []
                 if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
                     views[index] = {**view, "drops": drops}
-        # what the cleaner could not resolve, on the subject's row
-        for case in self.ledger.cases(("needs-person",)):
-            for index, view in enumerate(views):
-                if (view["kind"], view["number"]) == (case["kind"], case["number"]) and "cleaner" not in view:
-                    views[index] = {**view, "cleaner": case["data"].get("needs", "")}
         failed = []
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
-            failed.append({**action, "subject": self._subject_view(found[0], holds) if found else None})
-        if query.get("shelved"):
-            needs = [view for view in views if view["shelved"]]
-        else:
-            needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+            failed.append({**action, "subject": self._subject_view(found[0], holds, repairs) if found else None})
+        needs = [view for view in views if view["status"] == status or (waits and view.get("drops"))]
         kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
         if (kind := query.get("kind")) is not None:
             if kind not in SUBJECT_RULES:
                 raise HttpError(422, f"kind must be one of {list(SUBJECT_RULES)}, got {kind!r}")
             needs = [view for view in needs if view["kind"] == kind]
         page = self._page_of(query, SUBJECT_SORTS)
+        out = {"failed": failed, "kinds": kinds, "counts": counts}
         if page is None:
-            return 200, {"needs": needs, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
+            return 200, {"subjects": needs, **out}, {}
         rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
-        return 200, {"needs": rows, "total": total, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
+        return 200, {"subjects": rows, "total": total, **out}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
@@ -1587,10 +1666,13 @@ class BufferService:
         kind, key, stage = subject["kind"], subject["key"], subject["stage"]
         number = subject.get("number")  # none yet for a buffer spec that its first go creates
         hold = self.ledger.shelved().get((kind, number)) if number is not None else None
-        status, accepted = self._rules(subject, hold, self._gaps(key) if kind == "dataset" else [])
+        phase, accepted = self._rules(subject, hold, self._gaps(key) if kind == "dataset" else [])
         if parsed.action not in accepted:
             takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
-            raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
+            standing = "shelved" if hold else phase
+            raise HttpError(
+                409, f"{kind} {key!r} is at `{stage}` ({standing}): it takes {takes}, not `{parsed.action}`"
+            )
         if parsed.action in ("approve", "reject") and parsed.revision is None:
             raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
         if parsed.revision is not None and parsed.revision != subject["revision"]:
@@ -1861,7 +1943,7 @@ class BufferService:
         return 200, case, {}
 
     def _case_changed(self, case: dict) -> None:
-        if case["kind"] in SUBJECT_RULES and case["number"] is not None:  # the subject's row in Needs you
+        if case["kind"] in SUBJECT_RULES and case["number"] is not None:  # the subject's status may have changed
             self.changes.announce(case["kind"], case["number"])
 
     def _cases(self, *, query: dict[str, str], body: bytes) -> Response:

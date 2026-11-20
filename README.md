@@ -64,10 +64,10 @@ addressed by its recipe, so a later buffer with the same binding, levels and pla
 again. After that the buffer lives until it is retired: idle when no consumer has drawn for a while, *Keep* to
 hold it, *Retire* to release what it references, *Revoke* to withdraw single records; a round in progress takes
 only *Cancel*. A keeper evicts unreferenced caches under the configured quotas and is the only code that deletes.
-A cleaner looks every few minutes for rounds that read "in progress" with nothing running, rounds that stopped
+A repair agent looks every few minutes for rounds that read "in progress" with nothing running, rounds that stopped
 for a reason with a known remedy, and jobs, issues and pull requests a round left behind; it says what is wrong
 with the installation, resolves what it can through the same actions the page's buttons send, and leaves the
-rest under *Needs you* with what it takes.
+rest under *Needs human* on the Overview page with what it takes.
 
 A dataset that is not prepared is out of the pool. A preparation request (*Prepare these datasets* on the page)
 hands its records to mia-data, each with a `go` sent through buffer-api and charged to the request, and follows

@@ -274,7 +274,7 @@ def test_a_round_with_no_run_is_cancelled_and_run_again(world):
         "kill_jobs",
         "resume",
     ]
-    said = [entry["body"] for entry in out["entries"] if entry["body"].startswith("**Cleaner:**")]
+    said = [entry["body"] for entry in out["entries"] if entry["body"].startswith("**Repair agent:**")]
     assert len(said) == 1 and "no open run" in said[0] and "Doing: cancel the round" in said[0]
     world.temporal.runs[number] = dict(RUN)
     world.stage("dataset", number, "matching")
@@ -309,8 +309,10 @@ def test_a_job_that_cannot_be_seen_dead_ends_the_case_at_a_person(world):
     world.sweep(3.0)
     world.sweep(6.0)
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and "end the round's cluster jobs was not possible" in case["data"]["needs"]
-    assert "needs a person" in world.timeline("dataset", number)["entries"][-1]["body"]
+    assert case["state"] == "gave-up" and "end the round's cluster jobs was not possible" in case["data"]["needs"]
+    assert "could not repair this" in world.timeline("dataset", number)["entries"][-1]["body"]
+    view = call(world.service, "GET", "/subjects/dataset/rec-a")[1]
+    assert case["data"]["ended_revision"] == view["revision"]  # where the subject stood when the case ended
     assert all(sent[3].actor == "page" for sent in world.temporal.sent if sent[2] == "restart")  # no go of its own
 
 
@@ -372,7 +374,7 @@ def test_a_remedy_that_did_not_help_is_diagnosed_once_and_then_ends_at_a_person(
     world.stage("dataset", number, "failed", "the crops do not match the annotation")
     world.sweep()
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and "the remedy did not help" in case["data"]["needs"]
+    assert case["state"] == "gave-up" and "the remedy did not help" in case["data"]["needs"]
     assert len(world.submitted) == 1  # no second diagnosis
 
 
@@ -385,7 +387,7 @@ def test_the_weekly_limit_stops_the_cleaner_from_running_a_subject_again(tmp_pat
     world.answer({"diagnosis": "its run was lost again", "cause": "unknown", "remedies": [{"do": "go"}]})
     world.sweep(9.0)
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and "started work on this subject 1 times" in case["data"]["needs"]
+    assert case["state"] == "gave-up" and "started work on this subject 1 times" in case["data"]["needs"]
     gos = [
         action
         for action in world.timeline("dataset", number)["actions"]
@@ -450,7 +452,7 @@ def test_autodevs_failed_run_is_asked_for_again_and_the_dataset_follows_once_aut
     assert case["rule"] == "autodev's run failed" and case["state"] == "working"
     assert [step["do"] for step in case["data"]["steps"]] == ["snippets_go"] and cleaner_actions(world, number) == []
     assert "snippets:go" in world.snippets.labels(72) and len(world.snippets.comments[72]) == 2
-    assert "**Cleaner:**" in world.timeline("dataset", number)["entries"][-1]["body"]
+    assert "**Repair agent:**" in world.timeline("dataset", number)["entries"][-1]["body"]
     world.snippets.issues[72]["labels"] = [{"name": "snippets:working"}]  # autodev read the label
     world.sweep()
     (case,) = world.cases()
@@ -467,7 +469,7 @@ def test_a_dataset_is_not_run_again_when_autodev_does_not_take_the_command(world
     world.sweep(3.0)
     world.sweep(4.0)  # the label is still there after the quiet time
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and "autodev did not take it within 30 min" in case["data"]["needs"]
+    assert case["state"] == "gave-up" and "autodev did not take it within 30 min" in case["data"]["needs"]
     assert cleaner_actions(world, number) == []
 
 
@@ -523,8 +525,8 @@ def test_a_record_gap_waits_for_a_person_and_runs_again_once_the_record_changed(
     world.stage("dataset", number, "blocked", "match blocked: Someone has to decide what class the label arrays mark")
     world.sweep()
     (case,) = world.cases()
-    assert case["rule"] == "record gap" and case["state"] == "needs-person" and cleaner_actions(world, number) == []
-    assert call(world.service, "GET", "/needs")[1]["needs"][0]["cleaner"].startswith(
+    assert case["rule"] == "record gap" and case["state"] == "gave-up" and cleaner_actions(world, number) == []
+    assert call(world.service, "GET", "/subjects")[1]["subjects"][0]["repair"]["needs"].startswith(
         "its catalog record needs a decision"
     )
     world.sweep()
@@ -587,7 +589,7 @@ def test_a_request_whose_dataset_needs_a_person_needs_one_too(world):
     world.stage("dataset", dataset, "blocked", "match blocked: Someone has to decide the label classes")
     world.sweep()
     case = next(case for case in world.cases() if case["kind"] == "prep")
-    assert case["state"] == "needs-person" and "its dataset `rec-a` needs a person" in case["data"]["needs"]
+    assert case["state"] == "gave-up" and "its dataset `rec-a` could not be repaired" in case["data"]["needs"]
     assert cleaner_actions(world, request, "prep") == ["cancel"]
 
 
@@ -649,7 +651,7 @@ def test_what_no_rule_covers_is_diagnosed_and_only_the_menu_is_carried_out(world
         "cleaner/case-"
     )
     (said,) = [
-        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Cleaner:**" in entry["body"]
+        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Repair agent:**" in entry["body"]
     ]
     assert "Diagnosis (defect): the round waits on a signal that was lost" in said and "#job/cleaner/case-" in said
     world.temporal.runs.pop(number)
@@ -668,11 +670,11 @@ def test_a_diagnosis_that_proposes_nothing_says_what_a_person_must_do(world):
     world.answer({"diagnosis": "the dataset has no labels at all", "cause": "data", "remedies": [], "needs": "drop it"})
     world.sweep()
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and case["data"]["needs"] == "drop it"
+    assert case["state"] == "gave-up" and case["data"]["needs"] == "drop it"
     (said,) = [
-        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Cleaner:**" in entry["body"]
+        entry["body"] for entry in world.timeline("dataset", number)["entries"] if "**Repair agent:**" in entry["body"]
     ]
-    assert "Diagnosis (data): the dataset has no labels at all Needs a person: drop it" in said  # once, in one entry
+    assert "Diagnosis (data): the dataset has no labels at all What it takes: drop it" in said  # once, in one entry
     spent = call(world.service, "GET", "/budgets")[1]["budgets"]  # the job counted 0.5
     assert [row["spent_usd"] for row in spent if row["root"].startswith("cleaner-")] == [pytest.approx(0.05)]
     assert cleaner_actions(world, number) == []
@@ -703,7 +705,7 @@ def test_an_answer_that_cannot_be_read_ends_at_a_person(world):
     world.answer("I could not decide.")
     world.sweep()
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and "no answer that can be read" in case["data"]["needs"]
+    assert case["state"] == "gave-up" and "no answer that can be read" in case["data"]["needs"]
 
 
 def test_a_diagnosis_waits_while_the_days_budget_is_spent(tmp_path, monkeypatch):
@@ -735,7 +737,7 @@ def test_a_defect_is_filed_once_in_the_repository_named_for_it(tmp_path, monkeyp
         world.csub.alive.discard(job["id"])
         world.sweep()
     (filed,) = [issue for issue in world.issues.issues.values() if "title" in issue]
-    assert filed["title"] == "cleaner: The look never fires" and "run.json has no timer" in filed["body"]
+    assert filed["title"] == "repair agent: The look never fires" and "run.json has no timer" in filed["body"]
     assert [comment["body"].split(".")[0] for comment in world.issues.comments[filed["number"]]] == ["Seen again"]
     results = [
         step["result"] for case in world.cases() for step in case["data"]["steps"] if step["do"] == "report_defect"
@@ -795,7 +797,7 @@ def test_a_step_that_fails_on_every_pass_ends_its_case_at_a_person(world):
     assert case["state"] == "working" and [step["do"] for step in case["data"]["steps"]] == ["cancel"]  # kept
     world.sweep(6.0)
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and "kept failing for 2 h: csub: not_found" in case["data"]["needs"]
+    assert case["state"] == "gave-up" and "kept failing for 2 h: csub: not_found" in case["data"]["needs"]
 
 
 def test_an_issue_number_in_a_timeline_that_is_not_this_datasets_is_not_acted_on(world):
@@ -838,5 +840,92 @@ def test_a_request_that_selects_its_datasets_is_never_run_again_by_the_cleaner(w
     world.stage("prep", request, "requested")
     world.sweep()
     (case,) = world.cases()
-    assert case["state"] == "needs-person" and "it selects its datasets" in case["data"]["needs"]
+    assert case["state"] == "gave-up" and "it selects its datasets" in case["data"]["needs"]
     assert cleaner_actions(world, request, "prep") == ["cancel"]
+
+
+def gave_up(world, kind, key, plan):
+    body = {"kind": kind, "key": key, "rule": "left over", "state": "gave-up", "data": {"plan": plan, "steps": []}}
+    return worker(world.service, "POST", "/cases", body)[1]
+
+
+def test_a_left_behind_job_the_agent_gave_up_on_is_resolved_once_it_is_gone(world):
+    world.csub.alive.add("901")
+    case = gave_up(world, "job", "issue-7/i7-e1/crops-1", [{"do": "kill_job", "job_id": "901", "address": "a"}])
+    world.sweep()
+    assert world.cases()[0]["state"] == "gave-up"  # the job still runs
+    world.csub.alive.discard("901")
+    world.sweep()
+    (after,) = world.cases()
+    assert (after["id"], after["state"], after["data"]["note"]) == (case["id"], "resolved", "it is gone")
+
+
+def test_a_left_behind_run_the_agent_gave_up_on_stays_until_a_pass_that_looked_finds_it_gone(world):
+    stray = {"namespace": "mia-buffers", "id": "old/1", "run_id": "run-0", "type": "MiaBufferPoll"}
+    world.temporal.open = [stray]
+    gave_up(world, "run", "mia-buffers/old/1", [{"do": "terminate"}])
+    world.sweep()
+    assert world.cases()[0]["state"] == "gave-up"  # it is still there
+    world.temporal.open = []
+    worker(world.service, "PUT", "/workers/mia-buffers", {"commit": "a" * 40, "code": "0" * 16})
+    report = world.sweep()  # a worker owes a restart: open runs are not looked at, so nothing is known to be gone
+    assert [finding["id"] for finding in report["findings"]] == ["restart mia-buffers"]
+    assert world.cases()[0]["state"] == "gave-up"
+    worker(world.service, "PUT", "/workers/mia-buffers", {"commit": "c" * 40, "code": "b" * 16})
+    world.sweep()
+    assert (world.cases()[0]["state"], world.cases()[0]["data"]["note"]) == ("resolved", "it is gone")
+
+
+def test_a_case_that_gives_up_right_after_its_own_cancel_ends_once_the_round_answers(tmp_path, monkeypatch):
+    """Review of the overview branch: the weekly limit refused the resume in the pass that sent the cancel. The
+    case ended at the revision before the round wrote `cancelled`, so the dataset read `done` and was on no list."""
+    world = World(tmp_path, monkeypatch, max_remedies=1)
+    number = world.dataset(run=False)
+    world.sweep()  # no run: cancel, resume (the one remedy of the week)
+    world.temporal.runs[number] = dict(RUN)
+    world.stage("dataset", number, "matching")  # the resumed round runs, and then writes nothing
+    world.sweep(6.0)  # not helped: a diagnosis
+    world.answer({"diagnosis": "it hangs", "cause": "unknown", "remedies": [{"do": "cancel"}, {"do": "go"}]})
+    world.sweep(9.0)
+    view = lambda: call(world.service, "GET", "/subjects/dataset/rec-a")[1]  # noqa: E731
+    (case,) = world.cases()
+    assert "started work on this subject 1 times" in case["data"]["needs"]
+    assert (case["state"], view()["status"]) == ("working", "in repair")  # its cancel is not answered yet
+    world.temporal.runs.pop(number, None)
+    world.stage("dataset", number, "cancelled")  # the round answers the cancel
+    world.sweep(9.2)
+    (case,) = world.cases()
+    assert case["state"] == "gave-up" and case["data"]["ended_revision"] == view()["revision"]
+    assert (view()["phase"], view()["status"]) == ("done", "needs human")
+    assert [row["key"] for row in call(world.service, "GET", "/subjects")[1]["subjects"]] == ["rec-a"]
+
+
+def test_a_round_the_agent_ended_and_runs_nothing_after_needs_a_human(world):
+    """Review of the overview branch: a diagnosis that proposed a cancel alone ended its case `resolved`, and the
+    dataset rested at `cancelled` on no list, with what the diagnosis asked of a person dropped."""
+    number = world.dataset(stage="matching")  # its workflow runs, and writes nothing for hours
+    world.sweep()
+    needs = "fix the record, then restart"
+    world.answer(
+        {"diagnosis": "the record has no labels", "cause": "data", "remedies": [{"do": "cancel"}], "needs": needs}
+    )
+    world.sweep()
+    assert cleaner_actions(world, number) == ["cancel"]
+    world.temporal.runs.pop(number, None)
+    world.stage("dataset", number, "cancelled")
+    world.sweep(3.2)
+    (case,) = world.cases()
+    view = call(world.service, "GET", "/subjects/dataset/rec-a")[1]
+    assert (case["state"], case["data"]["needs"]) == ("gave-up", needs)
+    assert (view["status"], view["repair"]["needs"]) == ("needs human", needs)
+    said = [entry["body"] for entry in world.timeline("dataset", number)["entries"]]
+    assert sum(f"could not repair this: {needs}" in body for body in said) == 1  # said once, not at each pass
+
+
+def test_the_diagnosing_agent_is_told_where_the_round_stands_not_the_status_a_person_reads(tmp_path):
+    from mia_buffers.diagnose import EVIDENCE_DIR, write_evidence
+
+    subject = {"kind": "dataset", "key": "rec-a", "stage": "blocked", "phase": "stopped", "shelved": None}
+    item = {"subject": {**subject, "status": "in repair"}, "entries": [], "actions": []}
+    write_evidence(tmp_path, {"id": 1, "data": {"seen": "it stopped"}}, item, [], {})
+    assert "at `blocked` (stopped)" in (tmp_path / EVIDENCE_DIR / "case.md").read_text()

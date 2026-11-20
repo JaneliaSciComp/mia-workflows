@@ -149,9 +149,9 @@ tested again under a new round, and no second snippets issue is opened. The new 
 example binding is adopted whatever catalog commit it names (the round that asked for the reader wrote it), and the
 stored binding names the commits of the round that adopted it. A PR closed or merged by then means a new
 match, and a reader that match asks for gets a new snippets issue: closing a snippet PR is how a person has the
-reader written again. A go that carries advice (the debugger's, and the cleaner's after its diagnosis: actor
+reader written again. A go that carries advice (the debugger's, and the repair agent's after its diagnosis: actor
 `cleaner-advice`) matches first even while the PR is open, so that its advice is read; the PR is resumed only if
-that match asks for a reader again. The cleaner's plain go (actor `cleaner`) is a *Run again*. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
+that match asks for a reader again. The repair agent's plain go (actor `cleaner`) is a *Run again*. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
 `/approve` and `/revise` from the worker because its login is in autodev's `github.trusted_bots`), mia-snippets
 CI, the GitHub client.
 
@@ -165,7 +165,7 @@ the image's own extent when it is smaller: a small dataset is cropped whole, nev
 and writes overlay PNGs. At least half of the set must verify (verify exits 1 whenever one crop fails, so its
 report is the judge); fewer ends the round `failed` with nothing saved. The passing crops' `raw.png`
 and `overlay.png` are committed to the `galleries` branch of mia-workflow-data, and a timeline entry shows them
-with the binding and the agent's reasons. The stage is `review`, and the dataset is listed under *Needs you*.
+with the binding and the agent's reasons. The stage is `review`, and the dataset is listed under *Needs human* on Overview.
 
 **The crop judge.** With `judge.crops.mode: shadow` or `active`, a second model looks at the same set before the
 person does: the worker builds an evidence directory under the round's workspace (`judge-crops-1/evidence/`: the

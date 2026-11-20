@@ -115,16 +115,17 @@ stop ends the workflow, and a Resume after one starts from the beginning.
 
 **Shelving is beside the stage tables** (spec `docs/specs/2026-11-14-shelved-subjects.md`). A person sets a
 subject of any kind aside with a reason: `shelve`, with the reason in `note`, is accepted whenever the subject's
-status is `not started`, `stuck` or `done` and no action is waiting for its workflow's answer; `unshelve` takes it
+phase is `not started`, `stopped` or `done` and no action is waiting for its workflow's answer; `unshelve` takes it
 back. A subject whose round waits for a verdict (`waiting`, and its stage takes `cancel`: a dataset at `review`, a
 buffer at `plan-review` or `staged`) takes it too, and that shelve sends the round a `cancel` first, as an action
-of its own: a cancel that is not delivered shelves nothing. One function gives a subject its status word and its actions (`BufferService._rules`): the stage's, or
-`shelved` and `unshelve` alone for a shelved one. buffer-api carries both actions out itself (`_hold`): the row of
+of its own: a cancel that is not delivered shelves nothing. One function gives a subject its phase and its actions (`BufferService._rules`): the stage's, and `unshelve`
+alone for a shelved one. buffer-api carries both actions out itself (`_hold`): the row of
 the ledger's `shelved` table, the action and its timeline entry are one transaction, and nothing but that cancel
 is sent to Temporal. `_hold` writes neither the stage (a cancelled round writes its own `cancelled`) nor the
 dataset's stored row. What reads the hold:
 
-- `GET /needs` leaves a shelved subject out, counts them as `shelved` and lists them with `?shelved=1`.
+- `GET /subjects` gives a shelved subject the status `shelved`, so it is in no other status's list;
+  `?status=shelved` lists them.
 - `Ledger.dataset` and `Ledger.datasets` give a shelved dataset `state: shelved` and the hold's reason (a row is
   made up for one that never ran), so `POST /plan`, the `plan` activity and the Datasets list need no rule of
   their own; `shelved` is not a state a worker can write.
@@ -373,11 +374,20 @@ mia exec mia-buffers datasets sync                        # rebuild the prepared
 ```
 
 **Subjects.** A dataset, a buffer spec and a preparation request are each a *subject*: `{kind, number, key, stage,
-revision, issue, data}`, with the status word (`not started`, `working`, `waiting`, `stuck`, `done`) and the
-actions its stage accepts, both read from one table per kind (`STAGE_ACTIONS` in `mia_data/config.py`,
-`STAGE_ACTIONS` and `PREP_STAGE_ACTIONS` in `mia_buffers/config.py`). `GET /subjects/<kind>/<key>` reads one,
-`GET /subjects/<kind>` lists a kind, `GET /needs` lists those waiting on a person or stuck (and the actions of the
-last day that did not reach Temporal), `GET /lookup?q=` finds subjects from an issue number, an issue URL or a
+revision, issue, data}`. Three words say how it stands (spec `docs/specs/2026-11-19-overview-and-needs-human.md` §3).
+Its **stage** is where it is in its lifecycle. Its **phase** is what a round does at that stage (`not started`,
+`working`, `waiting` for an answer only a person gives, `stopped`, `done`), read with the actions the stage accepts
+from one table per kind (`STAGE_ACTIONS` in `mia_data/config.py`, `STAGE_ACTIONS` and `PREP_STAGE_ACTIONS` in
+`mia_buffers/config.py`); every worker decision reads the phase and the hold (`mia_buffers.cleaner.standing`). Its
+**status** is who moves it next, the one word a person reads and the only thing that says a human is needed:
+`shelved`, `in repair`, `needs human`, `done`, `not started` or `working`. buffer-api computes it for each view
+(`status_of`) from the phase, the hold and `repair`, the repair agent's case about the subject as it stands: a case
+in work while the agent acts (its last sweep reported in `act` mode, and that report is not overdue by three of
+its periods) makes it `in repair`, one the agent gave up on makes it `needs human` until the
+subject's revision moves, and a phase of `waiting` or `stopped` with neither is `needs human`. `GET /subjects/<kind>/<key>` reads one,
+`GET /subjects/<kind>` lists a kind, `GET /subjects?status=` lists the subjects of every kind with one status
+(`needs human` when none is named), with every kind's count by status and the actions of the last day that did not
+reach Temporal; it builds a view only for the subjects it lists, `GET /lookup?q=` finds subjects from an issue number, an issue URL or a
 key, and `GET /stream` is a server-sent event per change (`{kind, number}`; the reader fetches the subject again).
 A subject's number comes from the clock (whole seconds since 2026-01-01; action ids are milliseconds since the
 epoch), so a ledger restored from a backup issues no id twice.
@@ -844,7 +854,7 @@ nothing to mia-data: a dataset that was prepared when the plan was made and is n
 **`evaluate.enabled`.** mia-data's config has `evaluate: {enabled: false}`. It is a switch only: no evaluate job
 exists.
 
-## The cleaner
+## The repair agent
 
 `MiaCleaner` runs on the schedule `<deployment>-cleaner` every `cleaner.minutes` (`mia-buffers schedule`; the
 schedule is deleted while `cleaner.mode` is `off`). Its one activity, `sweep` (`mia_buffers/sweep.py`), is a pass
@@ -857,14 +867,14 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
    `GET /workers` (what each worker said it started on: `mia_core.checkout.code_digest`, a digest of the
    packages as committed, against the checkout's now; a commit that touches only docs, tests or the page's
    files changes nothing; every worker reports when it starts, the mia-data and mia-buffers ones and each
-   autodev deployment's, `mia_core.registry.report_worker`: a worker that does not is one the cleaner cannot
+   autodev deployment's, `mia_core.registry.report_worker`: a worker that does not is one the repair agent cannot
    see),
    `GET /schedules` and `autonomy.pause`. Each finding names the subject kinds behind it, and those are left
    alone for the pass: a worker that is down or runs old code is said once, never "fixed" by cancelling what waits
    on it. Findings that only show across subjects (`evidence_findings`: workflow tasks failing on more than one
    run of a kind, a service refusing several rounds, jobs pending in the cluster queue) are added after step 2.
-   They are the report's `findings`: the page's banner and the Cleaner view show them.
-2. **Evidence.** For every subject that has been `working` for `quiet_minutes` or `stuck` for `stopped_minutes`
+   They are the report's `findings`: the page's banner and Overview's System section show them.
+2. **Evidence.** For every subject that has been `working` for `quiet_minutes` or `stopped` for `stopped_minutes`
    and has no case of its present revision: its timeline and actions, its run (`GET /run/<kind>/<number>?detail=1`:
    run id, a workflow task that keeps failing, pending activities), the jobs of its round whose record has no end
    (`mia_core.jobrecord.open_records`, each asked of the cluster by id), and the party it waits for (the snippets
@@ -873,14 +883,20 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
    `plan_for` turns the rule into steps. A case (ledger table `cases`, routes `POST /cases`, `PUT /cases/<id>`,
    `GET /cases`) holds what was seen, the revision and run it was seen at, the steps done and the steps left.
    `GET /cases` adds `jobs` to each: the addresses of the job records of the round it saw, of autodev's jobs on
-   the snippets issue it is about, and of the cleaner's own jobs for it (`cleaner/case-<id>/diagnose-<n>`),
-   which the Cleaner view links.
+   the snippets issue it is about, and of the repair agent's own jobs for it (`cleaner/case-<id>/diagnose-<n>`),
+   which the case links on Overview.
    Leftovers get cases of their own kind: `run` (an open run of a workflow type in no worker, `WORKFLOW_TYPES`),
    `job` (alive after its round ended), `snippets` (an open issue or pull request of ours nobody follows).
 4. **Carrying cases on.** In `act` mode each open case does its remaining steps in order until one has to wait
-   (it returns None and is tried at the next pass), one is refused (the case is `needs-person` and says why), or
+   (it returns None and is tried at the next pass), one is refused (the case ends `gave-up` and says what it takes), or
    none is left (`waiting` for the outcome when a step started work, else `resolved`). `report` mode opens cases
-   and does nothing; at most `max_parallel` cases are in work.
+   and does nothing; at most `max_parallel` cases are in work. A case records a repair and nothing more: it ends
+   `resolved`, `dropped` (somebody acted) or `gave-up`, and a `gave-up` case about a subject records the revision
+   the subject stood at (`ended_revision`), which is how long buffer-api shows it as the subject's `repair`. A
+   left-over thing the agent gave up on is resolved once it is gone. A case that gives up while the subject has
+   not yet answered the agent's own last action (a cancel whose stage write is still to come) stays in work
+   until it has, so that it ends at the revision the answer leaves. A round the agent ended (`cancel`, `stop`)
+   with nothing run after it ends its case `gave-up`: nobody decided that, so the subject needs a human.
 
 **What keeps a remedy on the round it was decided about.** Before a step the subject is read again; a person's
 action since the case opened drops the case, and so does a subject that moved before the case did anything. An
@@ -891,8 +907,8 @@ than the round's pins hold (a changed record, a pull request the plan closed, a 
 agent's advice). Either, after a `cancel` that found no run or after a `stop`, waits for `kill_jobs`: every job
 of the ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses
 while a job may still write. A dataset's `resume` after a command to autodev waits until the snippets issue has
-lost `snippets:needs-human` (`await_autodev`). A request gets no `go` from the cleaner, and a `resume` only when
-that runs no dataset round (`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The cleaner never
+lost `snippets:needs-human` (`await_autodev`). A request gets no `go` from the repair agent, and a `resume` only when
+that runs no dataset round (`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The repair agent never
 sends a `stop` to a buffer spec (it retires the spec's buffers), kills a left-over job only where no job of the
 round can be wanted any more (never at a person's turn or at `ready`), acts on a snippets issue only when its
 first line names the dataset and the bot wrote it, and judges a remedy's outcome only once the subject has moved
@@ -998,6 +1014,7 @@ above it in this table, never in a circle:
 | `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
 | `job.js` | a job's record, every value of it inserted as text |
 | `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views; `designer.js` is steps 1 and 2 of a buffer (its definition and that definition's plan) |
+| `overview.js` | Overview, the landing page: the system, the counts by status, what needs a human, what is in repair, what is working, the week's repairs and what is shelved, each a section that folds |
 | `flow.js` | a buffer's page: its heading, the strip of steps, the step shown with its way back and forward, steps 3 to 6, the timeline |
 | `app.js` | the Docs view, health, the stream, hash routing and boot |
 
@@ -1009,9 +1026,14 @@ code is compared without whitespace (`has()`, `count()`), so it holds however Bi
 
 Each tab is one kind of thing, and each thing has one page:
 
-- **Needs you** reads `/needs`: everything that waits on a person, with the buttons that answer it. *Shelve…* on
-  a row (or on the subject's page) takes it off the list with a reason; the *Shelved* toggle lists those, each with
-  its reason and *Unshelve*.
+- **Overview**, the landing page, is sections that fold and stay as the viewer left them (`overview.js`):
+  *System* (the last sweep's findings, and left-behind things the repair agent could not remove), *Counts* (every
+  kind's subjects by status), *Needs human* (`/subjects`: the subjects with that status, why, and the buttons that
+  answer it; also the actions that were not delivered), *In repair* and *Repairs in the last week* (`/cases`),
+  *Working* and *Shelved* (`/subjects?status=`). *Shelve…* on a row (or on the subject's page) takes it out of
+  *Needs human* with a reason; *Shelved* lists those, each with its reason and *Unshelve*. Overview follows the
+  stream at most once in ten seconds and is redrawn by each health check; a redraw keeps the sections, leaves a
+  table or a case list alone while a fold in it is open, and loads the cases again at most once a minute.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
   download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
   (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, `anything` or `nothing`; `record_row` names them,
@@ -1095,8 +1117,9 @@ copy of the timeline. No link to GitHub is spelled out in words.
 
 **A subject's page says where it stands with its lifecycle.** Under the name comes one row with the links to what the
 workflows made (its GitHub issue, its workflow in Temporal, its round's crops), then the line of stages; the step a
-round is working at is marked (`subject.status === "working"`). There is no status word on the page or in a
-table: a table shows the stage as a pill, and the buttons say whose turn it is.
+round is working at is marked (`subject.phase === "working"`). A subject's own page shows no status word: the
+line of stages and the buttons say whose turn it is. Overview groups the subjects by status and the Buffers list
+shows it; every other table shows the stage as a pill.
 
 **A button with more to enter ends in an ellipsis.** *Reject…* opens a dialog for the feedback and sends nothing
 until some is typed; the dialog hangs off the body, so a redraw of the view behind it keeps what was typed.

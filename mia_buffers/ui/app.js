@@ -2,14 +2,15 @@
 // The page holds no token. It reads with GETs (and with POST /plan and POST /hosts/missing, which write nothing)
 // and asks for things through the action routes, which take none. All hosts and repos come from GET /meta.
 import { $, el, hideTip, SUBJECT_HASH, SUBJECT_TAB, SUBJECT_VIEWS, toEpoch } from "./dom.js";
-import { HttpError, load, S, send } from "./api.js";
+import { downLines, HttpError, load, S, send } from "./api.js";
 import { onScreen } from "./actions.js";
 import { bindControls } from "./designer.js";
 import { viewBuffers } from "./buffers.js";
 import { viewDatasetList } from "./datasets.js";
-import { viewCache, viewCleaner, viewDecisions, viewPreparation } from "./operations.js";
+import { viewCache, viewDecisions, viewPreparation } from "./operations.js";
 import { viewJob } from "./job.js";
-import { viewFind, viewNeeds, viewSubject } from "./subjects.js";
+import { viewFind, viewSubject } from "./subjects.js";
+import { viewOverview } from "./overview.js";
 import { viewFlow } from "./flow.js";
 
 // ---- the Docs view
@@ -45,24 +46,14 @@ async function viewDocs(arg) {
 
 // ---- health and the stream
 const HEALTH_MS = 60000; // how often the page asks whether Temporal and every worker are still there
-export function downLines(health, findings) {
-  // what is away, in words; a service's task queue carries its name. `findings`: what the cleaner's last sweep
-  // found wrong with the installation, less what the health check says itself
-  const away = Object.keys(health.queues || {}).filter(queue => !health.queues[queue]);
-  return [
-    !health.temporal && "Temporal does not answer: nothing can be started or cancelled from this page right now.",
-    away.length &&
-      `No worker is running for ${away.join(", ")}: nothing that waits on ${away.length > 1 ? "them" : "it"} is moving. On the host: pixi run mia restart ${away.join(" ")}`,
-    ...(Array.isArray(findings) ? findings : [])
-      .filter(finding => finding.id !== "temporal" && !finding.id.startsWith("worker "))
-      .map(finding => finding.text.replaceAll("`", "")),
-  ].filter(Boolean);
-}
 async function checkHealth() {
   // so that "working" is true: these lines stay until a later check finds everything back
-  const [health, cleaner] = await Promise.all([load("/health"), load("/cleaner", true)]);
-  if (health)
-    $("down").replaceChildren(...downLines(health, cleaner?.findings).map(line => el("div", {}, el("span", {}, line))));
+  const [health, sweep] = await Promise.all([load("/health"), load("/cleaner", true)]);
+  if (!health) return;
+  $("down").replaceChildren(...downLines(health, sweep?.findings).map(line => el("div", {}, el("span", {}, line))));
+  // a view that follows the stream also says what is away: a worker that is down writes nothing to the stream
+  onScreen.health = health;
+  onScreen.streams[onScreen.view]?.();
 }
 function followStream() {
   // told what changed, the page refetches it; a lost stream reconnects by itself
@@ -83,7 +74,7 @@ function followStream() {
     if (onScreen.subject) {
       if (change.kind !== onScreen.subject.kind) return;
       if (onScreen.subject.number != null && change.number !== onScreen.subject.number) return;
-    } else if (onScreen.view !== "needs") return;
+    } else if (!onScreen.streams[onScreen.view]) return;
     clearTimeout(timer);
     timer = setTimeout(refresh, 150);
   };
@@ -91,11 +82,10 @@ function followStream() {
 
 // ---- hash routing, the top bar, the theme and boot
 const VIEWS = {
-  needs: viewNeeds,
+  overview: viewOverview,
   datasets: viewDatasetList,
   buffers: viewBuffers,
   cache: viewCache,
-  cleaner: viewCleaner,
   preparation: viewPreparation,
   decisions: viewDecisions,
   docs: viewDocs,
@@ -120,7 +110,7 @@ function route() {
   const fresh = name === "buffers" && rest[0] === "new",
     flow = fresh || (name === "buffer" && !!rest[0]);
   const kind = arg ? SUBJECT_VIEWS[name] : null; // #datasets/<record>, #requests/<key>: its own page
-  const view = flow ? "buffer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "needs";
+  const view = flow ? "buffer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "overview";
   const tab = flow ? "buffers" : kind ? SUBJECT_TAB[name] : view === "preparation" ? "datasets" : view;
   document.querySelectorAll("[data-view]").forEach(s => {
     s.hidden = s.dataset.view !== view;
@@ -191,7 +181,7 @@ export async function boot() {
       if (a.getAttribute("href") === location.hash) route();
     }),
   );
-  for (const id of ["subjectBody", "needsBody"])
+  for (const id of ["subjectBody", "overviewBody"])
     $(id).addEventListener("input", () => {
       $(id).dataset.dirty = "1";
     });

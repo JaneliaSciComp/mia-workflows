@@ -189,7 +189,7 @@ def test_every_label_description_fits_github():
 
 def test_every_buffer_and_prep_stage_has_a_rule():
     from mia_buffers.config import CANCELLABLE, PREP_STAGE_ACTIONS, STAGE_ACTIONS
-    from mia_data.config import STATUS_WORDS
+    from mia_data.config import PHASES
 
     assert set(STAGE_ACTIONS) == set(STAGES) and set(PREP_STAGE_ACTIONS) == {"new", *PREP_STAGES}
     vocabulary = (set(HUMAN_LABELS) - {"plan"}) | {
@@ -201,7 +201,7 @@ def test_every_buffer_and_prep_stage_has_a_rule():
         "resume",
     }  # plan is an option of go (§4.2); edit is settled by buffer-api and is no signal; resume is a request's
     for status, actions in [*STAGE_ACTIONS.values(), *PREP_STAGE_ACTIONS.values()]:
-        assert status in STATUS_WORDS and actions <= vocabulary
+        assert status in PHASES and actions <= vocabulary
     assert STAGE_ACTIONS["idle"] == ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"}))
     assert PREP_STAGE_ACTIONS["requested"] == ("working", frozenset({"cancel", "stop"}))
     # a request is resumed wherever it can be run again (spec resume-restart §5); a buffer takes no resume

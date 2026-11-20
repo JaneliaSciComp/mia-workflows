@@ -88,7 +88,7 @@ def test_every_path_the_page_requests_is_an_open_route() -> None:
         "/subjects/prep",
         "/assets/raw",
         "/assets/staged",
-        "/needs",
+        "/subjects",
         "/buffers",
         "/keeper",
         "/locks",
@@ -107,7 +107,7 @@ def test_the_pages_buttons_call_action_routes_and_it_follows_the_stream() -> Non
     for path in ("/datasets/x/actions", "/specs", "/specs/x/actions", "/prep", "/prep/x/actions"):
         assert ("POST", path) in requested and resolve("POST", path) == "action", path
     assert ("POST", "/specs/parse") in requested and resolve("POST", "/specs/parse") == "read"  # it writes nothing
-    for path in ("/needs", "/subjects/buffer", "/subjects/prep"):
+    for path in ("/subjects", "/subjects/buffer", "/subjects/prep"):
         assert ("GET", path) in requested, path
     assert not has("issues/new")  # nothing is started by opening a GitHub issue
     for path in ("/subjects/x/x", "/timeline/x/x", "/run/x/x", "/lookup?q=x", "/health"):
@@ -144,12 +144,119 @@ def test_the_docs_describe_the_system_as_it_is() -> None:
     assert has("send(`/ui/${doc}.html`)") and resolve("GET", "/ui/guide.html") == "read"
     assert not re.search(r"\b(buffer|data|prep|autodev):[a-z]", docs)
     assert not re.search(r"\b(no longer|any more|anymore|used to|as before|previously|read-only log)\b", docs, re.I)
-    for needle in ("Needs you", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):
+    for needle in ("Needs human", "Overview", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):
         assert needle in docs, needle
 
 
-def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
-    assert has('data-tab="cleaner"') and has('data-view="cleaner"') and has("cleaner: viewCleaner")
+LOCAL_STORAGE = """
+globalThis.localStorage = {
+  store: {}, getItem(key) { return this.store[key] ?? null; }, setItem(key, value) { this.store[key] = String(value); },
+};
+"""
+
+
+def test_overview_is_the_landing_page_and_names_seven_folding_sections() -> None:
+    """spec overview §5: one page for the whole system; the tabs Needs you and Cleaner are gone."""
+    index = FILES["index.html"]
+    tabs = re.findall(r'data-tab="(\w+)"', index)
+    assert tabs == ["overview", "datasets", "buffers", "cache", "decisions", "docs"]
+    assert 'data-view="overview"' in index and 'data-view="needs"' not in index and 'data-view="cleaner"' not in index
+    assert has("overview: viewOverview") and has('VIEWS[name] ? name : "overview"')
+    assert not has("viewNeeds") and not has("viewCleaner")
+    assert run_js("print(SECTIONS);", {"overview.js": "SECTIONS"}) == [
+        "system", "counts", "needs", "repair", "working", "repairs", "shelved",
+    ]  # fmt: skip
+    for title in ("System", "Counts", "Needs human", "In repair", "Working", "Repairs in the last week", "Shelved"):
+        assert has(f'"{title}"', squeezed(FILES["overview.js"])), title
+
+
+def test_a_section_folds_and_stays_as_it_was_left() -> None:
+    body = (
+        LOCAL_STORAGE
+        + """
+    const first = fold("needs", "Needs human", 3, "");
+    const was = [first.tag, "open" in first.attrs, textOf(first)];
+    first.open = false;
+    first.fire("toggle");
+    const again = fold("needs", "Needs human", 3, "");
+    again.open = true;
+    again.fire("toggle");
+    print([was, localStorage.store, "open" in again.attrs, "open" in fold("needs", "Needs human", 3, "").attrs]);
+    """
+    )
+    was, stored, closed, reopened = run_js(body, {"overview.js": "fold"})
+    assert was == ["details", True, "Needs human3"]
+    assert stored == {"mia-fold-needs": "1"} and (closed, reopened) == (False, True)
+
+
+def test_overview_sorts_the_cases_by_what_a_person_does_with_them() -> None:
+    now = 1_800_000_000.0
+    cases = [
+        {"id": 1, "kind": "job", "key": "issue-9/i9-e1/crops-1", "state": "gave-up", "updated": now - 40 * 86400},
+        {"id": 2, "kind": "dataset", "key": "rec-a", "state": "open", "updated": now - 60},
+        {"id": 3, "kind": "dataset", "key": "rec-b", "state": "waiting", "updated": now - 60},
+        {"id": 4, "kind": "dataset", "key": "rec-c", "state": "resolved", "updated": now - 86400},
+        {"id": 5, "kind": "dataset", "key": "rec-d", "state": "gave-up", "updated": now - 30 * 86400},
+        {"id": 6, "kind": "run", "key": "mia-buffers/old/1", "state": "working", "updated": now - 60},
+        {"id": 7, "kind": "dataset", "key": "rec-e", "state": "gave-up", "updated": now - 3600},
+    ]
+    repairing = [{"kind": "dataset", "key": "rec-a", "repair": {"id": 2}}]
+    body = """
+    const ids = found => Object.fromEntries(Object.entries(found).map(([name, list]) => [name, list.map(c => c.id)]));
+    print([true, false].map(acting => ids(overviewCases(input.cases, input.repairing, acting, input.now))));
+    """
+    acting, reporting = run_js(
+        body, {"overview.js": "overviewCases"}, {"cases": cases, "repairing": repairing, "now": now}
+    )
+    # a left-behind thing the agent gave up on is the installation's problem; a case in work is shown while its
+    # subject is in repair; what ended in the last week is the record of the repairs
+    assert acting == {"system": [1], "repair": [2, 6], "ended": [4, 7]}
+    assert reporting == {"system": [1], "repair": [2, 3, 6], "ended": [4, 7]}  # nothing is carried out: all are listed
+
+
+def test_overviews_system_section_says_what_is_away_and_a_repair_agent_gone_quiet() -> None:
+    """Review of the overview branch: with a worker down the banner said so while System said all was well, and
+    a repair agent that had stopped reporting still read as at work."""
+    now = 1_800_000_000
+    finding = {"id": "restart mia-data", "text": "the `mia-data` worker runs commit `aaaaaaa`: a restart is owed"}
+    payload = {
+        "now": now,
+        "quiet": {"at": now - 7200, "every_s": 600, "mode": "act", "findings": [finding]},
+        "fresh": {"at": now - 60, "every_s": 600, "mode": "act", "findings": []},
+        "away": {"temporal": True, "queues": {"mia-buffers": False}},
+    }
+    body = """
+    print([systemLines(input.quiet, input.away, input.now), systemLines(input.fresh, input.away, input.now),
+      systemLines(input.fresh, null, input.now), systemLines(null, null, input.now),
+      overdue(input.quiet, input.now), overdue(input.fresh, input.now)]);
+    """
+    quiet, away, well, never, late, on_time = run_js(body, {"overview.js": "systemLines, overdue"}, payload)
+    assert quiet[0].startswith("No worker is running for mia-buffers") and "a restart is owed" in quiet[1]
+    assert quiet[2].startswith("The repair agent last reported") and "nothing is being repaired" in quiet[2]
+    assert len(away) == 1 and (well, never) == ([], []) and (late, on_time) == (True, False)
+    assert has("onScreen.streams[onScreen.view]?.()", squeezed(FILES["app.js"]))  # each health check redraws it
+
+
+def test_what_needs_a_human_says_why() -> None:
+    subjects = [
+        {"stage": "blocked", "repair": {"id": 3, "state": "gave-up", "needs": "approve the host"}},
+        {"stage": "review", "repair": None},
+        {"stage": "blocked", "repair": {"id": 4, "state": "open", "needs": None}},
+    ]
+    gave_up, review, blocked = run_js("print(input.map(whyOf));", {"overview.js": "whyOf"}, subjects)
+    assert gave_up == "approve the host"
+    assert "verdict" in review and "decides or changes something" in blocked  # the stage's sentence
+
+
+def test_the_page_names_the_repair_agent_and_one_status_for_a_humans_turn() -> None:
+    shown = "\n".join(text for name, text in FILES.items() if name != "app.css")
+    said = re.sub(r"//[^\n]*|<!--.*?-->", "", shown, flags=re.S)  # a comment may name the module
+    for old in ("Cleaner", "the cleaner", "Needs you", "needs you", "waits for you", "needs a person"):
+        assert old not in said, old
+    assert "Repair agent" in said and "repair agent" in said and "needs human" in said
+
+
+def test_the_banner_says_the_sweeps_findings_and_a_case_is_a_short_row() -> None:
     assert resolve("GET", "/cleaner") == "read" and resolve("GET", "/cases") == "read"
     findings = [
         {"id": "worker snippets", "text": "no worker polls `snippets`"},  # the health check says this itself
@@ -158,7 +265,7 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
     health = {"temporal": True, "queues": {"mia-data": True}}
     lines = run_js(
         "print(downLines(input.health, input.findings));",
-        {"app.js": "downLines"},
+        {"api.js": "downLines"},
         {"health": health, "findings": findings},
     )
     assert lines == ["the mia-data worker runs commit aaaaaaa: a restart is owed"]
@@ -167,7 +274,7 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
             "kind": "dataset",
             "key": "rec-a",
             "rule": "no run",
-            "state": "needs-person",
+            "state": "gave-up",
             "updated": 5.0,
             "opened": 4.0,
             "data": {
@@ -195,7 +302,7 @@ def test_page_has_a_cleaner_view_and_the_banner_says_its_findings() -> None:
     stuck, job = run_js("print(caseRows(input));", {"operations.js": "caseRows"}, cases)
     # the row is short: the subject, the problem in a few words, a status and how far the cleaner got
     assert (stuck["href"], stuck["about"], stuck["problem"]) == ("#datasets/rec-a", "rec-a", "No workflow run")
-    assert (stuck["status"], stuck["progress"]) == ("needs you", "2 done, 1 to go")
+    assert (stuck["status"], stuck["progress"]) == ("gave up", "2 done, 1 to go")
     assert (job["href"], job["problem"]) == ("#job/issue-9/i9-e1/crops-1", "Left-over cluster job")
     assert (job["status"], job["progress"]) == ("queued", "1 to go")
     # the long words are the drill-down's: what the problem is, what was found, each step with its result, what is
@@ -340,7 +447,9 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
         {"temporal": True, "queues": {"mia-data": True}},
         {"temporal": False, "queues": {}},
     ]
-    both, one, none, no_temporal = run_js("print(input.map(downLines));", {"app.js": "downLines"}, healths)
+    both, one, none, no_temporal = run_js(
+        "print(input.map(health => downLines(health)));", {"api.js": "downLines"}, healths
+    )
     assert len(both) == 1 and both[0].startswith(
         "No worker is running for snippets, autodev: nothing that waits on them"
     )
@@ -351,15 +460,14 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
 
 
 def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
-    view = squeezed(FILES["subjects.js"][FILES["subjects.js"].index("function viewNeeds(") :])
+    view = squeezed(FILES["overview.js"])
     assert (
         has('"aria-pressed": String(kind === needsKind)', view)
         and not has("<select", view)
         and not has('"select"', view)
     )
     assert has(
-        'pageOf("/needs", "needs", () => ({ ...(needsKind ? { kind: needsKind } : {}),'
-        " ...(needsShelved ? { shelved: 1 } : {}) }))",
+        'pageOf("/subjects", "subjects", () => ({ status: "needs human", ...(needsKind ? { kind: needsKind } : {}) }))',
         view,
     )
     assert has('["", "All"], ["dataset", "Datasets"], ["buffer", "Buffers"], ["prep", "Requests"]')
@@ -864,7 +972,9 @@ def test_shelving_is_offered_for_every_kind_and_asks_for_its_reason() -> None:
     assert {"shelve", "unshelve"} <= set(order)
     assert has('shelve: "Shelve…"') and has("if (dialog) return askNote(subject, dialog, note => start({ note }))")
     assert has("if (subject.shelved) parts.push(shelvedNotice(subject.shelved))")
-    assert has('"aria-pressed": String(needsShelved)') and has('"shelved": "Set aside by a person')
+    assert has('pageOf("/subjects", "subjects", () => ({ status: "shelved" }))') and has(
+        '"shelved": "Set aside by a person'
+    )
     assert has('dialog.cancels && subject.actions.includes("cancel")')  # a round at review is said to be cancelled
 
 
@@ -1428,11 +1538,11 @@ def test_a_stage_opens_at_its_step() -> None:
             "strips": [["plan-review", "plan"], ["plan-review", "define"], [None, "define"], ["ready", "serve"]],
             "subjects": [
                 {"stage": "new", "status": "not started", "actions": ["edit", "go"]},
-                {"stage": "plan-review", "status": "waiting", "actions": ["approve"]},
+                {"stage": "plan-review", "status": "needs human", "actions": ["approve"]},
                 {"stage": "sourcing", "status": "working", "actions": ["cancel"]},
                 {"stage": "ready", "status": "done", "actions": ["go"]},
-                {"stage": "idle", "status": "waiting", "actions": ["keep"]},
-                {"stage": "needs-human", "status": "stuck", "actions": ["edit", "go"]},
+                {"stage": "idle", "status": "needs human", "actions": ["keep"]},
+                {"stage": "needs-human", "status": "in repair", "actions": ["edit", "go"]},
                 {"stage": "retired", "status": "done", "actions": ["edit", "go"]},
                 {"stage": "cancelled", "status": "shelved", "actions": ["unshelve"], "shelved": {"reason": "later"}},
             ],
@@ -1452,7 +1562,7 @@ def test_a_stage_opens_at_its_step() -> None:
         "done done done done done here",
     ]  # fmt: skip
     assert words == [
-        "saved, not started", "waits for you", "working", "serving", "serving", "needs you", "retired", "shelved",
+        "saved, not started", "needs human", "working", "serving", "serving", "in repair", "retired", "shelved",
     ]  # fmt: skip
     assert can == [True, False, False, False, False, True, True, False, True]  # an unsaved buffer is editable
 

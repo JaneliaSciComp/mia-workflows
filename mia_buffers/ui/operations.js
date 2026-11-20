@@ -1,7 +1,6 @@
-// The operator's views: Cache, Cleaner, Preparation and Decisions.
+// The operator's views: Cache, Preparation and Decisions; and the repair agent's cases as Overview lists them.
 import {
   $,
-  ago,
   assetPill,
   bufferCount,
   card,
@@ -193,9 +192,9 @@ export async function viewCache() {
     ),
   );
 }
-// ---- cleaner: what the last sweep found wrong with the installation, and its cases (spec cleaner §4.8)
+// ---- the repair agent's cases (spec cleaner §4.8), as Overview lists them
 const CASE_HREF = c => (SUBJECT_HASH[c.kind] ? SUBJECT_HASH[c.kind](c.key) : c.kind === "job" ? "#job/" + c.key : null);
-// a step in words, as the timeline's Cleaner entries say it (mia_buffers.cleaner.STEP_WORDS)
+// a step in words, as the repair agent's timeline entries say it (mia_buffers.cleaner.STEP_WORDS)
 const STEP_WORDS = {
   cancel: "cancel the round",
   stop: "force-stop the run",
@@ -212,53 +211,52 @@ const STEP_WORDS = {
   diagnose: "diagnose it",
   report_defect: "report the defect",
 };
-const plain = text => String(text || "").replaceAll("`", "");
 // a rule (mia_buffers.cleaner) for someone who has not read the rules: the problem in a few words, then what it
-// means and what the cleaner does about it
+// means and what the repair agent does about it
 const RULE_HELP = {
   "no run": [
     "No workflow run",
-    "The registry says a round is in progress, but Temporal has no open run for it, so nothing will ever move it. The cleaner cancels the round, ends its cluster jobs and resumes it; a buffer is planned again.",
+    "The registry says a round is in progress, but Temporal has no open run for it, so nothing will ever move it. The repair agent cancels the round, ends its cluster jobs and resumes it; a buffer is planned again.",
   ],
   "frozen run": [
     "Workflow run is frozen",
-    "The run's workflow task fails every time, so the run cannot take a step. The cleaner force-stops it, ends its cluster jobs and resumes it. A force stop loses what the round had, so it starts from the beginning. A buffer's run is left to a person, because stopping it retires the buffer's versions.",
+    "The run's workflow task fails every time, so the run cannot take a step. The repair agent force-stops it, ends its cluster jobs and resumes it. A force stop loses what the round had, so it starts from the beginning. A buffer's run is left to a person, because stopping it retires the buffer's versions.",
   ],
   "activity retrying": [
     "A step keeps failing",
-    "One activity of the run has failed many times in a row. If its worker does not know the activity, the worker needs a restart. If a service looks away, the cleaner looks again in an hour. Otherwise it diagnoses.",
+    "One activity of the run has failed many times in a row. If its worker does not know the activity, the worker needs a restart. If a service looks away, the repair agent looks again in an hour. Otherwise it diagnoses.",
   ],
   "request behind": [
     "Request has not noticed its datasets",
-    "A preparation request rests although each of its datasets is prepared or shelved. The cleaner tells it to look at them again.",
+    "A preparation request rests although each of its datasets is prepared or shelved. The repair agent tells it to look at them again.",
   ],
   "autodev's run failed": [
     "Snippet agent's job failed",
-    "The dataset waited for a reader on a snippets issue, and autodev's agent job there failed before it opened a pull request. The cleaner asks autodev to try once more, waits until it has started, then resumes the dataset's round. A second failure on the same issue is diagnosed.",
+    "The dataset waited for a reader on a snippets issue, and autodev's agent job there failed before it opened a pull request. The repair agent asks autodev to try once more, waits until it has started, then resumes the dataset's round. A second failure on the same issue is diagnosed.",
   ],
   "merge conflict": [
     "Snippet pull request cannot merge",
-    "The pull request the dataset waited for conflicts with main. The cleaner asks autodev to merge main into it and resumes the dataset's round. When autodev has no revision left it closes the pull request and restarts the dataset.",
+    "The pull request the dataset waited for conflicts with main. The repair agent asks autodev to merge main into it and resumes the dataset's round. When autodev has no revision left it closes the pull request and restarts the dataset.",
   ],
   "revision limit": [
     "Revisions used up",
-    "The work stopped at its limit of revisions. No remedy is automatic: the cleaner diagnoses it.",
+    "The work stopped at its limit of revisions. No remedy is automatic: the repair agent diagnoses it.",
   ],
   "time limit": [
     "Job ran out of time",
-    "A cluster job was ended at its time limit. No remedy is automatic: the cleaner diagnoses it.",
+    "A cluster job was ended at its time limit. No remedy is automatic: the repair agent diagnoses it.",
   ],
   "passing cause": [
     "Passing failure",
-    "The round stopped on something that usually passes by itself: a dropped connection, a time-out, a busy service. The cleaner waits, then resumes it, at most twice, and diagnoses it after that.",
+    "The round stopped on something that usually passes by itself: a dropped connection, a time-out, a busy service. The repair agent waits, then resumes it, at most twice, and diagnoses it after that.",
   ],
   "merged since": [
     "Merged after the stop",
-    "The round stopped because autodev reported a problem with the reader's pull request, and that pull request was merged afterwards. The cleaner resumes the dataset, once per pull request: the round finds the merge and saves the crops that were approved.",
+    "The round stopped because autodev reported a problem with the reader's pull request, and that pull request was merged afterwards. The repair agent resumes the dataset, once per pull request: the round finds the merge and saves the crops that were approved.",
   ],
   "fixed since": [
     "Worker restarted since",
-    "The round stopped on an error of the worker, and the worker has since started on newer code. The cleaner resumes it, once per commit.",
+    "The round stopped on an error of the worker, and the worker has since started on newer code. The repair agent resumes it, once per commit.",
   ],
   "budget used up": [
     "Budget used up",
@@ -270,37 +268,37 @@ const RULE_HELP = {
   ],
   "record gap": [
     "Catalog record is incomplete",
-    "The round could not go on because the dataset's catalog record lacks something or needs a decision. The cleaner cannot change a record; it restarts the dataset once the record has changed.",
+    "The round could not go on because the dataset's catalog record lacks something or needs a decision. The repair agent cannot change a record; it restarts the dataset once the record has changed.",
   ],
   "input changed": [
     "Catalog record changed",
-    "The record a stopped dataset waited on has changed, so the cleaner restarts the dataset: a round is pinned to the record it began with.",
+    "The record a stopped dataset waited on has changed, so the repair agent restarts the dataset: a round is pinned to the record it began with.",
   ],
   "diagnosis": [
     "Cause not known",
-    "No rule covers this stop, or the rule's remedy did not help. A read-only agent reads the subject's timeline and job records and proposes what to do. The cleaner carries out only what is on its own list of steps and leaves the rest to a person.",
+    "No rule covers this stop, or the rule's remedy did not help. A read-only agent reads the subject's timeline and job records and proposes what to do. The repair agent carries out only what is on its own list of steps and leaves the rest to a person.",
   ],
   "unrunnable run": [
     "Run no worker can run",
-    "An open workflow run of a type no worker registers: it logs an error on every task and never ends. The cleaner terminates it.",
+    "An open workflow run of a type no worker registers: it logs an error on every task and never ends. The repair agent terminates it.",
   ],
   "left-over job": [
     "Left-over cluster job",
-    "A cluster job is still alive though the round it belonged to has ended. The cleaner kills it.",
+    "A cluster job is still alive though the round it belonged to has ended. The repair agent kills it.",
   ],
   "left-over snippet work": [
     "Left-over snippet issue",
-    "A snippets issue, with its pull request, is still open though no dataset waits for it. The cleaner closes them.",
+    "A snippets issue, with its pull request, is still open though no dataset waits for it. The repair agent closes them.",
   ],
 };
 // a case's state as the row says it: [words, pill kind, what it means]
 const CASE_STATUS = {
   "open": ["queued", "", "Found, and not started on. In report mode a case stays here."],
-  "working": ["working", "", "The cleaner is part-way through its steps."],
-  "waiting": ["waiting", "", "The steps are done; the cleaner is watching whether the subject moves on."],
-  "needs-person": ["needs you", "warn", "The cleaner cannot resolve it; the case says what it takes."],
+  "working": ["working", "", "The repair agent is part-way through its steps."],
+  "waiting": ["waiting", "", "The steps are done; the repair agent is watching whether the subject moves on."],
+  "gave-up": ["gave up", "warn", "The repair agent could not repair it; the case says what it takes."],
   "resolved": ["resolved", "pool", "The subject moved on, or the left-over thing is gone."],
-  "dropped": ["dropped", "", "Somebody acted on the subject, so the cleaner let go of it."],
+  "dropped": ["dropped", "", "Somebody acted on the subject, so the repair agent let go of it."],
 };
 const stepWords = step => STEP_WORDS[step.do] || step.do;
 // a job's record under its job's name; one of autodev's on a snippets issue (`<owner>__<repo>/issue-<n>/…`) says so
@@ -309,7 +307,7 @@ export function caseRows(cases) {
   // a case as the page shows it. The row: what it is about, the problem in a few words, a status and how far the
   // cleaner got. The drill-down: what the problem means, what was found, each step with its result, the steps
   // left, what a person must do, the diagnosis, and the records (conversation and cluster logs) of the jobs it is
-  // about: its round's, then the cleaner's own
+  // about: its round's, then the repair agent's own
   return cases.map(c => {
     const data = c.data || {},
       [problem, meaning] = RULE_HELP[c.rule] || [c.rule, ""],
@@ -336,7 +334,7 @@ export function caseRows(cases) {
         evidence: step.evidence,
       })),
       next: plan.map(stepWords),
-      needs: c.state === "needs-person" ? data.needs || null : null,
+      needs: c.state === "gave-up" ? data.needs || null : null,
       note: data.note || null,
       diagnosis: found ? { cause: found.cause, text: found.diagnosis ?? String(found) } : null,
       jobs: (c.jobs || []).map(where => ({ href: "#job/" + where, name: jobName(where) })),
@@ -347,12 +345,12 @@ export function caseRows(cases) {
 }
 // what a job or a record wrote, as inline markdown: text, never HTML
 const said = text => el("p", {}, ...mdInline(String(text)));
-function caseDetail(row) {
+export function caseDetail(row) {
   const part = (title, ...kids) => (kids.some(Boolean) ? el("section", {}, el("h4", {}, title), ...kids) : null);
   return el(
     "div",
     { class: "casebody" },
-    part("What it needs from you", row.needs && said(row.needs)),
+    part("What it takes", row.needs && said(row.needs)),
     part(
       "What this kind of problem is",
       row.meaning ? el("p", {}, row.meaning) : null,
@@ -366,13 +364,13 @@ function caseDetail(row) {
         ".",
       ),
     ),
-    part("What the cleaner found", row.found && said(row.found)),
+    part("What the repair agent found", row.found && said(row.found)),
     part(
       "Diagnosis",
       row.diagnosis && said((row.diagnosis.cause ? `**${row.diagnosis.cause}:** ` : "") + row.diagnosis.text),
     ),
     part(
-      "What the cleaner did",
+      "What the repair agent did",
       row.did.length
         ? el(
             "ol",
@@ -405,7 +403,7 @@ function caseDetail(row) {
   );
 }
 // the cases of one card: a short row each, which opens into the case's full description
-function caseList(cases, empty) {
+export function caseList(cases, empty) {
   if (!cases.length) return el("div", { class: "empty" }, empty);
   return el(
     "div",
@@ -433,43 +431,6 @@ function caseList(cases, empty) {
         caseDetail(row),
       );
     }),
-  );
-}
-export async function viewCleaner() {
-  const root = $("cleanerBody");
-  root.replaceChildren(el("div", { class: "empty" }, "loading…"));
-  const [report, listed] = await Promise.all([load("/cleaner"), load("/cases?days=7")]);
-  const cases = listed?.cases || [];
-  const inState = (...states) => cases.filter(c => states.includes(c.state));
-  const findings = report?.findings || [];
-  // act mode is the normal one and goes unsaid
-  const modes = { off: " The cleaner is off.", report: " Report mode: cases are listed and nothing is done." };
-  root.replaceChildren(
-    card(
-      "System status",
-      report
-        ? `Last checked ${ago(report.at)}.${modes[report.mode] || ""}${findings.length ? " The subjects behind a problem listed here are left alone until it clears." : ""}`
-        : "The cleaner has not reported a sweep yet.",
-      findings.length
-        ? el("div", {}, ...findings.map(finding => el("div", { class: "notice" }, plain(finding.text))))
-        : el("div", { class: "empty" }, "All services operating, no problems found."),
-      report?.errors?.length ? kv([["errors of the last sweep", list(report.errors)]]) : null,
-    ),
-    card(
-      "Needs you",
-      "The cleaner could not resolve these. Each opens to what it takes: a decision, a correction to a record, a fix in the code.",
-      caseList(inState("needs-person"), "Nothing."),
-    ),
-    card(
-      "In work",
-      "What the cleaner is resolving now, or would resolve in act mode.",
-      caseList(inState("open", "working", "waiting"), "Nothing is stuck."),
-    ),
-    card(
-      "Closed in the last week",
-      "Resolved, or dropped because somebody acted on the subject.",
-      caseList(inState("resolved", "dropped"), "Nothing yet."),
-    ),
   );
 }
 // ---- preparation

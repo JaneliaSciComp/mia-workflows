@@ -12,6 +12,7 @@ from mia_buffers.cleaner import (
     plan_words,
     service_findings,
     sighting,
+    standing,
 )
 from mia_buffers.config import CleanerCfg
 
@@ -77,8 +78,9 @@ def test_a_schedule_three_intervals_late_and_the_pause_are_findings():
     assert found["schedule mia-data-poll"]["kinds"] == [] and found["pause"]["kinds"] == [*ALL_KINDS, SNIPPETS]
 
 
-def item(status="working", stage="developing", kind="dataset", minutes=45.0, run="open", jobs=(), party=None, **more):
-    subject = {"kind": kind, "number": 224, "key": "rec-a", "stage": stage, "status": status, "revision": 3}
+def item(phase="working", stage="developing", kind="dataset", minutes=45.0, run="open", jobs=(), party=None, **more):
+    subject = {"kind": kind, "number": 224, "key": "rec-a", "stage": stage, "phase": phase, "revision": 3}
+    subject["shelved"] = None
     entry = {
         "at": at(minutes),
         "stage": stage,
@@ -162,14 +164,17 @@ def test_a_working_subject_with_nothing_going_on_goes_to_the_diagnosis():
 
 
 def test_a_stopped_subject_is_seen_after_the_stopped_time_with_its_own_words():
-    assert sighting(item(status="stuck", stage="blocked", minutes=10), CFG, NOW) is None
-    found = sighting(item(status="stuck", stage="blocked", minutes=120), CFG, NOW)
+    assert sighting(item(phase="stopped", stage="blocked", minutes=10), CFG, NOW) is None
+    found = sighting(item(phase="stopped", stage="blocked", minutes=120), CFG, NOW)
     assert found["what"] == "stopped" and found["seen"] == "stopped at `blocked` 2.0 h ago: why it stopped"
 
 
 def test_what_is_a_persons_turn_or_done_is_never_stuck():
-    for status in ("waiting", "done", "not started", "shelved"):
-        assert sighting(item(status=status, minutes=10_000, run=None), CFG, NOW) is None
+    for phase in ("waiting", "done", "not started"):
+        assert sighting(item(phase=phase, minutes=10_000, run=None), CFG, NOW) is None
+    held = item(phase="stopped", stage="blocked", minutes=10_000, run=None)
+    held["subject"]["shelved"] = {"reason": "later"}
+    assert sighting(held, CFG, NOW) is None
 
 
 def test_findings_across_subjects():
@@ -201,7 +206,7 @@ def test_entry_text_and_the_last_person():
 
 
 def stopped(said, party=None, worker=None, earlier=(), minutes=120.0, hosts=()):
-    evidence = item(status="stuck", stage="blocked", minutes=minutes, party=party)
+    evidence = item(phase="stopped", stage="blocked", minutes=minutes, party=party)
     evidence["subject"]["hosts"] = list(hosts)  # the hosts its jobs were refused that no one approved yet
     evidence["entries"][0]["body"] = f"**Result:** `data:developing`\n\n**blocked**: {said}"
     evidence |= {"worker": worker, "earlier": list(earlier), "retry_hours": CFG.retry_hours}
@@ -321,17 +326,17 @@ def test_a_round_its_budget_refused_is_left_to_a_person_and_not_diagnosed():
 def test_left_over_snippet_work_is_named_by_why_it_is_left():
     from mia_buffers.cleaner import leftover_reason
 
-    def reason(status="stuck", stage="blocked", days=1.0, labels=(), newer=False):
-        view = {"status": status, "stage": stage, "updated": NOW - days * 86400}
+    def reason(phase="stopped", stage="blocked", days=1.0, labels=(), newer=False, shelved=None):
+        view = {"phase": phase, "shelved": shelved, "stage": stage, "updated": NOW - days * 86400}
         return leftover_reason(view, set(labels), newer, CFG.leftover_days, NOW)
 
-    assert reason(status="done", stage="done") == "its dataset is prepared through another reader"
-    assert reason(status="shelved") == "its dataset is shelved"
+    assert reason(phase="done", stage="done") == "its dataset is prepared through another reader"
+    assert reason(shelved={"reason": "later"}) == "its dataset is shelved"
     assert reason(newer=True) == "its dataset has opened a newer snippets issue"
     assert reason(days=4) == "its dataset has rested at `blocked` for 4 days" and reason(days=2) is None
-    assert reason(status="done", stage="cancelled", days=4) == "its dataset has rested at `cancelled` for 4 days"
-    assert reason(status="working", stage="developing", days=9) is None
-    assert reason(status="done", stage="done", labels=["snippets:working"]) is None  # autodev is at work on it
+    assert reason(phase="done", stage="cancelled", days=4) == "its dataset has rested at `cancelled` for 4 days"
+    assert reason(phase="working", stage="developing", days=9) is None
+    assert reason(phase="done", stage="done", labels=["snippets:working"]) is None  # autodev is at work on it
     assert leftover_reason(None, set(), False, CFG.leftover_days, NOW) is None  # no dataset of ours behind it
 
 
@@ -417,3 +422,8 @@ def test_a_buffer_spec_is_never_stopped_by_the_cleaner():
         "kill_jobs",
         "go",
     ]
+
+
+def test_a_decision_reads_the_phase_and_a_held_subject_stands_shelved():
+    assert standing({"phase": "stopped", "shelved": None}) == "stopped"
+    assert standing({"phase": "stopped", "shelved": {"by": "ann", "at": 1.0, "reason": "later"}}) == "shelved"
