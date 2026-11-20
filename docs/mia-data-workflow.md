@@ -201,13 +201,14 @@ rebuilds the dataset's `manifest.json`. The final entry carries the totals and l
 gallery and the round's workspace. The stage is `done` and the registry row `prepared`; *Run again* later starts
 another round and adds more crops.
 
-The trusted crop job writes the record's raw download cache (`paths.work_root/_cache/<record>`), so the worker
-first takes the record's **raw lock**, the lock file `paths.local_root/locks/raw/<record>` with the owner
-`mia-data <round> crop`. The waits for the crop and verify jobs heartbeat it (TTL 900 s) and the lock is released
+The trusted crop job reads its record on demand, as a buffer's stage job does: by range where the reader can,
+and a file whole into the record's raw cache (`paths.work_root/_cache/<record>`) where it cannot, within
+`limits.job_bytes`. It may write that cache, so the worker first takes the record's **raw lock**, the lock file
+`paths.local_root/locks/raw/<record>` with the owner `mia-data <round> crop`. The waits for the crop and verify jobs heartbeat it (TTL 900 s) and the lock is released
 after the verify report is read, whatever it says. When another job holds it (a buffers stage, another
 round), the timeline gets one entry per round, ``waiting for the raw cache of `<record>`: held by <owner>``, and
 the workflow tries again every `temporal.poll_minutes`. After the verify report the worker puts the cache's `raw`
-asset row (files, bytes, `ready` or `partial`, `last_used`) to buffer-api. A trusted crop job that was refused a
+asset row (files, bytes, the state `ready`, `last_used`) to buffer-api. A trusted crop job that was refused a
 host (a redirect to one that is not allowed) ends the round `blocked`, naming the host. A PR head's crop job mounts
 the cache read-only, writes a private one and takes no lock.
 
