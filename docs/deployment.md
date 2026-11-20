@@ -94,11 +94,13 @@ submit host) is the hardening that comes with the service account; `CSUB_BROKER_
 `mia release <tag>` runs on the installation being released to, from its `current` (or any `releases/<x>`):
 
 1. finds `<root>` from the checkout it runs in; any other layout is refused with a message saying what the layout is;
-2. when `releases/<tag>` does not exist, clones the tag from the running checkout's `origin` (`git clone --branch
-   <tag> --depth 1`) and runs `pixi install --locked` there, under a hidden name until both succeeded, so a release has
-   exactly the lockfile's packages and a failed clone leaves nothing behind;
-3. links `mia.yaml`, then runs the new checkout's `mia exec <service> check` for every service, and stops before
-   anything is touched if one fails;
+2. when `releases/<tag>` is not there, or is there without the `mia.yaml` link that marks a finished install, clones
+   the tag from the running checkout's `origin` (`git clone --branch <tag> --depth 1`) into it and runs
+   `pixi install --locked` there, where the environment stays (a pixi environment hard-codes its own path), so a
+   release has exactly the lockfile's packages; a failed clone or install leaves nothing behind. A tag is letters,
+   digits, `.`, `_` and `-`;
+3. links `mia.yaml` last, then runs the new checkout's `mia exec <service> check` for every service, and stops
+   before anything is touched if one fails;
 4. flips `current` (a new symlink beside it, renamed over the old: atomic);
 5. runs the new checkout's `mia restart`: `down` drains every worker and stops buffer-api last, `up` starts buffer-api
    first, then the workers on the new code with their broker or relay; Temporal is left running.

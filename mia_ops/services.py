@@ -566,6 +566,7 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
         return 0
 
     sock = svc.run / "csub.sock"
+    sock.unlink(missing_ok=True)  # a broker killed with its session left its socket; the probe must not reach it
     new_session(svc.name, "broker", broker_command(svc, csub, policy, sock), keep=True)
     if csub.broker == "relay" and (problem := broker_answers(sock)) is not None:
         print(f"{svc.name}: NOT RUNNING: the relay cannot reach the broker: {problem}", file=sys.stderr)

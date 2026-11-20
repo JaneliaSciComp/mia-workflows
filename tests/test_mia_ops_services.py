@@ -120,6 +120,7 @@ def fake(monkeypatch, tmp_path):
                     state.healthy = True
                 command = argv[argv.index("-n") + 2]
                 if " relay " in command and (found := re.search(r"(\S+/csub\.sock)", command)):
+                    state.stale_sock = Path(found.group(1)).exists()  # a socket a dead relay left behind?
                     Path(found.group(1)).parent.mkdir(parents=True, exist_ok=True)
                     Path(found.group(1)).touch()  # the relay serves its socket
             elif argv[1] == "kill-session":
@@ -740,6 +741,17 @@ def test_up_relay_fails_when_the_submit_host_does_not_answer(tmp_path, fake, cap
     assert "Permission denied" in capsys.readouterr().err
     assert "autodev" in fake.running  # the session stays: mia logs autodev broker shows why
     assert not any(c[:2] == ["tmux", "new-window"] for c, _ in fake.calls)  # no worker was started
+
+
+def test_up_relay_removes_the_socket_a_dead_relay_left_before_probing(tmp_path, fake):
+    (tmp_path / "csub").write_text("#!/bin/sh\n")
+    (tmp_path / "csub").chmod(0o755)
+    stale = tmp_path / "run/autodev/csub.sock"
+    stale.parent.mkdir(parents=True)
+    stale.touch()  # tmux's SIGHUP gave the old relay no chance to unlink it
+    s = make_stack(tmp_path, csub=relay_csub(tmp_path, ssh_host="submit.example.org", run_dir=tmp_path / "run"))
+    assert services.service_up(s.services["autodev"], s, Temporal(s)) == 0
+    assert fake.stale_sock is False  # gone before the relay started, so the probe cannot reach the old file
 
 
 def test_up_relay_needs_the_csub_cli(tmp_path, fake):

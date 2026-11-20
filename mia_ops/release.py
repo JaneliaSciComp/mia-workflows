@@ -5,6 +5,7 @@ it (when `releases/<tag>` is not there yet), link `mia.yaml` into it, run every 
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -33,35 +34,47 @@ def installation_root(checkout: Path) -> Path:
     )
 
 
+TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # one path component, and never a git option
+
+
 def _fetch(tag: str, checkout: Path, target: Path, run: Runner) -> None:
-    """Clone `tag` from the checkout's origin and install it, under a hidden name until both succeeded."""
-    building = target.with_name(f".{tag}-new")
-    shutil.rmtree(building, ignore_errors=True)
+    """Clone `tag` from the checkout's origin into `target` and install it there (a pixi environment hard-codes its
+    own path, so it is built where it stays); the `mia.yaml` link, written last, marks the install finished. Whatever
+    is left of a failed attempt is removed."""
+    shutil.rmtree(target, ignore_errors=True)
     try:
         origin = run(
             ["git", "-C", str(checkout), "remote", "get-url", "origin"], capture_output=True, text=True, check=True
         )
-        run(["git", "clone", "--branch", tag, "--depth", "1", origin.stdout.strip(), str(building)], check=True)
-        run(["pixi", "install", "--locked"], cwd=building, check=True)
-    except subprocess.CalledProcessError:
-        shutil.rmtree(building, ignore_errors=True)
+        run(["git", "clone", "--branch", tag, "--depth", "1", origin.stdout.strip(), str(target)], check=True)
+        run(["pixi", "install", "--locked"], cwd=target, check=True)
+    except (subprocess.CalledProcessError, OSError):
+        shutil.rmtree(target, ignore_errors=True)
         raise
-    (building / "mia.yaml").symlink_to(Path("../../mia.yaml"))
-    building.rename(target)
+    (target / "mia.yaml").symlink_to(Path("../../mia.yaml"))
+
+
+def _said(error: Exception) -> str:
+    """One line of what a failed step said."""
+    if isinstance(error, subprocess.CalledProcessError):
+        lines = (error.stderr or "").strip().splitlines()
+        return f"{' '.join(error.cmd)} failed" + (f": {lines[-1]}" if lines else "")
+    return str(error)
 
 
 def release(tag: str, checkout: Path = PROJECT_DIR, run: Runner = subprocess.run) -> int:
     """Put `tag` live in the installation `checkout` belongs to; 1 when a step failed before the flip."""
+    if not TAG_RE.fullmatch(tag):
+        raise LayoutError(f"tag {tag!r}: a release tag is letters, digits, '.', '_' and '-', not starting with '-'")
     root = installation_root(checkout)
     target = root / "releases" / tag
     try:
-        if not target.exists():
+        if not (target / "mia.yaml").is_symlink():  # not there, or an install that never finished
             _fetch(tag, checkout, target, run)
         for name in read_manifest(root / "mia.yaml").get("services") or {}:
             run([str(target / MIA_BIN), "exec", name, "check"], cwd=target, check=True)
-    except subprocess.CalledProcessError as error:
-        said = (error.stderr or "").strip().splitlines()
-        print(f"mia release {tag}: {' '.join(error.cmd)} failed" + (f": {said[-1]}" if said else ""), file=sys.stderr)
+    except (subprocess.CalledProcessError, OSError) as error:
+        print(f"mia release {tag}: {_said(error)}", file=sys.stderr)
         return 1
     new = root / "current.new"
     new.unlink(missing_ok=True)
