@@ -679,6 +679,12 @@ previous holder built the artifact, it is reused ("staged by <holder> while this
 partial after its attempts names the last job's id, state and exit code; `mia-buffers check` verifies the harness
 checkout has `harness fetch`.
 
+**Reading a raw cache by hand.** A cache entry is the upstream file's own bytes (a zip member inflated and
+CRC-checked) under a hash of its URL and validators. `mia-buffers raw <raw_root>/<record id>` prints each entry
+with the name it had upstream (`<zip name>/<member path>` for a member), and `--to <folder>` makes that folder with
+a symlink per file, which any viewer opens by its own name. With `--copy` the folder holds copies instead: they
+outlast an eviction and open over a share that does not follow links.
+
 **Staging.** The stage job runs `harness stage`, then `harness check-stage`, offline (cache read-only, no hosts),
 unless a URL streams: then the stage keeps the cache read-write and the hosts. A dropped (hand-placed) dataset
 stages offline. The job writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned

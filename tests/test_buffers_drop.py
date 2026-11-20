@@ -3,7 +3,8 @@
 import hashlib
 import json
 
-from mia_buffers.drop import cache_key, drop_names, merge_manifest, read_manifest
+from mia_buffers.cli import main
+from mia_buffers.drop import cache_key, cached_files, drop_names, merge_manifest, read_manifest
 
 
 def test_drop_names_prefer_unique_basenames():
@@ -37,3 +38,32 @@ def test_manifest_merge_is_atomic_and_additive(tmp_path):
     assert set(read_manifest(tmp_path)) == {"u1", "u2"}
     assert json.loads((tmp_path / "files.json").read_text())["u1"]["source"] == "manual"
     assert [p.name for p in tmp_path.iterdir()] == ["files.json"]
+
+
+def test_cached_files_are_named_as_upstream_and_linked(tmp_path):
+    cache, out = tmp_path / "rec", tmp_path / "out"
+    zipped, plain = {"size": 9, "etag": None}, {"size": 3}
+    merge_manifest(
+        cache,
+        {
+            "https://h/data.zip": {"validators": zipped, "source": "download"},
+            "https://h/a/readme.txt": {"validators": plain, "source": "download"},
+        },
+    )
+    members = ["data/s1/wsi.ome.tif", "data/s1/not-fetched.tif", "../../escape.tif"]
+    (cache / cache_key("https://h/data.zip::", zipped)).write_text(json.dumps(dict.fromkeys(members, [])))
+    for member in ("data/s1/wsi.ome.tif", "../../escape.tif"):
+        (cache / cache_key(f"https://h/data.zip::{member}", zipped)).write_bytes(b"II*")
+    (cache / cache_key("https://h/a/readme.txt", plain)).write_text("hi\n")
+
+    assert [name for name, _ in cached_files(cache)] == ["readme.txt", "data.zip/data/s1/wsi.ome.tif"]
+    assert main(["raw", str(cache), "--to", str(out)]) == 0
+    assert main(["raw", str(cache), "--to", str(out)]) == 0  # again: the links are replaced
+    assert (out / "data.zip/data/s1/wsi.ome.tif").read_bytes() == b"II*"
+    assert (out / "readme.txt").read_text() == "hi\n"
+    assert main(["raw", str(cache), "--to", str(out), "--copy"]) == 0  # over the links, and again over the copies
+    assert main(["raw", str(cache), "--to", str(out), "--copy"]) == 0
+    copied = out / "data.zip/data/s1/wsi.ome.tif"
+    assert not copied.is_symlink() and copied.read_bytes() == b"II*"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out", "rec"]
+    assert main(["raw", str(tmp_path / "none")]) == 1

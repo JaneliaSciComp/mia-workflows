@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -27,6 +28,7 @@ from mia_data.cli import _gh, _github_clients, _mirror_gh
 from mia_data.jobspec import harness_env, harness_pin
 
 from .config import PREP_STAGES, STAGES, load_config
+from .drop import cached_files
 from .jobspec import catalog_snapshot
 from .plan import build_plan, load_records, plan_hash
 from .spec import SpecError, load_spec, spec_hash
@@ -43,6 +45,26 @@ def catalog_head(catalog_dir: Path) -> str | None:
     """The checkout's HEAD commit, or None when the directory is not a git checkout."""
     result = subprocess.run(["git", "-C", str(catalog_dir), "rev-parse", "HEAD"], capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _raw(args: argparse.Namespace) -> int:
+    """Print a raw cache's files as `<cache entry>\t<upstream name>` and, with --to, link or copy each under its
+    name."""
+    files = cached_files(args.cache_dir)
+    for name, entry in files:
+        print(f"{entry}\t{name}")
+        if args.to:
+            target = args.to / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink():  # a link of an earlier run: never written through, which would reach the cache
+                target.unlink()
+            if args.copy:
+                shutil.copyfile(entry, target)
+            else:  # a real file there is left alone, and this fails
+                target.symlink_to(entry.resolve())
+    if not files:
+        print(f"{args.cache_dir}: no file is cached whole here", file=sys.stderr)
+    return 0 if files else 1
 
 
 def _plan(args: argparse.Namespace) -> int:
@@ -447,6 +469,13 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-ref-mismatch", action="store_true", help="plan even when the checkout is not at catalog.ref"
     )
     plan.set_defaults(func=_plan)
+    raw = sub.add_parser(
+        "raw", help="list a record's raw cache (<raw_root>/<record id>) under the files' upstream names"
+    )
+    raw.add_argument("cache_dir", type=Path)
+    raw.add_argument("--to", type=Path, help="also make this folder, with a symlink to each file under its name")
+    raw.add_argument("--copy", action="store_true", help="with --to: copy each file instead of linking it")
+    raw.set_defaults(func=_raw)
     reg = sub.add_parser("register", help="register a plan's staged volumes with a running buffer-api")
     reg.add_argument("plan", type=Path, help="plan.json from `mia-buffers plan --json`")
     reg.add_argument("spec", type=Path)
