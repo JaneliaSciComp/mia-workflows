@@ -26,6 +26,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
+    from autodev.activities import NO_COMMITS
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
     from mia_core.temporal import BEAT_TIMEOUT
 
@@ -109,7 +110,7 @@ RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (aw
 
 STOPPED = ("failed", "blocked", "needs-human")  # a round that stopped; `needs-human` is a stop of unrecorded kind
 # activity errors a person has to resolve: the same run would stop on them again
-BLOCKING = ("Conflict", "HostsNotAllowed")
+BLOCKING = ("Conflict", "HostsNotAllowed", "NoReachableFiles")
 
 
 class RoundFailed(Exception):
@@ -128,6 +129,16 @@ def stop_stage(error: BaseException) -> str:
     while isinstance(error, ActivityError) and error.cause:
         error = error.cause
     return "blocked" if getattr(error, "type", None) in BLOCKING else "failed"
+
+
+def autodev_said(look: AutodevLook) -> str:
+    """Why autodev stopped, as the words that end a `blocked` entry: what its agent wrote when autodev stopped
+    because the agent's round made no commits (autodev's own last comment then only points at that summary),
+    else autodev's last comment. Empty when it left none."""
+    if look.answer and NO_COMMITS in look.last_word:
+        quoted = "\n".join(f"> {line}" for line in look.answer.splitlines())
+        return f" Its agent made no commits and said:\n\n{quoted}"
+    return f' Its last comment: "{look.last_word}"' if look.last_word else ""
 
 
 def _rollover_due() -> bool:
@@ -1910,7 +1921,7 @@ class MiaDataDataset:
         if pr is None:
             again = ""
             if look.stopped:
-                await self._act("ask_autodev", state.snippet_issue, asked)
+                await self._act("ask_autodev", state.snippet_issue, asked, state.round_id)
                 again = "autodev had stopped and is asked again; "
             await self._stage(
                 "developing",
@@ -2022,7 +2033,7 @@ class MiaDataDataset:
             # matched set is back at review, where `_from_review` waits for the verdict)
             return state.stage in (*STOPPED, "done") or (state.stage == "review" and not state.pr)
         where = f"mia-snippets issue #{state.snippet_issue}" + (f" (PR #{look.pr})" if look.pr else "")
-        said = f' Its last comment: "{look.last_word}"' if look.last_word else ""
+        said = autodev_said(look)
         if look.stopped and not look.pr:
             await self._finish("blocked", f"{where}: autodev stopped before it opened a pull request.{said}")
             return True
@@ -2173,13 +2184,13 @@ class MiaDataDataset:
         return False
 
     async def _autodev_said(self, pr: int) -> str:
-        """Why autodev stopped, as the sentence that ends the round's `blocked` entry: its last comment on the
-        snippets issue or the PR (a merge refused for conflicts, a failed round). Empty when it left none, and in
-        a history without the `blocked-quotes-autodev` patch."""
+        """Why autodev stopped, as the sentence that ends the round's `blocked` entry (`autodev_said`, over the
+        snippets issue and the PR: a merge refused for conflicts, a failed round). Empty when it left none, and
+        in a history without the `blocked-quotes-autodev` patch."""
         if not workflow.patched("blocked-quotes-autodev"):
             return ""
         look = await self._act("autodev_look", self.state.snippet_issue, pr, result_type=AutodevLook)
-        return f'. Its last comment: "{look.last_word}"' if look.last_word else ""
+        return f".{said}" if (said := autodev_said(look)) else ""
 
     async def _test_head(self, pr: PrUpdate) -> PrUpdate:
         """Make the dataset's set at an untested PR head with the example binding the PR ships, posting the

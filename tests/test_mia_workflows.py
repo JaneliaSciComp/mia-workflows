@@ -153,8 +153,8 @@ class Mocks:
             return self.resume_root or PINS.root
 
         @activity.defn(name="ask_autodev")
-        async def ask_autodev(snippet_issue: int, marker: str) -> None:
-            rec("ask_autodev", snippet_issue, marker)
+        async def ask_autodev(snippet_issue: int, marker: str, round_id: str | None = None) -> None:
+            rec("ask_autodev", snippet_issue, marker, round_id)
 
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
@@ -1541,6 +1541,25 @@ async def test_a_waiting_round_ends_when_autodev_stopped_before_it_opened_a_pr(e
     assert "agent job 1 ended EXIT" in detail and m.of("autodev_look") == [(100, None)]
 
 
+async def test_a_round_autodev_left_without_commits_says_what_its_agent_said(env):
+    """2026-11-19, RV-PBS: the agent wrote that its job could not reach the data host. The round's `blocked`
+    entry quoted autodev's stop notice instead ("the agent made no commits; its summary is above ... Refusing to
+    create empty bundle"), on one line, and neither a person nor the repair agent could tell why."""
+    notice = "snippets: stopped **Error:** the agent made no commits; its summary is above ```` == claude.err == ````"
+    summary = "## Blocked\n\nThe sandbox proxy refuses `raw.githubusercontent.com`."
+    m = Mocks(outcome="needs_snippet", look=AutodevLook(None, False, True, notice, summary, "2026-11-20T01:03:16Z"))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        await idle(h, m, "blocked")
+    detail = m.of("set_stage")[-1][1]
+    assert detail.endswith(
+        "autodev stopped before it opened a pull request. Its agent made no commits and said:\n\n"
+        "> ## Blocked\n> \n> The sandbox proxy refuses `raw.githubusercontent.com`."
+    )
+    assert "claude.err" not in detail
+
+
 async def test_a_waiting_round_ends_after_the_quiet_limit_unless_autodev_is_at_work(env):
     quiet, at_work = AutodevLook(None, False, False, "Round 1 started"), AutodevLook(None, True, False, "")
     m = Mocks(outcome="needs_snippet", look=[at_work] * 12 + [quiet])
@@ -1802,7 +1821,9 @@ async def test_resume_asks_autodev_again_when_it_stopped_before_a_pull_request(e
         await idle(h, m, "developing")
         await wake(h, m, head(H1))  # autodev took it: its pull request is followed
         await idle(h, m, "review")
-    assert m.of("ask_autodev") == [(100, "resume i7-e11 12")] and m.of("open_snippet_issue") == [("i7-e11", None)]
+    assert m.of("ask_autodev") == [(100, "resume i7-e11 12", "i7-e11")] and m.of("open_snippet_issue") == [
+        ("i7-e11", None)
+    ]
     assert m.stages == ["matching", "developing", "blocked", "developing", "testing", "review"]
     assert "asked again" in m.of("set_stage")[3][1] and m.of("admit") == [("11",)]
 

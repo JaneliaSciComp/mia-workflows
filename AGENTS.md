@@ -104,7 +104,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   look takes the dataset back to `review` with autodev's answer as the pass's result (`_answered`). That a
   round made no commits never says the crops are right: only autodev's validated `no-change <request>` marker
   does (`read_no_change`), and only that answers the crop judge's findings or a request on an issue with no
-  pull request. An agent
+  pull request. A round that ends because autodev stopped quotes why (`autodev_said`): what the agent wrote
+  when its round made no commits, else autodev's last comment. An agent
   job Claude Code itself cut off (a lapsed login, an API error) is run once more by autodev before it stops.
   A new wait on something outside the round gets the same: a look and a limit.
 - **A new snippet is named after its issue.** `<what-it-reads>-i<K>`, K being the mia-snippets issue its pull
@@ -165,7 +166,9 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   the policy allows it; until then a request sends that dataset no `go` once it has
   stopped, and the repair agent says which hosts wait. No job reaches a GitHub host, except that a person may approve
   `raw.githubusercontent.com` for one dataset at a time: the policy allowing it grants it to no other dataset's
-  jobs. `policy_dir` is under home, apart from every directory a worker sandbox binds read-write, and its
+  jobs, and autodev grants it only to the reader's job of an issue that names it. A round asks for no reader
+  whose job could reach none of its record's files: it ends `blocked` naming the host to approve
+  (`NoReachableFiles`, raised where the issue's host line is written). `policy_dir` is under home, apart from every directory a worker sandbox binds read-write, and its
   `broker.toml` is not the base policy file.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.

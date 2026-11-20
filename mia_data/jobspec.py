@@ -75,6 +75,25 @@ class PinMoved(RuntimeError):
     """The harness environment changed since the round was admitted. Not retryable: the round ends `failed`."""
 
 
+class NoReachableFiles(RuntimeError):
+    """A new reader is needed, and the job that would write it may reach none of the hosts the record's files are
+    on, so it could test nothing. Not retryable: the fix is approving `approvable` on the page when the run is
+    started again, or, with none to approve, file URLs in the catalog record on a host a job may reach."""
+
+    def __init__(self, approvable: list[str]):
+        self.approvable = approvable
+        fix = (
+            f"(host not allowed: {', '.join(approvable)}). Approve it for this dataset on the page when the run "
+            "is started again"
+            if approvable
+            else "(its URLs are on GitHub hosts no job reaches). Its catalog record needs file URLs on "
+            "`raw.githubusercontent.com`, which a person can approve for one dataset, or on another host"
+        )
+        super().__init__(
+            f"a new reader is needed, and the job that writes one could reach none of this record's files {fix}"
+        )
+
+
 class HostsNotAllowed(RuntimeError):
     """A job needs hosts the csub policy doesn't allow. Not retryable: the fix is approving them on the page when
     the run is started again, or adding them to the operator's base policy."""

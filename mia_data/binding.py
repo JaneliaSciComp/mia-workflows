@@ -11,7 +11,7 @@ import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from autodev.config import is_github_host
+from autodev.config import RAW_GITHUB, is_github_host
 from mia_core.hosts import missing_hosts as missing_hosts  # re-exported: importers use it from here
 
 if TYPE_CHECKING:
@@ -20,10 +20,6 @@ if TYPE_CHECKING:
 
 LABEL_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # = the harness's LABEL_KEY: it becomes labels/<key>.png.
 # The key is the catalog's label name as-is; the encoding is `segmentation_type`, not a suffix.
-
-
-# Public file contents, read only: the one GitHub host a job may get, and only for a dataset a person approved it for.
-RAW_GITHUB = "raw.githubusercontent.com"
 
 
 def https(url: str) -> str:

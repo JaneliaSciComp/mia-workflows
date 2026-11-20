@@ -39,6 +39,10 @@ STAGES = {
 }
 
 
+# Public file contents, read only: the one GitHub host a job may get, and only for a dataset a person approved it for.
+RAW_GITHUB = "raw.githubusercontent.com"
+
+
 def is_github_host(host: str) -> bool:
     """True for github.com, githubusercontent.com and any of their subdomains."""
     host = host.strip().lower().rstrip(".")

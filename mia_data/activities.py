@@ -30,11 +30,11 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import NO_COMMITS, PERMANENT_CSUB, permanent_errors
 from autodev.agent import hosts_marker
-from autodev.config import is_github_host
 from autodev.jobs import JobSpec
 from mia_core import autonomy
 from mia_core.assets import raw_asset
 from mia_core.config import manifest_path
+from mia_core.hosts import missing_hosts
 from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge.evidence import build as build_evidence
 from mia_core.judge.evidence import evidence_digest, read_claude_json
@@ -58,13 +58,14 @@ from mia_core.untrusted import write_atomic as write_atomic
 
 from . import catalog
 from . import publish as crop_publish
-from .binding import check_binding, granted_hosts, hosts, record_gaps, record_urls
+from .binding import check_binding, granted_hosts, hosts, network_hosts, record_gaps, record_urls
 from .config import HUMAN_LABELS, STAGE_SENTENCES, STAGES, dataset_state, round_open
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
     ADVICE_FILE,
     SHA_RE,
     HostsNotAllowed,
+    NoReachableFiles,
     PinMoved,
     check_hosts_allowed,
     crop_job,
@@ -156,6 +157,7 @@ SNIPPET_BRANCH_RE = re.compile(r"snippets/issue-(\d+)")  # the branch of the pul
 # the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
 NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
 MARKER_RE = re.compile(r"(?s)<!--.*?-->")
+HEADING_RE = re.compile(r"(?m)^#+\s*")  # a Markdown heading's hashes, which mean nothing inside a sentence
 # the line of a snippets issue that names the hosts its agent's job may reach (`open_snippet_issue`)
 REACH_RE = re.compile(r"The reader's job may reach [^\n]*?<!-- autodev: hosts[^>]*?-->")
 EVIDENCE_FILE_BYTES = 64 << 20  # the largest file of the judge's evidence that is shared with the developer
@@ -168,6 +170,7 @@ CROP_STATUS = {
 }
 PERMANENT = (
     HostsNotAllowed,
+    NoReachableFiles,
     PinMoved,
     Conflict,
     ValueError,
@@ -1566,6 +1569,36 @@ class Activities:
         ]
         return self._clean("\n\n".join(notes))[:16000] or "(no details)"
 
+    async def _reach_line(self, round_id: str) -> str:
+        """The line of a snippets issue that says what the reader's job may reach: the hosts the dataset's files
+        are on, and what a person approved for this dataset since (`granted_hosts`: a host its own jobs were
+        refused, a redirect target mostly, and `raw.githubusercontent.com`). autodev grants its agent's job
+        these, of what the policy allows, and no other approved host.
+
+        NoReachableFiles when the policy allows none of them: the developer could read no file of the record,
+        so it is not asked."""
+        urls, network = record_urls(self._record(round_id)), self.cfg.network
+        patterns = await asyncio.to_thread(self.probe)
+        noted = await asyncio.to_thread(self.registry.dataset_hosts, self._pins(round_id).record)
+        reach = [
+            host
+            for host in dict.fromkeys([*hosts(urls, self.cfg), *granted_hosts(noted, patterns)])
+            if host not in network.package_hosts
+        ]
+        if len(missing_hosts(reach, patterns)) == len(reach):  # none, or none the policy allows
+            # what a person could approve, as buffer-api lists it at a start
+            wanted = network_hosts(urls, network, raw_github=True)
+            raise NoReachableFiles([host for host in wanted if host not in network.package_hosts])
+        return f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
+
+    async def _name_reach(self, existing: dict, reach_line: str) -> None:
+        """Write into an issue of an earlier round the hosts its next agent job may reach as they are now: one
+        approved since the issue was written is in its text from here on."""
+        body = existing.get("body") or ""
+        named = REACH_RE.sub(lambda _: reach_line, body, count=1)
+        if named != body:
+            await self.gh_snippets.update_issue(existing["number"], body=named)
+
     @activity.defn(name="open_snippet_issue")
     @mia_permanent_errors
     async def open_snippet_issue(
@@ -1586,18 +1619,7 @@ class Activities:
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
         record = self._record(round_id)
         urls = record_urls(record)
-        # What the reader's job may reach: the hosts the dataset's files are on, and those its own jobs were
-        # refused that a person has approved since (a redirect target, mostly: a download host hands the file
-        # to a storage host). autodev grants its agent's job these, of what the policy allows, and no other
-        # approved host; it grants no GitHub host, so none is named.
-        patterns = await asyncio.to_thread(self.probe)
-        noted = await asyncio.to_thread(self.registry.dataset_hosts, pins.record)
-        reach = [
-            host
-            for host in dict.fromkeys([*hosts(urls, self.cfg), *granted_hosts(noted, patterns)])
-            if host not in self.cfg.network.package_hosts and not is_github_host(host)
-        ]
-        reach_line = f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
+        reach_line = await self._reach_line(round_id)
 
         def ours(existing: dict, prefix: str) -> bool:  # filter by author: an outsider can copy the marker
             return (existing.get("user") or {}).get("login") == self.bot and (existing.get("body") or "").startswith(
@@ -1605,12 +1627,7 @@ class Activities:
             )
 
         async def found(existing: dict) -> int:
-            """An issue of an earlier round, with the hosts its next agent job may reach as they are now: one
-            approved since the issue was written is in its text from here on."""
-            body = existing.get("body") or ""
-            named = REACH_RE.sub(lambda _: reach_line, body, count=1)
-            if named != body:
-                await gh.update_issue(existing["number"], body=named)
+            await self._name_reach(existing, reach_line)
             return existing["number"]
 
         if snippet_issue:  # any round's marker for this data issue will do: the round id is new on a re-trigger
@@ -1689,9 +1706,14 @@ class Activities:
 
     @activity.defn(name="ask_autodev")
     @mia_permanent_errors
-    async def ask_autodev(self, snippet_issue: int, marker: str) -> None:
+    async def ask_autodev(self, snippet_issue: int, marker: str, round_id: str | None = None) -> None:
         """Ask autodev to try a snippets issue again, for a resumed round whose developer had stopped before a
-        pull request: one comment per `marker`, and the label autodev starts on."""
+        pull request: one comment per `marker`, and the label autodev starts on. With `round_id` (the resumed
+        round) the issue first names what the reader's job may reach as it is now, and autodev is not asked
+        when that is nothing (`_reach_line`)."""
+        if round_id:
+            issue = await self.gh_snippets.get_issue(int(snippet_issue))
+            await self._name_reach(issue, await self._reach_line(round_id))
         full_marker = self.cfg.marker(marker)
         said = "mia-data asks autodev to try this issue again: its dataset's round was resumed."
         await self._comment_once(self.gh_snippets, int(snippet_issue), f"{said}\n\n{full_marker}", full_marker)
@@ -1746,8 +1768,10 @@ class Activities:
             pr,
             "snippets:working" in labels,
             issue.get("state") == "closed" or "snippets:needs-human" in labels,
-            _text(self._clean(" ".join((last.get("body") or "").split())), 400) if last else "",
-            _text(self._clean(NO_COMMITS_RE.sub("", MARKER_RE.sub("", answer["body"]), count=1).strip()), 1500)
+            _text(self._clean(" ".join(HEADING_RE.sub("", MARKER_RE.sub("", last.get("body") or "")).split())), 400)
+            if last
+            else "",
+            _text(self._clean(NO_COMMITS_RE.sub("", MARKER_RE.sub("", answer["body"]), count=1).strip()), 3000)
             if answer
             else "",
             str(answer.get("created_at") or "") if answer else "",
