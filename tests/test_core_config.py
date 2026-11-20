@@ -232,6 +232,35 @@ def test_csub_policy_dir_defaults_beside_the_state_root(tmp_path, monkeypatch):
     assert explicit.policy_dir == tmp_path / "p" and explicit.base_policy == tmp_path / "b"
 
 
+def test_csub_defaults_to_a_local_broker(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = csub_config({})
+    assert cfg.broker == "local" and cfg.ssh_host is None and cfg.run_dir is None
+    assert cfg.ssh_key == tmp_path / ".ssh/csub_ed25519"
+
+
+def test_csub_relay_carries_the_ssh_settings_and_the_run_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = csub_config(
+        {
+            "csub": {
+                "broker": "relay",
+                "ssh_host": "submit.example.org",
+                "ssh_user": "svc",
+                "ssh_key": "~/.ssh/other",
+                "run_dir": "/opt/mia/run",
+            }
+        }
+    )
+    assert cfg.broker == "relay" and cfg.ssh_host == "submit.example.org" and cfg.ssh_user == "svc"
+    assert cfg.ssh_key == tmp_path / ".ssh/other" and cfg.run_dir == Path("/opt/mia/run")
+
+
+def test_csub_relay_needs_a_submit_host():
+    with pytest.raises(ValueError, match="csub.ssh_host: required when csub.broker is relay"):
+        csub_config({"csub": {"broker": "relay"}})
+
+
 def test_every_service_receives_the_csub_block():
     manifest = {**SHARED, "csub": {"policy_dir": "/h/p"}}
     assert service_config(manifest, "mia-data")["csub"] == service_config(manifest, "snippets")["csub"]
