@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
-MANIFEST_ONLY = frozenset({"sandbox_dir", "services"})  # top-level keys no service config receives
+MANIFEST_ONLY = frozenset({"host", "sandbox_dir", "services"})  # top-level keys no service config receives
 TEMPORAL_MANIFEST_ONLY = frozenset({"managed", "state_dir"})  # temporal keys read by the ops CLI, not by services
 
 

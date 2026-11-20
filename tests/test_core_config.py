@@ -66,6 +66,11 @@ def test_service_block_keys_are_sections():
         service_config(bad, "x")
 
 
+def test_host_is_manifest_only():
+    manifest = {**SHARED, "host": "prod1", "services": {"x": {"app": "autodev"}}}
+    assert "host" not in service_config(manifest, "x")
+
+
 @pytest.mark.parametrize("services, message", [({}, "no service 'x'"), ({"x": {"github": {}}}, "needs app")])
 def test_missing_service_or_app(services, message):
     with pytest.raises(ValueError, match=message):
