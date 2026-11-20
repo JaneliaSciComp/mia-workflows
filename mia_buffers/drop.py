@@ -1,20 +1,19 @@
 """The manual drop (spec §3): which file name a human gives each URL, the raw cache's key for a dropped file,
 and the `files.json` manifest the harness reads instead of a HEAD request.
 
-`cache_key` repeats the harness's `mia_harness.io._key` so a dropped file lands where `io.fetch(url)` looks.
+A dropped file is named by `mia_core.assets.cache_key`, so it lands where the harness's `io.fetch(url)` looks.
 `cached_files` goes the other way: the files of a record's raw cache under the names they had upstream.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
-from mia_core.assets import read_files_json
+from mia_core.assets import cache_key, is_entry, read_files_json
 from mia_core.untrusted import loads, read_untrusted
 
 MANIFEST = "files.json"
@@ -44,10 +43,6 @@ def drop_names(urls: list[str]) -> list[tuple[str, str]]:
     ]
 
 
-def cache_key(url: str, validators: dict) -> str:
-    return hashlib.sha256(f"{url}\n{json.dumps(validators, sort_keys=True)}".encode()).hexdigest()
-
-
 def _member_name(member: object) -> bool:
     """Whether a zip directory's member name is a plain relative path: it becomes a path under a person's folder."""
     return (
@@ -72,19 +67,15 @@ def cached_files(cache_dir: Path) -> list[tuple[str, Path]]:
         validators = entry.get("validators")
         if not isinstance(validators, dict) or url not in names:
             continue
-        if _is_entry(whole := cache_dir / cache_key(url, validators)):
+        if is_entry(whole := cache_dir / cache_key(url, validators)):
             found.append((names[url], whole))
             continue
         # ponytail: a zip directory over 64 MiB of JSON (about a million members) lists nothing; raise the limit then
         members = loads(read_untrusted(cache_dir, cache_key(f"{url}::", validators), 64 << 20))
         for member in members if isinstance(members, dict) else ():
-            if _member_name(member) and _is_entry(path := cache_dir / cache_key(f"{url}::{member}", validators)):
+            if _member_name(member) and is_entry(path := cache_dir / cache_key(f"{url}::{member}", validators)):
                 found.append((f"{names[url]}/{member}", path))
     return found
-
-
-def _is_entry(path: Path) -> bool:
-    return path.is_file() and not path.is_symlink()
 
 
 def read_manifest(cache_dir: Path) -> dict:

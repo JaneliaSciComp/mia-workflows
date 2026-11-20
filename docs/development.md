@@ -668,10 +668,12 @@ locks, so there it refuses to run without `--dry-run`.
 fetch.json` with the cache read-write, the byte cap `limits.fetch_bytes` and the walltime
 `limits.fetch_walltime_min`, up to `limits.fetch_attempts` attempts that resume from the cache (`partial`),
 `sourcing.parallel_fetch` fetch jobs per buffer. `fetch.json` lists one outcome per URL: `cached`, `fetched`,
-`stream`, `pending` or `failed`; a missing `fetch.json` counts as partial. The fetch is skipped when `files.json`
-already lists every binding url: a plain file is listed by the HEAD that fetched it, a `<zip>::<member or glob>`
-url only once `harness fetch` has every matching member in the cache (source `members`); the zip's own entry
-proves nothing about members, as mia-data's verify reads only a sample of them. The harness also caches the zip's
+`stream`, `pending` or `failed`; a missing `fetch.json` counts as partial. The fetch is skipped when the cache
+holds every binding url (`mia_core.assets.cache_missing`): a plain file counts when `files.json` lists it and its
+entry is on disk, as a HEAD lists a file before a byte of it is kept and a read by range keeps none; a
+`<zip>::<member or glob>` url counts once `harness fetch` has every matching member in the cache and lists it
+(source `members`); the zip's own entry proves nothing about members, as mia-data's verify reads only a sample of
+them. The harness also caches the zip's
 directory, so the offline stage expands a glob without a request. The binding is re-read under the lock: if the
 previous holder built the artifact, it is reused ("staged by <holder> while this buffer waited"). A fetch still
 partial after its attempts names the last job's id, state and exit code; `mia-buffers check` verifies the harness
