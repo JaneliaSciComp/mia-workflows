@@ -1,9 +1,9 @@
 # MIA: a stage reads on demand — Spec
 
-**Status:** v0.1 · 2026-11-20 · not approved. The direction (§4, approach A) is the user's decision of
-2026-11-20; §6 lists the calls that are the writer's and the user's to change. Rests on the training-buffers
-spec, the sparse OME-Zarr staging spec and the prep-and-buffering spec, whose fetch phase (§5.2) and quota
-estimate (§5.4, "the record's expected bytes") it replaces.
+**Status:** v0.2 · approved 2026-11-20 as it stands for now, with §9 owed later. The direction (§4, approach
+A) and §9 are the user's decisions of 2026-11-20; §6 lists the calls that are the writer's. Rests on the
+training-buffers spec, the sparse OME-Zarr staging spec and the prep-and-buffering spec, whose fetch phase
+(§5.2) and quota estimate (§5.4, "the record's expected bytes") it replaces.
 
 ## 1. Intent
 
@@ -133,8 +133,8 @@ a person fills a record's cache by hand.
    random, so a later plan touches other blocks, and a rebuild of the same plan costs what the first stage
    cost.
 3. **No download path for large whole-file sources.** Today a record can take 4 fetch jobs of 50 GB. After
-   this a record whose reader must take more than the job's cap whole cannot be staged. Such a record is what
-   the buffer is not for; if one matters, its reader is the thing to change.
+   this a record whose reader must take more than the job's cap whole cannot be staged, until §9 gives such
+   a file range reads.
 4. **The quota charges nothing ahead.** An exact figure would need each file's size and how its reader reads
    it, known only once the job runs. The cap bounds the overshoot.
 5. **A rebuild depends on upstream.** With no raw copy, a pyramid can be staged again only while the source
@@ -153,3 +153,10 @@ a person fills a record's cache by hand.
 The patch's name and the replay fixtures; whether the quota wait keeps its place in `_fetch` or moves beside
 the stage slot; the wording of the timeline and help texts; when the unpatched path and §5.5 are removed; the
 tests, one of them named after this incident: a record far larger upstream than the quota is staged.
+
+## 9. Later: range reads for large files
+
+Accepted for now (2026-11-20): a file its reader must take whole, and that is larger than the job's cap, is
+out of reach. It is to get range reads later through a reference index of the file: a key-value map from each
+chunk to where its bytes are (url, offset, length), built once and kept, so a job reads the chunks its crops
+touch and never the file. Not designed here; it gets a spec of its own.
