@@ -2,7 +2,7 @@
 <header>
   <div class="eyebrow">architecture · mia-data, mia-buffers and buffer-api</div>
   <h1>MIA Training Buffers</h1>
-  <p>The system is two pipelines that share one registry. <b>mia-data</b> turns a catalog record into a prepared dataset, which means an approved binding and verified crops on shared storage. <b>mia-buffers</b> turns a buffer spec into served crops. It plans over prepared datasets only, fetches the raw files once into a shared cache, stages each volume as an immutable OME-Zarr pyramid, and registers each pyramid with <b>buffer-api</b>, the one service that picks every crop. Training jobs pull crop descriptors from the service and read the pyramids themselves.</p>
+  <p>The system is two pipelines that share one registry. <b>mia-data</b> turns a catalog record into a prepared dataset, which means an approved binding and verified crops on shared storage. <b>mia-buffers</b> turns a buffer spec into served crops. It plans over prepared datasets only, reads from each dataset's source only what the planned crops touch, stages each volume as an immutable OME-Zarr pyramid, and registers each pyramid with <b>buffer-api</b>, the one service that picks every crop. Training jobs pull crop descriptors from the service and read the pyramids themselves.</p>
   <p>buffer-api also serves <b>this page</b>, which is how a person starts, approves or cancels anything. A button is a request to buffer-api; the service checks it against the stage of the thing it is about and passes it to that thing's workflow. Every step a workflow takes is written to the registry as a stage and a timeline entry, and the page follows them as they happen.</p>
 </header>
 
@@ -132,7 +132,7 @@
 <text class="t" x="418" y="78">crops · review</text>
 <text class="s" x="418" y="96">one set, verified, shown; Approve</text>
 <text class="s" x="418" y="110">saves it, Reject loops (fig. 3b);</text>
-<text class="s" x="418" y="124">downloads land in the raw cache</text>
+<text class="s" x="418" y="124">whole files land in the raw cache</text>
 <path class="ea" d="M545 58 V44 H425 V58" marker-end="url(#f2)"/>
 <text class="l" x="552" y="40">Reject: fix, then new crops</text>
 <rect class="bs" x="595" y="58" width="150" height="90" rx="4"/>
@@ -440,7 +440,7 @@
 </figure>
 
 <h2>6. Sourcing one dataset</h2>
-<p>Once a round is running, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the steps shown in figure 6: it waits while the raw cache is over its quota, then one stage job reads from the source what the planned crops touch. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
+<p>Once a round is running, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the steps shown in figure 6: it waits while the raw cache is over its quota, then one stage job reads from the source what the planned crops touch. Nothing is downloaded ahead of that job, and a dataset's size upstream decides nothing. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
 <figure>
 <svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, wait while the raw cache is over its quota, stage online into a build directory, save by rename, register the volumes, release the lock.">
 <defs><marker id="f4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
@@ -499,7 +499,7 @@
 <line class="e" x1="760" y1="278" x2="790" y2="278" marker-end="url(#f4)"/>
 <text class="l" x="775" y="271" text-anchor="middle">release</text>
 </svg>
-<figcaption><b>Figure 6.</b> Nothing is downloaded ahead of a stage. The stage job has the binding's hosts and the raw cache read-write, and each reader takes from the source what the planned samples touch: byte ranges into the job's workspace, or a whole file into the raw cache where ranges will not do. <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker saves it. The quota is where staging waits and the keeper evicts, not a ceiling: a dataset is blocked only while the raw cache is over it. A record whose files a person placed by hand is staged with no network and the cache read-only. A saved pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
+<figcaption><b>Figure 6.</b> Nothing is downloaded ahead of a stage. The stage job has the binding's hosts and the raw cache read-write, and each reader takes from the source what the planned samples touch: byte ranges into the job's workspace, or a whole file into the raw cache where ranges will not do (a server that ignores Range, a compressed zip member), at most <code>limits.job_bytes</code> for one job. Range blocks stay in the job's workspace and no later job reads them; a file in the raw cache is a hit for every later job until the keeper evicts it. <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker saves it. The quota is where staging waits and the keeper evicts, not a ceiling: a dataset is blocked only while the raw cache is over it. A record whose files a person placed by hand is staged with no network and the cache read-only, and has no quota wait. A rebuild of a lost pyramid reads the source again. A saved pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
 </figure>
 
 <h2>7. The cache and its keeper</h2>
@@ -629,8 +629,8 @@
   binding.yaml · manifest.json           <span class="c">the manifest names the binding it was verified with</span>
   &lt;crop id&gt;/                             <span class="c">verified crops</span>
 
-&lt;raw_root&gt;/&lt;record&gt;/                     <span class="c">original files · shared by both pipelines · untrusted bytes</span>
-  files.json                             <span class="c">url → cache key, validators, source: download | drop</span>
+&lt;raw_root&gt;/&lt;record&gt;/                     <span class="c">files a reader took whole or a person placed · shared by both pipelines · untrusted bytes</span>
+  files.json                             <span class="c">url → validators, source: download | members | manual</span>
   incoming/                              <span class="c">where a person places files no job may fetch</span>
 
 &lt;staged_root&gt;/&lt;levels key&gt;/&lt;record&gt;/&lt;artifact id&gt;/

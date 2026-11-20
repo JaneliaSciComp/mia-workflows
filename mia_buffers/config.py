@@ -128,7 +128,7 @@ class PathsCfg(mia_data_config.PathsCfg):
 
     ROOTS: ClassVar[tuple[str, ...]] = ("work_root", "storage_root", "raw_root", "staged_root")
 
-    raw_root: Path  # unset: mia-data's download cache, <work_root>/_cache, so a dataset is fetched once for both
+    raw_root: Path  # unset: mia-data's cache, <work_root>/_cache, so a file a reader took whole is cached once for both
     raw_root_url: str | None = None
     staged_root: Path
     staged_root_url: str | None = None
