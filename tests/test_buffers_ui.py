@@ -529,6 +529,26 @@ def test_a_link_to_github_carries_the_github_mark() -> None:
     assert '<a href="https://github.com.evil.example/x" target="_blank" rel="noopener">https://github.com.evil' in body
 
 
+def test_a_file_inside_a_zip_links_to_the_zip() -> None:
+    """`<file url>::<member or glob>` is the harness's address of a file inside a zip or a directory: no host
+    serves it, so the link opens the part before `::` and its text stays the whole address."""
+    member, glob, plain, ipv6 = run_js(
+        "print(input.map(url => html(link(url, url))));",
+        {"dom.js": "link"},
+        [
+            "https://zenodo.org/records/1/files/data.zip::data/sub-10/a.ome.tif",
+            "https://host.example/TIFs/::*.tif",
+            "https://host.example/a.tif",
+            "http://[::1]/data.zip::a.tif",
+        ],
+    )
+    assert '<a href="https://zenodo.org/records/1/files/data.zip" ' in member
+    assert ">https://zenodo.org/records/1/files/data.zip::data/sub-10/a.ome.tif</a>" in member
+    assert '<a href="https://host.example/TIFs/" ' in glob and ">https://host.example/TIFs/::*.tif</a>" in glob
+    assert '<a href="https://host.example/a.tif" ' in plain
+    assert '<a href="http://[::1]/data.zip" ' in ipv6
+
+
 def test_a_rounds_crops_are_pictures_served_by_this_origin() -> None:
     """A round's crops table names images in the gallery repo, which a browser cannot read: each one is shown from
     buffer-api's own copy. Any other image is a link, never a picture loaded from somewhere else."""
