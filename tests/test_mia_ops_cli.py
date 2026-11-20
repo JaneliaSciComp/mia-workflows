@@ -215,3 +215,24 @@ def test_judge_eval_cli(stack, tmp_path, monkeypatch, capsys):  # noqa: F811
     out = capsys.readouterr().out
     assert "a\tconfocal/none\texpected approve\tgot approve\t0.9\t$0.20" in out and "\tgot approve\t0.8\t-" in out
     assert "| confocal/none | 2 | 1 | 1 | 0 | 0 |" in out and "| all | 2 | 1 | 1 | 0 | 0 |" in out
+
+
+def test_release_is_parsed_without_a_manifest(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli.release, "release", lambda tag, **kw: seen.append((tag,)) or 0)
+    monkeypatch.setattr(cli.release, "release_to", lambda tag, target, **kw: seen.append((tag, target)) or 0)
+    monkeypatch.setattr(cli, "load_manifest", lambda _: pytest.fail("release must not load the manifest"))
+    assert cli.main(["release", "v2"]) == 0
+    assert cli.main(["release", "v2", "--to", "h:/r"]) == 0
+    assert seen == [("v2",), ("v2", "h:/r")]
+
+
+def test_release_layout_error_is_one_line(monkeypatch, capsys):
+    from mia_ops.release import LayoutError
+
+    def refuse(tag, **kw):
+        raise LayoutError("not laid out")
+
+    monkeypatch.setattr(cli.release, "release", refuse)
+    with pytest.raises(SystemExit, match="not laid out"):
+        cli.main(["release", "v2"])
