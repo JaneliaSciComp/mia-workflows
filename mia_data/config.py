@@ -65,27 +65,26 @@ HUMAN_LABELS = {  # the actions a person takes
 PHASES = ("not started", "working", "waiting", "stopped", "done")
 # stage -> (phase, the actions it accepts); "working" means a round is in progress, and a round in progress
 # accepts only `cancel` (spec webapp-actions §5.1). `debugging` is between two rounds, so it also takes the `go`
-# that runs the next one: the debugger's own, or a person's who does not want to wait for it. A verdict is also
-# taken away from `review` when it names a set of its own (spec judge-decides §5): an `approve` of the set that
-# was sent back for rework, while that rework runs and after it stopped, and at `done` a `reject` of the saved
-# set. buffer-api refuses any other action and a verdict with no such set; the page offers only these. The
-# workflow stays the code that carries a round out. `resume` (spec resume-restart §4.3) goes on with a round that
+# that runs the next one: the debugger's own, or a person's who does not want to wait for it. A verdict is
+# taken at `review`, about the set under review, and at `done` as a `reject` of the saved set (spec
+# judge-decides §5.2). buffer-api refuses any other action and a verdict about another set; the page offers only
+# these. The workflow stays the code that carries a round out. `resume` (spec resume-restart §4.3) goes on with a round that
 # stopped or waits for its verdict: not where nothing has run, nothing is missing, or the debugger's own run
 # follows.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
     "matching": ("working", frozenset({"cancel", "stop"})),
-    "developing": ("working", frozenset({"approve", "cancel", "stop"})),
-    "testing": ("working", frozenset({"approve", "cancel", "stop"})),
+    "developing": ("working", frozenset({"cancel", "stop"})),
+    "testing": ("working", frozenset({"cancel", "stop"})),
     # go: start over, the set is dropped; resume: the set stays, and is judged if the judge never looked
     "review": ("waiting", frozenset({"approve", "reject", "go", "resume", "cancel"})),
     "merging": ("working", frozenset({"cancel", "stop"})),
-    "debugging": ("working", frozenset({"approve", "go", "cancel", "stop"})),
+    "debugging": ("working", frozenset({"go", "cancel", "stop"})),
     "done": ("done", frozenset({"go", "reject", "revoke"})),
-    "failed": ("stopped", frozenset({"approve", "go", "resume", "revoke"})),
-    "blocked": ("stopped", frozenset({"approve", "go", "resume", "revoke"})),
-    "needs-human": ("stopped", frozenset({"approve", "go", "resume", "revoke"})),
-    "cancelled": ("done", frozenset({"approve", "go", "resume", "revoke"})),
+    "failed": ("stopped", frozenset({"go", "resume", "revoke"})),
+    "blocked": ("stopped", frozenset({"go", "resume", "revoke"})),
+    "needs-human": ("stopped", frozenset({"go", "resume", "revoke"})),
+    "cancelled": ("done", frozenset({"go", "resume", "revoke"})),
 }
 
 

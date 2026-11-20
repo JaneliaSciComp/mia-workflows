@@ -707,8 +707,7 @@ def test_an_asked_action_holds_the_buttons_until_its_workflow_answers() -> None:
     """A click is not shown as the old stage's buttons again: while the subject says an action is `asked`, every
     button that would send an action is disabled, and a reload that started earlier never paints over a later one."""
     # the bar, a drop, a revoke, a new plan; the forward and back buttons of a step add the stage to theirs
-    # ... and the accept of a set that was sent back, beside a newer one under review
-    assert count("disabled: !!subject.asked") == 5 and has("disabled: !!x.asked")
+    assert count("disabled: !!subject.asked") == 4 and has("disabled: !!x.asked")
     assert count("|| !!subject.asked") == 4  # the plan of step 3, Run, Approve and serve, the way back
     assert has("waiting for its workflow to answer")
     assert has("turn !== subjectTurn")
@@ -901,16 +900,10 @@ def test_a_second_click_during_the_host_check_starts_nothing() -> None:
 
 def test_a_datasets_verdict_names_the_set_it_is_about() -> None:
     """spec judge-decides §5.4: the page sends the set with the click; which set depends on the stage."""
-    sets = {
-        "review": "i7-e2:t2",
-        "held": {"set": "i7-e1:t1", "by": "judge", "worst": "suspect", "findings": [], "gallery": None},
-        "saved": {"set": "i7-e0:t0", "approved_by": "judge"},
-    }
+    sets = {"review": "i7-e2:t2", "saved": {"set": "i7-e0:t0", "approved_by": "judge"}}
     cases = [
         ({"kind": "dataset", "stage": "review", "revision": 4, "data": {"sets": sets}}, "approve"),
         ({"kind": "dataset", "stage": "review", "revision": 4, "data": {"sets": sets}}, "reject"),
-        ({"kind": "dataset", "stage": "developing", "revision": 5, "data": {"sets": sets}}, "approve"),
-        ({"kind": "dataset", "stage": "blocked", "revision": 6, "data": {"sets": sets}}, "approve"),
         ({"kind": "dataset", "stage": "done", "revision": 7, "data": {"sets": sets}}, "reject"),
         ({"kind": "dataset", "stage": "review", "revision": 8, "data": {}}, "approve"),  # a round from before sets
         ({"kind": "buffer", "stage": "plan-review", "revision": 9, "data": {}}, "approve"),
@@ -922,8 +915,6 @@ def test_a_datasets_verdict_names_the_set_it_is_about() -> None:
     assert got == [
         {"revision": 4, "set": "i7-e2:t2"},
         {"revision": 4, "set": "i7-e2:t2"},
-        {"revision": 5, "set": "i7-e1:t1"},
-        {"revision": 6, "set": "i7-e1:t1"},
         {"revision": 7, "set": "i7-e0:t0"},
         {"revision": 8},
         {"revision": 9},
@@ -932,25 +923,16 @@ def test_a_datasets_verdict_names_the_set_it_is_about() -> None:
     assert has("...verdictOf(subject, action)")
 
 
-def test_a_set_that_was_sent_back_is_shown_with_its_findings_and_an_accept() -> None:
-    """spec judge-decides §5.1, §6: who sent the set back, the findings as text, and what Accept does."""
+def test_a_datasets_verdict_buttons_say_approve_and_reject() -> None:
+    """A dataset's approve is about the set under review and nothing else: the page has one word for it."""
     words = run_js(
         "print(input.map(([subject, action]) => actionWord(subject, action)));",
         {"actions.js": "actionWord"},
-        [
-            [{"kind": "dataset", "stage": "developing"}, "approve"],
-            [{"kind": "dataset", "stage": "review"}, "approve"],
-            [{"kind": "dataset", "stage": "done"}, "reject"],
-        ],
+        [[{"kind": "dataset", "stage": "review"}, "approve"], [{"kind": "dataset", "stage": "done"}, "reject"]],
     )
-    assert words == ["Accept these crops", "Approve", "Reject…"]
-    assert has("export function heldPanel(") and has("heldPanel(subject, redraw)")
-    assert has("title: BUTTON_HELP.acceptHeld")
-    assert has("Accept these crops instead")  # at review, beside the verdict on the newer set
-    assert has("Cancel the rework and save this set as it is")
+    assert words == ["Approve", "Reject…"]
     assert has("Revoke the saved crops and send them back with your feedback")
-    # a finding is text a job wrote: inserted as text, never as markup
-    assert has("`${finding.item} [${finding.severity}]: ${finding.note}`")
+    assert not has("sent back for rework")
 
 
 def test_a_stopped_dataset_offers_resume_first_and_restart_beside_it() -> None:

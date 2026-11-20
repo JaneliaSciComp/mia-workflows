@@ -176,8 +176,6 @@ class MiaDataDataset:
         self.reject_events: list[LabelEvent] = []
         self.revoke_events: list[LabelEvent] = []
         self.cancel_events: list[LabelEvent] = []
-        # approves that name the set that was sent back for rework: taken at any stage (see _guard, _accept_held)
-        self.accept_events: list[LabelEvent] = []
         # rejects that name the saved set: each revokes it and starts its rework (see _rework_saved)
         self.rework_events: list[LabelEvent] = []
         self.restarts: set[str] = set()  # ids of the gos that came as `restart`: each starts its round in a new run
@@ -219,14 +217,7 @@ class MiaDataDataset:
 
     @workflow.signal
     def approve(self, event: LabelEvent) -> None:
-        """A verdict on the set under review, or (spec judge-decides §5.1) an accept of the set that was sent
-        back for rework, which is taken at any stage; an accept that is being carried out takes no second one."""
-        held, state = self.state.held, self.state
-        under_review = state.stage == "review" and state.tests and set_id(state.round_id, state.tests[-1]) == event.set
-        if event.set and held and event.set == held.set_id and not under_review and not state.accepting:
-            self.accept_events.append(event)
-        else:
-            self.approve_events.append(event)
+        self.approve_events.append(event)
 
     @workflow.signal
     def reject(self, event: LabelEvent) -> None:
@@ -278,12 +269,6 @@ class MiaDataDataset:
                 await self._rollover()  # idle, nothing queued
             await self._refuse_cancels()  # idle: no round to cancel
             await self._revokes()  # a revoke counts at any stage
-            if self.accept_events:  # the set that was sent back is accepted after its rework stopped
-                accepted = self.accept_events.pop(0)
-                if not self._seen(accepted) and await self._acceptable(accepted):
-                    worked = True
-                    await self._guard(self._accept_held(accepted))
-                continue
             if self.rework_events:  # the saved set is rejected: it is revoked and its rework is a round of its own
                 rejected = self.rework_events.pop(0)
                 if not self._seen(rejected):
@@ -358,12 +343,12 @@ class MiaDataDataset:
     def _roll_due(self) -> bool:
         """Whether to continue as new now: never with a cancel queued, which a new run would not hear, and never
         while the crop judge still looks, which a new run would not wait for."""
-        waited_for = self.cancel_events or self.accept_events or self.rework_events
+        waited_for = self.cancel_events or self.rework_events
         return _rollover_due() and not waited_for and not (self.judging and not self.judging.done())
 
     def _queued(self) -> bool:
         """Whether anything a person or a worker asked for is waiting to be acted on."""
-        return bool(self._labels() or self.cancel_events or self.accept_events or self.rework_events)
+        return bool(self._labels() or self.cancel_events or self.rework_events)
 
     async def _limits(self) -> RoundLimits:
         """The round's config values. They are not part of the durable state, so a rollover re-reads them."""
@@ -382,35 +367,12 @@ class MiaDataDataset:
         self.cancel_events = []
         round_task = self.round_task = asyncio.ensure_future(step)
         cancel = asyncio.ensure_future(workflow.wait_condition(lambda: bool(self.cancel_events)))
-        accept = asyncio.ensure_future(workflow.wait_condition(lambda: bool(self.accept_events)))
-        accepted: LabelEvent | None = None  # the accept this step was ended for
         try:
-            while True:
-                await workflow.wait([round_task, cancel, accept], return_when=asyncio.FIRST_COMPLETED)
-                if round_task.done():
-                    await round_task  # re-raises what ended it: a failure below, or a continue-as-new
-                    break
-                if self.cancel_events:
-                    await self._cancel_round(round_task)
-                    break
-                # an accept of the set that was sent back (spec judge-decides §5.1): what the send-back started
-                # is ended as a cancel would end it, with no `cancelled` stage, and the set is saved
-                event = self.accept_events.pop(0)
-                accept = asyncio.ensure_future(workflow.wait_condition(lambda: bool(self.accept_events)))
-                if self._seen(event) or not await self._acceptable(event):
-                    continue  # refused: the round goes on
-                await self._stop_round(round_task)
-                if self.unkilled:
-                    jobs = "; ".join(self.unkilled)
-                    await self._finish(
-                        "failed",
-                        f"accepted by {event.actor}, but a job of the rework could not be killed and may still be "
-                        f"running: {jobs}. Accept can be sent again.",
-                        debug=False,
-                    )
-                else:
-                    accepted = event
-                break
+            await workflow.wait([round_task, cancel], return_when=asyncio.FIRST_COMPLETED)
+            if round_task.done():
+                await round_task  # re-raises what ended it: a failure below, or a continue-as-new
+            else:
+                await self._cancel_round(round_task)
         except (ActivityError, RoundFailed) as error:
             await self._finish(stop_stage(error), error_message(error))
         except asyncio.CancelledError:  # the workflow itself is being cancelled: let the round clean up
@@ -420,13 +382,9 @@ class MiaDataDataset:
             raise
         finally:
             cancel.cancel()
-            accept.cancel()
             self.round_task, self.cancelling, self.unwinding = None, False, False
         await self._judge_ended()  # a judge a person's verdict overtook: the round closes when its record is written
         await self._settle_stage_write(cancel=False)  # quiet point: the last stage write lands before a rollover
-        if accepted is not None:
-            self.failure = None  # whatever the rework was doing, the set a person accepted is saved now
-            return await self._guard(self._accept_held(accepted))
         if (failure := self.failure) is not None:  # the step failed with a debugging cycle left: that runs now
             self.failure = None
             await self._guard(self._debug(failure))
@@ -1062,7 +1020,7 @@ class MiaDataDataset:
         """A person rejected the saved set (spec judge-decides §5.2): it is revoked as a `revoke` revokes it (the
         dataset is no longer prepared, buffers stop serving its volumes), and its rework starts as a round of
         its own, which asks the developer for a reader superseding the rejected binding's, with the person's
-        comments. The rejected set is held: it can still be accepted, which saves it again."""
+        comments. The rejected set is kept as the one that was sent back: the developer's answer is about it."""
         state, saved = self.state, self.state.saved
         if saved is None or event.set != saved.set_id:
             return await self._refuse(REJECT, "that set is not the saved one any more", event)
@@ -1081,9 +1039,8 @@ class MiaDataDataset:
             self._found(state.result or "Ended: the saved crops were rejected.")
             await self._flush()
         state.reworks = state.debugs = 0  # a person acted: the judge's send-backs and the debugger's cycles start over
-        # the rejected set is held before anything else can fail (the pause, an admission that refuses): it can
-        # be accepted back whatever becomes of the rework. Its pull request is merged and done with: the set is
-        # its crops under the commit they were saved at, with its binding
+        # the rejected set is the one the developer answers for. Its pull request is merged and done with: the
+        # set is its crops under the commit they were saved at, with its binding
         held = state.held = dataclasses.replace(
             saved,
             test=dataclasses.replace(saved.test, sha=saved.pins.snippets_commit),
@@ -1138,7 +1095,7 @@ class MiaDataDataset:
             await self._flush()
         await self._begin_round(event)
         assert state.pins and state.seed  # the round is admitted
-        if state.held:  # a set held from an earlier round stays acceptable; its request is answered there or never
+        if state.held:  # a set sent back in an earlier round: its request is answered there or never
             state.held.request = ""
         # a go with advice (the debugger's, the cleaner's after a diagnosis) starts from the match, whose agent
         # reads the advice: any other go resumes the PR
@@ -1348,7 +1305,7 @@ class MiaDataDataset:
             await self._assess("reject", event, subject)
             self._found(f"Rejected by {event.actor}: autodev is asked for a snippet that takes the comments in.")
             feedback = await self._feedback(event)
-            if workflow.patched("judge-decides"):  # the set stays acceptable, and the request can be answered
+            if workflow.patched("judge-decides"):  # the request can be answered: the set is kept for that
                 held = self._hold(state.tests[-1], event.actor, f"#{event.event_id}")
                 held.opened_issue = state.snippet_issue is None
                 feedback = review_request(feedback, held.request)
@@ -1485,9 +1442,8 @@ class MiaDataDataset:
 
     async def _send_back(self, test: Test, judged: JudgeResult) -> bool:
         """The crop judge sends `test`'s set back: its findings go to the developer as a person's reject would,
-        and the set is held so that a person can still accept it (spec judge-decides §4.1, §5.1). False when the
-        judge has done so `limits.max_reworks` times since a person last acted: the set then waits at review
-        (§4.3)."""
+        and the set is kept for the developer's answer (spec judge-decides §4.1). False when the judge has done
+        so `limits.max_reworks` times since a person last acted: the set then waits at review (§4.3)."""
         state, limits = self.state, await self._limits()
         if state.reworks >= limits.max_reworks:
             await self._act(
@@ -1585,8 +1541,7 @@ class MiaDataDataset:
 
     def _hold(self, test: Test, by: str, suffix: str) -> CropSet:
         """`test`'s set was sent back for rework by `by` (the judge, or a person's actor): it is kept as the
-        dataset's held set, which an approve can still name (spec judge-decides §5.1), under a request id the
-        developer answers."""
+        dataset's held set, under a request id the developer answers."""
         held = self.state.held = self._set_of(test)
         held.sent_back_by, held.request = by, f"{held.set_id}{suffix}"
         return held
@@ -1612,13 +1567,13 @@ class MiaDataDataset:
         except ActivityError as error:
             workflow.logger.warning("issue #%d: evidence not shared: %s", state.issue, error_message(error))
 
-    async def _switch_to(self, held: CropSet, said: str) -> None:
+    async def _switch_to(self, held: CropSet) -> None:
         """Make the held set's round the dataset's again (`_restore`). When that is another round than the one in
-        the state, the pass that round left open ends here with its result (or `said`), under its own round."""
+        the state, the pass that round left open ends here with its result, under its own round."""
         state = self.state
         if state.round_id != held.round_id:
             if self._results() and state.pass_stage:
-                self._found(state.result or said)
+                self._found(state.result)
                 await self._flush()
             # the set's round goes on where it stopped: its next pass at a stage is one more, never the first again
             state.passes, state.pass_stage = dict(held.passes), ""
@@ -1669,86 +1624,6 @@ class MiaDataDataset:
         self._found(found)
         await self._close_issue("autodev answered that nothing needs changing; the crops are saved as they are.")
         await self._publish_set(held.test)
-
-    async def _acceptable(self, event: LabelEvent) -> bool:
-        """Whether the set the accept names is still the one that was sent back and its crops can still be read
-        (spec judge-decides §5.4: checked again when the verdict is carried out). A set that is not is refused on
-        the timeline, and nothing is stopped, merged or saved for it."""
-        held = self.state.held
-        gone = "that set can no longer be accepted"
-        if held is None or event.set != held.set_id:
-            await self._refuse(
-                APPROVE, f"{gone}: a newer set was approved, or it is not the set that was sent back", event
-            )
-            return False
-        test = held.test
-        try:
-            if not (test.crop_workspace and test.verify_workspace):
-                raise RoundFailed("it was made before sets were kept")
-            await self._act(
-                "read_verify", test.verify_workspace, test.crop_workspace, result_type=VerifyResult, cleanup=True
-            )
-        except (ActivityError, RoundFailed) as error:
-            await self._refuse(APPROVE, f"{gone}: its crops cannot be read ({error_message(error)})", event)
-            return False
-        return True
-
-    async def _accept_held(self, event: LabelEvent) -> None:
-        """A person accepted the set that was sent back for rework (spec judge-decides §5.1): the set's round
-        becomes the dataset's again, the approval is recorded, and the set is saved, or its pull request merged
-        as it was at that head (`/accept`: autodev reads it when its running job has ended, drops that job's
-        result, resets the branch and merges). What the send-back started was stopped by the caller.
-
-        The approval stands whatever follows: a step that fails rests the dataset at `blocked`, saying which, and
-        the set stays held, so the accept can be sent again."""
-        state, held = self.state, self.state.held
-        if held is None or event.set != held.set_id:  # superseded while the rework was being stopped
-            return await self._refuse(APPROVE, "that set can no longer be accepted: a newer set was approved", event)
-        # a pull request the rework opened for a set that had none: closed with the issue it answers
-        opened = held.pr is None and held.opened_issue and state.snippet_issue == held.snippet_issue
-        rework_pr = state.pr if opened else None
-        await self._switch_to(held, f"Ended: {event.actor} accepted the set of an earlier round.")
-        state.pending, state.waiting_since, state.revised_at = [], None, None
-        who = JUDGE_NAME if held.sent_back_by == JUDGE else held.sent_back_by
-        step = "recording the approval"
-        try:
-            state.accepting = held.test.sha
-            subject = ("pr_head", held.test.sha) if held.pr else ("crop_set", held.set_id)
-            written = await self._assess("approve", event, subject)
-            if not written.authorized:
-                return await self._finish("blocked", NOT_AUTHORIZED.format(id=written.id, why=written.reason))
-            held.test.approved_at, held.test.approved_by = event.at, event.actor
-            said = (
-                f"Accepted by {event.actor}: the set `{held.set_id}` that {who} sent back is taken as it is; the "
-                "rework is ended."
-            )
-            self._found(said)
-            await self._act("comment", state.issue, f"**{said}**", f"accept {held.round_id} {event.event_id}")
-            if held.pr is None:
-                if held.opened_issue:  # the reader the send-back asked for is not wanted any more
-                    why = f"The crops this issue was opened for were accepted by {event.actor}."
-                    await self._close_issue(why, rework_pr)
-                step = "saving the crops"
-                return await self._publish_set(held.test)  # a matched set's sha is its pinned snippets commit
-            step = "asking autodev to merge"
-            sha = held.test.sha
-            await self._act("comment", held.pr, f"/accept {sha}", f"accept {held.round_id} {sha}", "snippets")
-            await self._stage(
-                "merging",
-                f"accepted by {event.actor}; autodev merges the snippet PR as it was at `{sha}` once its running job "
-                "has ended, then the crops are saved",
-            )
-            step = "the merge"
-            await self._follow_pr()
-        except (ActivityError, RoundFailed) as error:
-            await self._finish(
-                "blocked",
-                f"The set {held.set_id} was accepted by {event.actor}; {step} failed: {error_message(error)}. "
-                "Accept can be sent again.",
-                debug=False,
-            )
-        finally:
-            state.accepting = None
 
     def _set_of(self, test: Test) -> CropSet:
         """The round's set `test` with what a later verdict on it needs (spec judge-decides §5.4)."""
@@ -1872,7 +1747,7 @@ class MiaDataDataset:
             "open_snippet_issue", state.issue, state.round_id, draft, *extra, seconds=300, result_type=int
         )
         if state.held and state.held.opened_issue and state.held.snippet_issue is None:
-            state.held.snippet_issue = state.snippet_issue  # the issue this send-back opened: an accept closes it
+            state.held.snippet_issue = state.snippet_issue  # the issue this send-back opened: closed with its answer
         await self._share_evidence()
         source = "the crop judge's findings" if state.held and state.held.sent_back_by == JUDGE else "your comments"
         what = f"a snippet superseding the binding's, from {source}," if binding else "the snippet"
@@ -2097,7 +1972,7 @@ class MiaDataDataset:
         else:  # that issue is answered and done with: a further reject opens a new one
             await self._close_issue("autodev answered that nothing needs changing; the same crops wait for a verdict.")
             assert held is not None  # an answer with no pull request is to a held set's request
-            await self._switch_to(held, "")  # the set of an earlier round (a saved one that was rejected)
+            await self._switch_to(held)  # the set of an earlier round (a saved one that was rejected)
             state.snippet_issue = None
         await self._stage("review", detail, extra=extra)
         return True
@@ -2171,8 +2046,6 @@ class MiaDataDataset:
             if pr.state == "merged":
                 await self._merged(pr)
                 return True
-            if state.accepting and pr.head_sha != state.accepting:
-                return False  # a person accepted an earlier head's set: this one is not tested, autodev resets it
             if any(test.sha == pr.head_sha for test in state.tests):
                 return False  # tested: its status stands until a new head
             if len(state.tests) >= (await self._limits()).max_pr_revisions:

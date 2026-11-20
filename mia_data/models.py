@@ -119,7 +119,7 @@ class CropSet:
     sent_back_by: str = ""  # `judge` or the person's actor; "" for a set that was not sent back
     worst: str = ""  # the judge's worst finding on it: "bad" | "suspect" | ""
     request: str = ""  # the id of the rework request the developer answers: "<set_id>#<n>"
-    opened_issue: bool = False  # the send-back opened the snippets issue: accepting the set closes it
+    opened_issue: bool = False  # the send-back opened the snippets issue: the set's approval closes it
     findings: list[dict] = field(default_factory=list)  # the judge's findings that are not `ok`, as it wrote them
     # what the set's round needs when it becomes the dataset's round again: the snippet a merge looks for, the
     # round's seed, and the stage passes the round had begun (their numbers go on, so no entry is written twice)
@@ -171,26 +171,16 @@ class DatasetState:
     held: CropSet | None = None
     saved: CropSet | None = None
     reworks: int = 0  # how often the crop judge sent this dataset's sets back since a person last acted
-    accepting: str | None = None  # the PR head whose set a person accepted: autodev merges it, other heads are ignored
+    accepting: str | None = None  # read by nothing: states in recorded histories carry the field
     revoked: bool = False  # a person's revoke ended the round: it takes no resume, and a new round clears this
 
 
 def sets_view(state: DatasetState, stage: str) -> dict:
     """What the page needs to know about the dataset's sets, for the subject's data: the set a verdict at
-    `review` is about, the set that was sent back (an approve may name it at any stage) and the saved one (a
-    reject may name it at `done`)."""
-    held, saved = state.held, state.saved
+    `review` is about and the saved one (a reject may name it at `done`)."""
+    saved = state.saved
     return {
         "review": set_id(state.round_id, state.tests[-1]) if stage == "review" and state.tests else None,
-        "held": {
-            "set": held.set_id,
-            "by": held.sent_back_by,
-            "worst": held.worst,
-            "findings": held.findings,
-            "gallery": held.test.gallery_prefix,
-        }
-        if held
-        else None,
         "saved": {"set": saved.set_id, "approved_by": saved.test.approved_by} if saved else None,
         "revoked": state.revoked,  # buffer-api offers no resume for it (spec resume-restart §4.3)
     }

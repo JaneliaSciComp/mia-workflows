@@ -228,14 +228,12 @@ crops; on a pull request it still brings a person's own revision request back to
 
 **Sets outlive their round, and a verdict names its set.** `DatasetState.held` is the set that was sent back
 (by the judge or a person) and not yet superseded by an approved one; `DatasetState.saved` is the saved set.
-Each is a `CropSet`: the round, the test, the pins, the binding. The stage write puts them into the subject's
-`data.sets` (`models.sets_view`), which the page reads. An approve that names the held set is an **accept**,
-taken at any stage (`accept_events`, `_guard`, `_accept_held`): what the send-back started is stopped as a
-cancel stops it, the set's round becomes the state's again (`_switch_to`), and the set is saved, or `/accept
-<sha>` asks autodev to reset its pull request to that head and merge it once its running job has ended
-(`review.accepted`, `decide` → `RESET`, `Mirror.reset`); other heads are ignored meanwhile
-(`DatasetState.accepting`). A reject that names the saved set (`rework_events`, `_rework_saved`) revokes it and
-starts a round of its own that asks the developer for a fix. For one set a person's newest verdict decides:
+Each is a `CropSet`: the round, the test, the pins, the binding. The stage write puts the set under review and
+the saved one into the subject's `data.sets` (`models.sets_view`), which the page reads. A verdict is about
+the set under review. The held set takes none: it is what the developer's answer is about, and when that
+answer brings it back to `review` its round becomes the state's again (`_switch_to`). A reject that names the
+saved set (`rework_events`, `_rework_saved`) revokes it and starts a round of its own that asks the developer
+for a fix. For one set a person's newest verdict decides:
 `authorized()` leaves out what `MACHINE_AUTHORS` (the judge, `policy:developer`) wrote once a person has spoken.
 
 **A person's verdict never waits for the crop judge.** The judge runs as a task beside the round's (`_judged`,

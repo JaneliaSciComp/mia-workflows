@@ -1415,20 +1415,12 @@ async def test_a_stage_write_tells_the_page_which_sets_a_verdict_may_name(tmp_pa
     state = DatasetState(1, round_id=ROUND, pins=pins, tests=[test])
     await t.a.set_stage(1, "review", state)
     sets = t.ledger.subject("dataset", "rec-1")["data"]["sets"]
-    assert sets == {"review": f"{ROUND}:t1", "held": None, "saved": None, "revoked": False}
-    findings = [{"item": "c1", "severity": "suspect", "note": "shifted <!-- x -->"}]
-    state.held = CropSet(f"{ROUND}:t1", ROUND, test, pins, sent_back_by="judge", worst="suspect", findings=findings)
+    assert sets == {"review": f"{ROUND}:t1", "saved": None, "revoked": False}
+    state.held = CropSet(f"{ROUND}:t1", ROUND, test, pins, sent_back_by="judge", worst="suspect")
     state.saved = CropSet("i1-e5:t0", "i1-e5", test, pins)
     await t.a.set_stage(1, "developing", state)
     sets = t.ledger.subject("dataset", "rec-1")["data"]["sets"]
-    assert sets["review"] is None and sets["saved"] == {"set": "i1-e5:t0", "approved_by": "judge"}
-    assert sets["held"] == {
-        "set": f"{ROUND}:t1",
-        "by": "judge",
-        "worst": "suspect",
-        "findings": [{"item": "c1", "severity": "suspect", "note": "shifted &lt;!-- x -->"}],
-        "gallery": "galleries/rec-1/r/t1",
-    }
+    assert sets == {"review": None, "saved": {"set": "i1-e5:t0", "approved_by": "judge"}, "revoked": False}
 
 
 def _with_service(t, tmp_path):

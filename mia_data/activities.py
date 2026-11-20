@@ -845,10 +845,6 @@ class Activities:
             shown=self._shown(state) if state.pass_stage else "",
         )
         view = sets_view(state, stage)  # which sets a verdict may name now: the page reads it with the stage
-        if view["held"]:
-            view["held"]["findings"] = [
-                {key: self._clean(str(value)) for key, value in finding.items()} for finding in view["held"]["findings"]
-            ]
         for body, marker_text, sets in entries:
             marker = self.cfg.marker(marker_text)
             data = {"sets": view} if sets else None
