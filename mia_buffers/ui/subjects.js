@@ -9,6 +9,9 @@ import { datasetCards } from "./datasets.js";
 
 // ---- a subject's page
 let subjectTurn = 0; // the newest load of a subject's page: one that started earlier never paints over it
+// ponytail: a page whose load failed asks again this often for as long as it fails; back off if a route that
+// stays broken ever makes that a load on the service
+const RETRY_MS = 10000;
 // the stream, and the end of an asked action's wait, redraw the subject's page, or the view that follows the
 // stream (`onScreen.streams`), whichever is shown
 onScreen.refresh = () => {
@@ -111,11 +114,23 @@ export async function viewSubject(kind, key, refresh) {
         : null,
   };
   const turn = ++subjectTurn;
+  // A request that failed says nothing about the subject: what is on screen stays (a first load says that it did
+  // not load; the banner says how), and the page asks again for as long as it is the one shown.
+  const failed = () => {
+    if (!refresh)
+      root.replaceChildren(
+        el("div", { class: "empty" }, "This page did not load: the service did not answer. It is asked again shortly."),
+      );
+    setTimeout(() => {
+      if (location.hash === hash && turn === subjectTurn) redraw();
+    }, RETRY_MS);
+  };
   const [subject, detail] = await Promise.all([
     load(`/subjects/${kind}/${encodeURIComponent(key)}`, true),
     kind === "dataset" ? load(`/catalog/datasets/${encodeURIComponent(key)}`, true) : null,
   ]);
   if (location.hash !== hash || turn !== subjectTurn) return; // the reader moved on, or a later load started, while this loaded
+  if (subject === undefined || detail === undefined) return failed();
   if (keepTyping(root, redraw)) return; // someone typed while this loaded
   const about = detail ? datasetCards(detail) : [];
   const [links = null, ...cards] = about; // a dataset's links stand right under its name, its cards at the end
@@ -163,6 +178,7 @@ export async function viewSubject(kind, key, refresh) {
     api(`/run/${kind}/${subject.number}`).catch(() => null),
   ]);
   if (location.hash !== hash || turn !== subjectTurn) return;
+  if (timeline === undefined) return failed();
   if (keepTyping(root, redraw)) return;
   const entries = timeline?.entries || [];
   const flow = lifecycle(

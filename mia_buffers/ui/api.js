@@ -2,7 +2,7 @@
 // boot (`S`).
 import { $, el } from "./dom.js";
 
-// ---- fetch: errors go to the banner, the caller gets null
+// ---- fetch: errors go to the banner, the caller gets no value
 export class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -56,12 +56,14 @@ export function banner(message) {
   }
 }
 export async function load(path, quiet404) {
-  // quiet404: a 404 is an expected answer (a buffer not sourced yet), not an error
+  // null: nothing is there, a 404 that is an expected answer (quiet404: a buffer not sourced yet, a dataset nobody
+  // started). undefined: the request failed, which says nothing about what is there; the banner says how
   try {
     return await api(path);
   } catch (e) {
-    if (!(quiet404 && e.status === 404)) banner(`GET ${path} → ${e.status || "network error"}: ${e.message}`);
-    return null;
+    if (quiet404 && e.status === 404) return null;
+    banner(`GET ${path} → ${e.status || "network error"}: ${e.message}`);
+    return undefined;
   }
 }
 

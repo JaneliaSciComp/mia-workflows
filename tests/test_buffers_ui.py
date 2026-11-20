@@ -725,6 +725,37 @@ def test_what_is_typed_while_a_subjects_page_loads_is_kept() -> None:
     assert shown == ["k", "No such request."]
 
 
+def test_a_subjects_page_whose_requests_failed_never_says_that_the_subject_is_missing() -> None:
+    """A request that failed says nothing about the subject. A redraw whose requests fail leaves what is on
+    screen, a first load that fails says that it did not load, and either asks again later; only the service's
+    404 says that there is no such dataset."""
+    away, first, back = run_js(
+        """
+        const root = document.getElementById("subjectBody");
+        root.append(el("p", {}, "what was there"));
+        globalThis.location = { hash: "#datasets/d" };
+        const timers = [];
+        globalThis.setTimeout = fn => timers.push(fn);
+        const says = status => async () => ({ ok: false, status, statusText: "", text: async () => "" });
+        let answer = async () => { throw new TypeError("Failed to fetch"); };  // the service cannot be reached
+        globalThis.fetch = path => answer(path);
+        await viewSubject("dataset", "d", "stream");
+        const away = root.kids.map(textOf);
+        answer = says(503);
+        await viewSubject("dataset", "d");  // a first load
+        const first = root.kids.map(textOf);
+        answer = says(404);  // the service is back, and it holds no dataset d
+        timers.splice(0).forEach(fn => fn());  // the page asks again
+        await new Promise(setImmediate);
+        print([away, first, root.kids.map(textOf)]);
+        """,
+        {"dom.js": "el", "subjects.js": "viewSubject"},
+    )
+    assert away == ["what was there"]
+    assert len(first) == 1 and "did not load" in first[0]
+    assert back == ["d", "No dataset with this id in the newest catalog or the registry."]
+
+
 def test_the_page_asks_which_hosts_a_run_lacks_before_it_starts() -> None:
     """A start action first asks the service which hosts the run needs that the policy lacks."""
     assert ("POST", "/hosts/missing") in requested_paths() and resolve("POST", "/hosts/missing") == "read"

@@ -705,6 +705,7 @@ export async function viewFlow(key, asked, refresh) {
   if (!refresh) $("bufferNotes").replaceChildren(el("div", { class: "empty" }, "loading…"));
   const subject = await load(`/subjects/buffer/${encodeURIComponent(key)}`, true);
   if (location.hash !== hash || mine !== turn) return; // the reader moved on, or a later load started
+  if (subject === undefined) return; // the request failed (the banner says how): what is shown stays, the page's poll asks again
   if (!subject) {
     $("bufferHead").replaceChildren(el("h2", {}, key));
     $("bufferSteps").replaceChildren();
