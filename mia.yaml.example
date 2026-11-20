@@ -17,7 +17,8 @@ sandbox_dir: ../agentic-sandbox/scripts
 # Temporal, the workflow engine. On a dev host `managed: true` makes `mia up` run a local dev server from
 # `state_dir` (SQLite: host-local disk, refused on a network fs; logs/ and bin/temporal live there too). For an
 # external Temporal, omit `managed` and `state_dir`. $TEMPORAL_ADDRESS overrides `address`. Each service names its
-# own namespace under `services`. `poll_minutes` is how often a round retries a lock or quota someone else holds.
+# own namespace under `services`. `poll_minutes` is a round's first wait for a lock or quota someone else holds
+# (it doubles each try, up to 30 minutes) and how often mia-data looks at the snippet pull requests.
 temporal:
   managed: true
   state_dir: /scratch/mia/temporal
@@ -101,8 +102,9 @@ csub:
 
 # buffer-api (`mia-buffers serve`) and its clients. The port is required in `url`. `token_file` holds the worker
 # token its write routes need (chmod 600; `mia init-token` creates it). buffer-api also reaches Temporal (the
-# `temporal.address` above): it starts the workflow that copies each dataset's, buffer's and request's timeline
-# to its GitHub issue, on mia-buffers' namespace and on that of the service whose app is mia-data.
+# `temporal.address` above), on mia-buffers' namespace and on that of the service whose app is mia-data: an action
+# from the page starts, signals or stops the subject's workflow, and it starts the workflow that copies each
+# dataset's, buffer's and request's timeline to its GitHub issue.
 service:
   url: http://host.example.org:8765
   token_file: ~/.config/mia/service-token
@@ -191,7 +193,8 @@ services:
   # `/approve` and `/revise` count. Under `agent`: the model, the job's shape (walltime <= 60 lands in the short
   # queue; mem_mb under one slot keeps the job at 1 slot), the hosts it may reach, extra read-only mounts and PATH
   # entries for its tests, how many revisions it gets, an optional `max_budget_usd` passed to claude -p, and
-  # `api_key_env` to bill an API key instead of a login.
+  # `api_key_env` to bill an API key instead of a login (`mia up` refuses a service that sets it: give the account
+  # a Claude login).
   autodev:
     app: autodev
     temporal: {namespace: default}
@@ -210,9 +213,6 @@ services:
       # package hosts only: each job also gets the hosts its issue names (a dataset's own), where the policy allows them
       allow_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, prefix.dev, repo.prefix.dev]
       extra_mounts: []
-      # where mia-data leaves what a developer should look at (the crops its judge doubted):
-      # `<evidence_dir>/issue-<n>/` is mounted read-only into the agent job of snippets issue n
-      evidence_dir: /path/to/mia/work/_evidence        # = mia-data paths.work_root + /_evidence
       path_prepend: []
       max_revisions: 3
       # max_budget_usd: 5
@@ -227,24 +227,24 @@ services:
       repo: JaneliaSciComp/mia-snippets
       base_branch: main
       protected_paths: [".github/"]
+    agent:
+      # where mia-data leaves what a developer should look at (the crops its judge doubted):
+      # `<evidence_dir>/issue-<n>/` is mounted read-only into the agent job of snippets issue n
+      evidence_dir: /path/to/mia/work/_evidence        # = mia-data paths.work_root + /_evidence
 
   # mia-data: dataset to saved crops. `data_repo` receives one issue per dataset, a copy of its timeline that the
   # system writes and nothing reads (datasets are started and steered from the buffers page). `crops`: the round's set
-  # (`per_round`, reviewed and, approved, saved), the hand-run `test-pr` command's `test_per_round`, and how
-  # many crops per plane and per file. `gallery.branch` receives the crop galleries. `agent` is the match agent:
-  # its walltime is limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not
-  # accepted here. `evaluate` is a switch for the evaluate job after cropping; nothing runs behind it yet.
+  # (`per_round`, reviewed and, approved, saved) and the hand-run `test-pr` command's `test_per_round`.
+  # `gallery.branch` receives the crop galleries. `agent` is the match agent: its walltime is
+  # limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not accepted here. `evaluate` is a switch for the evaluate job after cropping; nothing runs behind it yet.
   mia-data:
     app: mia-data
     temporal: {namespace: mia-data}
     github:
       data_repo: JaneliaSciComp/mia-workflow-data
     crops:
-      size: 256
       per_round: 16
       test_per_round: 4
-      per_plane: 4
-      per_file: 8
     gallery: {branch: galleries}
     agent:
       model: sonnet
@@ -255,8 +255,7 @@ services:
 
   # mia-buffers: training buffers. `buffers_repo` receives one issue per buffer spec and per preparation request,
   # a copy of its timeline (they are created and run on the page); `datasets_repo` is mia-data's issue repo.
-  # `sourcing`: stage jobs in flight per buffer (`parallel`), the tensorizer under
-  # <harness.dir>/tensorizers/, and the frozen val and test list lengths.
+  # `sourcing`: stage jobs in flight per buffer (`parallel`) and the tensorizer under <harness.dir>/tensorizers/.
   mia-buffers:
     app: mia-buffers
     temporal: {namespace: mia-buffers}
