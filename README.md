@@ -40,8 +40,10 @@ assessment, and *Revoke*
 withdraws a prepared dataset later: nothing is deleted, the buffers that drew from it are degraded. A **judge**
 (a second model, read-only, over the same gallery) can look at every set before the human does: in shadow mode its
 verdict is recorded beside the human's and decides nothing, and the buffers page's Decisions tab shows how often
-they agree; with the crop gate active, the judge's approve saves the set and a person sees only what it rejects
-or escalates. Every stage is an entry
+they agree; with the crop gate active, the judge decides: a set it finds in order is saved, a set it doubts
+goes back to the developer once (which fixes the reader, or answers that the crops are right as they are), and
+a person sees what is left. Either decision can be overturned later: a set that was sent back can be accepted
+as it is, and a saved set can be rejected, which revokes it and starts the rework. Every stage is an entry
 in the dataset's timeline, with links to the folders involved. The whole flow, with a diagram and the component for each
 step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/specs/2026-10-12-mia-crops.md`](docs/specs/2026-10-12-mia-crops.md).
 

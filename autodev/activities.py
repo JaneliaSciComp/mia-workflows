@@ -35,11 +35,20 @@ from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import TooManyHostsError, cut_off, issue_hosts, judge_dir, log_tail, read_result, render_prompt
+from .agent import (
+    TooManyHostsError,
+    cut_off,
+    issue_hosts,
+    judge_dir,
+    log_tail,
+    read_no_change,
+    read_result,
+    render_prompt,
+)
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
-from .gitops import RejectedBundleError, git
+from .gitops import GitError, RejectedBundleError, git
 from .models import (
     AwaitInput,
     CommentInput,
@@ -56,13 +65,14 @@ from .models import (
     PrRef,
     PrSnapshot,
     PublishInput,
+    ResetInput,
     RoundInput,
     StageInput,
     SubmitInput,
     Workspace,
     check_key,
 )
-from .review import WRITE_PERMISSIONS, Reviewers, approved, feedback, handled_ids, latest_round_at
+from .review import WRITE_PERMISSIONS, Reviewers, accepted, approved, feedback, handled_ids, latest_round_at
 from .workflows import IssueWorkflow
 
 if TYPE_CHECKING:
@@ -189,6 +199,8 @@ class Activities:
             self.submit_agent,
             self.publish_round,
             self.observe_pr,
+            self.accepted_head,
+            self.reset_pr,
             self.merge_pr,
             self.report_failure,
             self.poll_issues,
@@ -328,9 +340,18 @@ class Activities:
         if request.feedback_id:
             markers.append(f"handled {request.feedback_id}")  # tells observe_pr this feedback was addressed
         body = render_summary(self.cfg, request.round, request.workspace.branch, head_sha, self._clean(summary), cost)
+        no_change: str = ""
+        answers: dict[str, str] = {}
+        if not head_sha:  # no commits: did the agent answer a request with "nothing needs changing"?
+            asked = request.feedback_text or (await self.gh.get_issue(request.issue)).get("body") or ""
+            no_change, answers = read_no_change(workspace_dir, asked)
+        if no_change:
+            markers.append(f"no-change {no_change}")  # tells whoever asked that this request was answered so
+            listed = "\n".join(f"- {self._clean(item)}: {self._clean(answer)}" for item, answer in answers.items())
+            body += f"\n\n**Nothing needs changing.** The answer to each finding:\n\n{listed}"
         body += "\n\n" + "\n".join(self.cfg.marker(marker) for marker in markers)
         await self._comment_once(pr_number or request.issue, body, self.cfg.marker(markers[0]))
-        return PrRef(pr_number, head_sha)
+        return PrRef(pr_number, head_sha, no_change)
 
     # --- the review judge (spec autonomous-gates §4.1, §9) ------------------------------------------
 
@@ -506,7 +527,32 @@ class Activities:
         ]
         is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
-        return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)
+        accept = accepted(comments, reviewers, await asyncio.to_thread(self._heads, pr["head"].get("ref") or ""))
+        return PrSnapshot(number, "open", head_sha, is_approved, checks, pending, accept)
+
+    def _heads(self, branch: str) -> list[str]:
+        """Every head autodev pushed for the issue whose branch this is; none for any other branch."""
+        issue = re.fullmatch(rf"{re.escape(self.cfg.deployment)}/issue-(\d+)", branch)
+        return self.mirror.heads(int(issue.group(1))) if issue else []
+
+    @activity.defn(name="accepted_head")
+    @permanent_errors
+    async def accepted_head(self, pr: int) -> str:
+        """The earlier head of the pull request a person accepted, or "": asked when an agent's job has ended,
+        before anything of it is pushed (spec judge-decides §5.1)."""
+        return (await self._snapshot(pr)).accepted
+
+    @activity.defn(name="reset_pr")
+    @permanent_errors
+    async def reset_pr(self, request: ResetInput) -> None:
+        """Move the pull request's branch back to the head a person accepted. The mirror refuses a commit that
+        was never a head of the issue."""
+        try:
+            await asyncio.to_thread(self.mirror.reset, self.cfg.branch(request.issue), request.sha, request.issue)
+        except GitError as error:
+            if "is not a head" in str(error):
+                raise ApplicationError(str(error), non_retryable=True) from error
+            raise
 
     @activity.defn(name="merge_pr")
     @permanent_errors

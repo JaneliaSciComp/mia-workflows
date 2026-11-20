@@ -69,6 +69,10 @@ class FakeGH:
         self.issues[n] = {"number": n, "body": body, "labels": [{"name": x} for x in labels], "user": {"login": "bot"}}
         return self.issues[n]
 
+    async def update_issue(self, n, **fields):
+        self.issues[n].update(fields)
+        return self.issues[n]
+
     async def issue_comments(self, n):
         return self.comments.get(n, [])
 

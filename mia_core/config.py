@@ -105,11 +105,20 @@ class AutonomyCfg(BaseModel):
 
 class GateCfg(BaseModel):
     """One judged gate (spec autonomous-gates §9): `off` runs no judge, `shadow` records the verdict beside the human's and
-    decides nothing, `active` lets an approve authorize (a reject or an escalate still waits for a person).
-    `max_suspect` is how many `suspect` crops a set may carry and still be approved (§4.2)."""
+    decides nothing, `active` lets the judge decide: an approve authorizes, and at the crops gate a set with a
+    `suspect` or `bad` crop is sent back to the developer (spec judge-decides §3). `max_reworks` is how often the
+    judge may send one dataset's sets back before a person is asked (§4.3)."""
 
     mode: Literal["off", "shadow", "active"] = "off"
-    max_suspect: int = Field(default=2, ge=0)
+    max_reworks: int = Field(default=1, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_suspect_cap(cls, data: object) -> object:
+        """Refuse a config that still sets the suspect cap, saying what took its place."""
+        if isinstance(data, dict) and "max_suspect" in data:
+            raise ValueError("max_suspect is gone: one suspect finding sends a set back; max_reworks bounds how often")
+        return data
 
     @field_validator("mode", mode="before")
     @classmethod

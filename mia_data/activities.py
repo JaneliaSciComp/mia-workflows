@@ -38,7 +38,14 @@ from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge.evidence import build as build_evidence
 from mia_core.judge.evidence import evidence_digest, read_claude_json
 from mia_core.judge.policy import POLICY_VERSION, authorized, new_assessment
-from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
+from mia_core.judge.schema import (
+    Verdict,
+    effective_verdict,
+    parse_verdict,
+    prompt_text,
+    prompt_version,
+    worst_finding,
+)
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
 from mia_core.untrusted import loads as _loads
@@ -92,6 +99,7 @@ from .models import (
     RoundLimits,
     SmokeResult,
     VerifyResult,
+    sets_view,
 )
 from .poll import run_poll
 from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
@@ -145,6 +153,8 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
 # the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
 NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
 MARKER_RE = re.compile(r"(?s)<!--.*?-->")
+EVIDENCE_FILE_BYTES = 64 << 20  # the largest file of the judge's evidence that is shared with the developer
+NO_CHANGE_RE = re.compile(r"<!-- \S+: no-change (\S+) -->")  # autodev's marker on a validated "nothing to change"
 CROP_STATUS = {
     "pending": "test crops running",
     "success": "test crops passed",
@@ -314,6 +324,8 @@ class Activities:
             self.publish_gallery,
             self.publish_crops,
             self.refuse_label,
+            self.close_snippet_issue,
+            self.share_evidence,
             self.read_feedback,
             self.open_snippet_issue,
             self.pr_state,
@@ -352,13 +364,28 @@ class Activities:
         return (await self._bot_comment(gh, number, marker) or await gh.comment(number, body)).get("html_url")
 
     async def _post(
-        self, issue: int, body: str, marker: str, *, round_id: str | None = None, stage: str | None = None
+        self,
+        issue: int,
+        body: str,
+        marker: str,
+        *,
+        round_id: str | None = None,
+        stage: str | None = None,
+        data: dict | None = None,
     ) -> None:
         """Write what a round has to say about its dataset: a stage, a text (once per marker), or both. It is the
         subject's stage and a timeline entry in the registry, a required write, and no GitHub call: the mirror
-        copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7)."""
+        copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7). `data` rides with a stage:
+        the keys of the subject's data it replaces."""
         write = functools.partial(
-            self.registry.append_entry, "dataset", issue, body=body, marker=marker, round_id=round_id, stage=stage
+            self.registry.append_entry,
+            "dataset",
+            issue,
+            body=body,
+            marker=marker,
+            round_id=round_id,
+            stage=stage,
+            data=data,
         )
         await asyncio.to_thread(write)
 
@@ -538,6 +565,7 @@ class Activities:
             cfg.limits.debug_cycles,
             cfg.limits.debug_wait_min,
             cfg.limits.autodev_quiet_hours,
+            cfg.judge.crops.max_reworks,
         )
 
     # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
@@ -635,8 +663,7 @@ class Activities:
             verdict = parse_verdict(text)
         except ValueError as error:
             verdict = Verdict("escalate", 0.0, (), f"unreadable verdict: {_text(str(error), 400)}")
-        max_suspect = self.cfg.judge.crops.max_suspect if gate == "crops" else None
-        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence, max_suspect)
+        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence, suspect_rejects=gate == "crops")
         findings = [
             {"item": self._clean(f.item), "severity": f.severity, "note": self._clean(f.note)} for f in verdict.findings
         ]
@@ -684,7 +711,16 @@ class Activities:
         if jobs := render_jobs(self._job_links([str(path)])):  # the entry that reports a job links its record
             comment += f"\n\n{jobs}"
         return JudgeResult(
-            verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings, granted
+            verdict.verdict,
+            effective,
+            verdict.confidence,
+            summary,
+            assessment_id,
+            cost,
+            comment,
+            findings,
+            granted,
+            worst_finding(verdict.findings),
         )
 
     def _granted(self, row: dict, round_id: str) -> bool:
@@ -788,9 +824,15 @@ class Activities:
             result=self._clean(state.result),
             shown=self._shown(state) if state.pass_stage else "",
         )
+        view = sets_view(state, stage)  # which sets a verdict may name now: the page reads it with the stage
+        if view["held"]:
+            view["held"]["findings"] = [
+                {key: self._clean(str(value)) for key, value in finding.items()} for finding in view["held"]["findings"]
+            ]
         for body, marker_text, sets in entries:
             marker = self.cfg.marker(marker_text)
-            await self._post(issue, f"{body}\n{marker}", marker, round_id=round_id, stage=sets)
+            data = {"sets": view} if sets else None
+            await self._post(issue, f"{body}\n{marker}", marker, round_id=round_id, stage=sets, data=data)
 
     def _shown(self, state: DatasetState) -> str:
         """What goes under the result of the pass open in `state`: the round's binding when the result is about
@@ -840,6 +882,49 @@ class Activities:
             return await self._comment_once(self.gh_snippets, issue, f"{body}\n\n{full_marker}", full_marker)
         await self._post(issue, f"{body}\n\n{full_marker}", full_marker)
         return None
+
+    @activity.defn(name="share_evidence")
+    @mia_permanent_errors
+    async def share_evidence(self, issue: int, round_id: str, workspace: str, snippet_issue: int, name: str) -> None:
+        """Copy what the crop judge saw (`<workspace>/evidence/`: the crops as PNGs, the record, the binding, the
+        verify report) to `<work_root>/_evidence/issue-<snippet_issue>/<name>/`, where autodev's agent for that
+        snippets issue reads it (spec judge-decides §4.1). Regular files only, each read as a job's output is
+        read; a copy that exists is replaced."""
+        source = self._job_workspace(issue, round_id, workspace) / "evidence"
+        folder = self.cfg.paths.work_root / "_evidence" / f"issue-{int(snippet_issue)}"
+        target = folder / re.sub(r"[^A-Za-z0-9._-]", "-", name)
+
+        def copy() -> None:
+            staging = folder / f".{target.name}.tmp"
+            shutil.rmtree(staging, ignore_errors=True)
+            for path in sorted(source.rglob("*")):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                data = read_untrusted(source, str(path.relative_to(source)), EVIDENCE_FILE_BYTES, binary=True)
+                if data is None:
+                    continue
+                copied = staging / path.relative_to(source)
+                copied.parent.mkdir(parents=True, exist_ok=True)
+                copied.write_bytes(data)
+            staging.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(target, ignore_errors=True)
+            staging.rename(target)
+
+        await asyncio.to_thread(copy)
+
+    @activity.defn(name="close_snippet_issue")
+    @mia_permanent_errors
+    async def close_snippet_issue(self, snippet_issue: int, pr: int | None, why: str) -> None:
+        """Close a snippets issue, and its pull request when one is given, that no round waits for any more: the
+        crops it was opened for were accepted as they are, or autodev answered that nothing needs changing (spec
+        judge-decides §4.2, §5.1). One comment says why; what is closed already is left alone."""
+        gh = self.gh_snippets
+        for number in (int(snippet_issue), *([int(pr)] if pr else [])):
+            if (await gh.get_issue(number)).get("state") == "closed":
+                continue
+            marker = self.cfg.marker(f"closed {number}")
+            await self._comment_once(gh, number, f"{self._clean(why)}\n\n{marker}", marker)
+            await gh.update_issue(number, state="closed")
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
@@ -1336,18 +1421,23 @@ class Activities:
         )
         if revoked:  # a new publication repairs a revocation (spec autonomous-gates §6.5)
             (dataset_dir / REVOKED_FILE).unlink(missing_ok=True)
-            await self._release_revoked(round_id, pins.record)
+            saved = read_untrusted(dataset_dir, "binding.yaml", crop_publish.MAX_INDEX_FILE, binary=True)
+            await self._release_revoked(round_id, pins.record, hashlib.sha256(saved or b"").hexdigest())
         return published
 
-    async def _release_revoked(self, round_id: str, record: str) -> None:
-        """After a repair: every quarantined staged artifact of the record gets a `policy:repair` approve (the newest
-        assessment, so buffers may reuse it) and its quarantine mark cleared. Best effort: the publication stands."""
+    async def _release_revoked(self, round_id: str, record: str, binding_hash: str) -> None:
+        """After a repair: each quarantined staged artifact of the record that was staged from the binding this
+        save wrote (`binding_hash`: the sha256 a buffer puts into the asset) gets a `policy:repair` approve (the
+        newest assessment, so buffers may reuse it) and its quarantine mark cleared. An artifact of any other
+        binding, or of none on record, was read by the recipe that was rejected and is immutable: it stays
+        quarantined, and buffers stage the record anew (spec judge-decides §5.5). Best effort: the publication
+        stands."""
         registry = self.registry
         try:
             assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
             for asset in assets:
                 data = asset.get("data") or {}
-                if not data.get("quarantined"):
+                if not data.get("quarantined") or data.get("binding_hash") != binding_hash:
                     continue
                 key, now = str(asset["key"]), time.time()
                 approve = new_assessment(
@@ -1465,11 +1555,14 @@ class Activities:
         remembers as `snippet_issue` from an earlier round, while it is still open, else by this round's
         first-line marker on a retry. Returns the issue number.
 
-        With `binding` (one of this round's, from state_dir), the request is to supersede the snippets that
+        With `binding` (one of this dataset's rounds', from state_dir: this round's, or the binding a saved set
+        was approved with when that set is rejected later), the request is to supersede the snippets that
         binding names: a reviewer rejected its crops and `draft["what_fails"]` is their comments (spec §14)."""
         gh, github_cfg, pins = self.gh_snippets, self.cfg.github, self._pins(round_id)
-        if binding and not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
-            raise ValueError(f"binding {binding} is not one of round {round_id}'s")
+        if binding:
+            rounds, given = self._round_dir(round_id).resolve().parent, Path(binding).resolve()
+            if not (given.is_relative_to(rounds) and given.relative_to(rounds).parts[0].startswith(f"i{int(issue)}-e")):
+                raise ValueError(f"binding {binding} is not one of this dataset's rounds'")
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
 
         def ours(existing: dict, prefix: str) -> bool:  # filter by author: an outsider can copy the marker
@@ -1484,7 +1577,8 @@ class Activities:
                 return remembered["number"]
         # ponytail: lists every issue; one call per round.
         for existing in await gh.list_issues(state="all"):
-            if ours(existing, marker):
+            # a closed one is done with (merged, or answered "nothing needs changing"): what is asked now is new
+            if existing.get("state") != "closed" and ours(existing, marker):
                 return existing["number"]
         record = self._record(round_id)
         urls = record_urls(record)
@@ -1596,6 +1690,8 @@ class Activities:
         last = max(said, key=lambda comment: comment.get("created_at") or "", default=None)
         unchanged = [comment for comment in said if NO_COMMITS_RE.match(comment.get("body") or "")]
         answer = max(unchanged, key=lambda comment: comment.get("created_at") or "", default=None)
+        validated = [comment for comment in unchanged if NO_CHANGE_RE.search(comment.get("body") or "")]
+        newest = max(validated, key=lambda comment: comment.get("created_at") or "", default=None)
         return AutodevLook(
             pr,
             "snippets:working" in labels,
@@ -1605,6 +1701,7 @@ class Activities:
             if answer
             else "",
             str(answer.get("created_at") or "") if answer else "",
+            NO_CHANGE_RE.findall(newest["body"])[-1] if newest else "",
         )
 
     @activity.defn(name="set_crop_status")

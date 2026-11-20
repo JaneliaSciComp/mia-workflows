@@ -13,6 +13,8 @@ POLICY_VERSION: int = 1
 GATES = ("review", "crops", "code", "staged")
 SUBJECT_KINDS = ("pr_head", "crop_set", "artifact")
 VERDICTS = ("approve", "reject", "escalate", "audited")
+# who decides in a person's place: the judge, and the approval that follows a developer's "nothing to change"
+MACHINE_AUTHORS = ("judge", "policy:developer")
 
 
 def assessment_id(at: float) -> str:
@@ -94,8 +96,14 @@ def authorized(
     budget_ok: bool = True,
 ) -> Authorization:
     """The newest acceptable approve stands unless a reject follows it (or supersedes it), the deterministic checks
-    are red, or the root budget says no. A judge's approve counts only for an enabled gate."""
+    are red, or the root budget says no. A judge's approve counts only for an enabled gate.
+
+    A person outranks the judge and the developer, whenever each spoke (spec judge-decides §5.3): once a person
+    has given a verdict on the subject, what `MACHINE_AUTHORS` wrote about it counts for nothing, also when it
+    was written later (a judge that was still looking, a developer's answer that came late)."""
     ordered = sorted(assessments, key=lambda row: str(row.get("at", "")))
+    if any(str(row.get("by", "")).startswith("human:") for row in ordered):
+        ordered = [row for row in ordered if row.get("by") not in MACHINE_AUTHORS]
     approves = [
         row
         for row in ordered

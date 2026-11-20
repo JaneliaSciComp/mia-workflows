@@ -244,12 +244,14 @@ class AdoptBody(_Strict):
 
 
 class EntryBody(_Strict):
-    """One write of a round: a stage, a timeline entry (text with the marker that makes it once-only), or both."""
+    """One write of a round: a stage, a timeline entry (text with the marker that makes it once-only), or both.
+    `data` rides with either: keys of the subject's data that this write replaces (a dataset's `sets`)."""
 
     body: str = ""
     marker: str = ""
     round: str | None = None
     stage: str | None = None
+    data: dict | None = None
 
     @model_validator(mode="after")
     def _something_to_write(self) -> EntryBody:
@@ -306,6 +308,7 @@ class ActionBody(_Strict):
     # the subject's revision the sender was looking at: required of a verdict, checked on any action that has it
     revision: int | None = None
     run: str | None = None  # stop: the run to end; one that is over already is not replaced by a later run
+    set: str | None = None  # a dataset's verdict: the set of crops it is about (spec judge-decides §5.4)
     note: str = ""  # reject: the feedback for the agent; shelve: why it can wait
     root: str | None = None  # a worker's go: the root request this round is charged to
     actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
@@ -1025,6 +1028,14 @@ class BufferService:
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
         if gaps:
             actions = actions - {"go"}
+        if row["kind"] == "dataset":
+            # away from `review` a verdict needs a set of its own: an approve the set that was sent back, a
+            # reject the saved one (spec judge-decides §5)
+            sets = (row.get("data") or {}).get("sets") or {}
+            if row["stage"] != "review" and not sets.get("held"):
+                actions = actions - {"approve"}
+            if row["stage"] == "done" and not sets.get("saved"):
+                actions = actions - {"reject"}
         resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
         if resting and self._asking(row["kind"], row.get("number")) is None:
             actions = actions | {"shelve"}
@@ -1211,7 +1222,13 @@ class BufferService:
         if parsed.stage is not None and parsed.stage not in SUBJECT_RULES[kind]:
             raise HttpError(422, f"stage must be one of {list(SUBJECT_RULES[kind])}, got {parsed.stage!r}")
         written = self.ledger.append_entry(
-            kind, int(number), body=parsed.body, marker=parsed.marker, round_id=parsed.round, stage=parsed.stage
+            kind,
+            int(number),
+            body=parsed.body,
+            marker=parsed.marker,
+            round_id=parsed.round,
+            stage=parsed.stage,
+            data=parsed.data,
         )
         assert written is not None  # the subject was just found, and nothing deletes one
         self._asked.pop((kind, int(number)), None)  # the workflow wrote: whatever was asked of it is answered
@@ -1343,8 +1360,11 @@ class BufferService:
         if subject["revision"] == 0 and stage in SUBJECT_RULES["dataset"] and stage != subject["stage"]:
             subject = self.ledger.adopt_subject("dataset", subject["number"], record, stage=stage, data=subject["data"])
             self.changes.announce("dataset", subject["number"])
-        payload = {name: value for name, value in (("note", parsed.note), ("root", parsed.root)) if value}
-        needed = (partial(self._needed, records=[record])) if parsed.action == "go" else None
+        fields = (("note", parsed.note), ("root", parsed.root), ("set", parsed.set))
+        payload = {name: value for name, value in fields if value}
+        # a reject of the saved set starts the rework's jobs, as a go starts a round's (spec judge-decides §5.2)
+        starts = parsed.action == "go" or (parsed.action == "reject" and subject["stage"] == "done")
+        needed = (partial(self._needed, records=[record])) if starts else None
         return self._act_on(subject, parsed, actor, payload, needed)
 
     # --- buffer specs and preparation requests: created and run from the page (spec §4.4, §8.1) ---
@@ -1569,6 +1589,30 @@ class BufferService:
             raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
         if parsed.revision is not None and parsed.revision != subject["revision"]:
             raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
+        if kind == "dataset" and parsed.action in ("approve", "reject"):
+            self._names_its_set(subject, parsed)
+
+    @staticmethod
+    def _names_its_set(subject: dict, parsed: ActionBody) -> None:
+        """A dataset's verdict names the set it is about, and only a set the stage lets it be about (spec
+        judge-decides §5.4): at `review` the set under review, and for an approve also the set that was sent
+        back; at `done` a reject of the saved set; anywhere else an approve of the set that was sent back. A
+        subject whose round wrote no sets (a run from before them) takes a verdict that names none."""
+        sets = (subject.get("data") or {}).get("sets")
+        if sets is None:
+            return
+        if not parsed.set:
+            raise HttpError(422, "a verdict names the set it is about: `set`")
+        held, saved = (sets.get("held") or {}).get("set"), (sets.get("saved") or {}).get("set")
+        if subject["stage"] == "review":
+            allowed = {sets.get("review"), held} if parsed.action == "approve" else {sets.get("review")}
+            refusal = "that set is not the one under review"
+        elif parsed.action == "reject":
+            allowed, refusal = {saved}, "that set is not the saved one"
+        else:
+            allowed, refusal = {held}, "that set can no longer be accepted: a newer one was approved"
+        if parsed.set not in allowed - {None}:
+            raise HttpError(409, f"{refusal}: nothing was sent")
 
     def _check_hosts(
         self, parsed: ActionBody, needed: Callable[[], Needed] | None, kind: str, number: int | None
@@ -1651,7 +1695,7 @@ class BufferService:
         payload = action["payload"]
         # the workflow's signal: a buffer's `plan` is a go that waits at the plan too (its event's kind says so)
         signal = "plan" if payload.get("plan_first") else parsed.action
-        event = LabelEvent(signal, str(action["id"]), action["actor"], action["at"])
+        event = LabelEvent(signal, str(action["id"]), action["actor"], action["at"], payload.get("set") or "")
         running = True
         self._asked[(kind, number)] = (action, time.monotonic())  # before the send: the answer may beat this request
         try:

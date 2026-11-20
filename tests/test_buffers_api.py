@@ -1459,6 +1459,20 @@ def test_a_stage_and_an_entry_are_written_read_and_mirrored_back(tmp_path):
     assert call(s, "PUT", "/timeline/dataset/234/9", payload={"comment_url": None})[0] == 404
 
 
+def test_a_stage_write_can_carry_subject_data_which_a_later_write_without_any_leaves(tmp_path):
+    s = svc(tmp_path)
+    call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "data": {"name": "kept"}})
+    sets = {"review": "i234-e5:t1", "held": None, "saved": None}
+    status, out, _ = call(s, "POST", "/timeline/dataset/234", payload={"stage": "review", "data": {"sets": sets}})
+    assert status == 200 and out["subject"]["data"] == {"name": "kept", "sets": sets}
+    call(s, "POST", "/timeline/dataset/234", payload={"stage": "merging"})
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["data"] == {"name": "kept", "sets": sets}
+    held = {"review": None, "held": {"set": "i234-e5:t1", "by": "judge"}, "saved": None}
+    call(s, "POST", "/timeline/dataset/234", payload={"stage": "developing", "data": {"sets": held}})
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["data"]["sets"] == held  # replaced whole, not merged
+    assert call(s, "POST", "/timeline/dataset/234", payload={"data": {"sets": held}})[0] == 422  # data rides a write
+
+
 def test_timeline_writes_are_checked(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/subjects/dataset/1", payload={"key": "rec-a"})
@@ -1836,6 +1850,76 @@ def test_decisions_show_what_the_person_wrote_with_their_verdict(tmp_path):
         ("judge", None),
     ]
     assert second["payload"]["note"] == "and the axes are swapped"
+
+
+def _at(s, number, record, stage, sets):
+    """A dataset subject at `stage` whose round wrote these sets; its view."""
+    worker(s, "PUT", f"/subjects/dataset/{number}", {"key": record})
+    worker(s, "POST", f"/timeline/dataset/{number}", {"stage": stage, "data": {"sets": sets}})
+    return call(s, "GET", f"/subjects/dataset/{record}")[1]
+
+
+def test_a_verdict_names_its_set(tmp_path):
+    """spec judge-decides §5.4: two sets may be approvable at once, so a verdict says which it is about."""
+    s, gateway = _acting(tmp_path)
+    held = {"set": "i7-e1:t1", "by": "judge", "worst": "suspect", "findings": [], "gallery": None}
+    view = _at(s, 7, "rec-a", "review", {"review": "i7-e1:t2", "held": held, "saved": None})
+    verdict = {"action": "approve", "revision": view["revision"]}
+    status, out, _ = act(s, "/datasets/rec-a/actions", verdict)
+    assert status == 422 and "names the set" in out["error"]
+    status, out, _ = act(s, "/datasets/rec-a/actions", {**verdict, "set": "i7-e0:t9"})
+    assert status == 409 and "not the one under review" in out["error"] and gateway.sent == []
+    # a reject is about the set under review alone; an approve may also name the one that was sent back
+    assert act(s, "/datasets/rec-a/actions", {**verdict, "action": "reject", "set": "i7-e1:t1", "note": "n"})[0] == 409
+    status, action, _ = act(s, "/datasets/rec-a/actions", {**verdict, "set": "i7-e1:t1"})
+    assert status == 202 and action["payload"] == {"set": "i7-e1:t1"}
+    kind, number, signal, event = gateway.sent[-1]
+    assert (signal, event.set, event.kind) == ("approve", "i7-e1:t1", "approve")
+
+
+def test_a_dataset_under_rework_takes_an_approve_of_the_set_that_was_sent_back_and_of_no_other(tmp_path):
+    s, gateway = _acting(tmp_path)
+    held = {"set": "i7-e1:t1", "by": "judge", "worst": "bad", "findings": [], "gallery": None}
+    for number, stage in enumerate(("developing", "testing", "blocked", "failed", "cancelled", "needs-human"), 7):
+        view = _at(s, number, f"rec-{number}", stage, {"review": None, "held": held, "saved": None})
+        assert "approve" in view["actions"], stage
+        verdict = {"action": "approve", "revision": view["revision"], "set": "i7-e1:t1"}
+        assert act(s, f"/datasets/rec-{number}/actions", {**verdict, "set": "i7-e9:t9"})[0] == 409
+        assert act(s, f"/datasets/rec-{number}/actions", verdict)[0] == 202, stage
+    plain = _at(s, 20, "rec-20", "developing", {"review": None, "held": None, "saved": None})
+    assert "approve" not in plain["actions"]
+    status, out, _ = act(
+        s, "/datasets/rec-20/actions", {"action": "approve", "revision": plain["revision"], "set": "x"}
+    )
+    assert status == 409 and "it takes" in out["error"]
+    merging = _at(s, 21, "rec-21", "merging", {"review": None, "held": held, "saved": None})
+    assert "approve" not in merging["actions"]  # an accept is on its way already
+
+
+def test_a_reject_at_done_names_the_saved_set_and_is_a_start(tmp_path):
+    s, gateway = _acting(tmp_path)
+    saved = {"set": "i7-e1:t1", "approved_by": "judge"}
+    view = _at(s, 7, "rec-a", "done", {"review": None, "held": None, "saved": saved})
+    assert "reject" in view["actions"]
+    reject = {"action": "reject", "revision": view["revision"], "note": "the labels are shifted"}
+    assert act(s, "/datasets/rec-a/actions", {**reject, "set": "i7-e0:t0"})[0] == 409
+    status, action, _ = act(s, "/datasets/rec-a/actions", {**reject, "set": "i7-e1:t1"})
+    assert status == 202 and action["payload"] == {"note": "the labels are shifted", "set": "i7-e1:t1"}
+    assert gateway.sent[-1][2] == "reject" and gateway.sent[-1][3].set == "i7-e1:t1"
+    nothing_saved = _at(s, 8, "rec-b", "done", {"review": None, "held": None, "saved": None})
+    assert "reject" not in nothing_saved["actions"]
+
+
+def test_a_subject_whose_round_wrote_no_sets_takes_a_verdict_as_before(tmp_path):
+    """A run from before sets writes none: its verdict is about the set under review, and names nothing."""
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
+    worker(s, "POST", "/timeline/dataset/7", {"stage": "review"})
+    assert act(s, "/datasets/rec-a/actions", {"action": "approve", "revision": 1})[0] == 202
+    assert gateway.sent[-1][3].set == ""
+    worker(s, "PUT", "/subjects/dataset/8", {"key": "rec-b"})
+    worker(s, "POST", "/timeline/dataset/8", {"stage": "developing"})
+    assert "approve" not in call(s, "GET", "/subjects/dataset/rec-b")[1]["actions"]
 
 
 def test_a_verdict_names_the_revision_the_person_saw(tmp_path):

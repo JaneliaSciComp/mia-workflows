@@ -64,3 +64,27 @@ def test_refused_names_the_newest_reject_only():
         "human:bob at 1970-01-01T00:00:20+00:00: shifted labels"
     )
     assert refused([a("reject", at=5.0), a("approve", at=10.0)]) is None
+
+
+GATES = frozenset({"crops"})
+
+
+def test_a_judge_reject_written_after_a_persons_approve_does_not_undo_it():
+    rows = [a("approve", at=10.0), a("reject", by="judge", at=20.0)]
+    assert authorized(rows, enabled_gates=GATES).ok
+
+
+def test_a_judge_or_developer_approve_written_after_a_persons_reject_authorizes_nothing():
+    for author in ("judge", "policy:developer"):
+        rows = [a("reject", at=10.0, summary="shifted"), a("approve", by=author, at=20.0)]
+        assert not authorized(rows, enabled_gates=GATES).ok
+
+
+def test_a_developer_approve_stands_over_a_judge_reject_while_no_person_spoke():
+    rows = [a("reject", by="judge", at=10.0), a("approve", by="policy:developer", at=20.0)]
+    assert authorized(rows, enabled_gates=GATES).ok
+
+
+def test_a_repair_approve_still_follows_a_persons_revoke():
+    rows = [a("reject", at=10.0), a("approve", by="policy:repair", at=20.0)]
+    assert authorized(rows).ok

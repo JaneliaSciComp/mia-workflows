@@ -124,6 +124,7 @@ class PublishInput:
     workspace: Workspace
     pr: int | None
     feedback_id: str | None = None
+    feedback_text: str = ""  # a revision round: the reviewer's request as the agent was given it
 
 
 @dataclass
@@ -154,6 +155,8 @@ class JudgeOutcome:
 class PrRef:
     pr: int | None
     head_sha: str | None
+    # the id of the request the round answered with a validated "nothing needs changing" (no commits); "" otherwise
+    no_change: str = ""
 
 
 @dataclass
@@ -178,6 +181,18 @@ class PrSnapshot:
     approved: bool  # a qualifying approval of head_sha exists (a human's, or a trusted bot's `/approve` comment)
     checks: str  # success | pending | failure | none
     feedback: list[Feedback] = field(default_factory=list)  # requests not yet handled, per GitHub markers
+    # an earlier head of this pull request that a person accepted (`/accept <sha>`): the branch goes back to it and
+    # it is merged, whatever came after; "" when nobody did
+    accepted: str = ""
+
+
+@dataclass
+class ResetInput:
+    """Move the pull request's branch back to `sha`, one of the heads autodev pushed for the issue."""
+
+    issue: int
+    pr: int
+    sha: str
 
 
 @dataclass

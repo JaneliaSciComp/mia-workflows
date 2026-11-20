@@ -17,6 +17,7 @@ from .models import Feedback
 WRITE_PERMISSIONS = {"admin", "maintain", "write"}
 APPROVE_RE = re.compile(r"^/approve\s+([0-9a-f]{7,40})\b", re.M)
 REVISE_RE = re.compile(r"^/revise\b(.*)", re.M | re.S)
+ACCEPT_RE = re.compile(r"^/accept\s+([0-9a-f]{40})\b", re.M)
 _FAILED = {"failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"}
 
 
@@ -88,6 +89,28 @@ def approved(head_sha: str, reviews: list[dict], comments: list[dict], reviewers
         if match and head_sha.startswith(match.group(1)) and reviewers.may_command(comment, match):
             return True
     return False
+
+
+def accepted(comments: list[dict], reviewers: Reviewers, heads: Sequence[str]) -> str:
+    """The head a person accepted with `/accept <sha>`: the newest such comment by someone who may command
+    (`Reviewers.may_command`) that names, in full, one of the `heads` autodev pushed for this issue; "" when
+    there is none. An accept is for an earlier head's set of crops: the pull request goes back to that head and
+    it is merged (spec judge-decides §5.1). It counts until someone who may command asks for something else: a
+    later `/revise` or `/approve` takes its place, so an accept whose merge cannot happen never holds the pull
+    request for good."""
+    newest = ""
+    for comment in comments:  # GitHub returns comments oldest first
+        body = comment.get("body") or ""
+        if reviewers.is_ours(body):
+            continue
+        match = ACCEPT_RE.search(body)
+        if match and match.group(1) in heads and reviewers.may_command(comment, match):
+            newest = match.group(1)
+            continue
+        later = REVISE_RE.search(body) or APPROVE_RE.search(body)
+        if later and reviewers.may_command(comment, later):
+            newest = ""
+    return newest
 
 
 def feedback(

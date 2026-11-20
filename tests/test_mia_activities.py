@@ -559,8 +559,32 @@ async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(
     )
     assert "**The reviewer's comments:**" in body and "the masks are &lt;!-- shifted" in body
     assert "**supersedes**" in body and "**The rejected binding:**" in body and "tiff-zip-member" in body
-    with pytest.raises(ApplicationError, match="not one of round"):
+    with pytest.raises(ApplicationError, match="not one of this dataset's rounds'"):
         await t.a.open_snippet_issue(1, ROUND, {}, None, str(tmp_path / "elsewhere.yaml"))
+    # the rework of a saved set is a round of its own that names the binding of the round that saved it
+    put_action(t, 100)
+    await t.a.admit(1, "100")
+    assert await t.a.open_snippet_issue(1, "i1-e100", {"what_fails": "shifted"}, None, str(binding)) == 101
+    assert "**The rejected binding:**" in t.snip.created[1][1]
+    other = t.a._round_dir(ROUND).parent / "i2-e7" / "binding-1.yaml"
+    other.parent.mkdir()
+    other.write_text(binding.read_text())
+    with pytest.raises(ApplicationError, match="not one of this dataset's rounds'"):
+        await t.a.open_snippet_issue(1, "i1-e100", {}, None, str(other))  # another dataset's round
+
+
+async def test_a_request_made_after_the_rounds_snippets_issue_was_closed_opens_a_new_issue(tmp_path):
+    """Review finding: the developer answered "nothing needs changing", the issue was closed, the person rejected
+    again. The round's marker must not find the closed issue, or the new comments reach nobody."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    binding = t.a._round_dir(ROUND) / "binding-1.yaml"
+    binding.write_text(yaml.safe_dump(BINDING))
+    first = await t.a.open_snippet_issue(1, ROUND, {"what_fails": "Request: r#1"}, None, str(binding))
+    assert await t.a.open_snippet_issue(1, ROUND, {"what_fails": "Request: r#1"}, None, str(binding)) == first
+    await t.a.close_snippet_issue(first, None, "answered")
+    second = await t.a.open_snippet_issue(1, ROUND, {"what_fails": "Request: r#2"}, None, str(binding))
+    assert second != first and "Request: r#2" in t.snip.created[1][1] and len(t.snip.created) == 2
 
 
 async def test_open_snippet_issue_reuses_the_remembered_issue_in_a_new_round(tmp_path):
@@ -1047,7 +1071,7 @@ async def test_revoke_dataset_with_nothing_published_records_nothing(tmp_path, t
     assert not (folder / "revoked.json").exists() and registry.assessments() == [] and registry.dataset("rec-1") is None
 
 
-async def test_a_publication_after_a_revoke_releases_the_artifacts(tmp_path, token_server):  # noqa: F811
+async def test_a_save_after_a_revoke_releases_only_the_artifacts_staged_from_its_own_binding(tmp_path, token_server):  # noqa: F811
     from test_buffers_sync import write_prepared
 
     t = _setup(tmp_path)
@@ -1055,18 +1079,27 @@ async def test_a_publication_after_a_revoke_releases_the_artifacts(tmp_path, tok
     registry = t.a.registry = Registry(token_server, "t")
     folder = t.a._dataset_dir("i1-e11", t.a._pins("i1-e11"))
     write_prepared(folder, "rec-1")
-    registry.put_asset("staged", "art1", {"record": "rec-1", "state": "ready", "path": "/x", "bytes": 1})
-    await t.a.revoke_dataset(1, "i1-e11", "alice", "77")
-    assert registry.asset("staged", "art1")["quarantined"] is True
     binding = t.cfg.paths.state_dir / "rounds" / "i1-e11" / "binding-1.yaml"
     binding.write_text("record: rec-1\n")
+    saved_hash = hashlib.sha256(binding.read_bytes()).hexdigest()  # what a buffer hashes into its staged asset
+    staged = {"record": "rec-1", "state": "ready", "path": "/x", "bytes": 1}
+    registry.put_asset("staged", "art1", {**staged, "binding_hash": saved_hash})
+    registry.put_asset("staged", "art2", {**staged, "binding_hash": "another binding's"})  # the broken reader's
+    registry.put_asset("staged", "art3", staged)  # its recipe is unknown
+    await t.a.revoke_dataset(1, "i1-e11", "alice", "77")
+    assert all(registry.asset("staged", key)["quarantined"] is True for key in ("art1", "art2", "art3"))
     cw = Path(await t.a.prepare_job(1, "i1-e11", "crop", 1, None))
     await t.a.publish_crops(1, "i1-e11", str(cw), [_crop(cw, "c1", 0)], SNIP_SHA, str(binding))
     assert not (folder / "revoked.json").exists()
+    assert hashlib.sha256((folder / "binding.yaml").read_bytes()).hexdigest() == saved_hash
     art1 = registry.asset("staged", "art1")
     assert art1["quarantined"] is False and art1["repaired_by"] == "i1-e11"
     newest = registry.assessments(subject_kind="artifact", subject_ref="art1")[0]
     assert newest["verdict"] == "approve" and newest["by"] == "policy:repair"
+    # only the artifacts this save's own binding staged are released (spec judge-decides §5.5)
+    for key in ("art2", "art3"):
+        assert registry.asset("staged", key)["quarantined"] is True
+        assert [row["verdict"] for row in registry.assessments(subject_kind="artifact", subject_ref=key)] == ["reject"]
     assert t.a.dataset_fields(1, "i1-e11", "done")["state"] == "prepared"
 
 
@@ -1104,6 +1137,25 @@ async def test_prepare_judge_builds_evidence_without_reasons(tmp_path):
     assert {"question.md", "record.yaml", "binding.yaml", "verify.json", "c0/raw.png", "c1/overlay.png"} <= set(listed)
     with pytest.raises(ApplicationError, match="crops gate"):
         await t.a.prepare_judge(1, ROUND, "review", str(cw), str(vw), verified)
+
+
+async def test_share_evidence_copies_what_the_judge_saw_to_the_snippets_issues_folder(tmp_path):
+    """spec judge-decides §4.1: the developer looks at what the judge saw; autodev mounts this folder read-only."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    cw, vw, verified = _judged_round(t)
+    ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified))
+    (tmp_path / "secret").write_text("token")
+    (ws / "evidence" / "leak.txt").symlink_to(tmp_path / "secret")  # a job could plant a link in its workspace
+    await t.a.share_evidence(1, ROUND, str(ws), 72, f"{ROUND}:t1")
+    await t.a.share_evidence(1, ROUND, str(ws), 72, f"{ROUND}:t1")  # a retry replaces the copy
+    shared = t.cfg.paths.work_root / "_evidence" / "issue-72" / f"{ROUND}-t1"
+    assert (shared / "question.md").read_text() == (ws / "evidence" / "question.md").read_text()
+    assert (shared / "c0" / "raw.png").is_file() and (shared / "c1" / "overlay.png").read_bytes() == b"ov"
+    assert not (shared / "leak.txt").exists() and not any(path.is_symlink() for path in shared.rglob("*"))
+    assert [path.name for path in shared.parent.iterdir()] == [f"{ROUND}-t1"]  # nothing left beside it
+    with pytest.raises(ApplicationError):
+        await t.a.share_evidence(1, ROUND, str(tmp_path / "elsewhere"), 72, f"{ROUND}:t1")
 
 
 def _claude_json(ws: Path, verdict: dict, cost=0.31):
@@ -1172,12 +1224,12 @@ async def test_read_judge_reject_without_bad_is_approve(tmp_path):
         {
             "verdict": "reject",
             "confidence": 0.8,
-            "findings": [{"item": "c1", "severity": "suspect", "note": "dim"}],
+            "findings": [{"item": "c1", "severity": "ok", "note": "dim"}],
             "summary": "nits",
         },
     )
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
-    assert (out.verdict, out.effective) == ("reject", "approve") and out.assessment
+    assert (out.verdict, out.effective, out.worst) == ("reject", "approve", "") and out.assessment
     assert "`approve` (the judge said `reject`: reject without a bad finding" in out.comment
     _claude_json(ws, {"verdict": "approve", "confidence": 0.3, "findings": [], "summary": "unsure"})
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
@@ -1194,19 +1246,24 @@ async def test_limits_carry_the_judge_config(tmp_path):
         }
     )
     limits = await t.a.limits()
-    assert (limits.crop_judge, limits.judge_max_budget_usd) == ("shadow", 3.5)
+    assert (limits.crop_judge, limits.judge_max_budget_usd, limits.max_reworks) == ("shadow", 3.5, 1)
 
 
-async def test_read_judge_applies_the_suspect_cap(tmp_path):
+async def test_read_judge_rejects_a_crop_set_on_one_suspect_finding_and_says_the_worst(tmp_path):
     t = _setup(tmp_path)
     await t.a.admit(1, "99")
     cw, vw, verified = _judged_round(t)
     ws = Path(await t.a.prepare_judge(1, ROUND, "crops", str(cw), str(vw), verified, 1, "abc"))
     assert ws.name == "judge-crops-abc-1"
-    findings = [{"item": f"c{i}", "severity": "suspect", "note": "dim"} for i in range(3)]
+    findings = [{"item": "c0", "severity": "ok", "note": ""}, {"item": "c1", "severity": "suspect", "note": "shifted"}]
     _claude_json(ws, {"verdict": "approve", "confidence": 0.9, "findings": findings, "summary": "meh"})
     out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
-    assert out.effective == "reject" and "more than the cap of 2" in out.comment
+    assert (out.effective, out.worst, out.authorized) == ("reject", "suspect", False)
+    assert "a suspect finding: c1" in out.comment
+    findings.append({"item": "c2", "severity": "bad", "note": "header read as pixels"})
+    _claude_json(ws, {"verdict": "approve", "confidence": 0.9, "findings": findings, "summary": "meh"})
+    out = await t.a.read_judge(1, ROUND, str(ws), "crops", "crop_set", f"{ROUND}:t1", "shadow")
+    assert (out.effective, out.worst) == ("reject", "bad")
 
 
 async def test_read_judge_at_an_active_gate_grants_on_an_approve_and_on_nothing_else(tmp_path, token_server):  # noqa: F811
@@ -1227,11 +1284,37 @@ async def test_read_judge_at_an_active_gate_grants_on_an_approve_and_on_nothing_
     out = await judged("a", "active")
     assert out.authorized and "Approved automatically" in out.comment
     assert t.a.registry.dataset("rec-1")["assessment"] == out.assessment  # the row names it, as a person's approve
-    capped = await judged("c", "active", [{"item": f"c{i}", "severity": "suspect", "note": "dim"} for i in range(3)])
-    assert capped.effective == "reject" and not capped.authorized and "A person's verdict decides." in capped.comment
+    doubted = await judged("c", "active", [{"item": "c0", "severity": "suspect", "note": "dim"}])
+    assert doubted.effective == "reject" and not doubted.authorized
 
 
 # --- with buffer-api: a round writes the timeline, the mirror writes the issue (spec webapp-actions §6, §7) ---
+
+
+async def test_a_stage_write_tells_the_page_which_sets_a_verdict_may_name(tmp_path):
+    from mia_data.models import CropSet, Test
+
+    t = _setup(tmp_path)
+    pins = await t.a.admit(1, "99")
+    t.a.registry.adopt_subject("dataset", 1, "rec-1")
+    test = Test("abc", "t1", ok=True, gallery_prefix="galleries/rec-1/r/t1", approved_by="judge")
+    state = DatasetState(1, round_id=ROUND, pins=pins, tests=[test])
+    await t.a.set_stage(1, "review", state)
+    sets = t.ledger.subject("dataset", "rec-1")["data"]["sets"]
+    assert sets == {"review": f"{ROUND}:t1", "held": None, "saved": None}
+    findings = [{"item": "c1", "severity": "suspect", "note": "shifted <!-- x -->"}]
+    state.held = CropSet(f"{ROUND}:t1", ROUND, test, pins, sent_back_by="judge", worst="suspect", findings=findings)
+    state.saved = CropSet("i1-e5:t0", "i1-e5", test, pins)
+    await t.a.set_stage(1, "developing", state)
+    sets = t.ledger.subject("dataset", "rec-1")["data"]["sets"]
+    assert sets["review"] is None and sets["saved"] == {"set": "i1-e5:t0", "approved_by": "judge"}
+    assert sets["held"] == {
+        "set": f"{ROUND}:t1",
+        "by": "judge",
+        "worst": "suspect",
+        "findings": [{"item": "c1", "severity": "suspect", "note": "shifted &lt;!-- x -->"}],
+        "gallery": "galleries/rec-1/r/t1",
+    }
 
 
 def _with_service(t, tmp_path):
@@ -1356,6 +1439,20 @@ async def test_refusing_an_action_marks_it_refused_and_touches_no_label(tmp_path
     assert ledger.timeline("dataset", 1)[0]["body"].startswith("Refused `go`: busy")  # the action, not a label
 
 
+async def test_close_snippet_issue_closes_what_is_open_with_one_comment(tmp_path):
+    t = _setup(tmp_path)
+    t.snip.issues[72] = {"number": 72, "state": "open", "labels": []}
+    t.snip.issues[80] = {"number": 80, "state": "open", "labels": []}
+    t.snip.issues[81] = {"number": 81, "state": "closed", "labels": []}
+    await t.a.close_snippet_issue(72, 80, "accepted as they are <!-- x -->")
+    await t.a.close_snippet_issue(72, 80, "accepted as they are <!-- x -->")  # a retry: nothing twice
+    assert t.snip.issues[72]["state"] == t.snip.issues[80]["state"] == "closed"
+    said = [comment["body"] for comment in t.snip.comments.get(72, [])]
+    assert len(said) == 1 and said[0].startswith("accepted as they are &lt;!-- x -->")
+    await t.a.close_snippet_issue(81, None, "why")
+    assert not t.snip.comments.get(81)
+
+
 async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp_path):
     """What a round that waits for autodev finds: no PR and a stopped issue, then the open PR of a working one."""
     t = _setup(tmp_path)
@@ -1398,3 +1495,17 @@ async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp
     look = await t.a.autodev_look(72, 80)
     assert look.answer == "The rows repeat in the source file.\n\nNothing to change."
     assert look.answer_at == "2026-11-14T23:30:00Z"
+    # a no-commit round is an answer; "the crops are right as they are" is autodev's marker for a request
+    assert look.no_change == ""
+    t.snip.comments[80].append(
+        {
+            "created_at": "2026-11-14T23:40:00Z",
+            "user": {"login": "mallory"},
+            "body": "### snippets: round 4 made no commits\n\nfine\n\n<!-- snippets: no-change i1-e11:t1#9 -->",
+        }
+    )
+    assert (await t.a.autodev_look(72, 80)).no_change == ""  # anyone can paste a marker; only autodev's counts
+    for at, request in (("2026-11-14T23:50:00Z", "i1-e11:t1#1"), ("2026-11-14T23:55:00Z", "i1-e11:t1#2")):
+        body = f"### snippets: round 5 made no commits\n\n**Nothing needs changing.**\n\n<!-- snippets: round x-5 -->\n<!-- snippets: no-change {request} -->"
+        t.snip.comments[80].append({"created_at": at, "user": {"login": "bot"}, "body": body})
+    assert (await t.a.autodev_look(72, 80)).no_change == "i1-e11:t1#2"  # the newest

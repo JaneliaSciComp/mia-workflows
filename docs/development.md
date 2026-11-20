@@ -184,15 +184,44 @@ facts about them, listed with sha256 in `evidence.json`. Nothing from the author
 caller names that exact file (`IndependenceError` otherwise); the binding goes in without its `reasons`,
 agent-written text is fenced and labelled as data. Its final message is one JSON verdict (`schema.parse_verdict`);
 policy (`schema.effective_verdict`) turns a `reject` without a `bad` finding into an approve with notes and a
-confidence under `judge.min_confidence` into an escalate, and the result is an assessment `by: judge` with the
+confidence under `judge.min_confidence` into an escalate; at the crops gate one `suspect` finding rejects too
+(`suspect_rejects`), since a doubted set is sent back for rework, and the result is an assessment `by: judge` with the
 evidence digest, model and prompt version. A `judge.model` other than `agent.model` is a precaution, not a rule.
 
-**An active crop judge approves, and does nothing else.** With `judge.crops.mode: active`, `read_judge` asks
-`authorized()` (with the gate enabled) about the judge's approve and returns `JudgeResult.authorized`; the round
-then goes on as it does after a person's approve (`_judge_grants` in `mia_data/workflows.py`): it saves a matched
-binding's set, or comments `/approve <head>` on the snippet PR. Anything else the judge says, and any verdict, go
-or revoke queued while it looked, leaves the set to a person. `judge.review.mode: active` is refused by the
-config: nothing grants on the review judge's verdict.
+**An active crop judge decides, and a person can overturn it** (spec `2026-11-17-judge-decides.md`). With
+`judge.crops.mode: active`, `read_judge` asks `authorized()` (with the gate enabled) about the judge's approve and
+returns `JudgeResult.authorized` and `worst` (the worst finding). Every crop `ok`: the round goes on as after a
+person's approve (`_judge_grants` in `mia_data/workflows.py`): it saves a matched binding's set, or comments
+`/approve <head>` on the snippet PR. A `suspect` or a `bad` crop: the set is sent back (`_sends_back`,
+`_send_back`): its findings go to the developer as a person's reject would (`crop_test.rework_request`: a snippets
+issue superseding the binding's reader, or `/revise` on the pull request), and the judge's evidence is copied to
+`<work_root>/_evidence/issue-<snippets issue>/` (`share_evidence`), which autodev mounts read-only into that
+issue's agent job (`agent.evidence_dir`). The judge sends a dataset's sets back `judge.crops.max_reworks` times
+(default 1) since a person last acted; after that a doubted set waits at `review`. An escalate, a judge that did
+not run, and any verdict, go or revoke queued while it looked leave the set to a person.
+`judge.review.mode: active` is refused by the config: nothing grants on the review judge's verdict.
+
+**"The crops are right as they are" is an outcome the developer states and autodev validates.** A request for
+rework names itself (`Request: <set id>#<n>`) and lists its findings. The agent that finds nothing to change
+makes no commits and writes `no_change.json` in its checkout, answering every finding; autodev accepts it only
+for that request, from a run that ended by itself (`agent.read_no_change`), posts the answers under the marker
+`no-change <request>`, and ends a first round `answered` (a stage label) where it would otherwise stop. The
+round reads the marker (`AutodevLook.no_change`, `_answered`): a set the judge doubted (`suspect` only) is
+approved by `policy:developer` and saved; a set with a `bad` finding, and any set a person rejected, goes back
+to `review` with the answer. A round of autodev's with no commits and no such marker says nothing about the
+crops; on a pull request it still brings a person's own revision request back to them.
+
+**Sets outlive their round, and a verdict names its set.** `DatasetState.held` is the set that was sent back
+(by the judge or a person) and not yet superseded by an approved one; `DatasetState.saved` is the saved set.
+Each is a `CropSet`: the round, the test, the pins, the binding. The stage write puts them into the subject's
+`data.sets` (`models.sets_view`), which the page reads. An approve that names the held set is an **accept**,
+taken at any stage (`accept_events`, `_guard`, `_accept_held`): what the send-back started is stopped as a
+cancel stops it, the set's round becomes the state's again (`_switch_to`), and the set is saved, or `/accept
+<sha>` asks autodev to reset its pull request to that head and merge it once its running job has ended
+(`review.accepted`, `decide` → `RESET`, `Mirror.reset`); other heads are ignored meanwhile
+(`DatasetState.accepting`). A reject that names the saved set (`rework_events`, `_rework_saved`) revokes it and
+starts a round of its own that asks the developer for a fix. For one set a person's newest verdict decides:
+`authorized()` leaves out what `MACHINE_AUTHORS` (the judge, `policy:developer`) wrote once a person has spoken.
 
 **A person's verdict never waits for the crop judge.** The judge runs as a task beside the round's (`_judged`,
 patch `verdict-first`): the round waits for its verdict or for a label, whichever comes first. A label is acted on
@@ -222,9 +251,11 @@ whatever the buffer's workflow or the keeper have done yet. The keeper holds a q
 quarantined volumes, sends the `revoked` signal: the buffer unregisters those volumes, fails the dataset with the
 reason and serves on at its floor, or ends in needs-human below it (*Retire* stops it altogether). A board approve
 never writes over an artifact whose newest assessment is a reject: only a repair supersedes a revocation. A new
-`go` on the dataset that saves its crops removes `revoked.json`, writes a `policy:repair` approve on each
-quarantined artifact of the record and clears their quarantine marks, and the next stage write makes the row
-prepared again. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
+`go` on the dataset that saves its crops removes `revoked.json`, and the next stage write makes the row
+prepared again. The save repairs by recipe: a quarantined artifact that was staged from the binding the save
+wrote (the asset's `binding_hash`) gets a `policy:repair` approve and its quarantine mark cleared; an artifact
+of any other binding was read by the recipe that was rejected, stays quarantined, and the record is staged
+anew. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
 page's *Revoke the checked*; records not in the buffer are ignored), rejects and quarantines those records'
 artifacts and takes the keeper's `revoked` path at once.
 

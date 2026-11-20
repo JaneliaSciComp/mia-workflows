@@ -13,6 +13,7 @@ from mia_core.judge.schema import (
     parse_verdict,
     prompt_text,
     prompt_version,
+    worst_finding,
 )
 
 APPROVE = {
@@ -64,11 +65,24 @@ def test_a_bad_finding_rejects_whatever_the_judge_wrote():
     assert effective_verdict(approve_with_bad, 0.6) == ("reject", "a bad finding: c2")
 
 
-def test_more_suspects_than_the_cap_reject():
-    suspects = Verdict("approve", 0.9, tuple(Finding(f"c{i}", "suspect") for i in range(3)), "meh")
-    assert effective_verdict(suspects, 0.6, max_suspect=2) == ("reject", "3 suspect findings, more than the cap of 2")
-    assert effective_verdict(suspects, 0.6, max_suspect=3) == ("approve", "approve")
-    assert effective_verdict(suspects, 0.6) == ("approve", "approve")  # no cap for this gate
+def test_one_suspect_finding_rejects_at_a_gate_that_sends_suspects_back():
+    verdict = Verdict("approve", 0.9, (Finding("crop-3", "suspect", "labels look shifted"),), "fine")
+    assert effective_verdict(verdict, 0.6, suspect_rejects=True) == ("reject", "a suspect finding: crop-3")
+    assert worst_finding(verdict.findings) == "suspect"
+    assert effective_verdict(verdict, 0.6) == ("approve", "approve")  # the review gate: a suspect is a note
+
+
+def test_a_bad_finding_outranks_a_suspect_one():
+    findings = (Finding("crop-1", "suspect", ""), Finding("crop-2", "bad", ""))
+    verdict = Verdict("approve", 0.9, findings, "")
+    assert effective_verdict(verdict, 0.6, suspect_rejects=True) == ("reject", "a bad finding: crop-2")
+    assert worst_finding(findings) == "bad"
+
+
+def test_a_reject_with_every_finding_ok_is_still_an_approve_with_notes():
+    verdict = Verdict("reject", 0.9, (Finding("crop-1", "ok", "dim"),), "")
+    assert effective_verdict(verdict, 0.6, suspect_rejects=True)[0] == "approve"
+    assert worst_finding(verdict.findings) == "" and worst_finding(()) == ""
 
 
 def test_low_confidence_escalates():

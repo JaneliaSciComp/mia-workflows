@@ -62,21 +62,24 @@ HUMAN_LABELS = {  # the actions a person takes
 STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done", "shelved")
 # stage -> (status word, the actions it accepts); "working" means a round is in progress, and a round in progress
 # accepts only `cancel` (spec webapp-actions §5.1). `debugging` is between two rounds, so it also takes the `go`
-# that runs the next one: the debugger's own, or a person's who does not want to wait for it. buffer-api refuses any other action, the page offers only
-# these. The workflow stays the code that carries a round out.
+# that runs the next one: the debugger's own, or a person's who does not want to wait for it. A verdict is also
+# taken away from `review` when it names a set of its own (spec judge-decides §5): an `approve` of the set that
+# was sent back for rework, while that rework runs and after it stopped, and at `done` a `reject` of the saved
+# set. buffer-api refuses any other action and a verdict with no such set; the page offers only these. The
+# workflow stays the code that carries a round out.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
     "matching": ("working", frozenset({"cancel", "stop"})),
-    "developing": ("working", frozenset({"cancel", "stop"})),
-    "testing": ("working", frozenset({"cancel", "stop"})),
+    "developing": ("working", frozenset({"approve", "cancel", "stop"})),
+    "testing": ("working", frozenset({"approve", "cancel", "stop"})),
     "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),  # go: start over, the set is dropped
     "merging": ("working", frozenset({"cancel", "stop"})),
-    "debugging": ("working", frozenset({"go", "cancel", "stop"})),
-    "done": ("done", frozenset({"go", "revoke"})),
-    "failed": ("stuck", frozenset({"go", "revoke"})),
-    "blocked": ("stuck", frozenset({"go", "revoke"})),
-    "needs-human": ("stuck", frozenset({"go", "revoke"})),
-    "cancelled": ("done", frozenset({"go", "revoke"})),
+    "debugging": ("working", frozenset({"approve", "go", "cancel", "stop"})),
+    "done": ("done", frozenset({"go", "reject", "revoke"})),
+    "failed": ("stuck", frozenset({"approve", "go", "revoke"})),
+    "blocked": ("stuck", frozenset({"approve", "go", "revoke"})),
+    "needs-human": ("stuck", frozenset({"approve", "go", "revoke"})),
+    "cancelled": ("done", frozenset({"approve", "go", "revoke"})),
 }
 
 

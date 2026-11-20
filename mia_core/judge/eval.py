@@ -37,7 +37,7 @@ class EvalRow:
     cost_usd: float | None
 
 
-def run_item(item: Path, cfg: JudgeCfg, run: Runner = subprocess.run, max_suspect: int | None = None) -> EvalRow:
+def run_item(item: Path, cfg: JudgeCfg, run: Runner = subprocess.run, suspect_rejects: bool = False) -> EvalRow:
     """Run the judge over a copy of the item's evidence in a fresh temporary directory (the answer key stays out
     of its reach) and read its answer; a run that fails, hangs or writes no readable verdict is an `escalate`."""
     # ponytail: on the operator's host the judge is not sandboxed, so Read works anywhere; the copy keeps the set's
@@ -61,7 +61,7 @@ def run_item(item: Path, cfg: JudgeCfg, run: Runner = subprocess.run, max_suspec
         text, cost, _ = read_claude_json(workspace)
     try:
         verdict = parse_verdict(text)
-        got, _ = effective_verdict(verdict, cfg.min_confidence, max_suspect)
+        got, _ = effective_verdict(verdict, cfg.min_confidence, suspect_rejects)
         confidence = verdict.confidence
     except ValueError:
         got, confidence = "escalate", 0.0
@@ -85,9 +85,9 @@ def evaluate(
     *,
     limit: int | None = None,
     run: Runner = subprocess.run,
-    max_suspect: int | None = None,
+    suspect_rejects: bool = False,
 ) -> list[EvalRow]:
-    return [run_item(item, cfg, run, max_suspect) for item in items(eval_dir)[:limit]]
+    return [run_item(item, cfg, run, suspect_rejects) for item in items(eval_dir)[:limit]]
 
 
 def summarize(rows: list[EvalRow]) -> dict[str, dict[str, int]]:

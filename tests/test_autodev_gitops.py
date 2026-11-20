@@ -158,3 +158,21 @@ def test_token_never_on_disk_or_in_errors(tmp_path):
     with pytest.raises(GitError) as e:
         bad.sync()
     assert "sekrit-token" not in str(e.value)
+
+
+def test_reset_moves_the_branch_back_to_a_head_the_issue_had_and_to_nothing_else(setup):
+    origin, m, ws, base = setup
+    first = agent_commit(ws / "repo", "one.txt", "1\n", base)
+    m.publish(ws / "result.bundle", base, "autodev/issue-7", "refs/autodev/issue-7/k-r1", [], force=True)
+    second = agent_commit(ws / "repo", "two.txt", "2\n", base)
+    m.publish(ws / "result.bundle", base, "autodev/issue-7", "refs/autodev/issue-7/k-r2", [], force=False)
+    assert run_git("rev-parse", "refs/heads/autodev/issue-7", cwd=origin) == second
+    assert sorted(m.heads(7)) == sorted([first, second]) and m.heads(8) == []
+    m.reset("autodev/issue-7", first, 7)
+    assert run_git("rev-parse", "refs/heads/autodev/issue-7", cwd=origin) == first
+    assert run_git("rev-parse", "refs/heads/autodev/issue-7", cwd=m.path) == first
+    with pytest.raises(GitError, match="not a head"):
+        m.reset("autodev/issue-7", base, 7)  # main's commit was never this issue's head
+    with pytest.raises(GitError, match="not a head"):
+        m.reset("autodev/issue-7", first, 8)
+    assert run_git("rev-parse", "refs/heads/autodev/issue-7", cwd=origin) == first

@@ -23,6 +23,7 @@ class LabelEvent:
     event_id: str  # the action's id in the registry
     actor: str
     at: str  # ISO-8601, as buffer-api stored the action
+    set: str = ""  # a verdict: the set of crops it is about (`set_id`); "" from a sender that names none
 
 
 @dataclass
@@ -50,6 +51,9 @@ class AutodevLook:
     # posted it (ISO time); "" when no round ended so
     answer: str = ""
     answer_at: str = ""
+    # the request (`CropSet.request`) autodev's newest validated "nothing needs changing" answers; "" when none.
+    # Only this says the crops are right as they are: a round without commits alone does not.
+    no_change: str = ""
 
 
 @dataclass
@@ -89,6 +93,38 @@ class Test:
     crop_workspace: str | None = None  # the round's set (spec §13): where its crops and verify report are
     verify_workspace: str | None = None
     approved_at: str | None = None  # the `data:approve` event's time, once a reviewer approved this set (spec §14)
+    approved_by: str = ""  # who approved it: a person's actor, `judge`, or `policy:developer`
+    evidence: str = ""  # the crop judge's workspace for this set, once it looked: what it saw is under `evidence/`
+
+
+def set_id(round_id: str | None, test: Test) -> str:
+    """The name a verdict uses for the set of crops `test` made in the round."""
+    return f"{round_id}:{test.test_id}"
+
+
+@dataclass
+class CropSet:
+    """One set of sample crops with everything a later verdict needs, kept after the round that made it (spec
+    judge-decides §5.4): the set that was saved, and a set that was sent back for rework."""
+
+    set_id: str  # "<round_id>:<test_id>"
+    round_id: str
+    test: Test
+    pins: Pins
+    binding: str | None = None
+    binding_hash: str | None = None
+    pr: int | None = None
+    snippet_issue: int | None = None
+    sent_back_by: str = ""  # `judge` or the person's actor; "" for a set that was not sent back
+    worst: str = ""  # the judge's worst finding on it: "bad" | "suspect" | ""
+    request: str = ""  # the id of the rework request the developer answers: "<set_id>#<n>"
+    opened_issue: bool = False  # the send-back opened the snippets issue: accepting the set closes it
+    findings: list[dict] = field(default_factory=list)  # the judge's findings that are not `ok`, as it wrote them
+    # what the set's round needs when it becomes the dataset's round again: the snippet a merge looks for, the
+    # round's seed, and the stage passes the round had begun (their numbers go on, so no entry is written twice)
+    snippet_name: str | None = None
+    seed: str | None = None
+    passes: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -126,6 +162,32 @@ class DatasetState:
     # when a reviewer's comments went to the snippet PR as a revision request (ISO time); None once a head or
     # autodev's answer came back for it
     revised_at: str | None = None
+    # sets that outlive their round (spec judge-decides §5.4): the one sent back for rework and not superseded by
+    # an approved set, and the one that is saved; neither is touched when a new round starts
+    held: CropSet | None = None
+    saved: CropSet | None = None
+    reworks: int = 0  # how often the crop judge sent this dataset's sets back since a person last acted
+    accepting: str | None = None  # the PR head whose set a person accepted: autodev merges it, other heads are ignored
+
+
+def sets_view(state: DatasetState, stage: str) -> dict:
+    """What the page needs to know about the dataset's sets, for the subject's data: the set a verdict at
+    `review` is about, the set that was sent back (an approve may name it at any stage) and the saved one (a
+    reject may name it at `done`)."""
+    held, saved = state.held, state.saved
+    return {
+        "review": set_id(state.round_id, state.tests[-1]) if stage == "review" and state.tests else None,
+        "held": {
+            "set": held.set_id,
+            "by": held.sent_back_by,
+            "worst": held.worst,
+            "findings": held.findings,
+            "gallery": held.test.gallery_prefix,
+        }
+        if held
+        else None,
+        "saved": {"set": saved.set_id, "approved_by": saved.test.approved_by} if saved else None,
+    }
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:
@@ -217,6 +279,7 @@ class RoundLimits:
     autodev_quiet_hours: float = (
         2.0  # limits.autodev_quiet_hours: how long a round waits on an autodev that is not at work
     )
+    max_reworks: int = 1  # judge.crops.max_reworks: how often the crop judge may send a dataset's sets back
 
 
 @dataclass
@@ -280,3 +343,4 @@ class JudgeResult:
     comment: str = ""
     findings: list[dict] = field(default_factory=list)  # <= 64 of {"item", "severity", "note"}
     authorized: bool = False
+    worst: str = ""  # the worst finding's severity: "bad" | "suspect" | "" (every crop `ok`)

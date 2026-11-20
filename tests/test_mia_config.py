@@ -117,10 +117,19 @@ def test_every_dataset_stage_has_a_rule():
     # a round in progress is cancelled (or, when it cannot answer, stopped) before anything else is asked of its
     # dataset; between a failed round and its re-run a go is taken too: the debugger's own, or a person's who
     # does not wait for it
+    # a set that was sent back for rework can be approved while the rework runs and after it stopped (never
+    # before there is a set, and not once its merge is on the way); the saved set can be rejected
     working = {stage: actions for stage, (status, actions) in STAGE_ACTIONS.items() if status == "working"}
-    assert working.pop("debugging") == {"go", "cancel", "stop"}
-    assert all(actions == {"cancel", "stop"} for actions in working.values())
-    assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"go", "revoke"}))
+    assert working.pop("debugging") == {"approve", "go", "cancel", "stop"}
+    assert working.pop("developing") == working.pop("testing") == {"approve", "cancel", "stop"}
+    assert all(actions == {"cancel", "stop"} for actions in working.values()) and set(working) == {
+        "matching",
+        "merging",
+    }
+    assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"approve", "go", "revoke"}))
+    assert STAGE_ACTIONS["done"] == ("done", frozenset({"go", "reject", "revoke"}))
+    for stage in ("failed", "blocked", "needs-human"):
+        assert STAGE_ACTIONS[stage] == ("stuck", frozenset({"approve", "go", "revoke"}))
 
 
 def test_a_datasets_state_is_what_a_person_reads_and_the_stage_decides_it():

@@ -34,6 +34,7 @@ STAGES = {
     "working": ("fbca04", "autodev: agent job running"),
     "review": ("1d76db", "autodev: PR open, waiting for review"),
     "needs-human": ("d93f0b", "autodev: stopped, needs a human"),
+    "answered": ("c2e0c6", "autodev: looked into it, nothing to change"),
     "done": ("5319e7", "autodev: merged"),
 }
 
@@ -76,6 +77,9 @@ class AgentCfg(BaseModel):
     max_revisions: int = 3
     max_budget_usd: float | None = None  # passed to `claude -p --max-budget-usd`
     api_key_env: str | None = None  # bill the API with this env var's key instead of the broker account's login
+    # where whoever asks for a fix leaves what the agent should look at: `<evidence_dir>/issue-<n>/` is mounted
+    # read-only into the job of issue n when it exists (mia-data's judged crops, spec judge-decides §4.1)
+    evidence_dir: Path | None = None
 
 
 class GitHubAuth(Protocol):
@@ -167,8 +171,16 @@ class Config(BaseModel):
 
     def _check_mounts(self) -> None:
         """Extra mounts are read-only, absolute, and must not expose anything that holds credentials or trusted
-        state."""
+        state; the evidence directory likewise."""
         secrets = [self.paths.state_dir, self.github.token_file, self.github.private_key_path]
+        if (evidence := self.agent.evidence_dir) is not None:
+            if not evidence.is_absolute():
+                raise ValueError(f"agent.evidence_dir: {str(evidence)!r} must be an absolute path")
+            self.agent.evidence_dir = evidence = evidence.resolve()
+            for secret in filter(None, secrets):
+                secret = Path(secret).resolve()
+                if evidence == secret or evidence in secret.parents or secret in evidence.parents:
+                    raise ValueError(f"agent.evidence_dir overlaps {secret}, which the agent must not see")
         for index, mount in enumerate(self.agent.extra_mounts):
             if not mount.endswith(":ro"):
                 raise ValueError(f"agent.extra_mounts: {mount!r} must end with ':ro'")

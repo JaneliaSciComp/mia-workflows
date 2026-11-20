@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import os
 import uuid
@@ -100,7 +101,13 @@ class Mocks:
         debug_cycles=0,
         debug_result=None,
         look=None,
+        max_reworks=1,
+        verify_gone=False,
+        publish_error=None,
     ):
+        self.verify_gone = verify_gone  # read_verify finds nothing readable: a set's crops are gone
+        self.publish_error = publish_error  # a message: publish_crops fails with it, non-retryable
+        self.max_reworks = max_reworks  # judge.crops.max_reworks the limits activity reports
         self.look = look or AutodevLook(None, True, False, "")  # what autodev_look finds (a list: one per look)
         self.debug_cycles = debug_cycles  # limits.debug_cycles the limits activity reports
         self.debug_result = debug_result or DebugResult("rerun", "the host sent 30 KB/s", "bind the first volume only")
@@ -146,6 +153,7 @@ class Mocks:
                 crop_judge=self.crop_judge,
                 judge_max_budget_usd=3.5,
                 debug_cycles=self.debug_cycles,
+                max_reworks=self.max_reworks,
             )
 
         @activity.defn(name="set_stage")
@@ -240,6 +248,8 @@ class Mocks:
         @activity.defn(name="read_verify")
         async def read_verify(ws: str, crop_ws: str | None = None, record: str | None = None) -> VerifyResult:
             rec("read_verify", ws, crop_ws, *([record] if record else []))
+            if self.verify_gone:
+                raise ApplicationError("no verify report", type="ValueError", non_retryable=True)
             job = self.crop_jobs.get(crop_ws or "")
             trusted = bool(job and job.trusted)  # a matched binding's or the merge commit's set; else a PR head's
             by_sha = next((v for s, v in self.test_ok_by.items() if s in ws), None)  # by tested SHA
@@ -267,6 +277,8 @@ class Mocks:
             issue: int, round_id: str, crop_ws: str, verified: list[dict], sha: str, binding: str | None = None
         ) -> dict:
             rec("publish_crops", crop_ws, len(verified), sha, binding)
+            if self.publish_error:
+                raise ApplicationError(self.publish_error, type="ValueError", non_retryable=True)
             return {"published": [c["crop_id"] for c in verified], "already": [], "total": len(verified)}
 
         @activity.defn(name="open_snippet_issue")
@@ -275,6 +287,14 @@ class Mocks:
         ) -> int:
             rec("open_snippet_issue", round_id, snippet_issue, *([binding, draft] if binding else []))
             return 100
+
+        @activity.defn(name="share_evidence")
+        async def share_evidence(issue: int, round_id: str, ws: str, snippet_issue: int, name: str) -> None:
+            rec("share_evidence", round_id, ws, snippet_issue, name)
+
+        @activity.defn(name="close_snippet_issue")
+        async def close_snippet_issue(snippet_issue: int, pr: int | None, why: str) -> None:
+            rec("close_snippet_issue", snippet_issue, pr, why)
 
         @activity.defn(name="kill_job")
         async def kill_job(job_id: str) -> None:
@@ -375,6 +395,8 @@ class Mocks:
         return [
             admit,
             limits,
+            close_snippet_issue,
+            share_evidence,
             set_stage,
             stage_result,
             comment,
@@ -1093,9 +1115,12 @@ async def test_reject_in_matched_review_asks_for_a_superseding_snippet(env):
         await idle(h, m, "done")
         st = await h.query(MiaDataDataset.status)
     assert m.stages == ["matching", "testing", "review", "developing", "testing", "review", "merging", "done"]
-    assert m.of("open_snippet_issue") == [
-        ("i7-e11", None, "/s/binding-1.yaml", {"what_fails": "alice wrote:\nthe masks are shifted by one pixel"})
-    ]
+    (asked,) = m.of("open_snippet_issue")
+    assert asked[:3] == ("i7-e11", None, "/s/binding-1.yaml")
+    # the comments, under a request the developer can answer with "the crops are right as they are"
+    assert asked[3]["what_fails"].splitlines()[0].startswith("Request: i7-e11:")
+    assert "alice wrote:\nthe masks are shifted by one pixel" in asked[3]["what_fails"]
+    assert m.of("open_snippet_issue") == [("i7-e11", None, "/s/binding-1.yaml", {"what_fails": asked[3]["what_fails"]})]
     assert "superseding" in m.of("set_stage")[3][1]
     assert [a[1] for a in m.of("submit")] == ["match", "crop", "verify", "crop", "verify"]
     assert [(a.sha, a.trusted) for a in m.jobs() if a.n_crops] == [(PINS.snippets_commit, True), (H1, False)]
@@ -1531,6 +1556,7 @@ CANCEL_HISTORY = HISTORY.with_name("dataset_history_cancel.json")
 AWAITED_HISTORY = HISTORY.with_name("dataset_history_b.json")
 RESULTS_HISTORY = HISTORY.with_name("dataset_history_r.json")
 VERDICT_HISTORY = HISTORY.with_name("dataset_history_v.json")
+DECIDES_HISTORY = HISTORY.with_name("dataset_history_j.json")
 
 
 def _scrub(obj):
@@ -1579,6 +1605,27 @@ async def test_replay_dataset_history_c(env):
             await idle(h, m, "done")
             LOCK_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("mia-raw-lock", LOCK_HISTORY.read_text())
+    await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
+
+
+async def test_replay_dataset_history_j(env):
+    """A run under the `judge-decides` patch: the crop judge sends a matched set back, a person accepts that set
+    while its rework runs, and it is saved; then they reject the saved set, which is revoked and reworked.
+    Re-record this one alone, so the older fixtures keep their paths:
+    MIA_DATA_RECORD_HISTORY=1 pixi run pytest tests/test_mia_workflows.py -k replay_dataset_history_j"""
+    if os.environ.get("MIA_DATA_RECORD_HISTORY"):
+        m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, True, False, ""))
+        async with started(env, m) as h:
+            await idle(h, m, "developing")
+            held = (await h.query(MiaDataDataset.status)).held
+            await h.signal(MiaDataDataset.approve, accept(held))
+            await idle(h, m, "done")
+            saved = (await h.query(MiaDataDataset.status)).saved
+            rejected = LabelEvent("reject", "31", "alice", "2999-01-01T00:00:00Z", saved.set_id)
+            await h.signal(MiaDataDataset.reject, rejected)
+            await idle(h, m, "developing")
+            DECIDES_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("mia-judge-decides", DECIDES_HISTORY.read_text())
     await Replayer(workflows=[MiaDataDataset]).replay_workflow(history)
 
 
@@ -2110,11 +2157,37 @@ async def test_an_active_judges_authorized_approve_saves_the_set_with_no_person(
     assert "Approved by the crop judge." in next(r for r in m.of("result") if r[0] == "review")[1]
 
 
+async def test_the_saved_set_is_kept_with_the_dataset_across_rounds(env):
+    """spec judge-decides §5.4: a set holds together what a later verdict needs, and outlives its round."""
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+        saved = state.saved
+        assert saved.set_id == f"i7-e11:{state.tests[-1].test_id}" and saved.round_id == "i7-e11"
+        assert (saved.binding, saved.pins.record, saved.test.sha) == ("/s/binding-1.yaml", state.pins.record, SHA)
+        assert saved.test.approved_by == "alice" and state.held is None
+        await h.signal(MiaDataDataset.go, ev("go", "13"))
+        await idle(h, m, "review")
+        state = await h.query(MiaDataDataset.status)
+        # the next round leaves the saved set alone; the set takes its own round's pass numbers with it
+        kept = dataclasses.replace(saved, passes={"matching": 1, "testing": 1, "review": 1})
+        assert state.round_id == "i7-e13" and state.saved == kept
+        assert state.tests[-1].test_id != saved.test.test_id or state.round_id != saved.round_id
+
+
+async def test_a_set_the_judge_approved_says_so(env):
+    m = Mocks(crop_judge="active", judge_result=GRANTED)
+    async with started(env, m) as h:
+        await idle(h, m, "done")
+        assert (await h.query(MiaDataDataset.status)).saved.test.approved_by == "judge"
+
+
 @pytest.mark.parametrize(
     "judged",
     [
         JudgeResult("approve", "approve", 0.9, "fine", "as-j", 0.5, "Crop judge: approve"),  # not authorized
-        JudgeResult("approve", "reject", 0.9, "4 suspect", "as-j", 0.5, "Crop judge: reject", authorized=False),
         JudgeResult("escalate", "escalate", 0.3, "unsure", "as-j", 0.5, "Crop judge: escalate"),
     ],
 )
@@ -2126,6 +2199,528 @@ async def test_an_active_judge_that_does_not_grant_leaves_the_set_to_a_person(en
         await approve_review(h, m)
         await idle(h, m, "done")
     assert "publish_crops" in m.names() and m.of("assess")[0][3] == "approve"
+
+
+DOUBTED = JudgeResult(
+    "approve",
+    "reject",
+    0.9,
+    "one doubt",
+    "as-j",
+    0.5,
+    "Crop judge: reject",
+    findings=[
+        {"item": "c0", "severity": "ok", "note": "dim"},
+        {"item": "c1", "severity": "suspect", "note": "labels look shifted"},
+    ],
+    worst="suspect",
+)
+
+
+def revisions(m):
+    return [body for body in pr_comments(m) if body.startswith("/revise")]
+
+
+async def test_an_active_judge_that_finds_a_suspect_crop_sends_a_matched_set_to_the_developer(env):
+    """spec judge-decides §3, §4.1: the findings go to the developer as a person's reject does."""
+    m = Mocks(crop_judge="active", judge_result=DOUBTED)
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        state = await h.query(MiaDataDataset.status)
+    (asked,) = m.of("open_snippet_issue")
+    binding, draft = asked[2], asked[3]
+    assert binding == "/s/binding-1.yaml" and draft["what_fails"].startswith(f"Request: {state.held.request}\n")
+    assert "- c1 [suspect]: labels look shifted" in draft["what_fails"] and "c0" not in draft["what_fails"]
+    held = state.held
+    assert (held.sent_back_by, held.worst, held.request) == ("judge", "suspect", f"{held.set_id}#1")
+    assert held.set_id == f"i7-e11:{held.test.test_id}" and held.binding == "/s/binding-1.yaml"
+    assert held.findings == [{"item": "c1", "severity": "suspect", "note": "labels look shifted"}]
+    assert (held.opened_issue, held.snippet_issue, state.reworks) == (True, 100, 1)
+    # the developer is shown what the judge saw: the judge's workspace, under the snippets issue it answers
+    (shared,) = m.of("share_evidence")
+    assert shared[0] == "i7-e11" and "judge" in shared[1] and shared[2:] == (100, held.set_id)
+    assert m.names().index("open_snippet_issue") < m.names().index("share_evidence")
+    assert "assess" not in m.names() and "publish_crops" not in m.names()  # no person, and nothing saved
+    assert "Sent back by the crop judge" in next(r for r in m.of("result") if r[0] == "review")[1]
+
+
+async def test_an_active_judge_sends_a_pr_heads_set_back_once_and_then_leaves_it_to_a_person(env):
+    """spec judge-decides §4.3: one automatic rework by default; the next doubted set waits at review."""
+    m = Mocks(outcome="needs_snippet", crop_judge="active", judge_result=DOUBTED)
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await until(lambda: revisions(m))
+        await idle(h, m, "developing")
+        assert m.stages[-3:] == ["testing", "review", "developing"]
+        state = await h.query(MiaDataDataset.status)
+        assert revisions(m) == [f"/revise Request: {state.held.request}\n" + revisions(m)[0].split("\n", 1)[1]]
+        assert (state.held.test.sha, state.held.pr, state.held.opened_issue, state.reworks) == (H1, 5, False, 1)
+        assert m.of("share_evidence")[0][2:] == (100, state.held.set_id)  # before the request goes to the PR
+        assert (
+            m.names().index("share_evidence")
+            < [i for i, c in enumerate(m.calls) if c[0] == "comment" and c[1][0].startswith("/revise")][0]
+        )
+        await wake(h, m, head(H2))
+        await idle(h, m, "review")
+        state = await h.query(MiaDataDataset.status)
+        assert len(revisions(m)) == 1 and state.reworks == 1 and state.held.test.sha == H1  # h1's set stays held
+        waits = [a[0] for a in m.of("comment") if "waits for your verdict" in a[0]]
+        assert len(waits) == 1 and "max_reworks" in waits[0]
+        # a person's verdict starts the count over: their reject goes to the developer, and so does the judge's next
+        await reject_review(h, m)
+        await until(lambda: len(revisions(m)) == 2)
+        await idle(h, m, "developing")
+        assert (await h.query(MiaDataDataset.status)).reworks == 0
+        await wake(h, m, head(H3))
+        await until(lambda: len(revisions(m)) == 3)
+        assert (await h.query(MiaDataDataset.status)).reworks == 1
+
+
+def test_the_rework_request_names_itself_and_lists_each_finding_on_a_line():
+    from mia_data.crop_test import rework_request
+
+    findings = [
+        {"item": "c1", "severity": "suspect", "note": "labels look shifted"},
+        {"item": "c2", "severity": "bad", "note": ""},
+    ]
+    text = rework_request(findings, "i7-e11:t1#1")
+    assert text.splitlines()[0] == "Request: i7-e11:t1#1"
+    assert [line for line in text.splitlines() if line.startswith("- ")] == [
+        "- c1 [suspect]: labels look shifted",
+        "- c2 [bad]:",
+    ]
+    assert "no_change.json" in text and "make no commits" in text
+
+
+DOUBTED_BAD = dataclasses.replace(
+    DOUBTED, findings=[{"item": "c1", "severity": "bad", "note": "header read as pixels"}], worst="bad"
+)
+SAID = "**Nothing needs changing.** The answer to each finding:\n\n- c1: the label's own shift"
+
+
+def answered(pr, request):
+    """What a look finds once autodev validated a "nothing needs changing" for `request`."""
+    return AutodevLook(pr, False, False, "", SAID, "2999-01-01T00:00:00Z", no_change=request)
+
+
+async def sent_back_pr(env, h, m):
+    """The judge sent h1's set back as a revision request and autodev has not answered yet; the held set."""
+    await idle(h, m, "developing")
+    await wake(h, m, head(H1))
+    await until(lambda: revisions(m))
+    await idle(h, m, "developing")
+    await env.sleep(LOOK)
+    assert m.stages[-1] == "developing"
+    return (await h.query(MiaDataDataset.status)).held
+
+
+async def test_the_developers_nothing_to_change_approves_a_suspect_only_set(env):
+    """spec judge-decides §4.2: the judge doubted, the developer looked and found the crops right: saved."""
+    quiet = AutodevLook(5, False, False, "")
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"}, crop_judge="active", judge_result=DOUBTED, look=quiet)
+    async with started(env, m) as h:
+        held = await sent_back_pr(env, h, m)
+        m.look = answered(5, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "merging")
+        assert pr_comments(m)[-1] == f"/approve {H1}"
+        (assessed,) = m.of("assess")
+        assert assessed[1:5] == ("pr_head", H1, "approve", "policy:developer")
+        said = [r[1] for r in m.of("result") if r[0] == "developing"][-1]
+        assert "changed nothing" in said and "> - c1: the label's own shift" in said
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done")
+        assert (await h.query(MiaDataDataset.status)).saved.test.approved_by == "policy:developer"
+
+
+async def test_the_developers_nothing_to_change_on_a_bad_set_waits_for_a_person(env):
+    quiet = AutodevLook(5, False, False, "")
+    m = Mocks(outcome="needs_snippet", crop_judge="active", judge_result=DOUBTED_BAD, look=quiet)
+    async with started(env, m) as h:
+        held = await sent_back_pr(env, h, m)
+        m.look = answered(5, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        assert not m.of("assess") and "/approve" not in " ".join(pr_comments(m))
+        detail = m.of("set_stage")[-1][1]
+        assert "the crop judge found a bad crop" in detail and "waits for your verdict" in detail
+        await approve_review(h, m, eid="13", dt=3)
+        await idle(h, m, "merging")
+    assert pr_comments(m)[-1] == f"/approve {H1}"
+
+
+@pytest.mark.parametrize("no_change", ["", "i7-e11:another#1"])
+async def test_a_no_commit_round_without_a_validated_answer_approves_nothing(env, no_change):
+    """spec judge-decides §4.2: a round with no commits is not "right as they are"."""
+    quiet = AutodevLook(5, False, False, "")
+    m = Mocks(outcome="needs_snippet", crop_judge="active", judge_result=DOUBTED, look=quiet)
+    async with started(env, m) as h:
+        await sent_back_pr(env, h, m)
+        m.look = AutodevLook(
+            5, False, False, "", "could not reach the host", "2999-01-01T00:00:00Z", no_change=no_change
+        )
+        await env.sleep(LOOK)
+        assert m.stages[-1] == "developing" and not m.of("assess")
+        assert "/approve" not in " ".join(pr_comments(m))
+
+
+async def test_the_developers_answer_on_an_issue_with_no_pull_request_saves_a_suspect_only_matched_set(env):
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, False, False, ""))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        m.look = answered(None, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+    assert m.of("assess")[0][1:5] == ("crop_set", held.set_id, "approve", "policy:developer")
+    assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
+    assert state.saved.set_id == held.set_id and state.held is None
+
+
+async def test_an_answer_on_an_issue_with_no_pull_request_brings_a_persons_rejected_set_back_to_review(env):
+    """spec judge-decides §4.2: a developer's answer to a person's reject never approves; the person decides."""
+    m = Mocks(look=AutodevLook(None, False, False, ""))
+    async with started(env, m) as h:
+        await reject_review(h, m)
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        draft = m.of("open_snippet_issue")[0][3]
+        assert (held.sent_back_by, held.request) == ("alice", f"{held.set_id}#12")
+        assert draft["what_fails"].startswith(f"Request: {held.request}\n")
+        assert "the masks are shifted by one pixel" in draft["what_fails"]
+        await env.sleep(LOOK)
+        assert m.stages[-1] == "developing"
+        m.look = answered(None, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        assert [a[3] for a in m.of("assess")] == ["reject"] and "publish_crops" not in m.names()
+        assert (await h.query(MiaDataDataset.status)).snippet_issue is None  # that issue is answered and done with
+        await approve_review(h, m, eid="13", dt=3)
+        await idle(h, m, "done")
+    assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
+
+
+def accept(held, eid="21", actor="alice"):
+    """A person's approve that names the set that was sent back."""
+    return LabelEvent("approve", eid, actor, "2999-01-01T00:00:00Z", held.set_id)
+
+
+async def test_accepting_a_matched_set_under_rework_cancels_it_and_saves_that_set(env):
+    """spec judge-decides §5.1: "cancel the new work and merge the old set", in one action."""
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        await h.signal(MiaDataDataset.approve, accept(held))
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+    assert "cancelled" not in m.stages and m.stages[-2:] == ["developing", "done"]
+    assert m.of("assess")[0][1:5] == ("crop_set", held.set_id, "approve", "human:alice")
+    assert m.of("close_snippet_issue")[0][:2] == (100, None)  # the reader the send-back asked for is not wanted
+    assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
+    assert state.saved.set_id == held.set_id and state.saved.test.approved_by == "alice"
+    assert state.held is None and state.accepting is None
+    assert any("Accepted" in a[0] and "alice" in a[0] for a in m.of("comment"))
+
+
+async def test_accepting_a_pr_heads_set_asks_autodev_to_merge_that_head_and_ignores_newer_heads(env):
+    quiet = AutodevLook(5, True, False, "")
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"}, crop_judge="active", judge_result=DOUBTED, look=quiet)
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await until(lambda: revisions(m))
+        await idle(h, m, "developing")
+        await wake(h, m, head(H2))  # the developer's fix: doubted too, and the judge may not send back twice
+        await idle(h, m, "review")
+        held = (await h.query(MiaDataDataset.status)).held
+        assert held.test.sha == H1
+        await h.signal(MiaDataDataset.approve, accept(held))
+        await idle(h, m, "merging")
+        assert pr_comments(m)[-1] == f"/accept {H1}" and (await h.query(MiaDataDataset.status)).accepting == H1
+        assert "its running job" in m.of("set_stage")[-1][1]
+        tested = len([a for a in m.jobs() if a.n_crops])
+        await wake(h, m, head(H3))  # a head autodev pushed before it read the accept: not tested, not judged
+        await h.signal(MiaDataDataset.approve, accept(held, eid="22"))  # a second click: nothing merges twice
+        await until(lambda: [a for a in m.of("refuse_label") if a[2] == "22"])
+        assert len([a for a in m.jobs() if a.n_crops]) == tested and m.stages[-1] == "merging"
+        assert [c for c in pr_comments(m) if c.startswith("/accept")] == [f"/accept {H1}"]
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+    assert m.of("publish_crops")[0][0].endswith(f"crop-{H1}-1") and m.of("publish_crops")[0][2] == MC
+    assert state.saved.test.sha == H1 and state.held is None and state.accepting is None
+    assert [a[1:5] for a in m.of("assess")] == [("pr_head", H1, "approve", "human:alice")]
+
+
+async def test_accept_is_taken_after_the_rework_stopped(env):
+    """spec judge-decides §5.1: the set stays acceptable when the rework ended blocked, failed or cancelled."""
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, False, True, "I cannot do this"))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        await env.sleep(LOOK)
+        await idle(h, m, "blocked")
+        await h.signal(MiaDataDataset.approve, accept(held))
+        await idle(h, m, "done")
+    assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
+
+
+async def test_an_accept_whose_crops_are_gone_is_refused_and_the_rework_goes_on(env):
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        m.verify_gone = True
+        await h.signal(MiaDataDataset.approve, accept(held))
+        await until(lambda: m.of("refuse_label"))
+        assert "can no longer be accepted" in m.of("refuse_label")[0][1]
+        await env.sleep(LOOK)  # the rework was not stopped for it: the round still waits for autodev
+        assert m.stages[-1] == "developing" and "publish_crops" not in m.names() and not m.of("kill_job")
+        assert (await h.query(MiaDataDataset.status)).held == held
+
+
+async def test_a_save_that_fails_after_an_accept_rests_at_blocked_and_keeps_the_approval(env):
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, True, False, ""))
+    m.publish_error = "the dataset folder is another record's"
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        await h.signal(MiaDataDataset.approve, accept(held))
+        await idle(h, m, "blocked")
+        state = await h.query(MiaDataDataset.status)
+        detail = m.of("set_stage")[-1][1]
+        assert f"The set {held.set_id} was accepted by alice" in detail and "Accept can be sent again" in detail
+        assert "another record's" in detail and m.of("assess")[0][3] == "approve"  # the approval stands
+        assert state.held.set_id == held.set_id and state.saved is None and state.accepting is None
+        m.publish_error = None
+        await h.signal(MiaDataDataset.approve, accept(held, eid="22"))  # and it can be sent again
+        await idle(h, m, "done")
+
+
+async def saved_then_rejected(h, m):
+    """A matched set a person approved and that was saved, then their reject of the saved set; (saved, held)."""
+    await approve_review(h, m)
+    await idle(h, m, "done")
+    saved = (await h.query(MiaDataDataset.status)).saved
+    await h.signal(MiaDataDataset.reject, LabelEvent("reject", "31", "alice", "2999-01-01T00:00:00Z", saved.set_id))
+    await idle(h, m, "developing")
+    return saved, (await h.query(MiaDataDataset.status)).held
+
+
+async def test_rejecting_a_saved_set_revokes_it_and_starts_the_rework(env):
+    """spec judge-decides §5.2: "revoke and start the rework"."""
+    m = Mocks(look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        saved, held = await saved_then_rejected(h, m)
+        state = await h.query(MiaDataDataset.status)
+    names = m.names()
+    revoked = names.index("revoke_dataset")
+    assert revoked < names.index("admit", revoked) < names.index("open_snippet_issue")
+    assert m.of("revoke_dataset") == [("i7-e11", "alice", "31")]  # the saved set's own round
+    (asked,) = m.of("open_snippet_issue")
+    assert asked[:3] == ("i7-e31", None, "/s/binding-1.yaml")  # a round of its own, the rejected binding
+    assert asked[3]["what_fails"].startswith(f"Request: {saved.set_id}#31\n")
+    assert "the masks are shifted by one pixel" in asked[3]["what_fails"]
+    assert state.round_id == "i7-e31" and state.saved is None
+    assert (held.set_id, held.sent_back_by, held.round_id) == (saved.set_id, "alice", "i7-e11")
+    assert any("revoked" in a[0] and "alice" in a[0] for a in m.of("comment"))
+
+
+async def test_a_reject_that_names_another_set_than_the_saved_one_is_refused(env):
+    m = Mocks()
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        await h.signal(MiaDataDataset.reject, LabelEvent("reject", "31", "alice", "2999-01-01T00:00:00Z", "i7-e0:zz"))
+        await until(lambda: m.of("refuse_label"))
+        assert m.stages[-1] == "done" and "revoke_dataset" not in m.names()
+        assert (await h.query(MiaDataDataset.status)).saved is not None
+
+
+async def test_accepting_the_revoked_set_again_saves_it_under_its_own_round(env):
+    """spec judge-decides §4.2, §5.5: the same set, accepted again, is saved again (which repairs by recipe)."""
+    m = Mocks(look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        saved, held = await saved_then_rejected(h, m)
+        await h.signal(MiaDataDataset.approve, accept(held, eid="41"))
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+    the_set = (f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")
+    assert m.of("publish_crops") == [the_set, the_set]
+    assert state.round_id == "i7-e11" and state.saved.set_id == saved.set_id and state.held is None
+    assert m.of("close_snippet_issue")[0][:2] == (100, None)
+
+
+async def test_the_developers_answer_to_a_reject_of_a_saved_set_brings_that_set_back_to_review(env):
+    m = Mocks(look=AutodevLook(None, False, False, ""))
+    async with started(env, m) as h:
+        saved, held = await saved_then_rejected(h, m)
+        m.look = answered(None, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        state = await h.query(MiaDataDataset.status)
+        assert state.round_id == "i7-e11" and state.tests[-1].test_id == saved.test.test_id
+        assert len(m.of("publish_crops")) == 1  # an answer to a person's reject never approves
+        await h.signal(
+            MiaDataDataset.approve, LabelEvent("approve", "51", "alice", "2999-02-01T00:00:00Z", saved.set_id)
+        )
+        await idle(h, m, "done")
+    assert len(m.of("publish_crops")) == 2 and m.of("publish_crops")[1][0] == f"/w/i7-e11/crop-{SHA}-1"
+
+
+async def test_a_rollover_while_the_developer_works_on_a_set_with_no_pull_request_keeps_the_way_back(env, monkeypatch):
+    """Review finding: after a continue-as-new at `developing`, the developer's answer brought the set back to
+    review with nothing waiting for the verdict."""
+    from temporalio import workflow
+
+    m = Mocks(look=AutodevLook(None, False, False, ""))
+    m.roll = False
+    monkeypatch.setattr(workflows, "_rollover_due", lambda: m.roll and workflow.info().continued_run_id is None)
+    async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
+        await reject_review(h, m)
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        m.roll = True
+        await env.sleep(LOOK)
+        for _ in range(500):
+            if (await h.describe()).run_id != h.first_run_id:
+                break
+            await asyncio.sleep(0.02)
+        assert (await h.describe()).run_id != h.first_run_id
+        m.roll = False
+        m.look = answered(None, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        await approve_review(h, m, eid="13", dt=3)
+        await idle(h, m, "done")
+    assert not m.of("refuse_label") and len(m.of("publish_crops")) == 1
+
+
+async def test_a_set_brought_back_from_an_earlier_round_goes_on_counting_that_rounds_passes(env):
+    """Review finding: with the round's pass counters reset, the entries of the restored round reused their
+    markers and the ledger dropped them: the timeline was silent about the second review and its approval."""
+    m = Mocks(look=AutodevLook(None, False, False, ""))
+    async with started(env, m) as h:
+        saved, held = await saved_then_rejected(h, m)
+        assert held.passes == {"matching": 1, "testing": 1, "review": 1}  # what its round had begun
+        m.look = answered(None, held.request)
+        await env.sleep(LOOK)
+        await idle(h, m, "review")
+        state = await h.query(MiaDataDataset.status)
+        assert state.round_id == "i7-e11" and state.passes["review"] == 2  # a second pass at review, not the first
+
+
+async def test_a_reject_of_the_saved_set_that_cannot_start_its_rework_leaves_the_set_acceptable(env):
+    """Review finding: the pause was on (or admission refused) after the revoke: the dataset was revoked with no
+    held set, so the reject could not be undone."""
+    m = Mocks(look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        await approve_review(h, m)
+        await idle(h, m, "done")
+        saved = (await h.query(MiaDataDataset.status)).saved
+        m.paused = True
+        await h.signal(MiaDataDataset.reject, LabelEvent("reject", "31", "alice", "2999-01-01T00:00:00Z", saved.set_id))
+        await idle(h, m, "blocked")
+        state = await h.query(MiaDataDataset.status)
+        assert state.held.set_id == saved.set_id and state.held.sent_back_by == "alice" and state.saved is None
+        assert "open_snippet_issue" not in m.names() and state.debugs == 0
+        m.paused = False
+        await h.signal(MiaDataDataset.approve, accept(state.held, eid="41"))
+        await idle(h, m, "done")
+    assert len(m.of("publish_crops")) == 2
+
+
+async def test_a_set_keeps_what_its_merge_needs_and_an_accept_from_a_later_round_saves_it(env):
+    """Review finding: `_restore` did not bring back the snippet's name and the seed, so an accepted pull-request
+    set of an earlier round was merged but another set was made instead of saving it."""
+    quiet = AutodevLook(5, True, False, "")
+    m = Mocks(outcome="needs_snippet", trees={H1: "T", MC: "T"}, crop_judge="active", judge_result=DOUBTED, look=quiet)
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        await wake(h, m, head(H1))
+        await until(lambda: revisions(m))
+        await idle(h, m, "developing")
+        state = await h.query(MiaDataDataset.status)
+        held = state.held
+        assert (held.snippet_name, held.seed) == (state.snippet_name, state.seed) and held.snippet_name
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "14"))
+        await idle(h, m, "cancelled")
+        m.pr_now = head(H2)
+        m.judge_result = JudgeResult("escalate", "escalate", 0.3, "unsure", "as-j", 0.5, "Crop judge: escalate")
+        await h.signal(MiaDataDataset.restart, ev("go", "15"))  # a later round picks the pull request up at h2
+        await idle(h, m, "review")
+        assert (await h.query(MiaDataDataset.status)).round_id == "i7-e15"
+        await h.signal(MiaDataDataset.approve, accept(held, eid="41"))
+        await idle(h, m, "merging")
+        m.pr_now = None
+        await wake(h, m, head(H1, "merged", MC))
+        await idle(h, m, "done")
+        state = await h.query(MiaDataDataset.status)
+    assert state.round_id == "i7-e11" and state.saved.set_id == held.set_id
+    assert m.of("publish_crops")[-1][0] == f"/w/i7-e11/crop-{H1}-1" and m.of("publish_crops")[-1][2] == MC
+
+
+async def test_accepting_a_matched_set_closes_the_pull_request_its_rework_opened(env):
+    """Review finding (spec §5.1 step 1): the reader the send-back asked for is not wanted any more."""
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        m.judge_result = JudgeResult("escalate", "escalate", 0.3, "unsure", "as-j", 0.5, "Crop judge: escalate")
+        await wake(h, m, head(H1))  # the developer's pull request: its head's set waits at review
+        await idle(h, m, "review")
+        await h.signal(MiaDataDataset.approve, accept(held))
+        await idle(h, m, "done")
+    assert m.of("close_snippet_issue")[0][:2] == (100, 5)
+    assert m.of("publish_crops") == [(f"/w/i7-e11/crop-{SHA}-1", 16, SHA, "/s/binding-1.yaml")]
+
+
+async def test_an_old_answer_never_approves_a_set_held_from_an_earlier_round(env):
+    """Review finding: a later round that follows the same snippets issue found the old "nothing needs changing"
+    marker and approved the earlier round's set. A request is answered within its own round, or not at all."""
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, look=AutodevLook(None, True, False, ""))
+    async with started(env, m) as h:
+        await idle(h, m, "developing")
+        held = (await h.query(MiaDataDataset.status)).held
+        await h.signal(MiaDataDataset.cancel, ev("cancel", "14"))
+        await idle(h, m, "cancelled")
+        m.outcome, m.look = "needs_snippet", answered(None, held.request)  # the old marker is still on the issue
+        await h.signal(MiaDataDataset.restart, ev("go", "15"))
+        await idle(h, m, "developing")
+        await env.sleep(LOOK)
+        state = await h.query(MiaDataDataset.status)
+    assert "publish_crops" not in m.names() and not m.of("assess")
+    assert state.held.set_id == held.set_id and state.held.request == ""  # still acceptable by a person
+
+
+def test_the_entries_of_a_send_back_an_accept_and_a_rework_name_their_set():
+    """Review finding (spec §6): each entry names the set and who acted."""
+    import inspect
+
+    source = inspect.getsource(MiaDataDataset)
+    for line in ("Sent back by the crop judge", "Accepted by {event.actor}", "the saved crops are revoked"):
+        start = source.index(line)
+        assert "set_id}" in source[start - 200 : start + 400], line
+
+
+async def test_max_reworks_zero_never_sends_back(env):
+    m = Mocks(crop_judge="active", judge_result=DOUBTED, max_reworks=0)
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        assert not m.of("open_snippet_issue") and (await h.query(MiaDataDataset.status)).held is None
+        await approve_review(h, m)
+        await idle(h, m, "done")
+    assert "publish_crops" in m.names()
+
+
+async def test_a_shadow_judge_that_doubts_a_set_sends_nothing_back(env):
+    m = Mocks(crop_judge="shadow", judge_result=DOUBTED)
+    async with started(env, m) as h:
+        await idle(h, m, "review")
+        assert not m.of("open_snippet_issue") and (await h.query(MiaDataDataset.status)).held is None
 
 
 async def test_an_active_judges_approve_of_a_pr_head_asks_autodev_to_merge_it(env):

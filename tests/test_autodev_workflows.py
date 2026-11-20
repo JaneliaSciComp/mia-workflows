@@ -1,5 +1,6 @@
 """IssueWorkflow on Temporal's time-skipping server, with every activity mocked."""
 
+import dataclasses
 import json
 import os
 import re
@@ -31,6 +32,7 @@ from autodev.models import (
     PrRef,
     PrSnapshot,
     PublishInput,
+    ResetInput,
     RoundInput,
     StageInput,
     SubmitInput,
@@ -67,7 +69,11 @@ class Mocks:
         judge_state="DONE",
         judge_gate=None,
         cut_offs=0,
+        no_change="",
+        accepted_during_round="",
     ):
+        self.accepted_during_round = accepted_during_round  # the head a person accepted while an agent job ran
+        self.no_change = no_change  # the request id a first round with no commits answers "nothing to change" to
         self.cut_offs = cut_offs  # how many agent jobs lose their session before one runs to its end
         self.observe_failures, self.report_failures, self.reported = observe_failures, report_failures, 0
         self.observe_fatal = observe_fatal
@@ -106,7 +112,7 @@ class Mocks:
         async def publish(a: PublishInput) -> PrRef:
             self.calls.append(("publish", a))
             if a.pr is None:
-                return PrRef(self.publish_pr, "h1" if self.publish_pr else None)
+                return PrRef(self.publish_pr, "h1" if self.publish_pr else None, self.no_change)
             return PrRef(a.pr, f"h{a.round}")
 
         @activity.defn(name="prepare_judge")
@@ -137,6 +143,15 @@ class Mocks:
                 raise ApplicationError("nothing to do yet")
             return s
 
+        @activity.defn(name="accepted_head")
+        async def accepted_head(pr: int) -> str:
+            self.calls.append(("accepted_head", pr))
+            return self.accepted_during_round
+
+        @activity.defn(name="reset_pr")
+        async def reset_pr(a: ResetInput) -> None:
+            self.calls.append(("reset", a))
+
         @activity.defn(name="merge_pr")
         async def merge(a: MergeInput) -> MergeResult:
             self.calls.append(("merge", a))
@@ -158,6 +173,8 @@ class Mocks:
             submit,
             publish,
             observe,
+            accepted_head,
+            reset_pr,
             merge,
             report,
             prepare_judge,
@@ -228,6 +245,13 @@ async def test_no_commits_reports_failure(env):
     assert "no commits" in f.error and f.workspace.dir == "/w/round-1" and "observe" not in m.names()
 
 
+async def test_a_first_round_that_answers_nothing_needs_changing_ends_answered_not_failed(env):
+    m = Mocks([snap()], publish_pr=None, no_change="i7-e1:t1#1")
+    assert await run(env, m) == "answered"
+    assert m.of("set_stage")[-1] == "answered"
+    assert not m.of("report_failure") and "observe" not in m.names()
+
+
 async def test_an_agent_cut_off_by_its_login_runs_the_round_once_more(env):
     """Incident 2026-11-17 (snippets #95): the login lapsed under a revision agent six minutes into its work; the
     job ended with no commits, and the issue stopped as `needs-human` over "Refusing to create empty bundle"."""
@@ -262,6 +286,26 @@ async def test_feedback_revised_once(env):
     assert [r.round for r in rounds] == [1, 2]
     assert rounds[1].feedback == "rename foo" and rounds[1].pr == 5
     assert m.of("publish")[1].feedback_id == "review-1" and m.of("merge")[0].sha == "h2"
+
+
+async def test_an_accept_of_an_earlier_head_resets_the_pull_request_and_merges_that_head(env):
+    """spec judge-decides §5.1: later commits are discarded, the accepted head is what lands."""
+    later = dataclasses.replace(snap(sha="h2"), accepted="h1")
+    back = dataclasses.replace(snap(sha="h1"), accepted="h1")
+    m = Mocks([later, back])
+    assert await run(env, m) == "merged"
+    assert m.of("reset") == [ResetInput(7, 5, "h1")] and m.of("merge")[0].sha == "h1"
+    assert m.names().index("reset") < m.names().index("merge")
+
+
+async def test_an_accept_that_comes_while_a_revision_runs_drops_that_rounds_result_unpushed(env):
+    """The agent's job is waited for, not killed; nothing of it is pushed, so nothing can land after the reset."""
+    fb = Feedback("review-1", "rename foo")
+    later = dataclasses.replace(snap(sha="h1"), accepted="h1")
+    m = Mocks([snap(feedback=[fb]), later], accepted_during_round="h1")
+    assert await run(env, m) == "merged"
+    assert [r.round for r in m.of("prepare")] == [1, 2] and len(m.of("publish")) == 1  # round 2 was not published
+    assert any("dropped" in c.body for c in m.of("comment")) and m.of("merge")[0].sha == "h1"
 
 
 async def test_revision_limit_escalates_and_the_requesters_approval_merges(env):

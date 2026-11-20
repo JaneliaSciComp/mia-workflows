@@ -601,15 +601,21 @@ class Ledger:
         marker: str = "",
         round_id: str | None = None,
         stage: str | None = None,
+        data: dict | None = None,
     ) -> tuple[dict, dict | None] | None:
         """Write a stage, an entry or both, in one transaction: (subject, entry), or None without such a subject.
         A `stage` always becomes the subject's and raises its revision. A `body` is appended once per marker: a
         second write with the marker (a retried activity, a stage entered twice in a round) returns the first
-        entry and appends nothing."""
+        entry and appends nothing. Each key of `data` replaces that key of the subject's data; the others stay."""
         key = (kind, number)
         with self._transaction() as db:
-            if not self._subjects(db, "WHERE kind = ? AND number = ?", key):
+            if not (found := self._subjects(db, "WHERE kind = ? AND number = ?", key)):
                 return None
+            if data:
+                db.execute(
+                    "UPDATE subjects SET data = ?, updated = ? WHERE kind = ? AND number = ?",
+                    (json.dumps({**found[0]["data"], **data}), time.time(), *key),
+                )
             if stage is not None:
                 db.execute(
                     "UPDATE subjects SET stage = ?, revision = revision + 1, updated = ? WHERE kind = ? AND number = ?",
@@ -893,7 +899,10 @@ class Ledger:
         """How the judge and the humans agree at a gate (spec autonomous-gates §9): per subject with a judge
         assessment, its newest judge verdict against the newest human verdict; no human verdict yet is `pending`.
         A person's verdict on a snippet PR head counts for the crop set made from that head (`head_of`).
-        Returns {"judged", "agree", "disagree", "pending", "pairs": [{subject, judge, human, agree}]}."""
+        A judge's decision that a person's later, opposite verdict overturned (spec judge-decides §5, §6) is a
+        disagreement that names who overturned it and when.
+        Returns {"judged", "agree", "disagree", "overturned", "abstain", "pending", "pairs": [{subject, judge,
+        human, agree, at, overturned_by, overturned_at}]}."""
         newest_judge: dict[str, dict] = {}
         newest_human: dict[str, dict] = {}
         on_head: dict[str, dict] = {}  # snippet PR head -> the newest human verdict recorded on it
@@ -913,19 +922,24 @@ class Ledger:
             if human is None and key.startswith("crop_set:"):
                 human = on_head.get(head_of(judge["subject"]) or "")
             abstained = judge.get("verdict") == "escalate"  # the judge did not decide: neither agreement nor not
+            agree = None if human is None or abstained else judge.get("verdict") == human.get("verdict")
+            overturned = human if human and agree is False and str(human.get("at")) > str(judge.get("at")) else None
             pairs.append(
                 {
                     "subject": key,
                     "judge": judge.get("verdict"),
                     "human": human.get("verdict") if human else None,
-                    "agree": None if human is None or abstained else judge.get("verdict") == human.get("verdict"),
+                    "agree": agree,
                     "at": judge.get("at"),
+                    "overturned_by": overturned.get("by") if overturned else None,
+                    "overturned_at": overturned.get("at") if overturned else None,
                 }
             )
         return {
             "judged": len(pairs),
             "agree": sum(1 for pair in pairs if pair["agree"] is True),
             "disagree": sum(1 for pair in pairs if pair["agree"] is False),
+            "overturned": sum(1 for pair in pairs if pair["overturned_by"]),
             "abstain": sum(1 for pair in pairs if pair["judge"] == "escalate"),
             "pending": sum(1 for pair in pairs if pair["agree"] is None and pair["judge"] != "escalate"),
             "pairs": pairs[:200],

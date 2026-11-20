@@ -35,7 +35,7 @@ directory on branch `{branch}` at commit {base_sha}.
 # Issue: {title}
 
 {body}
-{discussion}{revision}
+{discussion}{revision}{evidence}
 # How to work
 
 - Read CLAUDE.md and README.md first, if present, and follow the repository's conventions.
@@ -45,6 +45,10 @@ directory on branch `{branch}` at commit {base_sha}.
 - Do not modify anything under: {protected}.
 - Finish with a short summary of what you changed and how you tested it. It is posted on the pull request.
 - If the issue is unclear or cannot be done, make no commits and explain why in your summary.
+- If the issue or the requested changes carry a line `Request: <id>` with findings about sample crops, and you
+  find the crops right as they are, make no commits and write `{no_change}` in the current directory (do not
+  commit it): `{{"request": "<id>", "findings": [{{"item": "<the finding's item>", "answer": "<what you looked at
+  and why it is not a defect>"}}]}}`, one entry for every finding. Do not write code to satisfy a doubt.
 """
 
 
@@ -79,8 +83,23 @@ def render_prompt(
         body=issue.get("body") or "(no description)",
         discussion=discussion,
         revision=revision,
+        evidence=(
+            f"\n# Evidence\n\nWhat this issue is about can be looked at, read-only, under `{folder}`.\n"
+            if (folder := evidence_folder(cfg, issue["number"])) is not None
+            else ""
+        ),
         protected=", ".join(cfg.github.protected_paths) or "(nothing)",
+        no_change=NO_CHANGE_FILE,
     )
+
+
+def evidence_folder(cfg: Config, issue: int) -> Path | None:
+    """The folder of evidence left for this issue under `agent.evidence_dir`, when there is one: found by the
+    issue's number, never by a path an issue or a comment names. A link is not a folder of evidence."""
+    if cfg.agent.evidence_dir is None:
+        return None
+    folder = cfg.agent.evidence_dir / f"issue-{int(issue)}"
+    return folder if folder.is_dir() and not folder.is_symlink() else None
 
 
 def job_script(cfg: Config, base_sha: str) -> str:
@@ -142,6 +161,41 @@ def read_result(round_dir: Path, limit: int = 20000) -> tuple[str, float | None]
     if len(text) > limit:
         text = text[:limit] + "\n\n…(truncated)"
     return text or "(empty summary)", cost if isinstance(cost, (int, float)) else None
+
+
+NO_CHANGE_FILE = "no_change.json"  # the agent's "nothing needs changing", finding by finding, in its checkout
+NO_CHANGE_BYTES = 256 * 1024
+REQUEST_RE = re.compile(r"^[ \t]*(?:/revise[ \t]+)?Request: (\S+)[ \t]*$", re.M)
+FINDING_RE = re.compile(r"^- (.+?) \[(?:suspect|bad)\]:", re.M)
+
+
+def read_no_change(round_dir: Path, request_text: str) -> tuple[str, dict[str, str]]:
+    """The agent's validated "the crops are right as they are" (spec judge-decides §4.2): (the request's id, its
+    answer to each finding), or ("", {}) for anything else. It counts only as an explicit answer to this
+    request: `request_text` (the issue's body or the reviewer's feedback, as the agent was given it) names a
+    request and lists findings; the agent's `no_change.json` names that request and answers exactly those
+    findings, each with text; and the agent's run ended by itself (its result object is not an error). A round
+    with no commits and no such file says nothing about the crops. Untrusted, like everything a job wrote."""
+    asked, items = REQUEST_RE.search(request_text or ""), FINDING_RE.findall(request_text or "")
+    if not asked or not items or len(set(items)) != len(items):
+        return "", {}
+    try:
+        result = json.loads(read_untrusted(Path(round_dir), "result.json", 1 << 20) or "")
+        data = json.loads(read_untrusted(Path(round_dir) / "repo", NO_CHANGE_FILE, NO_CHANGE_BYTES) or "")
+    except (ValueError, RecursionError):
+        return "", {}
+    if not isinstance(result, dict) or result.get("is_error") is True or not isinstance(data, dict):
+        return "", {}
+    findings = data.get("findings")
+    if data.get("request") != asked.group(1) or not isinstance(findings, list) or len(findings) != len(items):
+        return "", {}
+    answers: dict[str, str] = {}
+    for finding in findings:
+        item, answer = (finding.get("item"), finding.get("answer")) if isinstance(finding, dict) else (None, None)
+        if not isinstance(item, str) or not isinstance(answer, str) or not answer.strip():
+            return "", {}
+        answers[item.strip()] = answer.strip()[:2000]
+    return (asked.group(1), answers) if set(answers) == {item.strip() for item in items} else ("", {})
 
 
 CUT_OFF_RE = re.compile(r"Not logged in|/login|OAuth|Invalid API key|API Error", re.IGNORECASE)
@@ -254,7 +308,10 @@ class AgentJobs:
                 mem_mb=agent_cfg.mem_mb,
                 allow_hosts=agent_hosts(agent_cfg.allow_hosts, named_hosts, policy_hosts),
                 agent="claude",
-                ro_mounts=[mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts],  # Config guarantees ":ro"
+                ro_mounts=[
+                    *(mount.removesuffix(":ro") for mount in agent_cfg.extra_mounts),  # Config guarantees ":ro"
+                    *([str(evidence)] if (evidence := evidence_folder(self.cfg, issue)) is not None else []),
+                ],
                 env={"ANTHROPIC_API_KEY": os.environ[agent_cfg.api_key_env]} if agent_cfg.api_key_env else {},
                 prompt_file="prompt.md",
                 transcript_file=TRANSCRIPT_FILE,

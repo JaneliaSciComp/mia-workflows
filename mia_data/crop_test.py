@@ -26,6 +26,59 @@ def describe_failure(kind: str, job: JobDone, errors: list[str] | None = None) -
     return f"{text}: {'; '.join(errors[:5])}" if errors else text
 
 
+NO_CHANGE_FILE = "no_change.json"  # where the developer says, finding by finding, that nothing needs changing
+
+
+def rework_request(findings: list[dict], request: str) -> str:
+    """What the developer is asked when the crop judge sends a set back (spec judge-decides §4.1, §4.2): the
+    request's id on the first line, each finding that is not `ok` on a line of its own, and the two ways the
+    developer may end. autodev validates the second way against exactly these lines."""
+    lines = [
+        f"- {finding['item']} [{finding['severity']}]: {finding.get('note') or ''}".rstrip() for finding in findings
+    ]
+    return "\n".join(
+        [
+            f"Request: {request}",
+            "",
+            "The crop judge looked at the sample crops this reader made and doubts them. Its findings:",
+            "",
+            *lines,
+            "",
+            "Look into every finding before you change anything; the crops the judge saw are in the read-only "
+            "evidence folder your instructions name, when there is one. Then end in one of two ways:",
+            "",
+            "1. The reader or its binding reads the data wrong: fix it and commit.",
+            f"2. The crops are right as they are: make no commits and write `{NO_CHANGE_FILE}` in the current "
+            "directory, uncommitted: "
+            '`{"request": "<the id on the first line>", "findings": [{"item": "<as above>", "answer": "<what you '
+            'looked at and why it is not a defect>"}]}`, with one entry for every finding above. Do not write a '
+            "reader to satisfy a doubt.",
+        ]
+    )
+
+
+def review_request(comments: str, request: str) -> str:
+    """What the developer is asked when a person rejects a set and no pull request carries the request: the
+    request's id, the person's comments, and one finding that stands for them, so that the developer can answer
+    "the crops are right as they are" the way it answers the judge (`rework_request`)."""
+    return "\n".join(
+        [
+            f"Request: {request}",
+            "",
+            "A reviewer rejected the sample crops this reader made. Their comments:",
+            "",
+            comments,
+            "",
+            "- the reviewer's comments [bad]: see above",
+            "",
+            "Fix the reader or its binding and commit. If the crops are right as they are, make no commits and "
+            f"write `{NO_CHANGE_FILE}` in the current directory, uncommitted: "
+            '`{"request": "<the id on the first line>", "findings": [{"item": "the reviewer\'s comments", '
+            '"answer": "<what you looked at and why it is not a defect>"}]}`.',
+        ]
+    )
+
+
 def judge(verify: VerifyResult, jobs: list[JobDone], needed: int | None = None) -> tuple[bool, list[str]]:
     """(passed, descriptions of failed jobs). A PR head's test crops (`needed` None) pass when both jobs succeeded
     and every crop verified. The dataset's own set (spec §13) passes when the crop job succeeded and at least
