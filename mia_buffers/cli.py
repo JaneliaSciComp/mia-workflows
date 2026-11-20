@@ -494,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
         ("init-labels", "create the buffer:* labels on the issue repo"),
         (
             "check",
-            "verify GitHub repos, Temporal, directories, the local root, the token, the harness (and its fetch) and "
+            "verify GitHub repos, Temporal, directories, the local root, the token, the harness (and its stage) and "
             "buffer-api",
         ),
     ):

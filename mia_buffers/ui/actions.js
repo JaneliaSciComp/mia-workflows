@@ -9,8 +9,8 @@ import { api, banner, JSON_HEADERS, newKey, S } from "./api.js";
 // What a button does, said on hover. BUTTON_HELP: the buttons with a control of their own. ACTION_HELP: a subject's
 // action bar, by kind and action; a function where the stage changes what the action means.
 export const BUTTON_HELP = {
-  plan: "Plan this buffer over the datasets that are prepared now. The round stops at its plan: nothing is downloaded until you press Run.",
-  run: "Accept the plan and start the jobs: its datasets are downloaded and staged, then the round stops for your approval.",
+  plan: "Plan this buffer over the datasets that are prepared now. The round stops at its plan: nothing is read from a source until you press Run.",
+  run: "Accept the plan and start the jobs: its datasets are staged, then the round stops for your approval.",
   serve:
     "Serve this version as the table shows it. The share each weighting group has now becomes the floor it is judged against.",
   back: "Cancel the round in progress, so that the buffer can be changed. Its cluster jobs are killed and the work so far is not kept.",
@@ -86,7 +86,7 @@ export const ACTION_HELP = {
     ...SHELF_HELP,
     approve: s =>
       s.stage === "plan-review"
-        ? "Accept the plan and start the jobs: the pool's datasets are downloaded and converted, then the round stops for your approval."
+        ? "Accept the plan and start the jobs: the pool's datasets are staged, then the round stops for your approval."
         : "Serve the buffer as the board shows it. The share each weighting group has now becomes the floor it is judged against.",
     keep: "Keep this idle buffer: it goes back to ready instead of being retired.",
     retire: "Release the buffer's staged data: training jobs are refused from then on, and the space can be reclaimed.",

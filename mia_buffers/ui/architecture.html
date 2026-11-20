@@ -32,7 +32,7 @@
 <text class="s" x="288" y="102">match · crops · save</text>
 <rect class="b" x="280" y="140" width="175" height="55" rx="4"/>
 <text class="t" x="288" y="160">mia-buffers worker</text>
-<text class="s" x="288" y="176">plan · fetch · stage · keeper</text>
+<text class="s" x="288" y="176">plan · stage · keeper</text>
 <rect class="bs" x="480" y="66" width="170" height="129" rx="4"/>
 <text class="t" x="488" y="86">buffer-api</text>
 <text class="s" x="488" y="104">the registry: an index of</text>
@@ -46,12 +46,9 @@
 <rect class="b" x="280" y="300" width="110" height="50" rx="4"/>
 <text class="t" x="288" y="320">mia-data jobs</text>
 <text class="s" x="288" y="337">match · crop</text>
-<rect class="b" x="410" y="300" width="110" height="50" rx="4"/>
-<text class="t" x="418" y="320">fetch job</text>
-<text class="s" x="418" y="337">files → raw cache</text>
-<rect class="b" x="540" y="300" width="110" height="50" rx="4"/>
-<text class="t" x="548" y="320">stage job</text>
-<text class="s" x="548" y="337">cache → pyramid</text>
+<rect class="b" x="410" y="300" width="240" height="50" rx="4"/>
+<text class="t" x="418" y="320">stage job</text>
+<text class="s" x="418" y="337">source → pyramid; whole files → raw cache</text>
 <!-- storage band -->
 <rect class="band" x="250" y="385" width="410" height="140" rx="6"/>
 <text class="hd" x="262" y="401">shared storage · the truth the registry indexes</text>
@@ -90,7 +87,6 @@
 <!-- workers → jobs (csub), in the left gutter and below the band -->
 <path class="e" d="M280 110 H262 V325 H280" marker-end="url(#f1)"/>
 <text class="l" x="258" y="365" text-anchor="end">csub</text>
-<path class="e" d="M400 195 V270 H465 V300" marker-end="url(#f1)"/>
 <path class="e" d="M430 195 V260 H595 V300" marker-end="url(#f1)"/>
 <text class="l" x="520" y="254" text-anchor="middle">csub</text>
 <!-- jobs → storage -->
@@ -184,15 +180,16 @@
 <text class="s" x="48" y="544">person runs it; a request</text>
 <text class="s" x="48" y="558">asks mia-data for datasets</text>
 <rect class="b" x="225" y="478" width="150" height="100" rx="4"/>
-<text class="t" x="233" y="498">fetch</text>
-<text class="s" x="233" y="516">harness fetch fills the</text>
-<text class="s" x="233" y="530">raw cache under the lock,</text>
-<text class="s" x="233" y="544">resuming until complete</text>
+<text class="t" x="233" y="498">quota wait</text>
+<text class="s" x="233" y="516">under the record's lock, a</text>
+<text class="s" x="233" y="530">dataset waits while the raw</text>
+<text class="s" x="233" y="544">cache is over its quota</text>
 <rect class="b" x="410" y="478" width="150" height="100" rx="4"/>
 <text class="t" x="418" y="498">stage</text>
-<text class="s" x="418" y="516">cache read-only, no network;</text>
-<text class="s" x="418" y="530">the worker saves the</text>
-<text class="s" x="418" y="544">pyramid by rename</text>
+<text class="s" x="418" y="516">online: reads what the</text>
+<text class="s" x="418" y="530">planned crops touch; the</text>
+<text class="s" x="418" y="544">worker saves the pyramid</text>
+<text class="s" x="418" y="558">by rename</text>
 <rect class="bs" x="595" y="478" width="150" height="100" rx="4"/>
 <text class="t" x="603" y="498">register</text>
 <text class="s" x="603" y="516">volumes with refs to the</text>
@@ -216,8 +213,8 @@
 <line class="ed" x1="240" y1="148" x2="140" y2="278" marker-end="url(#f2)"/>
 <text class="l" x="150" y="190" text-anchor="end">takes</text>
 <line class="ed" x1="430" y1="148" x2="360" y2="278" marker-start="url(#f2)" marker-end="url(#f2)"/>
-<text class="l" x="420" y="226" text-anchor="start">reads the original files; a file not</text>
-<text class="l" x="420" y="240" text-anchor="start">cached yet is downloaded into place</text>
+<text class="l" x="420" y="226" text-anchor="start">reads the original files by range; a file</text>
+<text class="l" x="420" y="240" text-anchor="start">a reader takes whole lands here</text>
 <line class="ed" x1="670" y1="148" x2="670" y2="278" marker-end="url(#f2)"/>
 <text class="l" x="676" y="214">writes</text>
 <line class="ed" x1="855" y1="148" x2="855" y2="278" marker-end="url(#f2)"/>
@@ -243,7 +240,7 @@
 <path class="ea" d="M60 478 V460 H30 V103 H40" marker-end="url(#f2)"/>
 <text class="l" transform="rotate(-90 12 300)" x="12" y="300" text-anchor="middle">a preparation request sends each dataset a go</text>
 </svg>
-<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is saved together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job fetches through it. The trusted crop jobs pull what they read, so a buffer's later fetch of the same record finds those files already in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
+<figcaption><b>Figure 2.</b> The two pipelines never call each other. Preparation makes one set of crops per round and a person validates it. If the set is approved, that very set is saved together with the dataset's registry row. If it is rejected, the reviewer's feedback goes to the agent and the next set comes back for review (figure 3b). Buffering reads the registry row to plan and the binding to stage. Both pipelines write the same raw cache, because every job reads through it: a file a reader takes whole lands there, so a later job of the same record finds it in place. Both pipelines take the same lock before writing. Only the keeper deletes under the shared roots, and only the worker renames a pyramid into place.</figcaption>
 </figure>
 
 <h2>3. How a dataset becomes prepared</h2>
@@ -443,9 +440,9 @@
 </figure>
 
 <h2>6. Sourcing one dataset</h2>
-<p>Once a round is running, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the two phases shown in figure 6, a fetch and a stage. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
+<p>Once a round is running, the worker sources every dataset in the pool, heaviest first, so the datasets that supply the most crops are staged earliest. Each dataset passes through the steps shown in figure 6: it waits while the raw cache is over its quota, then one stage job reads from the source what the planned crops touch. A record's raw cache is written by one job at a time, across both pipelines and any number of buffers. A lock file on the host's local disk enforces that.</p>
 <figure>
-<svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, fetch what is missing into the raw cache, stage offline into a build directory, save by rename, register the volumes, release the lock.">
+<svg viewBox="0 0 960 330" role="img" aria-label="Per-dataset sourcing: read the binding, reuse the artifact if it exists, otherwise take the record's lock, wait while the raw cache is over its quota, stage online into a build directory, save by rename, register the volumes, release the lock.">
 <defs><marker id="f4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <rect class="b" x="20" y="40" width="150" height="56" rx="4"/>
 <text class="ts" x="28" y="62">binding + pins →</text><text class="ts" x="28" y="79">artifact id</text>
@@ -461,18 +458,18 @@
 <text class="s" x="228" y="92">wait while held</text>
 <line class="e" x1="350" y1="68" x2="400" y2="68" marker-end="url(#f4)"/>
 <rect class="b" x="400" y="40" width="150" height="56" rx="4"/>
-<text class="t" x="408" y="62">raw cache complete?</text><text class="s" x="408" y="79">files.json vs the binding</text>
-<text class="s" x="408" y="92">quota checked first</text>
+<text class="t" x="408" y="62">raw cache over quota?</text><text class="s" x="408" y="79">what the cache holds now,</text>
+<text class="s" x="408" y="92">asked again at the stage slot</text>
 <rect class="un" x="400" y="140" width="150" height="56" rx="4"/>
-<text class="t" x="408" y="162">fetch job</text><text class="s" x="408" y="179">harness fetch · cache rw</text>
-<text class="s" x="408" y="192">resumes until complete</text>
+<text class="t" x="408" y="162">blocked</text><text class="s" x="408" y="179">no stage slot held; waits</text>
+<text class="s" x="408" y="192">for the keeper, asks again</text>
 <line class="e" x1="475" y1="96" x2="475" y2="140" marker-end="url(#f4)"/>
-<text class="l" x="481" y="122">no</text>
+<text class="l" x="481" y="122">yes</text>
 <line class="e" x1="550" y1="68" x2="610" y2="68" marker-end="url(#f4)"/>
-<text class="l" x="580" y="60" text-anchor="middle">yes</text>
-<path class="e" d="M550 168 H580 V68" />
+<text class="l" x="580" y="60" text-anchor="middle">no</text>
+<path class="e" d="M400 168 H385 V84 H400" marker-end="url(#f4)"/>
 <rect class="b" x="610" y="40" width="150" height="56" rx="4"/>
-<text class="t" x="618" y="62">stage job</text><text class="s" x="618" y="79">cache read-only, no network</text>
+<text class="t" x="618" y="62">stage job</text><text class="s" x="618" y="79">online, raw cache read-write</text>
 <text class="s" x="618" y="92">writes .building-&lt;id&gt;-…</text>
 <line class="e" x1="685" y1="96" x2="685" y2="140" marker-end="url(#f4)"/>
 <rect class="b" x="610" y="140" width="150" height="56" rx="4"/>
@@ -502,7 +499,7 @@
 <line class="e" x1="760" y1="278" x2="790" y2="278" marker-end="url(#f4)"/>
 <text class="l" x="775" y="271" text-anchor="middle">release</text>
 </svg>
-<figcaption><b>Figure 6.</b> Fetch and stage are two phases per dataset, so one slow download never holds up the others. The stage job runs with the cache read-only: <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker saves it. The one exception to "no network" is a URL that the fetch could not get as a whole file, and for that URL alone the stage job stays online. A saved pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
+<figcaption><b>Figure 6.</b> Nothing is downloaded ahead of a stage. The stage job has the binding's hosts and the raw cache read-write, and each reader takes from the source what the planned samples touch: byte ranges into the job's workspace, or a whole file into the raw cache where ranges will not do. <code>harness stage</code> writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned samples touch, and <code>harness check-stage</code> verifies it against the 0.6 schemas before the worker saves it. The quota is where staging waits and the keeper evicts, not a ceiling: a dataset is blocked only while the raw cache is over it. A record whose files a person placed by hand is staged with no network and the cache read-only. A saved pyramid is never written again. The artifact id is a hash of the recipe, so a new binding, harness, voxel size or plan produces a new artifact beside the old one, and a buffer with the same recipe reuses what is there. The plan row decides the split (a holdout record registers as all-test) and the buffer config pins the recipe, so a sample is fully determined by the buffer and the sequence number.</figcaption>
 </figure>
 
 <h2>7. The cache and its keeper</h2>
@@ -512,7 +509,7 @@
 <defs><marker id="f5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
 <text class="hd" x="20" y="34">every keeper.minutes (30)</text>
 <rect class="b" x="20" y="46" width="150" height="50" rx="4"/><text class="t" x="28" y="66">sync</text><text class="s" x="28" y="83">datasets · assets (sizes, missing)</text>
-<rect class="b" x="200" y="46" width="150" height="50" rx="4"/><text class="t" x="208" y="66">stale builds</text><text class="s" x="208" y="83">job gone → partial / missing</text>
+<rect class="b" x="200" y="46" width="150" height="50" rx="4"/><text class="t" x="208" y="66">stale builds</text><text class="s" x="208" y="83">job gone → missing</text>
 <rect class="b" x="380" y="46" width="150" height="50" rx="4"/><text class="t" x="388" y="66">sweep .building-*</text><text class="s" x="388" y="83">older than hold_hours</text>
 <rect class="bs" x="560" y="46" width="150" height="50" rx="4"/><text class="t" x="568" y="66">evict per root</text><text class="s" x="568" y="83">until under quota − headroom</text>
 <rect class="b" x="740" y="46" width="200" height="50" rx="4"/><text class="t" x="748" y="66">watch ready buffers</text><text class="s" x="748" y="83">missing → degraded · idle · retire</text>
@@ -524,11 +521,11 @@
 <rect class="note" x="20" y="140" width="920" height="120" rx="6"/>
 <text class="hd" x="32" y="160">an asset is free, hence evictable, when all of these hold</text>
 <text class="t" x="32" y="186">refs = ∅</text><text class="s" x="32" y="202">no registered volume uses it</text>
-<text class="t" x="200" y="186">state = ready</text><text class="s" x="200" y="202">not fetching, staging, waiting</text>
+<text class="t" x="200" y="186">state = ready</text><text class="s" x="200" y="202">not staging, waiting for a drop</text>
 <text class="t" x="400" y="186">unused for hold_hours</text><text class="s" x="400" y="202">last_used: jobs touch raw, draws touch staged</text>
 <text class="t" x="650" y="186">record not busy</text><text class="s" x="650" y="202">no mia-data round in progress on it</text>
 <text class="t" x="650" y="226">lock not held</text><text class="s" x="650" y="242">the keeper takes it before deleting</text>
-<text class="s" x="32" y="226">quota 0 = unlimited (the default); a blocked fetch records its demand so the keeper frees enough room for it;</text>
+<text class="s" x="32" y="226">quota 0 = unlimited (the default); a dataset is blocked while the raw cache is over its quota;</text>
 <text class="s" x="32" y="242">when nothing is evictable and a root is still over, the Cache tab says so</text>
 </svg>
 <figcaption><b>Figure 7.</b> Sizes come from the keeper's scan and are reused until a directory's mtime changes. A raw asset shared by several buffers keeps one reference per buffer. A retire drops that buffer's references, so its pyramids become evictable and its raw files stay until the space is needed. A quarantined artifact, one whose dataset was revoked, is kept for <code>autonomy.quarantine_days</code> whatever the quota says. <code>mia-buffers assets sync --dry-run</code> runs the same pass by hand and only reports.</figcaption>
@@ -649,7 +646,7 @@
 <div class="tw"><table>
 <tr><th>tab</th><th>shows</th><th>reads</th></tr>
 <tr><td>Overview</td><td>the landing page, in sections that fold: the system and what is wrong with it, every subject counted by status, what needs a human with the buttons that answer it and the actions of the last day that were not delivered, what the repair agent is working on, the rounds in progress, the repairs of the last week, and what a person shelved, with the reason</td><td><code>/subjects</code>, <code>/cases</code>, <code>/cleaner</code></td></tr>
-<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw download, staged artifacts and buffers; a check per dataset and <i>Prepare</i>; a link to the list of preparation requests, whose pages list their datasets with where each stands. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/subjects/prep</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
+<tr><td>Datasets</td><td>every record of the newest synced catalog with its preparation state, raw cache, staged artifacts and buffers; a check per dataset and <i>Prepare</i>; a link to the list of preparation requests, whose pages list their datasets with where each stands. A dataset's page has its record, preparation, crops, decisions, cache, buffers, buttons and timeline</td><td><code>/catalog/datasets</code> · <code>/subjects/dataset</code> · <code>/subjects/prep</code> · <code>/timeline</code> · <code>/crops</code></td></tr>
 <tr><td>Buffers</td><td>the buffers, each with its step and the id it serves. A buffer's page is its six steps: its definition as controls and as YAML against a live plan, its datasets, the datasets left to prepare with the requests it filed, the plan, the sourcing, and the version being served; under the step its timeline. A version's page (one round's buffer, by its id) has its datasets, volumes, consumers, daily usage and health line</td><td><code>/subjects/buffer</code> · <code>/buffers</code> · <code>POST /plan</code> · <code>POST /specs/parse</code> · <code>/subjects/prep</code> · <code>/usage</code></td></tr>
 <tr><td>Cache</td><td>raw by dataset, staged by artifact, lock holders, two quota meters, the keeper's last pass</td><td><code>/assets/raw</code> · <code>/assets/staged</code> · <code>/locks</code> · <code>/keeper</code></td></tr>
 <tr><td>Decisions</td><td>every verdict at a gate, newest first, with how often the judge and the person agree</td><td><code>/decisions</code></td></tr>

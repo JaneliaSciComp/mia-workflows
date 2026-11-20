@@ -204,7 +204,7 @@ another round and adds more crops.
 The trusted crop job writes the record's raw download cache (`paths.work_root/_cache/<record>`), so the worker
 first takes the record's **raw lock**, the lock file `paths.local_root/locks/raw/<record>` with the owner
 `mia-data <round> crop`. The waits for the crop and verify jobs heartbeat it (TTL 900 s) and the lock is released
-after the verify report is read, whatever it says. When another job holds it (a buffers stage or fetch, another
+after the verify report is read, whatever it says. When another job holds it (a buffers stage, another
 round), the timeline gets one entry per round, ``waiting for the raw cache of `<record>`: held by <owner>``, and
 the workflow tries again every `temporal.poll_minutes`. After the verify report the worker puts the cache's `raw`
 asset row (files, bytes, `ready` or `partial`, `last_used`) to buffer-api. A trusted crop job that was refused a

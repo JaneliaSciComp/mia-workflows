@@ -660,7 +660,7 @@ quota wait through the stage (owner `mia-buffers <round> <record>`), released wh
 re-taken after; the keeper takes it (owner `keeper`) before evicting a record's assets and skips a held record.
 Snapshot extraction uses `snapshot/<sha>`. `GET /locks` lists the holders. A worker waiting for a lock (or for
 quota) polls after `poll_minutes`, doubling each try up to 30 minutes. A re-take that had to wait for another
-owner re-reads the binding and the raw cache before going on. Hand-run harness commands bypass all of this: run
+owner re-reads the binding before going on. Hand-run harness commands bypass all of this: run
 them only on records no round is touching. `assets sync` on a host other than the workers' sees none of their
 locks, so there it refuses to run without `--dry-run`.
 
@@ -691,8 +691,9 @@ record's raw cache read-write. Nothing is fetched ahead: each reader takes from 
 touch, by range into blocks in the job's workspace, which go with it, or a file whole into the raw cache where
 ranges will not do (a server that ignores Range, a deflated zip member), all within `limits.job_bytes`; a stage
 that would pass it fails the dataset with the harness's message. A dropped (hand-placed) dataset stages offline,
-the cache read-only. A rebuild of a pyramid that vanished reads the source again; only for a dropped dataset does
-it ask whether the raw cache still holds the files (`raw_ready`), and fail `raw cache gone` when not. The stage
+the cache read-only. A rebuild of a pyramid that vanished reads the source again; only where the binding is staged offline does
+it ask whether the raw cache still holds the files (`raw_ready`), and fail `raw cache gone` when not; a drop is
+marked just used (`verify_drop`), so the keeper's hold rule spares it while the record waits for its slot. The stage
 job's reservation is settled once, after its report is read, with the report's `bytes_fetched` (a failed
 report's too) and with 0 when there is no report. The job writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned
 samples touch, with its derivation recorded in the Zarr's attributes; `check-stage` verifies it against the 0.6
@@ -733,8 +734,8 @@ of the cache is free to evict.
 
 **Asset rows.** A staged row's `state` is one of `staging`, `ready`, `partial` (a failed build), `missing`,
 `evicted`; a raw row's is `waiting-drop`, `ready` (at rest on disk, whatever jobs left in it), `missing` or
-`evicted`. A raw row is written when a stage's report is read and by the scan, which also makes `ready` a raw row
-it finds at `partial` or `fetching`; while a job writes a raw cache the record's lock, not the row, keeps the
+`evicted`. A raw row is written when a stage's or a crop job's report is read (`mia_core.assets.raw_asset`) and
+by the scan, which also makes `ready` a raw row it finds at `partial` or `fetching`; while a job writes a raw cache the record's lock, not the row, keeps the
 keeper off. Rows also carry `bytes`, `job`, `last_used` and `scanned_at`, and raw rows `files`; a revoked staged row carries `quarantined`, `quarantined_at` and `quarantined_by`.
 `PUT /assets/<kind>/<key>` merges fields into the row. `GET /assets/<kind>?state=&record=` filters and adds a
 `bytes` total. `POST /sync/assets` (worker token) scans the roots, skips a missing or empty root, lists

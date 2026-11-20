@@ -424,7 +424,7 @@ export function datasetCards(d) {
       raw
         ? kv([
             [
-              "raw download",
+              "raw cache",
               el(
                 "span",
                 { class: "pills" },

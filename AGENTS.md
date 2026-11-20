@@ -141,8 +141,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **A buffer reads what its crops touch.** No job of a buffer round downloads a record or a file ahead of its
   reads: the stage job is online and its readers decide (`io.open` by range, `io.fetch` whole), within
   `limits.job_bytes`. `check_quota` looks at what the raw cache holds, never at a record's size upstream, and the
-  raw quota is where staging waits and the keeper evicts, not a ceiling. A raw row has no state but at rest
-  (`ready`): the record's lock, not the row, says a job is writing. Anything new that transfers data is sized by
+  raw quota is where staging waits and the keeper evicts, not a ceiling. A raw cache on disk is `ready`
+  whatever it holds (`raw_asset`): the record's lock, not the row, says a job is writing. Anything new that transfers data is sized by
   what the planned crops touch.
 - **Only the keeper deletes.** The buffers worker's `MiaCacheKeeper` is the only code that removes anything under
   `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.

@@ -546,7 +546,7 @@ function planStep(pane, subject, redraw, _wanted, entries) {
               });
             },
           },
-          subject.asked?.action === "approve" ? "Starting…" : "Run: fetch and stage",
+          subject.asked?.action === "approve" ? "Starting…" : "Run: stage",
         )
       : nextLink(subject),
   );

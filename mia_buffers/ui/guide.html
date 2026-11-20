@@ -63,10 +63,10 @@ ready:
 <p>The buffer waits at this step for as long as you like, and nothing about it runs meanwhile. <b>Continue with N prepared datasets</b> plans it over whatever is prepared at that moment. Datasets that are prepared later join the next plan.</p>
 
 <h2>Step 4. Plan</h2>
-<p>The round resolves the definition against the catalog and the prepared datasets and stops at its plan: the datasets in this version, one row each, with weights and crops. Nothing has been downloaded. <b>Run: fetch and stage</b> accepts the plan; before it starts, the page lists any host the downloads need that jobs may not reach yet, to approve with the start. <b>Change the buffer</b>, the way back, cancels the round, and the buffer rests at step 3 where it can be changed and planned again.</p>
+<p>The round resolves the definition against the catalog and the prepared datasets and stops at its plan: the datasets in this version, one row each, with weights and crops. Nothing has been read from a source. <b>Run: stage</b> accepts the plan; before it starts, the page lists any host the stage jobs need that jobs may not reach yet, to approve with the start. <b>Change the buffer</b>, the way back, cancels the round, and the buffer rests at step 3 where it can be changed and planned again.</p>
 
 <h2>Step 5. Source</h2>
-<p>The datasets of the plan are downloaded and converted, several at a time, and the step shows each one: on disk, fetching, staging, waiting, or failed with the reason. Sourcing runs until no dataset has a job left; the buffer is then <code>staged</code>, and its timeline gets the board: each dataset's outcome, each weighting group's servable share against <code>ready.min_fraction</code>, volumes per split, and bytes on disk.</p>
+<p>The datasets of the plan are staged, several at a time: each stage job reads from the source what the planned crops touch. The step shows each one: on disk, staging, blocked by quota, waiting, or failed with the reason. Sourcing runs until no dataset has a job left; the buffer is then <code>staged</code>, and its timeline gets the board: each dataset's outcome, each weighting group's servable share against <code>ready.min_fraction</code>, volumes per split, and bytes on disk.</p>
 <p><b>Approve and serve</b> serves the version as the step shows it. A dataset that failed stays out; one that is waiting keeps its place and joins when it lands. The share each group has at the approve becomes the floor it is judged against afterwards, so a partial buffer accepted on purpose is not later reported as degraded. The way back cancels the round, as on step 4. Converted pyramids stay in the shared cache, so a later round over the same datasets skips the conversion.</p>
 <ul>
   <li><b>Waiting on a drop.</b> Some datasets sit on hosts no job may reach. The timeline lists the files to place by hand in the dataset's <code>incoming/</code> directory. Once the copy has finished, press <i>Files are in place</i> on this step, and the worker takes them into the cache. The button is refused while the directory is empty or a file in it changed in the last minute.</li>
@@ -85,7 +85,7 @@ ready:
 <tr><td><i>Save buffer and continue</i></td><td>step 2, a buffer not saved yet</td><td>Creates the buffer. Nothing runs.</td></tr>
 <tr><td><i>Save changes and continue</i></td><td>steps 1 and 2 of a buffer that rests</td><td>Stores the changed definition. Nothing runs.</td></tr>
 <tr><td><i>Continue with N prepared datasets</i></td><td>step 3</td><td>Starts a round that stops at its plan.</td></tr>
-<tr><td><i>Run: fetch and stage</i></td><td>step 4, <code>plan-review</code></td><td>Accepts the plan: download, convert, then stop once at <code>staged</code>.</td></tr>
+<tr><td><i>Run: stage</i></td><td>step 4, <code>plan-review</code></td><td>Accepts the plan: stage, then stop once at <code>staged</code>.</td></tr>
 <tr><td><i>Approve and serve</i></td><td>step 5, <code>staged</code></td><td>Serves the version as the step shows it.</td></tr>
 <tr><td><i>Change the buffer</i></td><td>steps 4 and 5</td><td>Cancels the round: its cluster jobs are killed and its version is retired. The buffer rests at step 3.</td></tr>
 <tr><td><i>Files are in place</i></td><td>step 5</td><td>For a dataset waiting on files placed by hand: tells the round they are in its <code>incoming/</code> directory.</td></tr>
@@ -105,7 +105,7 @@ ready:
 <tr><th>stage</th><th>step</th><th>the buffer is</th></tr>
 <tr><td><code>new</code></td><td>3</td><td>saved; nothing has run.</td></tr>
 <tr><td><code>planning</code> → <code>plan-review</code></td><td>4</td><td>resolving the definition; then the plan is shown and the round waits for <i>Run</i>.</td></tr>
-<tr><td><code>sourcing</code></td><td>5</td><td>downloading and converting, several datasets at a time. One timeline entry per dataset as it lands or fails.</td></tr>
+<tr><td><code>sourcing</code></td><td>5</td><td>staging, several datasets at a time. One timeline entry per dataset as it lands or fails.</td></tr>
 <tr><td><code>staged</code></td><td>5</td><td>no job left to run; the board is in the timeline. Waiting for <i>Approve and serve</i>.</td></tr>
 <tr><td><code>ready</code></td><td>6</td><td>serving.</td></tr>
 <tr><td><code>idle</code></td><td>6</td><td>serving, and nobody drew from it for a while (default 72 hours).</td></tr>

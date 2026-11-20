@@ -125,13 +125,13 @@ export const PILL_HELP = {
     "Set aside by a person, with a reason (Shelve): no preparation request starts it and no buffer plan takes it. Unshelve on its page takes it back.",
   // a cache directory or a staged pyramid
   "cached":
-    "Files a reader took whole are in the shared cache and no job is writing them; the keeper may evict them once nothing holds them.",
+    "On disk, at rest. For a raw cache: the files a reader took whole; the keeper may evict it once nothing holds it.",
   "staging": "A stage job is reading what the planned crops need from the source and writing an OME-Zarr pyramid.",
   "waiting-drop":
     "The files cannot be fetched by a job; a person has to place them in the dataset's incoming/ directory.",
   "partial": "A stage job failed before its pyramid was complete; the keeper removes what it left.",
   "missing": "Expected on disk but not found by the last scan.",
-  "evicted": "Removed by the keeper to stay under quota; a buffer that needs it fetches or stages again.",
+  "evicted": "Removed by the keeper to stay under quota; a buffer that needs it stages again.",
   "staged": "At least one pyramid of this dataset exists in the staged cache.",
   "quarantined":
     "Kept on disk for autonomy.quarantine_days after a revocation; the keeper does not evict it while an investigation may need it.",
@@ -139,7 +139,7 @@ export const PILL_HELP = {
   "new": "Nothing has run yet.",
   "planning": "Resolving the definition against the catalog.",
   "plan-review": "The plan is in the timeline; the round waits here for Run, and no job has run yet.",
-  "sourcing": "Fetching and converting the pool's datasets, several at a time.",
+  "sourcing": "Staging the pool's datasets, several at a time.",
   "ready": "Serving: consumers can draw crops.",
   "idle": "No consumer has drawn for a while; Keep returns it to ready, otherwise the keeper retires it later.",
   "retired": "Its references are released; consumers get 410, and the keeper may reclaim the space.",
@@ -151,7 +151,7 @@ export const PILL_HELP = {
   "blocked":
     "The raw cache is over its quota; the dataset is staged once the keeper frees space or the quota is raised.",
   "servable": "Its volumes are registered and the service can draw crops from them.",
-  "failed": "The fetch or stage job failed; the reason is in the row and in the buffer's timeline.",
+  "failed": "The stage job failed; the reason is in the row and in the buffer's timeline.",
   "dropped": "Left out of the round: still waiting when the day limit passed.",
   // the preparation pipeline's stages (mia-data)
   "matching": "Looking for an existing reader snippet that fits the dataset's files.",
@@ -205,7 +205,7 @@ export const stagePill = s => {
     help = STAGE_HELP[s] || PILL_HELP[s];
   return help ? tipOn(node, [{ b: s, t: help }]) : node;
 };
-// an asset's `ready` only says its directory is there and no job writes it: the page says "cached"
+// an asset's `ready` only says its directory is there, at rest: the page says "cached"
 export const assetPill = s => statePill(s === "ready" ? "cached" : s);
 // ---- times: the ledger stores epoch seconds; keep ISO strings working too
 export function toEpoch(t) {
