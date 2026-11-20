@@ -117,7 +117,8 @@ Now that the bot is a separate account, protect `main`. Under **Settings → Rul
 - **Dismiss stale approvals** when new commits are pushed.
 - Don't add the App to the bypass list.
 
-autodev only merges after an approval from someone with write access, and GitHub enforces the same rule. Reviewers
+autodev only merges after an approval from someone with write access (or an App listed in `github.trusted_bots`,
+whose `/approve <sha>` counts), and GitHub enforces its own rule on top. Reviewers
 now click **Approve**. `/approve <sha>` comments still work, but they don't satisfy branch protection.
 
 Add `.github/CODEOWNERS` covering `autodev/`, `mia_ops/` and `.github/` so changes to the gates need a named human

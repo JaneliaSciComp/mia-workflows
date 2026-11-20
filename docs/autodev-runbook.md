@@ -15,8 +15,9 @@ request, and merges it after a human approves. Design: [agentic-dev-infrastructu
 | sees `autodev:needs-human` after "Needs a human: …" on the PR (the revision limit, an approval with failing checks or with someone else's change request) or "Approved, but merging failed: …" (conflicts: the merge is tried again at every poll; a merge GitHub refuses only because the base branch moved at that moment is tried again within seconds and never reported) | autodev still watches the PR: approve it, or close it and re-add `autodev:go` to start over; no further round runs by itself |
 
 Trust boundaries:
-- Only people with write access can trigger (`:go`), approve, or request changes, and only their comments reach
-  the agent's prompt. The issue body is included as-is, so edits to it after labelling are a known ceiling.
+- Only people with write access, and the Apps listed in `github.trusted_bots`, can trigger (`:go`), approve, or
+  request changes, and only their comments reach the agent's prompt. The issue body is included as-is, so edits
+  to it after labelling are a known ceiling.
 - Agent commits touching `.github/` are refused.
 - Permanent failures stop the round immediately; transient GitHub/csub/git errors retry for up to 6 h.
 - Agent summaries and log tails are posted with secret-shaped strings (`sk-ant-…`, `ghp_…`, JWTs, the worker's
@@ -26,8 +27,8 @@ Trust boundaries:
 
 ## Run it as yourself (testing)
 
-1. Prerequisites P1-P4 in [the plan](plans/2026-10-10-autodev-basic-loop.md#before-you-start-prerequisites-not-tasks).
-   csub is pinned to `krokicki/csub` branch `deploy-all` (has the `claude` request field); `pixi install` gets it.
+1. The prerequisites in [`autodev-local-setup.md`](autodev-local-setup.md#prerequisites).
+   csub is pinned to `krokicki/csub` branch `deploy-all` (has the `agent` request field); `pixi install` gets it.
 2. `cp mia.yaml.example mia.yaml`, keep the `autodev` service and name it `autodev-<you>` in `services` (the deployment
    is the service name, so your labels, branches and workflows stay apart from the service and from colleagues), and
    set its `paths.work_root` under your csub `allowed_roots`.
@@ -41,14 +42,15 @@ Trust boundaries:
 4. `pixi run mia exec autodev check`: the `temporal` row is `BAD` until step 5 has started the dev server; fix any other
    `BAD` row first.
 5. `pixi run mia exec autodev init-labels`, then `pixi run mia up`. It starts, in tmux, a Temporal dev server
-   (session `temporal`) and the pixi env's `csub-broker` (reading your `~/.config/csub/broker.toml` policy) on the
-   host, and the worker inside the sandbox. Re-run `pixi run mia exec autodev check`: now every row `ok`.
+   (session `temporal`) and the pixi env's `csub-broker` (on the policy mia generates from `csub.base_policy` plus
+   the hosts approved on the page) on the host, and the worker inside the sandbox. Re-run
+   `pixi run mia exec autodev check`: now every row `ok`.
 6. Open a small issue ("add a `--version` flag"), add `autodev-<you>:go`, watch `pixi run mia attach <service>`.
 
 Manage the services listed in `mia.yaml`: `pixi run mia ps`, `mia logs <service> [worker|broker]` (`-n N`, `-f` to
 follow), `mia logs temporal`, `mia attach <service>`, `mia down [<service>...]`, `mia restart [<service>...]`,
 `mia up [<service>...]`. Without a service name each command acts on everything, Temporal first on the way up and
-last on the way down.
+last on the way down; `mia restart` alone leaves Temporal running unless it is named.
 
 A service counts as running only while its processes do. `mia up` waits up to 90 s for each new worker's first poll
 of its task queue and exits 1, printing the worker's last lines, when the worker exits or never polls. A window
@@ -114,12 +116,13 @@ over the gate's evidence. It earns authority in three steps, per gate, and nothi
    pixi run mia judge eval crops /path/to/eval-crops            # per category: agree, false approve, false reject, abstain
    ```
 
-   Twenty live rounds without a false approval, and none on the evaluation set, is the bar the spec sets
-   (`autonomy.min_shadow_rounds`).
+   Twenty live rounds without a false approval, and none on the evaluation set, is the bar the spec sets; no
+   config key enforces it.
 3. **Active** (`mode: active`, the crop judge only; the config refuses it for `review`): the crop judge's approve
    authorizes the set. A matched binding's crops are saved, and a snippet PR head gets `/approve <head>`, so
-   autodev merges it, with no person's verdict. A reject (the suspect cap's too), an escalate, a judge that did
-   not run and a verdict a person gave while it looked all leave the set at `review` for a person. *Revoke* on
+   autodev merges it, with no person's verdict. A set with a `suspect` or `bad` crop goes back to the developer,
+   at most `judge.crops.max_reworks` times since a person last acted; after that, and on an escalate, a judge that
+   did not run or a verdict a person gave while it looked, the set waits at `review` for a person. *Revoke* on
    the dataset's page withdraws an approval at any time, `mia pause` stops every workflow at its next job.
 
 ## Known gaps (deliberate, for later)
@@ -135,8 +138,8 @@ over the gate's evidence. It earns authority in three steps, per gate, and nothi
   (`tests/fixtures/autodev_issue_history.json`) and fails on such a change. If the change is intentional, guard it
   with `workflow.patched()` (there is no Worker Versioning yet) so runs in flight keep their old path, then
   re-record: `AUTODEV_RECORD_HISTORY=1 pixi run pytest tests/test_autodev_workflows.py -k recorded_history`.
-- `[bot]` logins are treated as having no permission (never looked up), so no bot can trigger, approve or revise.
-- The live end-to-end run (issue, PR, `/revise`, `/approve`) has not been done yet.
+- `[bot]` logins are treated as having no permission (never looked up), so no bot can trigger, approve or revise
+  unless `github.trusted_bots` lists it.
 
 ## mia-data
 
@@ -153,17 +156,17 @@ names what is missing); P4 see the plan.
    The data repo needs at least one commit on its default branch: the `galleries` branch is created through the
    trees API, which answers 409 on an empty repo.
 2. `pixi run mia exec mia-data check` verifies repos, Temporal, csub, dirs and the harness pin (and that `cd harness
-   && pixi install` was done in `harness.dir`). Run on the host, `mia exec mia-data check` and
-   `mia exec mia-data test-pr` need the mia-data broker:
-   `CSUB_TRANSPORT=unix CSUB_SOCKET=/scratch/$USER/mia-data/csub.sock pixi run mia exec mia-data check`.
-3. `pixi run mia up` starts Temporal (unless `mia.yaml` says `temporal.managed: false`, in which case it only
-   checks that the configured cluster answers), then each service: it ensures the service's namespace, starts
+   && pixi install` was done in `harness.dir`). `mia exec mia-data check` and `mia exec mia-data test-pr` go
+   through the mia-data broker while that service is running (`mia exec` sets `CSUB_TRANSPORT` and `CSUB_SOCKET`).
+3. `pixi run mia up` starts Temporal when `mia.yaml` says `temporal.managed: true` (otherwise it only checks that
+   the configured cluster answers), then each service: it ensures the service's namespace, starts
    its broker and sandboxed worker, and applies its schedule. Re-running it while a session exists only
    re-applies that service's schedule, so a run that failed partway is repaired by running it again. Uses
    `temporal` from PATH; a managed server downloads one into `temporal.state_dir/bin` otherwise. Manage with
    `mia ps`, `mia logs mia-data [worker|broker]` (`-n N`, `-f`), `mia attach mia-data`, `mia down mia-data`,
-   `mia restart mia-data` (needed after a config change; wait for running rounds to finish first). `mia down`
-   with no service stops everything, Temporal last; naming a service never touches Temporal.
+   `mia restart mia-data` (needed after a config change; a worker is stopped, never killed, and hands its running
+   activities back to Temporal, so rounds in flight go on with the next worker). `mia down` with no service stops
+   everything, Temporal last; naming a service never touches Temporal.
 4. `pixi run mia exec mia-data init-labels` creates the `data:*` stage labels the mirror sets. Datasets are
    started from the buffers page (*Start*); an issue, a copy of the dataset's timeline, appears in the data repo
    the first time its dataset has something to say.
