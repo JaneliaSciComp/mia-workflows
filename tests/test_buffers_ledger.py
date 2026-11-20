@@ -248,7 +248,7 @@ def test_staged_last_used_comes_from_draws(tmp_path):
 
 def test_status_board_and_events(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite")
-    ledger.put_buffer_dataset("b1", "rec", "fetching", job="j1")
+    ledger.put_buffer_dataset("b1", "rec", "staging", job="j1")
     row = ledger.put_buffer_dataset("b1", "rec", "servable")
     assert row["status"] == "servable" and row["job"] is None and ledger.buffer_datasets("b1")[0]["record"] == "rec"
     assert ledger.buffer_datasets("b2") == [] and ledger.latest_event("b1") is None
@@ -389,8 +389,9 @@ def test_sync_assets_drops_a_raw_row_with_nothing_cached_that_the_scan_skipped(t
 
 
 def test_sync_assets_readies_a_raw_row_left_partial_or_fetching(tmp_path):
-    """A raw cache has no state but at rest: a row a fetch job left `partial` or `fetching` is `ready` once the scan
-    finds its directory, so the keeper may evict it. A staged row at `partial` is a failed build and stays one."""
+    """A raw cache has no state but at rest: a row at `partial` or `fetching`, which no job completes, is `ready`
+    once the scan finds its directory, so the keeper may evict it. A staged row at `partial` is a failed build
+    and stays one."""
     ledger = Ledger(tmp_path / "l.sqlite")
     ledger.put_asset("raw", "half", {"state": "partial", "bytes": 3, "scanned_at": 1.0, "last_used": 1.0})
     ledger.put_asset("raw", "busy", {"state": "fetching", "bytes": 3, "job": "1", "last_used": 1.0})

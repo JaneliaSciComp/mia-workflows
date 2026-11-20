@@ -66,7 +66,7 @@ from .config import (
 )
 from .drop import drop_names, merge_manifest, read_manifest
 from .explore import start_gaps
-from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
+from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, levels_key, stage_job
 from .keeper import evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
     MAX_POLL_MINUTES,
@@ -78,15 +78,12 @@ from .models import (
     DatasetPlan,
     DegradedSignal,
     DropResult,
-    FetchJobArgs,
-    FetchResult,
     KeeperReport,
     PlanResult,
     PrepOutcome,
     PrepPins,
     PrepState,
     QuotaCheck,
-    RawStatus,
     RegisterResult,
     RevokedArtifacts,
     RevokedSignal,
@@ -116,8 +113,6 @@ ROUND_RE = re.compile(r"[ip]\d+-e\d+")  # i<issue>-e<event>: a buffer round; p<i
 BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
 MANIFEST_SOURCE_MANUAL = "manual"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
-FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
-FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
 KEEPER = "keeper"  # the cache keeper's lock owner
 KEEPER_LOCK_TTL_S = 900
 KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, whatever step it is in
@@ -203,11 +198,7 @@ class Activities:
             self.read_stage,
             self.take_lock,
             self.release_lock,
-            self.raw_status,
             self.check_quota,
-            self.prepare_fetch,
-            self.submit_fetch,
-            self.read_fetch,
             self.mark_asset,
             self.verify_drop,
             self.create_buffer,
@@ -587,9 +578,6 @@ class Activities:
             cfg.sourcing.parallel,
             cfg.limits.job_walltime_min,
             cfg.service.url,
-            parallel_fetch=cfg.sourcing.parallel_fetch,
-            fetch_walltime_min=cfg.limits.fetch_walltime_min,
-            fetch_attempts=cfg.limits.fetch_attempts,
             poll_minutes=cfg.temporal.poll_minutes,
             max_tick_minutes=MAX_POLL_MINUTES,
         )
@@ -1281,33 +1269,17 @@ class Activities:
         """Release the lock if `owner` still holds it; a lock that lapsed or changed hands is logged and left."""
         await asyncio.to_thread(release_or_log, lock_dir(self.cfg), kind, key, owner)
 
-    @activity.defn(name="raw_status")
-    @mia_permanent_errors
-    async def raw_status(self, round_id: str, record: str) -> RawStatus:
-        """Whether the record's raw cache holds every file of the round's binding (`cache_missing`) but the
-        stream urls an earlier fetch recorded on the raw row (buffer-api unreachable: none known). The row's
-        `last_used` is touched, so the keeper's hold rule spares what this buffer is about to use."""
-        try:
-            row = await asyncio.to_thread(self.registry.asset, "raw", record)
-        except RegistryError as error:
-            log.warning("%s: registry unavailable, no stream urls known: %s", record, error)
-            row = None
-        if isinstance(row, dict):
-            await self.mark_asset("raw", record, {"last_used": time.time()})
-        recorded = row.get("stream") if isinstance(row, dict) else None
-        urls = self._binding_urls(round_id, record)
-        stream = [url for url in urls if isinstance(recorded, list) and url in recorded]
-        cache = self._cache_dir(record)
-        manifest = await asyncio.to_thread(read_files_json, cache)
-        # raw_asset's `ready` rule, without the du
-        ready, missing = await asyncio.to_thread(cache_missing, cache, manifest, urls, stream)
-        return RawStatus(ready, missing, texts(stream))
-
     @activity.defn(name="raw_ready")
     @mia_permanent_errors
     async def raw_ready(self, round_id: str, record: str) -> bool:
-        """Whether the record's raw cache still holds its binding's files: a missing pyramid can be staged again."""
-        return (await self.raw_status(round_id, record)).ready
+        """Whether the record's raw cache holds every file of the round's binding (`cache_missing`): asked for a
+        record whose files a person dropped, which a rebuild can only take from there. The row's `last_used` is
+        touched, so the keeper's hold rule spares what this buffer is about to use."""
+        await self.mark_asset("raw", record, {"last_used": time.time()})
+        cache = self._cache_dir(record)
+        manifest = await asyncio.to_thread(read_files_json, cache)
+        ready, _ = await asyncio.to_thread(cache_missing, cache, manifest, self._binding_urls(round_id, record))
+        return ready
 
     @activity.defn(name="check_quota")
     @mia_permanent_errors
@@ -1321,67 +1293,6 @@ class Activities:
         listing = await asyncio.to_thread(self.registry.assets, "raw")
         over_by = int(listing["bytes"]) - limit
         return QuotaCheck(over_by <= 0, max(over_by, 0))
-
-    @activity.defn(name="prepare_fetch")
-    @mia_permanent_errors
-    async def prepare_fetch(self, issue: int, round_id: str, record: str, attempt: int) -> str:
-        """The fetch job's workspace, one per attempt, with record.yaml and binding.yaml; the raw cache exists
-        afterwards (a mount must). Returns the workspace path."""
-        workspace = self._round_workspace(issue, round_id) / f"fetch-{record}-{int(attempt)}"
-        workspace.mkdir(parents=True, exist_ok=True)
-        write_atomic(workspace / "record.yaml", yaml.safe_dump(self._record(round_id, record), sort_keys=False))
-        shutil.copyfile(self._binding_path(round_id, record), workspace / "binding.yaml")
-        self._cache_dir(record).mkdir(parents=True, exist_ok=True)
-        return str(workspace)
-
-    @activity.defn(name="submit_fetch")
-    @mia_permanent_errors
-    @heartbeats
-    async def submit_fetch(self, key: str, args: FetchJobArgs) -> str:
-        """Submit the fetch job at most once per key, hosts checked as `submit` does. Returns the job id; the raw
-        asset row says `fetching` under it (best effort)."""
-        job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: fetch_job(self.cfg, args, snap))
-        await self.mark_asset("raw", args.record, {"state": "fetching", "job": job_id})
-        return job_id
-
-    @activity.defn(name="read_fetch")
-    @mia_permanent_errors
-    async def read_fetch(self, round_id: str, record: str, workspace: str) -> FetchResult:
-        """The fetch job's fetch.json, reduced; none (a job killed at its walltime) is partial, since the next
-        attempt resumes from the cache. The raw asset row is then put from the cache as it is (best effort)."""
-        report = loads(read_untrusted(Path(workspace), "fetch.json", FETCH_JSON_LIMIT))
-        stream: list[str] | None = None  # no report: the row keeps the stream urls it has
-        if not isinstance(report, dict):
-            result = FetchResult(True, partial=True, errors=[FETCH_JSON_MISSING])
-        else:
-            reported = report.get("files")
-            entries = reported if isinstance(reported, list) else []
-            files = [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("url"), str)]
-            files = [entry for entry in files if entry["url"]]
-
-            def urls(outcome: str) -> list[str]:
-                return texts([entry["url"] for entry in files if entry.get("outcome") == outcome])
-
-            fetched, blocked, failed = report.get("bytes_fetched"), report.get("host_not_allowed"), urls("failed")
-            result = FetchResult(
-                report.get("ok") is True and not failed,
-                report.get("partial") is True or any(entry.get("outcome") == "pending" for entry in files),
-                fetched if type(fetched) is int and fetched >= 0 else 0,
-                urls("stream"),
-                failed,
-                texts(report.get("errors")),
-                text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
-            )
-            # the binding's own urls the harness streams, kept on the row so raw_status leaves them out
-            streamed = {entry["url"] for entry in files if entry.get("outcome") == "stream"}
-            stream = [url for url in self._binding_urls(round_id, record) if url in streamed]
-        row = await asyncio.to_thread(raw_asset, self._cache_dir(record), self._binding_urls(round_id, record))
-        row.update(state="ready" if result.ok and not result.partial else "partial", job=None, last_used=time.time())
-        row.update(wanted=None, blocked_at=None)  # the fetch ran: no longer blocked
-        if stream is not None:
-            row["stream"] = stream
-        await self.mark_asset("raw", record, row)
-        return result
 
     @activity.defn(name="mark_asset")
     @mia_permanent_errors

@@ -33,7 +33,6 @@ BOARD_STATUSES = (
     "waiting-dataset",
     "waiting-lock",
     "waiting-drop",
-    "fetching",
     "blocked",
     "staging",
     "servable",

@@ -44,15 +44,12 @@ with workflow.unsafe.imports_passed_through():
         DatasetStatus,
         DegradedSignal,
         DropResult,
-        FetchJobArgs,
-        FetchResult,
         KeeperReport,
         PlanResult,
         PrepOutcome,
         PrepPins,
         PrepState,
         QuotaCheck,
-        RawStatus,
         RegisterResult,
         RevokedArtifacts,
         RevokedSignal,
@@ -60,7 +57,6 @@ with workflow.unsafe.imports_passed_through():
         StagedSummary,
         StageJobArgs,
         StageResult,
-        fetch_job_key,
         job_key,
     )
     from .status import render_ready, render_staged
@@ -210,7 +206,7 @@ class MiaBuffer:
         self.wanted = 0  # the tick a waiter waits for; the ticker starts no timer while it has been reached
         self._ticker: asyncio.Task | None = None
         self.rebuild: list[tuple[asyncio.Task, DatasetStatus]] = []  # degraded datasets staging again (d-lifecycle)
-        self.rebuild_slots: tuple[asyncio.Semaphore, asyncio.Semaphore] | None = None  # their stage and fetch slots
+        self.rebuild_slots: asyncio.Semaphore | None = None  # their stage slots
         self.degraded_records: set[str] = set()  # records of the degraded signals the running rebuild answers
         self.degraded_reason = ""
         self.paused_round = False  # a job of this round met autonomy.pause: the round stops once nothing runs
@@ -762,15 +758,14 @@ class MiaBuffer:
     async def _source_all(self, limits: SourcingLimits) -> bool:
         state = self.state
         semaphore = asyncio.Semaphore(max(1, limits.parallel))
-        fetch_slots = asyncio.Semaphore(max(1, limits.parallel_fetch))
         # ponytail: no continue-as-new during sourcing (the tasks live in this run); fine below ~2,000 datasets per
         # buffer, beyond that persist per-dataset progress and resume from it
         datasets = state.datasets
         starts = list(range(len(datasets)))
-        if workflow.patched("c-cache"):  # the heaviest first, so they take the first fetch and stage slots
+        if workflow.patched("c-cache"):  # the heaviest first, so they take the first stage slots
             starts = sorted(starts, key=lambda index: (-datasets[index].weight, datasets[index].record))
         created = {
-            index: asyncio.create_task(self._source(datasets[index], semaphore, fetch_slots)) for index in starts
+            index: asyncio.create_task(self._source(datasets[index], semaphore)) for index in starts
         }
         tasks = [created[index] for index in range(len(datasets))]  # in state.datasets order, as the zips below need
         self.sourcing_tasks = tasks
@@ -836,11 +831,10 @@ class MiaBuffer:
         approve, wait for the stragglers. Approves that come while jobs run are refused (no gate is open)."""
         state = self.state
         semaphore = asyncio.Semaphore(max(1, limits.parallel))
-        fetch_slots = asyncio.Semaphore(max(1, limits.parallel_fetch))
         datasets = state.datasets
         starts = sorted(range(len(datasets)), key=lambda index: (-datasets[index].weight, datasets[index].record))
         created = {
-            index: asyncio.create_task(self._source(datasets[index], semaphore, fetch_slots)) for index in starts
+            index: asyncio.create_task(self._source(datasets[index], semaphore)) for index in starts
         }
         tasks = [created[index] for index in range(len(datasets))]
         self.sourcing_tasks = tasks
@@ -1141,19 +1135,19 @@ class MiaBuffer:
         self.degraded_reason = signal.reason
         for dataset in hit:
             self.degraded_records.add(dataset.record)
-            if not await self._act("raw_ready", state.round_id, dataset.record, seconds=300, result_type=bool):
+            # files a person dropped exist nowhere else; any other record is read from its source again
+            if dataset.manual and not await self._act(
+                "raw_ready", state.round_id, dataset.record, seconds=300, result_type=bool
+            ):
                 await self._fail(dataset, RAW_GONE)
                 continue
             dataset.rebuilds += 1
             self._set(dataset, "pending")
             if self.rebuild_slots is None:  # the first of this rebuild: its slots and its ticker
                 self.timed_out = False  # the round's day limit is long past; a quota block waits, not drops
-                self.rebuild_slots = (
-                    asyncio.Semaphore(max(1, limits.parallel)),
-                    asyncio.Semaphore(max(1, limits.parallel_fetch)),
-                )
+                self.rebuild_slots = asyncio.Semaphore(max(1, limits.parallel))
                 self._start_ticker(limits)
-            self.rebuild.append((asyncio.create_task(self._source(dataset, *self.rebuild_slots)), dataset))
+            self.rebuild.append((asyncio.create_task(self._source(dataset, self.rebuild_slots)), dataset))
         return True if self.rebuild else await self._end_rebuild()
 
     def _rebuilt(self) -> bool:
@@ -1313,13 +1307,11 @@ class MiaBuffer:
         extra = render_ready(state.buffer_id or "", limits.service_url, servable, short or [], state.min_fraction)
         await self._stage("ready", detail, extra=extra)
 
-    async def _source(
-        self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, fetch_slots: asyncio.Semaphore
-    ) -> None:
+    async def _source(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
         """Binding → (drop) → stage job → register; the dataset's status records the outcome. An activity that
         gives up fails this dataset alone, never the round."""
         try:
-            await self._source_steps(dataset, semaphore, fetch_slots)
+            await self._source_steps(dataset, semaphore)
         except BudgetRefused as error:
             if str(error) == PAUSED:  # the round stops once nothing runs; the dataset is not at fault
                 self._set(dataset, "pending", PAUSED)
@@ -1333,11 +1325,9 @@ class MiaBuffer:
                 return  # a cancel that landed inside an activity: the drop or abandon already says why
             await self._fail(dataset, error_message(error))
 
-    async def _source_steps(
-        self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, fetch_slots: asyncio.Semaphore
-    ) -> None:
+    async def _source_steps(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
         if workflow.patched("c-cache"):
-            return await self._source_cached(dataset, semaphore, fetch_slots)
+            return await self._source_cached(dataset, semaphore)
         state = self.state
         assert state.round_id and state.pins and state.buffer_id
         round_id, record = state.round_id, dataset.record
@@ -1356,7 +1346,7 @@ class MiaBuffer:
                 workspace = await self._act(
                     "prepare_stage", state.issue, round_id, record, seconds=300, result_type=str
                 )
-                job = await self._job(record, workspace, binding.hosts, dataset.voxel_size_nm)
+                job, _ = await self._job(record, workspace, binding.hosts, dataset.voxel_size_nm)
                 if job.state not in ("DONE", "EXIT"):
                     return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
                 if job.state == "EXIT" and job.exit_code not in (0, None):
@@ -1380,13 +1370,12 @@ class MiaBuffer:
             f"dataset {round_id} {record} servable",
         )
 
-    async def _source_cached(
-        self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, fetch_slots: asyncio.Semaphore
-    ) -> None:
-        """`c-cache`: binding → (drop) → the record's raw-cache lock → fetch phase → stage → register → release.
-        The lock is held from before the fetch until the volumes are registered, so a second buffer of the same
-        record waits and then reuses the pyramid the first one staged. The stage is offline (no hosts, read-only
-        cache) unless some url streams."""
+    async def _source_cached(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
+        """`c-cache`: binding → (drop) → the record's raw-cache lock → quota wait → stage → register → release.
+        The lock is held until the volumes are registered, so a second buffer of the same record waits and then
+        reuses the pyramid the first one staged. The stage job is online with the raw cache read-write: its readers
+        take from the source what the planned crops touch. A record whose files a person dropped is staged
+        offline from the cache."""
         state = self.state
         assert state.round_id and state.pins and state.buffer_id
         round_id, record = state.round_id, dataset.record
@@ -1411,22 +1400,19 @@ class MiaBuffer:
         try:
             while True:
                 try:
-                    return await self._source_locked(dataset, semaphore, fetch_slots, owner, holder)
+                    return await self._source_locked(dataset, semaphore, owner, holder)
                 except LockChanged as changed:  # another owner had the cache meanwhile: look at it again
                     holder = changed.holder
         finally:
             await self._release(lock)
 
     async def _source_locked(
-        self,
-        dataset: DatasetStatus,
-        semaphore: asyncio.Semaphore,
-        fetch_slots: asyncio.Semaphore,
-        owner: str,
-        holder: str,
+        self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, owner: str, holder: str
     ) -> None:
-        """Under the record's lock: re-read the binding (`holder` may have staged it meanwhile) and the raw cache,
-        fetch what is missing, stage, register. LockChanged from a re-take means: decide again."""
+        """Under the record's lock: re-read the binding (`holder` may have staged it meanwhile), wait while the raw
+        cache is over its quota (holding no stage slot), take a stage slot, stage, register. After a wait for the
+        slot the quota is asked again (other jobs ran meanwhile; over: back to waiting, without the slot).
+        LockChanged from a re-take means: decide again."""
         state = self.state
         assert state.round_id and state.buffer_id
         round_id, record = state.round_id, dataset.record
@@ -1441,39 +1427,40 @@ class MiaBuffer:
             if record not in missing:
                 again = f" The pyramid was rebuilt by {holder} while this buffer waited and reused." if holder else ""
                 return await self._reuse(dataset, semaphore, again or " The pyramid is back on disk and reused.")
-        raw = await self._act("raw_status", round_id, record, seconds=300, result_type=RawStatus)
-        stream = list(raw.stream)
-        if raw.missing and not binding.manual:
-            fetched = await self._fetch(dataset, binding, owner, fetch_slots)
-            if fetched is None:
-                return  # failed
-            stream += fetched
-        async with semaphore:
-            await self._retake(dataset, owner)  # refreshed after the wait for a stage slot
-            self._set(dataset, "staging")
-            rebuild = [dataset.rebuilds] if dataset.rebuilds else []  # a rebuild's own workspace, job and build dir
-            workspace = await self._act(
-                "prepare_stage", state.issue, round_id, record, *rebuild, seconds=300, result_type=str
-            )
-            hosts = binding.hosts if stream else []
-            job = await self._job(
-                record,
-                workspace,
-                hosts,
-                dataset.voxel_size_nm,
-                cache_writable=bool(stream),
-                lock=["raw", record, owner],
-                rebuild=dataset.rebuilds,
-            )
-            if job.state not in ("DONE", "EXIT"):
-                return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
-            exited = job.state == "EXIT" and job.exit_code not in (0, None)
-            why = f"stage job {job.job_id} exited with code {job.exit_code}"
-            if exited and not workflow.patched("stage-errors"):
-                return await self._fail(dataset, why)
-            staged = await self._act("read_stage", round_id, record, *rebuild, seconds=300, result_type=StageResult)
-            if exited:  # stage-errors: the harness exits 1 with its reasons in stage.json; the comment says them
-                return await self._fail(dataset, f"{why}: {'; '.join(staged.errors) or 'no errors in stage.json'}")
+        online = not binding.manual  # files a person dropped are read from the cache alone, and add nothing to it
+        while True:
+            if online and not await self._quota(dataset, owner):
+                return  # dropped
+            waited = semaphore.locked()
+            async with semaphore:
+                await self._retake(dataset, owner)  # refreshed after the wait for a stage slot
+                if online and waited:
+                    quota = await self._act("check_quota", round_id, record, result_type=QuotaCheck)
+                    if not quota.ok:
+                        continue
+                self._set(dataset, "staging")
+                rebuild = [dataset.rebuilds] if dataset.rebuilds else []  # a rebuild's own workspace, job, build dir
+                workspace = await self._act(
+                    "prepare_stage", state.issue, round_id, record, *rebuild, seconds=300, result_type=str
+                )
+                job, staged = await self._job(
+                    record,
+                    workspace,
+                    binding.hosts if online else [],
+                    dataset.voxel_size_nm,
+                    cache_writable=online,
+                    lock=["raw", record, owner],
+                    rebuild=dataset.rebuilds,
+                    report=True,
+                )
+                if staged is None:
+                    return await self._fail(dataset, f"stage job {job.job_id} ended in state {job.state}")
+                if job.state == "EXIT" and job.exit_code not in (0, None):  # the harness's reasons are in stage.json
+                    errors = "; ".join(staged.errors) or "no errors in stage.json"
+                    return await self._fail(
+                        dataset, f"stage job {job.job_id} exited with code {job.exit_code}: {errors}"
+                    )
+            break
         await self._register(dataset, staged, "")
 
     async def _reuse(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, reused: str) -> None:
@@ -1561,8 +1548,8 @@ class MiaBuffer:
             workflow.logger.warning("issue #%d: could not release %s: %s", self.state.issue, lock, error_message(error))
 
     async def _quota(self, dataset: DatasetStatus, owner: str) -> bool:
-        """Wait until the raw cache has room for the record (`blocked` meanwhile, said once on the timeline), with the
-        record's lock released while blocked (spec §5.2) and taken again after. False: the dataset was dropped
+        """Wait while the raw cache is over its quota (`blocked` meanwhile, said once on the timeline), with the
+        record's lock released while blocked and taken again after. False: the dataset was dropped
         (the round's day limit had fired, so the block dropped it) or abandoned while blocked."""
         state = self.state
         assert state.round_id
@@ -1572,14 +1559,14 @@ class MiaBuffer:
             if self.timed_out:  # _drop_waiting has run: nothing would drop this one later
                 await self._drop(dataset, f"still blocked after {state.timeout_days:g} days")
                 return False
-            self._set(dataset, "blocked", f"raw quota over by {quota.over_by} bytes")
+            self._set(dataset, "blocked", f"raw cache over its quota by {quota.over_by} bytes")
             await self._release(["raw", dataset.record, owner])
             if dataset.status == "dropped" or _abandoned(dataset):  # cancelled meanwhile
                 return False
             if not said:
                 await self._comment(
-                    f"`{dataset.record}` is blocked: {dataset.reason}. Its fetch waits until the keeper frees space "
-                    "or the quota is raised.",
+                    f"`{dataset.record}` is blocked: {dataset.reason}. It is staged once the keeper frees space or "
+                    "the quota is raised.",
                     f"dataset {state.round_id} {dataset.record} blocked",
                 )
                 said = True
@@ -1590,67 +1577,6 @@ class MiaBuffer:
             self._set(dataset, "pending")
             await self._retake(dataset, owner)
         return True
-
-    async def _fetch(
-        self, dataset: DatasetStatus, binding: BindingInfo, owner: str, fetch_slots: asyncio.Semaphore
-    ) -> list[str] | None:
-        """The fetch phase under the record's lock: wait for quota (holding no fetch slot), then take a fetch slot;
-        after a wait for it the lock is refreshed and the quota checked again (other fetches ran meanwhile; over
-        again: back to waiting without the slot). Returns the urls the stage must stream, or None (failed or
-        dropped)."""
-        state = self.state
-        assert state.round_id
-        while True:
-            if not await self._quota(dataset, owner):
-                return None  # dropped
-            waited = fetch_slots.locked()
-            async with fetch_slots:
-                if waited:
-                    await self._retake(dataset, owner)  # refreshed after the wait for a fetch slot
-                    if not (await self._act("check_quota", state.round_id, dataset.record, result_type=QuotaCheck)).ok:
-                        continue
-                self._set(dataset, "fetching")
-                return await self._fetch_jobs(dataset, binding, owner)
-
-    async def _fetch_jobs(self, dataset: DatasetStatus, binding: BindingInfo, owner: str) -> list[str] | None:
-        """Up to fetch_attempts fetch jobs, each resuming from the cache; the stream urls, or None (failed)."""
-        state = self.state
-        assert state.round_id and state.pins
-        round_id, record = state.round_id, dataset.record
-        limits = await self._limits()
-        last = ""
-        first = dataset.rebuilds * limits.fetch_attempts  # a rebuild's fetch jobs get keys of their own
-        for attempt in range(first + 1, first + limits.fetch_attempts + 1):
-            workspace = await self._act(
-                "prepare_fetch", state.issue, round_id, record, attempt, seconds=300, result_type=str
-            )
-            args = FetchJobArgs(workspace, round_id, state.pins, record, list(binding.hosts), attempt)
-            key = fetch_job_key(state.issue, round_id, record, attempt)
-            budgeted = await self._charge(key, "fetch")
-            try:
-                job_id = await self._act("submit_fetch", key, args, seconds=600, result_type=str, beats=True)
-                self._ran(workspace)
-                job = await self._await_job(job_id, workspace, limits.fetch_walltime_min, ["raw", record, owner])
-                fetched = await self._act(
-                    "read_fetch", round_id, record, workspace, seconds=300, result_type=FetchResult
-                )
-            except (ActivityError, asyncio.CancelledError):
-                if budgeted:
-                    await self._settle(key)
-                raise
-            if budgeted:
-                await self._settle(key, fetched.bytes_fetched)
-            last = f"last job {job.job_id} {job.state} exit {job.exit_code}"
-            if fetched.host_not_allowed or not fetched.ok:
-                why = "; ".join(fetched.errors + [f"{url} failed" for url in fetched.failed]) or "no errors reported"
-                if fetched.host_not_allowed:
-                    why += f" (host not allowed: {fetched.host_not_allowed})"
-                await self._fail(dataset, f"fetch failed: {why}")
-                return None
-            if not fetched.partial:
-                return list(fetched.stream)
-        await self._fail(dataset, f"fetch still partial after {limits.fetch_attempts} attempts ({last})")
-        return None
 
     async def _drop(self, dataset: DatasetStatus, reason: str) -> None:
         """Take the dataset out of the plan and the ready denominator; say so and re-post the plan."""
@@ -1728,9 +1654,13 @@ class MiaBuffer:
         cache_writable: bool = True,
         lock: list[str] | None = None,
         rebuild: int = 0,
-    ) -> JobDone:
+        report: bool = False,
+    ) -> tuple[JobDone, StageResult | None]:
         """Submit the stage job (at most once per key) and wait for it on the await queue; the wait keeps `lock`
-        ([kind, key, owner]) alive."""
+        ([kind, key, owner]) alive. With `report`, the stage.json of a job that ended DONE or EXIT is read here.
+        The job's reservation is closed once, here: with what the report says the job transferred (a failed
+        report's count included), and with 0 when there is none (no `report`, a job that ended otherwise, a
+        cancel, an activity error). A transfer nobody reported is not counted."""
         state = self.state
         assert state.round_id and state.pins
         args = StageJobArgs(
@@ -1747,17 +1677,27 @@ class MiaBuffer:
         )
         key = job_key(state.issue, state.round_id, record, rebuild)
         budgeted = await self._charge(key, "stage")
+        staged: StageResult | None = None
         try:
             job_id = await self._act("submit", key, args, seconds=600, result_type=str, beats=True)
             self._ran(workspace)
             done = await self._await_job(job_id, workspace, (await self._limits()).walltime_min, lock)
+            if report and done.state in ("DONE", "EXIT"):
+                staged = await self._act(
+                    "read_stage",
+                    state.round_id,
+                    record,
+                    *([rebuild] if rebuild else []),
+                    seconds=300,
+                    result_type=StageResult,
+                )
         except (ActivityError, asyncio.CancelledError):
             if budgeted:
                 await self._settle(key)
             raise
         if budgeted:
-            await self._settle(key)
-        return done
+            await self._settle(key, staged.bytes_fetched if staged else 0)
+        return done, staged
 
     async def _charge(self, key: str, kind: str) -> bool:
         """Before a job: the pause switch, then the root budget (spec autonomous-gates §8). BudgetRefused ends this

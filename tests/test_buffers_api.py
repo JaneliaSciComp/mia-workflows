@@ -717,9 +717,9 @@ def test_records_route_defaults_to_the_newest_ref(tmp_path):
 def test_status_board_routes(tmp_path):
     s = BufferService(Ledger(tmp_path / "l.sqlite"), token="t")
     worker(s, "PUT", "/buffers/b", CFG)
-    assert call(s, "PUT", "/buffers/b/datasets/rec", payload={"status": "fetching"})[0] == 401
-    status, out, _ = worker(s, "PUT", "/buffers/b/datasets/rec", {"status": "fetching", "job": "j1"})
-    assert status == 200 and out["status"] == "fetching" and out["job"] == "j1"
+    assert call(s, "PUT", "/buffers/b/datasets/rec", payload={"status": "staging"})[0] == 401
+    status, out, _ = worker(s, "PUT", "/buffers/b/datasets/rec", {"status": "staging", "job": "j1"})
+    assert status == 200 and out["status"] == "staging" and out["job"] == "j1"
     status, out, _ = worker(s, "PUT", "/buffers/b/datasets/rec", {"status": "done"})
     assert status == 422 and "status must be one of" in out["error"]
     assert worker(s, "PUT", "/buffers/b/datasets/rec", {"status": "failed", "nope": 1})[0] == 422
@@ -2969,7 +2969,7 @@ def test_a_dataset_started_from_the_page_names_the_issue_the_mirror_opened(tmp_p
     call(s, "PUT", f"/datasets/{U937}", payload={"state": "in-progress", "issue": number})
     call(s, "PUT", f"/assets/raw/{U937}", payload={"state": "ready", "bytes": 10})
     call(s, "PUT", "/buffers/b", payload=CFG)
-    call(s, "PUT", f"/buffers/b/datasets/{U937}", payload={"status": "fetching"})
+    call(s, "PUT", f"/buffers/b/datasets/{U937}", payload={"status": "staging"})
     text = re.sub(r"ref: [0-9a-f]{40}", f"ref: {REF_A}", SPEC_2D_TEXT)
 
     def issues():

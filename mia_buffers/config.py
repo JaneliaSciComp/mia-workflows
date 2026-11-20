@@ -87,7 +87,7 @@ PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
 STAGE_SENTENCES = {
     "planning": "The spec is resolved against the catalog into a plan: the pool of datasets and their weights.",
     "plan-review": "The plan is in the timeline; the round waits here for an approve, and no job has run yet.",
-    "sourcing": "The pool's datasets are fetched, staged and registered with the buffer, several at a time.",
+    "sourcing": "The pool's datasets are staged and registered with the buffer, several at a time.",
     "staged": "No job is left to run and the board is in the timeline; the round waits for an approve.",
     "idle": "No consumer has drawn for a while; a keep returns the buffer to ready, otherwise the keeper retires it.",
 }
@@ -149,7 +149,6 @@ class PathsCfg(mia_data_config.PathsCfg):
 
 class SourcingCfg(BaseModel):
     parallel: int = Field(default=4, ge=1)  # stage jobs in flight per buffer
-    parallel_fetch: int = Field(default=2, ge=1)  # fetch jobs in flight per buffer
     tensorizer: str = "muvit-2d"  # must exist under <harness.dir>/tensorizers/
 
 

@@ -315,16 +315,16 @@ async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
             raise RuntimeError(f"{tensorizer} is missing")
         return f"{commit[:12]} env {digest[:12]} tensorizer {cfg.sourcing.tensorizer}"
 
-    async def harness_fetch():
-        """The harness checkout has the `fetch` subcommand the fetch jobs run."""
+    async def harness_stage():
+        """The harness environment runs, and its checkout has the `stage` subcommand the stage jobs run."""
         command = [str(harness_env(cfg)), "-c", "import sys; from mia_harness.cli import main; sys.exit(main())"]
         try:
-            result = subprocess.run([*command, "fetch", "--help"], capture_output=True, text=True, timeout=120)
+            result = subprocess.run([*command, "stage", "--help"], capture_output=True, text=True, timeout=120)
         except OSError as error:
             raise RuntimeError(f"cannot run the harness environment's python: {error}") from error
         if result.returncode:
-            raise RuntimeError(f"`harness fetch --help` exited {result.returncode}: {result.stderr.strip()[-300:]}")
-        return f"{cfg.harness.dir} has `harness fetch`"
+            raise RuntimeError(f"`harness stage --help` exited {result.returncode}: {result.stderr.strip()[-300:]}")
+        return f"{cfg.harness.dir} has `harness stage`"
 
     async def buffer_api():
         url = f"{cfg.service.url}/buffers/_check_/status"
@@ -347,7 +347,7 @@ async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
             ("local root", local_root),
             ("service token", service_token),
             ("harness", harness),
-            ("harness fetch", harness_fetch),
+            ("harness stage", harness_stage),
             ("buffer-api", buffer_api),
         ]
     )

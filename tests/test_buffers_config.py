@@ -76,7 +76,7 @@ def test_data_repo_key_is_refused(tmp_path):
         )
 
 
-@pytest.mark.parametrize("override", [{"sourcing": {"parallel": 0}}, {"sourcing": {"parallel_fetch": 0}}])
+@pytest.mark.parametrize("override", [{"sourcing": {"parallel": 0}}])
 def test_bad_sourcing_values_are_refused(tmp_path, override):
     with pytest.raises(ValidationError):
         make_cfg(tmp_path, **override)
