@@ -1,11 +1,11 @@
 # MIA: a stage reads on demand — Spec
 
-**Status:** v0.3 · 2026-11-20. v0.2 was approved 2026-11-20 as it stood for now, with §9 owed later. v0.3
-follows the user's decision of 2026-11-20 that nothing here keeps compatibility with rounds or histories from
-before it, and a review of v0.2 (§5.3 to §5.5, §6 calls 4 and 7 to 9 are new and the user's to change). The
-direction (§4, approach A) and §9 are the user's decisions. Rests on the training-buffers spec, the sparse
-OME-Zarr staging spec and the prep-and-buffering spec, whose fetch phase (§5.2) and quota estimate (§5.4,
-"the record's expected bytes") it replaces.
+**Status:** v0.4 · 2026-11-20 · v0.3 approved 2026-11-20 and built; v0.4 records what the review of the built
+branch changed (§5.2.4, §5.4, §7.3) and is the user's to change. v0.2 was approved as it stood for now, with §9
+owed later; v0.3 followed the user's decision that nothing here keeps compatibility with rounds or histories
+from before it, and a review of v0.2. The direction (§4, approach A) and §9 are the user's decisions. Rests on
+the training-buffers spec, the sparse OME-Zarr staging spec and the prep-and-buffering spec, whose fetch phase
+(§5.2) and quota estimate (§5.4, "the record's expected bytes") it replaces.
 
 ## 1. Intent
 
@@ -97,8 +97,10 @@ deployed is cancelled first and started again (§7).
 3. **Its byte cap is the job's.** `limits.job_bytes`, as for a crop job. A stage that would pass it fails the
    dataset with the harness's message, which names the url and the cap.
 4. **A rebuild reads upstream.** A pyramid that vanished is staged again without asking whether the raw cache
-   still holds the record's files; `RAW_GONE` remains for a record whose files a person dropped, which exist
-   nowhere else.
+   still holds the record's files. `RAW_GONE` remains where the binding is staged offline (files a person
+   dropped: a `manual://` url, or a host the policy refuses), since those files exist nowhere else. The
+   binding decides this, as it decides online or offline; the plan's mark of a record's download method does
+   not.
 
 ### 5.3 The raw quota is where staging waits and the keeper evicts, not a ceiling
 
@@ -131,7 +133,11 @@ With no fetch phase nothing says a raw cache is `partial` or `fetching`, and not
 
 - **After a stage job's report is read** (ok or failed), the record's raw row is written from the cache as
   it is: path, bytes, `files.json` entries, `last_used`, and the state `ready`, which for a raw cache means
-  only that it is at rest on disk.
+  only that it is at rest on disk. mia-data's crop jobs write the row the same way
+  (`mia_core.assets.raw_asset`), so no writer says `partial` of a raw cache.
+- **A drop is marked just used.** When a person's files are verified into the cache the row becomes `ready`
+  with `last_used` now: nothing else touches it before the stage, and the keeper's hold rule must spare files
+  that exist nowhere else while the record waits for its slot.
 - **After a stage with no report** (killed, cancelled, a worker restart before the read) nothing is written.
   The scan of the roots finds the directory, sums it again when it changed and merges the row; a directory
   with no row becomes `ready`.
@@ -196,8 +202,15 @@ by hand.
 1. Now: the round of buffer-27716818 is cancelled. While dharani stays `blocked`, its raw row asks the keeper
    for 3.07 TB and the keeper evicts every free raw cache toward it.
 2. mia-snippets: `harness stage` without `prefetch`, merged and the live harness checkout updated.
-3. Before the mia-workflows deploy: no buffer round is sourcing or rebuilding. `mia.yaml` loses the four
-   `limits` named in §5.7.
+3. Before the mia-workflows deploy: no buffer round is sourcing or rebuilding, and **every buffer whose
+   workflow run has sourced is dealt with**, resting ones included. A buffer at `ready`, `idle`, `staged`,
+   `needs-human` or `cancelled` still carries its sourcing pass in its run's history (a run rolls over only when
+   Temporal suggests it), and that history does not replay on the new workflow: the first signal after the
+   restart (the keeper's `idle`, `degraded` or `retire`, a `go` from the page) fails its workflow task for
+   good. Either it is force-stopped and run again after the deploy, which retires it and stages it anew; or,
+   for a buffer at `ready` or `idle` that should keep serving, its run is replaced by hand before the deploy
+   (query `status`, terminate, start `MiaBuffer` with that state), which leaves a history with no sourcing in
+   it. `mia.yaml` may lose the four `limits` named in §5.7; unknown keys are ignored.
 4. mia-workflows merged, workers and buffer-api restarted, buffer-27716818 started again.
 5. Check on that round: no fetch job among its job records, `bytes_fetched` on a stage record far below the
    binding's file sizes, the raw cache not grown by a range-read record, and after the next keeper pass no

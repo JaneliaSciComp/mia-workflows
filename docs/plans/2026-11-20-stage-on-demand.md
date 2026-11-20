@@ -363,5 +363,6 @@ if it has none, that a second `settle` of a closed reservation leaves `fetched_b
 ## Rollout (the user's to start; the builder pushes and deploys nothing)
 
 As spec §7: cancel buffer-27716818's round now; harness first; before the mia-workflows deploy no buffer
-round is sourcing or rebuilding and the live `mia.yaml` loses the four fetch limits; then merge, restart,
-start the buffer again, and check the first round as §7.5 says.
+round is sourcing or rebuilding and every buffer whose run has sourced is force-stopped or has its run
+replaced by hand (§7.3: a resting buffer's history does not replay on the new workflow); then merge, restart,
+start the buffers again, and check the first round as §7.5 says.
