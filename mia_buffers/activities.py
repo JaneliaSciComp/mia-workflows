@@ -1231,7 +1231,7 @@ class Activities:
     async def _record_assets(self, round_id: str, record: str, result: StageResult, rebuild: bool = False) -> None:
         """Register with buffer-api what the stage job left on disk: the staged artifact under its id (with every
         input the id hashes, so a later round can reuse it; `ready`, or `partial` when the job failed) and the
-        record's raw cache as files.json lists it, both just used. A failed build beside a published artifact (not
+        record's raw cache as it is on disk (`ready`: at rest, whatever the job left in it), both just used. A failed build beside a published artifact (not
         a rebuild of it) leaves that artifact's row as it was before submit marked it `staging`."""
         block, cache = self._artifact_block(round_id, record), self._cache_dir(record)
         binding = yaml.safe_load(self._binding_path(round_id, record).read_text())
@@ -1262,7 +1262,7 @@ class Activities:
                 "job": None,
             }
         raw = await asyncio.to_thread(raw_asset, cache, self._binding_urls(round_id, record))
-        del raw["state"]  # the fetch phase owns the raw state (it knows the stream urls); a stage updates the rest
+        raw["state"] = "ready"  # a raw cache at rest; while a job writes it, the record's lock keeps the keeper off
         raw["last_used"] = now
         await asyncio.to_thread(self.registry.put_asset, "staged", artifact, staged)
         await asyncio.to_thread(self.registry.put_asset, "raw", record, raw)

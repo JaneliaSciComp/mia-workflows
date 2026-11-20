@@ -92,11 +92,11 @@ def test_a_row_without_last_used_counts_as_never_used():
 
 def test_stale_builds():
     rows = [
-        {"kind": "raw", "key": "r", "data": {"state": "fetching", "job": "1"}},
+        {"kind": "raw", "key": "r", "data": {"state": "ready", "job": "1"}},
         {"kind": "staged", "key": "s", "data": {"state": "staging", "job": "2"}},
         {"kind": "staged", "key": "t", "data": {"state": "staging", "job": "3"}},
     ]
-    assert stale_builds(rows, finished=lambda job: job != "3") == [("raw", "r", "partial"), ("staged", "s", "missing")]
+    assert stale_builds(rows, finished=lambda job: job != "3") == [("staged", "s", "missing")]
 
 
 def test_a_quarantined_asset_is_held_for_the_quarantine_then_free():

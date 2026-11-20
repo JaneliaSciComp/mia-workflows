@@ -894,7 +894,7 @@ async def test_read_stage_records_the_staged_and_raw_assets(acts, server):
         "path": str(acts.cfg.paths.raw_root / U937),
         "files": {url: {"size": 12, "source": "download"}},
     }
-    assert "state" not in raw  # the fetch phase owns the raw state
+    assert raw["state"] == "ready"  # at rest on disk: the keeper may take it when nothing holds it
     acts.cfg.service.url = server  # the service's worker routes refuse a client without the token
     with pytest.raises(RegistryError) as error:
         Registry.from_config(acts.cfg.service).put_asset("staged", artifact, {})
@@ -1293,7 +1293,6 @@ async def test_keep_resets_stale_builds_and_removes_old_building_dirs(acts, keep
             return {"1": [], "2": [SimpleNamespace(terminal=True)], "4": [SimpleNamespace(terminal=False)]}[job_ids[0]]
 
     acts.jobs = SimpleNamespace(client=Csub())
-    registry.put_asset("raw", "r", {"state": "fetching", "job": "1"})
     for key, job in (("s", "2"), ("down", "3"), ("running", "4")):
         registry.put_asset("staged", key, {"state": "staging", "job": job})
     record_dir = acts.cfg.paths.staged_root / "p256-l1-2-4" / "rec"
@@ -1309,15 +1308,14 @@ async def test_keep_resets_stale_builds_and_removes_old_building_dirs(acts, keep
     os.utime(empty_old, (stamp, stamp))
 
     dry = await acts.keep(dry_run=True)
-    assert dry.stale == ["raw r partial", "staged s missing"] and dry.removed_building == [str(old)]
+    assert dry.stale == ["staged s missing"] and dry.removed_building == [str(old)]
     assert dry.removed_empty == [str(empty_old)] and empty_old.is_dir()
-    assert old.is_dir() and registry.asset("raw", "r")["state"] == "fetching"
+    assert old.is_dir() and registry.asset("staged", "s")["state"] == "staging"
     report = await acts.keep()
     assert report.errors == [] and report.stale == dry.stale and report.removed_building == [str(old)]
     assert report.removed_empty == [str(empty_old)] and not empty_old.exists() and empty_young.is_dir()
     assert registry.asset("raw", "phantom") is None  # never registered
     assert not old.exists() and young.is_dir()
-    assert registry.asset("raw", "r") == {"state": "partial", "job": None}
     assert registry.asset("staged", "s") == {"state": "missing", "job": None}
     assert registry.asset("staged", "down")["state"] == registry.asset("staged", "running")["state"] == "staging"
 
@@ -1456,6 +1454,23 @@ async def test_read_stage_leaves_a_failed_build_for_the_keeper(acts, server):
     assert json.loads((staged_dir(acts, U937) / "stage.json").read_text())["ok"] is True
     [aside] = staged_dir(acts, U937).parent.glob(".building-stale-*")
     assert json.loads((aside / "stage.json").read_text())["ok"] is False
+
+
+async def test_read_stage_of_a_failed_stage_leaves_the_raw_row_ready_with_its_bytes(acts, server):
+    """A stage that failed after its reader took a file whole: the raw cache is recorded as it is on disk, at rest,
+    so its bytes count toward the quota and the keeper can evict it."""
+    from mia_buffers.drop import merge_manifest
+
+    await planned_and_bound(acts)
+    await acts.prepare_stage(7, ROUND, U937)
+    cache = acts.cfg.paths.raw_root / U937
+    merge_manifest(cache, {"https://zenodo.org/a.tif": {"validators": {"size": 3}, "source": "download"}})
+    (cache / ("0" * 64)).write_bytes(b"abc")
+    staged_into(acts._building_dir(ROUND, U937), ok=False, errors=["boom"])
+    assert not (await acts.read_stage(ROUND, U937)).ok
+    raw = acts.registry.asset("raw", U937)
+    assert raw["state"] == "ready" and raw["bytes"] >= 3
+    assert raw["files"] == {"https://zenodo.org/a.tif": {"size": 3, "source": "download"}}
 
 
 async def test_read_stage_refuses_a_foreign_artifact_id(acts, server):

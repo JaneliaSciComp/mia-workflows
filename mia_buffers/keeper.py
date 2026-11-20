@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
-BUILDING = ("fetching", "staging")  # states a job is writing under
+BUILDING = ("staging",)  # the state a job is writing under
 
 
 def _bytes(data: dict, name: str = "bytes") -> float:
@@ -100,10 +100,9 @@ def evict_path(path: Path, roots: tuple[Path, ...]) -> bool:
 
 
 def stale_builds(assets: list[dict], finished: Callable[[str], bool]) -> list[tuple[str, str, str]]:
-    """(kind, key, new state) for each row still `fetching`/`staging` under a job that has ended: a raw cache
-    becomes `partial` (a fetch resumes it), a staged artifact `missing`."""
+    """(kind, key, `missing`) for each row still `staging` under a job that has ended."""
     return [
-        (row["kind"], row["key"], "partial" if row["kind"] == "raw" else "missing")
+        (row["kind"], row["key"], "missing")
         for row in assets
         if (data := row.get("data") or {}).get("state") in BUILDING and data.get("job") and finished(str(data["job"]))
     ]
