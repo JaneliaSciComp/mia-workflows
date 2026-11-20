@@ -1,17 +1,20 @@
 """The manual drop (spec §3): which file name a human gives each URL, the raw cache's key for a dropped file,
 and the `files.json` manifest the harness reads instead of a HEAD request.
 
-`cache_key` repeats the harness's `mia_harness.io._key` so a dropped file lands where `io.fetch(url)` looks.
+A dropped file is named by `mia_core.assets.cache_key`, so it lands where the harness's `io.fetch(url)` looks.
+`cached_files` goes the other way: the files of a record's raw cache under the names they had upstream.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
+
+from mia_core.assets import cache_key, is_entry, read_files_json
+from mia_core.untrusted import loads, read_untrusted
 
 MANIFEST = "files.json"
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()-]{0,120}")
@@ -40,8 +43,39 @@ def drop_names(urls: list[str]) -> list[tuple[str, str]]:
     ]
 
 
-def cache_key(url: str, validators: dict) -> str:
-    return hashlib.sha256(f"{url}\n{json.dumps(validators, sort_keys=True)}".encode()).hexdigest()
+def _member_name(member: object) -> bool:
+    """Whether a zip directory's member name is a plain relative path: it becomes a path under a person's folder."""
+    return (
+        isinstance(member, str)
+        and member.isprintable()
+        and not member.startswith("/")
+        and bool(PurePosixPath(member).parts)
+        and ".." not in PurePosixPath(member).parts
+    )
+
+
+def cached_files(cache_dir: Path) -> list[tuple[str, Path]]:
+    """(upstream name, cache entry) of every file a record's raw cache holds whole. An entry is the file's own
+    bytes (a zip member inflated and CRC-checked) under a hash of its URL, so this names it again: a `files.json`
+    URL by its drop name, a zip's member as `<zip name>/<member path>`, found through the directory the harness
+    caches beside it. A zip the cache holds whole is listed as itself, without its members."""
+    cache_dir = Path(cache_dir)
+    manifest = {url: entry for url, entry in read_files_json(cache_dir).items() if isinstance(entry, dict)}
+    names = dict(drop_names(list(manifest)))
+    found = []
+    for url, entry in manifest.items():
+        validators = entry.get("validators")
+        if not isinstance(validators, dict) or url not in names:
+            continue
+        if is_entry(whole := cache_dir / cache_key(url, validators)):
+            found.append((names[url], whole))
+            continue
+        # ponytail: a zip directory over 64 MiB of JSON (about a million members) lists nothing; raise the limit then
+        members = loads(read_untrusted(cache_dir, cache_key(f"{url}::", validators), 64 << 20))
+        for member in members if isinstance(members, dict) else ():
+            if _member_name(member) and is_entry(path := cache_dir / cache_key(f"{url}::{member}", validators)):
+                found.append((f"{names[url]}/{member}", path))
+    return found
 
 
 def read_manifest(cache_dir: Path) -> dict:

@@ -4,7 +4,7 @@ import { $, card, datasetLink, el, flowRow, ghIcon, lifecycle, link, statePill, 
 import { api, load, S } from "./api.js";
 import { pagedTable, pageOf } from "./table.js";
 import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
-import { actionBar, BUTTON_HELP, heldPanel, onScreen, undelivered } from "./actions.js";
+import { actionBar, BUTTON_HELP, onScreen, undelivered } from "./actions.js";
 import { datasetCards } from "./datasets.js";
 
 // ---- a subject's page
@@ -230,8 +230,6 @@ export async function viewSubject(kind, key, refresh) {
       ),
     );
   parts.push(actionBar(subject, redraw), undelivered(subject, timeline?.actions || [], redraw));
-  const held = heldPanel(subject, redraw); // a set of crops that was sent back for rework and can be accepted
-  if (held) parts.push(held);
   if (subject.shelved) parts.push(shelvedNotice(subject.shelved));
   if (gaps.length) parts.push(gapsNotice(gaps));
   if (subject.hosts?.length && subject.actions.includes("go")) parts.push(hostsNotice(subject.hosts));

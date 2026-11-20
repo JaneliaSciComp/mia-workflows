@@ -1068,11 +1068,8 @@ class BufferService:
         if gaps:
             actions = actions - {"go", "resume"}
         if row["kind"] == "dataset":
-            # away from `review` a verdict needs a set of its own: an approve the set that was sent back, a
-            # reject the saved one (spec judge-decides §5)
+            # at `done` a reject needs the saved set to be about (spec judge-decides §5.2)
             sets = (row.get("data") or {}).get("sets") or {}
-            if row["stage"] != "review" and not sets.get("held"):
-                actions = actions - {"approve"}
             if row["stage"] == "done" and not sets.get("saved"):
                 actions = actions - {"reject"}
             # a resume would save the revoked set again (spec resume-restart §4.3): the round says it was
@@ -1682,24 +1679,19 @@ class BufferService:
 
     @staticmethod
     def _names_its_set(subject: dict, parsed: ActionBody) -> None:
-        """A dataset's verdict names the set it is about, and only a set the stage lets it be about (spec
-        judge-decides §5.4): at `review` the set under review, and for an approve also the set that was sent
-        back; at `done` a reject of the saved set; anywhere else an approve of the set that was sent back. A
-        subject whose round wrote no sets (a run from before them) takes a verdict that names none."""
+        """A dataset's verdict names the set it is about, and only the set the stage lets it be about (spec
+        judge-decides §5.4): at `review` the set under review, at `done` (a reject) the saved set. A subject
+        whose round wrote no sets (a run from before them) takes a verdict that names none."""
         sets = (subject.get("data") or {}).get("sets")
         if sets is None:
             return
         if not parsed.set:
             raise HttpError(422, "a verdict names the set it is about: `set`")
-        held, saved = (sets.get("held") or {}).get("set"), (sets.get("saved") or {}).get("set")
         if subject["stage"] == "review":
-            allowed = {sets.get("review"), held} if parsed.action == "approve" else {sets.get("review")}
-            refusal = "that set is not the one under review"
-        elif parsed.action == "reject":
-            allowed, refusal = {saved}, "that set is not the saved one"
+            allowed, refusal = sets.get("review"), "that set is not the one under review"
         else:
-            allowed, refusal = {held}, "that set can no longer be accepted: a newer one was approved"
-        if parsed.set not in allowed - {None}:
+            allowed, refusal = (sets.get("saved") or {}).get("set"), "that set is not the saved one"
+        if parsed.set != allowed:
             raise HttpError(409, f"{refusal}: nothing was sent")
 
     def _check_hosts(

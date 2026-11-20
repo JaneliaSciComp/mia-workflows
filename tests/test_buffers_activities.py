@@ -942,6 +942,8 @@ async def test_raw_status_reads_files_json(acts):
     cache, member = await bound_two_urls(acts), B_ZIP + "::m.tif"
     assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, member])
     merge_manifest(cache, {A_TIF: {"validators": {"size": 3}, "source": "download"}})
+    assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, member])  # a HEAD's entry: no file kept
+    (cache / cache_key(A_TIF, {"size": 3})).write_bytes(b"tif")
     assert await acts.raw_status(ROUND, U937) == RawStatus(False, [member])
     merge_manifest(cache, {B_ZIP: {"validators": {"size": 5}, "source": "download"}})
     assert await acts.raw_status(ROUND, U937) == RawStatus(False, [member])  # a HEAD's entry: no member cached
@@ -1062,6 +1064,7 @@ async def test_a_stream_url_is_ready_for_fetch_status_and_stage(acts, server):
     workspace = Path(await acts.prepare_fetch(7, ROUND, U937, 1))
     assert await acts.raw_status(ROUND, U937) == RawStatus(False, [A_TIF, member])
     merge_manifest(cache, {A_TIF: {"validators": {"size": 3}, "source": "download"}})
+    (cache / cache_key(A_TIF, {"size": 3})).write_bytes(b"tif")
     files = [{"url": A_TIF, "outcome": "fetched", "bytes": 3}, {"url": member, "outcome": "stream", "reason": "r"}]
     report = {"ok": True, "partial": False, "bytes_fetched": 3, "files": files, "errors": []}
     (workspace / "fetch.json").write_text(json.dumps(report))

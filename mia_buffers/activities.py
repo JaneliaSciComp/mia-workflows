@@ -31,7 +31,7 @@ from temporalio.exceptions import ApplicationError
 from autodev.activities import PERMANENT_CSUB
 from autodev.jobs import JobSpec
 from mia_core import autonomy
-from mia_core.assets import cache_missing, raw_asset, read_files_json
+from mia_core.assets import cache_key, cache_missing, raw_asset, read_files_json
 from mia_core.config import manifest_path
 from mia_core.fs import dir_bytes
 from mia_core.jobrecord import address, job_link, record_path
@@ -64,7 +64,7 @@ from .config import (
     STAGES,
     stage_pass,
 )
-from .drop import cache_key, drop_names, merge_manifest, read_manifest
+from .drop import drop_names, merge_manifest, read_manifest
 from .explore import start_gaps
 from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
 from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
@@ -1284,7 +1284,7 @@ class Activities:
     @activity.defn(name="raw_status")
     @mia_permanent_errors
     async def raw_status(self, round_id: str, record: str) -> RawStatus:
-        """Whether files.json of the record's raw cache lists every whole file of the round's binding but the
+        """Whether the record's raw cache holds every file of the round's binding (`cache_missing`) but the
         stream urls an earlier fetch recorded on the raw row (buffer-api unreachable: none known). The row's
         `last_used` is touched, so the keeper's hold rule spares what this buffer is about to use."""
         try:
@@ -1297,8 +1297,10 @@ class Activities:
         recorded = row.get("stream") if isinstance(row, dict) else None
         urls = self._binding_urls(round_id, record)
         stream = [url for url in urls if isinstance(recorded, list) and url in recorded]
-        manifest = await asyncio.to_thread(read_files_json, self._cache_dir(record))
-        ready, missing = cache_missing(manifest, urls, stream)  # raw_asset's `ready` rule, without the du
+        cache = self._cache_dir(record)
+        manifest = await asyncio.to_thread(read_files_json, cache)
+        # raw_asset's `ready` rule, without the du
+        ready, missing = await asyncio.to_thread(cache_missing, cache, manifest, urls, stream)
         return RawStatus(ready, missing, texts(stream))
 
     @activity.defn(name="raw_ready")

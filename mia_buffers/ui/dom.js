@@ -56,12 +56,15 @@ const ghMark = () => {
 };
 // a link into this page (a job's record in a timeline: `<this origin>/#job/…`) opens here, any other in a new tab
 const intoThisPage = href => typeof location !== "undefined" && String(href).startsWith(`${location.origin}/#`);
+// `<file url>::<member or glob>` is the harness's address of a file inside a zip or a directory, which no host
+// serves: its link opens the part before the `::` (the first one after the host, so an IPv6 host stays whole)
+const served = href => String(href).replace(/^(https?:\/\/[^/]+\/.*?)::.*$/is, "$1");
 // catalog records are untrusted: only an http(s) href becomes a link, anything else (javascript:, data:) stays text
 export const link = (href, text, title) =>
   /^https?:\/\//i.test(String(href || ""))
     ? el(
         "a",
-        intoThisPage(href) ? { href, title } : { href, target: "_blank", rel: "noopener", title },
+        intoThisPage(href) ? { href, title } : { href: served(href), target: "_blank", rel: "noopener", title },
         ...(/^https:\/\/github\.com\//i.test(href) ? [ghMark(), " "] : []),
         ...[].concat(text),
       )

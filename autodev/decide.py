@@ -8,7 +8,6 @@ from __future__ import annotations
 from .models import Feedback, PrSnapshot
 
 DONE, CLOSED, MERGE, REVISE, ESCALATE, WAIT = "DONE", "CLOSED", "MERGE", "REVISE", "ESCALATE", "WAIT"
-RESET = "RESET"  # move the branch back to the head a person accepted
 
 
 def escalation(reason: str, snapshot: PrSnapshot) -> str:
@@ -19,11 +18,7 @@ def escalation(reason: str, snapshot: PrSnapshot) -> str:
 def decide(
     snapshot: PrSnapshot, handled: list[str], revisions: int, max_revisions: int, escalated: str | None = None
 ) -> tuple[str, Feedback | str | None]:
-    """Return (action, detail): the Feedback to act on for REVISE, the reason for ESCALATE, the head to go back
-    to for RESET, else None.
-
-    A head a person accepted (`snapshot.accepted`) outranks everything on an open pull request: the branch is
-    reset to it, then it is merged with no further approval, and no change request starts a revision.
+    """Return (action, detail): the Feedback to act on for REVISE, the reason for ESCALATE, else None.
 
     Pending change requests win over an approval while revisions remain; once the limit is hit, a pending
     request escalates to a human instead, approved or not: an approval never outranks a request someone else
@@ -38,12 +33,6 @@ def decide(
         return DONE, None
     if snapshot.state == "closed":
         return CLOSED, None
-    if snapshot.accepted:
-        if snapshot.head_sha != snapshot.accepted:
-            return RESET, snapshot.accepted
-        if snapshot.checks in ("success", "none"):
-            return MERGE, None
-        return escalate("accepted, but checks are failing") if snapshot.checks == "failure" else (WAIT, None)
     pending = [item for item in snapshot.feedback if item.id not in handled]
     if pending and revisions < max_revisions:
         return REVISE, pending[0]

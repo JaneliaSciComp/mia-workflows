@@ -482,7 +482,7 @@ function prepareStep(pane, subject, redraw, wanted) {
       table,
     ),
     card(
-      "Requests of this buffer",
+      "Preparation requests",
       "The preparation requests filed from this step, newest first. Open one for its datasets.",
       pagedTable("buffer-requests:" + subject.key, {
         source: pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number })),

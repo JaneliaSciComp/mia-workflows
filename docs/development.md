@@ -228,14 +228,12 @@ crops; on a pull request it still brings a person's own revision request back to
 
 **Sets outlive their round, and a verdict names its set.** `DatasetState.held` is the set that was sent back
 (by the judge or a person) and not yet superseded by an approved one; `DatasetState.saved` is the saved set.
-Each is a `CropSet`: the round, the test, the pins, the binding. The stage write puts them into the subject's
-`data.sets` (`models.sets_view`), which the page reads. An approve that names the held set is an **accept**,
-taken at any stage (`accept_events`, `_guard`, `_accept_held`): what the send-back started is stopped as a
-cancel stops it, the set's round becomes the state's again (`_switch_to`), and the set is saved, or `/accept
-<sha>` asks autodev to reset its pull request to that head and merge it once its running job has ended
-(`review.accepted`, `decide` → `RESET`, `Mirror.reset`); other heads are ignored meanwhile
-(`DatasetState.accepting`). A reject that names the saved set (`rework_events`, `_rework_saved`) revokes it and
-starts a round of its own that asks the developer for a fix. For one set a person's newest verdict decides:
+Each is a `CropSet`: the round, the test, the pins, the binding. The stage write puts the set under review and
+the saved one into the subject's `data.sets` (`models.sets_view`), which the page reads. A verdict is about
+the set under review. The held set takes none: it is what the developer's answer is about, and when that
+answer brings it back to `review` its round becomes the state's again (`_switch_to`). A reject that names the
+saved set (`rework_events`, `_rework_saved`) revokes it and starts a round of its own that asks the developer
+for a fix. For one set a person's newest verdict decides:
 `authorized()` leaves out what `MACHINE_AUTHORS` (the judge, `policy:developer`) wrote once a person has spoken.
 
 **A person's verdict never waits for the crop judge.** The judge runs as a task beside the round's (`_judged`,
@@ -670,14 +668,22 @@ locks, so there it refuses to run without `--dry-run`.
 fetch.json` with the cache read-write, the byte cap `limits.fetch_bytes` and the walltime
 `limits.fetch_walltime_min`, up to `limits.fetch_attempts` attempts that resume from the cache (`partial`),
 `sourcing.parallel_fetch` fetch jobs per buffer. `fetch.json` lists one outcome per URL: `cached`, `fetched`,
-`stream`, `pending` or `failed`; a missing `fetch.json` counts as partial. The fetch is skipped when `files.json`
-already lists every binding url: a plain file is listed by the HEAD that fetched it, a `<zip>::<member or glob>`
-url only once `harness fetch` has every matching member in the cache (source `members`); the zip's own entry
-proves nothing about members, as mia-data's verify reads only a sample of them. The harness also caches the zip's
+`stream`, `pending` or `failed`; a missing `fetch.json` counts as partial. The fetch is skipped when the cache
+holds every binding url (`mia_core.assets.cache_missing`): a plain file counts when `files.json` lists it and its
+entry is on disk, as a HEAD lists a file before a byte of it is kept and a read by range keeps none; a
+`<zip>::<member or glob>` url counts once `harness fetch` has every matching member in the cache and lists it
+(source `members`); the zip's own entry proves nothing about members, as mia-data's verify reads only a sample of
+them. The harness also caches the zip's
 directory, so the offline stage expands a glob without a request. The binding is re-read under the lock: if the
 previous holder built the artifact, it is reused ("staged by <holder> while this buffer waited"). A fetch still
 partial after its attempts names the last job's id, state and exit code; `mia-buffers check` verifies the harness
 checkout has `harness fetch`.
+
+**Reading a raw cache by hand.** A cache entry is the upstream file's own bytes (a zip member inflated and
+CRC-checked) under a hash of its URL and validators. `mia-buffers raw <raw_root>/<record id>` prints each entry
+with the name it had upstream (`<zip name>/<member path>` for a member), and `--to <folder>` makes that folder with
+a symlink per file, which any viewer opens by its own name. With `--copy` the folder holds copies instead: they
+outlast an eviction and open over a share that does not follow links.
 
 **Staging.** The stage job runs `harness stage`, then `harness check-stage`, offline (cache read-only, no hosts),
 unless a URL streams: then the stage keeps the cache read-write and the hosts. A dropped (hand-placed) dataset
