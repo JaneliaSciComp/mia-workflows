@@ -1,6 +1,4 @@
-import dataclasses
-
-from autodev.decide import CLOSED, DONE, ESCALATE, MERGE, RESET, REVISE, WAIT, decide, escalation
+from autodev.decide import CLOSED, DONE, ESCALATE, MERGE, REVISE, WAIT, decide, escalation
 from autodev.models import Feedback, PrSnapshot
 
 F1, F2 = Feedback("review-1", "a"), Feedback("comment-2", "b")
@@ -51,14 +49,3 @@ def test_raised_escalation_waits_until_the_head_changes():
     assert decide(snap(feedback=[F1]), [], 3, 3, raised) == (WAIT, None)
     assert decide(snap(approved=True, checks="failure"), [], 3, 3, raised)[0] == ESCALATE  # a different reason
     assert decide(PrSnapshot(5, "open", "h2", False, "none", [F1]), [], 3, 3, raised) == (ESCALATE, reason)
-
-
-def test_an_accept_outranks_pending_feedback_and_resets_before_it_merges():
-    """spec judge-decides §5.1: a person accepted the set of an earlier head; later commits are discarded."""
-    later = dataclasses.replace(snap(checks="success", feedback=[F1]), head_sha="b" * 40, accepted="a" * 40)
-    assert decide(later, [], 0, 3) == (RESET, "a" * 40)  # never a revision once a head was accepted
-    there = dataclasses.replace(later, head_sha="a" * 40)
-    assert decide(there, [], 0, 3) == (MERGE, None)  # no approval of the head is needed: the accept is one
-    assert decide(dataclasses.replace(there, checks="pending"), [], 0, 3) == (WAIT, None)
-    assert decide(dataclasses.replace(there, checks="failure"), [], 0, 3)[0] == ESCALATE
-    assert decide(dataclasses.replace(later, state="merged"), [], 0, 3) == (DONE, None)

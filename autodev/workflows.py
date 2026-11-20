@@ -16,7 +16,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
-    from .decide import CLOSED, DONE, ESCALATE, MERGE, RESET, REVISE, WAIT, decide, escalation
+    from .decide import CLOSED, DONE, ESCALATE, MERGE, REVISE, WAIT, decide, escalation
     from .models import (
         KEY_RE,
         AwaitInput,
@@ -34,7 +34,6 @@ with workflow.unsafe.imports_passed_through():
         PrRef,
         PrSnapshot,
         PublishInput,
-        ResetInput,
         RoundInput,
         StageInput,
         Status,
@@ -187,18 +186,10 @@ class IssueWorkflow:
             )
             await workflow.sleep(CUT_OFF_WAIT)
             return await self._run_round(feedback, again=False)
-        if state.pr is not None and workflow.patched("judge-decides"):
-            # a person accepted an earlier head while this job ran: nothing of the job is pushed, so nothing of
-            # it can land once the branch is back at that head (spec judge-decides §5.1)
-            accepted = await self._act("accepted_head", state.pr, result_type=str)
-            if accepted:
-                await self._comment(
-                    state.pr,
-                    f"Round {state.round}'s result was dropped: the pull request was accepted as it was at "
-                    f"`{accepted[:12]}`.",
-                    f"dropped {state.key}-{state.round}",
-                )
-                return PrRef(state.pr, None)
+        if state.pr is not None and workflow.patched("judge-decides") and not workflow.patched("no-accept"):
+            # ponytail: only a history without the `no-accept` patch asks this, and the answer is always "";
+            # delete the call and the activity once no such run is open
+            await self._act("accepted_head", state.pr, result_type=str)
         self.phase = "PUBLISHING"
         result = await self._act(
             "publish_round",
@@ -290,10 +281,6 @@ class IssueWorkflow:
                 await self._act("set_stage", StageInput(state.issue, None))
                 await self._settle_judge()
                 return "closed"
-            if action == RESET:
-                assert isinstance(detail, str)  # decide() returns the accepted head for RESET
-                await self._act("reset_pr", ResetInput(state.issue, state.pr, detail), seconds=300)
-                continue
             if action == MERGE:
                 merge = await self._act(
                     "merge_pr", MergeInput(state.issue, state.pr, snapshot.head_sha), result_type=MergeResult
