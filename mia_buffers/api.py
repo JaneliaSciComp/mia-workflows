@@ -46,6 +46,7 @@ from .explore import (
     DATASET_FILTERS,
     DATASET_SORTS,
     LACKS,
+    NOTHING,
     PLAN_SORTS,
     Page,
     dataset_haystack,
@@ -199,7 +200,6 @@ class PlanPage(_Strict):
     dir: str = "asc"
     q: str = ""
     fit_only: bool = False
-    to_prepare: bool = False  # only the rows that fit and are not prepared
     prepared_only: bool = False
     raw_cached: bool = False
     staged_geom: bool = False
@@ -291,6 +291,7 @@ class ActionBody(_Strict):
 
     action: Literal[
         "go",
+        "resume",
         "approve",
         "reject",
         "revoke",
@@ -965,7 +966,7 @@ class BufferService:
 
     def _catalog_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
         """The Datasets list: one page of datasets, filtered by state, modality, dims, licence, what the record
-        lacks (`lacks`: one of `LACKS`, or `anything`) or a request's records, with how many datasets have each
+        lacks (`lacks`: one of `LACKS`, `anything` or `nothing`) or a request's records, with how many datasets have each
         filter value."""
         page = self._page_of({"limit": "50", **query}, DATASET_SORTS)
         assert page is not None
@@ -978,8 +979,8 @@ class BufferService:
             if name in query:
                 rows = [row for row in rows if row[name] == query[name]]
         if "lacks" in query:
-            if query["lacks"] not in (*LACKS, ANYTHING):
-                raise HttpError(422, f"lacks must be one of {[*LACKS, ANYTHING]}, got {query['lacks']!r}")
+            if query["lacks"] not in (*LACKS, ANYTHING, NOTHING):
+                raise HttpError(422, f"lacks must be one of {[*LACKS, ANYTHING, NOTHING]}, got {query['lacks']!r}")
             rows = lacks_filter(rows, query["lacks"])
         found, total = paged(rows, page, DATASET_SORTS, dataset_haystack)
         return 200, {"ref": ref, "rows": found, "total": total, "facets": counts}, {}
@@ -1027,7 +1028,7 @@ class BufferService:
             return "shelved", frozenset({"unshelve"})
         status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
         if gaps:
-            actions = actions - {"go"}
+            actions = actions - {"go", "resume"}
         if row["kind"] == "dataset":
             # away from `review` a verdict needs a set of its own: an approve the set that was sent back, a
             # reject the saved one (spec judge-decides §5)
@@ -1036,6 +1037,10 @@ class BufferService:
                 actions = actions - {"approve"}
             if row["stage"] == "done" and not sets.get("saved"):
                 actions = actions - {"reject"}
+            # a resume would save the revoked set again (spec resume-restart §4.3): the round says it was
+            # revoked, or the dataset's row does, which also holds for a round that carries no such mark
+            if sets.get("revoked") or (self.ledger.dataset(row["key"]) or {}).get("state") == "revoked":
+                actions = actions - {"resume"}
         resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
         if resting and self._asking(row["kind"], row.get("number")) is None:
             actions = actions | {"shelve"}
@@ -1341,7 +1346,8 @@ class BufferService:
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
         actor = self._actor(headers, parsed)
-        if parsed.action == "go" and (gaps := self._gaps(record)):  # before a subject is created for it
+        runs = parsed.action in ("go", "resume")  # the actions that run a round: a go from scratch, a resume on
+        if runs and (gaps := self._gaps(record)):  # before a subject is created for it
             raise HttpError(409, f"the record cannot be run: {'; '.join(gaps)}")
         subject = self.ledger.subject("dataset", record)
         if subject is None:
@@ -1363,7 +1369,7 @@ class BufferService:
         fields = (("note", parsed.note), ("root", parsed.root), ("set", parsed.set))
         payload = {name: value for name, value in fields if value}
         # a reject of the saved set starts the rework's jobs, as a go starts a round's (spec judge-decides §5.2)
-        starts = parsed.action == "go" or (parsed.action == "reject" and subject["stage"] == "done")
+        starts = runs or (parsed.action == "reject" and subject["stage"] == "done")
         needed = (partial(self._needed, records=[record])) if starts else None
         return self._act_on(subject, parsed, actor, payload, needed)
 
@@ -1526,7 +1532,7 @@ class BufferService:
         subject = self._numbered("prep", number)
         payload: dict = {}
         needed = None
-        if parsed.action == "go":
+        if parsed.action in ("go", "resume"):  # both run the request: its datasets from scratch, or resumed
             text = parsed.spec if parsed.spec is not None else subject["data"].get("spec")
             if not text:
                 raise HttpError(422, f"request {subject['key']} has no text to run: send one as `spec`")
@@ -1718,8 +1724,12 @@ class BufferService:
                 if not self.dispatcher.signal_running(kind, number, "recheck"):
                     raise DispatchError("no workflow is running for it")
             else:
-                # a dataset's go is its workflow's `restart`: the round starts in a new run, on today's code
-                self.dispatcher.send(kind, number, "restart" if (kind, signal) == ("dataset", "go") else signal, event)
+                # a dataset's go and its resume are its workflow's `restart`: the round runs in a new run, on
+                # today's code, and the event's kind says which of the two it is
+                # a request's resume is its workflow's `go`: its round reads from the action how it runs
+                restarts = kind == "dataset" and signal in ("go", "resume")
+                name = "restart" if restarts else "go" if signal == "resume" else signal
+                self.dispatcher.send(kind, number, name, event)
         except DispatchError as error:
             self._asked.pop((kind, number), None)  # nothing was asked of any workflow
             failed = self.ledger.settle_action(action["id"], "failed", str(error))
@@ -2170,7 +2180,6 @@ class BufferService:
             staged_as,
             page,
             fit_only=asked.fit_only,
-            to_prepare=asked.to_prepare,
             prepared_only=asked.prepared_only,
             raw_cached=asked.raw_cached,
             staged_geom=asked.staged_geom,

@@ -61,6 +61,28 @@ def test_restart_one(stack, fake):  # noqa: F811
     assert killed(fake) == ["autodev"] and new_sessions(fake) == ["temporal", "autodev", "mia-data", "autodev"]
 
 
+def test_restart_of_everything_leaves_temporal_running(stack, fake):  # noqa: F811
+    """Temporal holds the rounds' state and runs no code of this repository: a restart with no names is for the
+    services, and Temporal is restarted only when it is named."""
+    cli.main(["up"])
+    assert cli.main(["restart"]) == 0
+    assert killed(fake) == ["mia-data", "autodev"] and "temporal" in fake.running
+    assert new_sessions(fake) == ["temporal", "autodev", "mia-data", "autodev", "mia-data"]
+    assert cli.main(["restart", "temporal"]) == 0 and killed(fake)[-1] == "temporal"
+
+
+def test_buffer_api_is_the_last_to_stop_and_the_first_to_start(tmp_path, fake, monkeypatch):  # noqa: F811
+    """Every worker writes to buffer-api. On 2026-11-18 it went down first and came up last: activities of the
+    other workers failed an attempt on a registry that did not answer, and dataset rows were skipped. So the
+    service that runs it stops after every other worker has handed its work back, and starts before any."""
+    s = make_stack_v2(tmp_path)
+    monkeypatch.setattr(cli, "load_manifest", lambda _: s.manifest)
+    assert cli.main(["up"]) == 0
+    assert new_sessions(fake) == ["temporal", "mia-buffers", "autodev", "snippets", "mia-data"]
+    assert cli.main(["down"]) == 0
+    assert killed(fake) == ["mia-data", "snippets", "autodev", "mia-buffers", "temporal"]
+
+
 def test_unknown_service_exits(stack, fake):  # noqa: F811
     with pytest.raises(SystemExit, match="unknown service"):
         cli.main(["up", "nope"])

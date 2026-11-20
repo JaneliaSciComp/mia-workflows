@@ -113,7 +113,7 @@ export const PILL_HELP = {
   "needs-human":
     "A person has to act. The stage says what: review (its crops wait for a verdict), failed (a step failed; running it again may pass) or blocked (something has to be decided or changed first). The newest entry of its timeline says why.",
   "revoked":
-    "Withdrawn by a person after its crops were saved (Revoke): nothing is selected or reused from it; Run again on its page repairs it.",
+    "Withdrawn by a person after its crops were saved (Revoke): nothing is selected or reused from it; Restart on its page repairs it.",
   "shelved":
     "Set aside by a person, with a reason (Shelve): no preparation request starts it and no buffer plan takes it. Unshelve on its page takes it back.",
   // a cache directory or a staged pyramid

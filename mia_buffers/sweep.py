@@ -52,8 +52,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 ACTIVE = ("open", "working", "waiting")  # the states of a case that is not over
-ACTIONS = ("cancel", "stop", "go", "recheck")  # steps sent to buffer-api's action routes
-STARTS_WORK = ("go", "snippets_go", "revise")  # steps the weekly limit counts
+ACTIONS = ("cancel", "stop", "go", "resume", "recheck")  # steps sent to buffer-api's action routes
+RUNS = ("go", "resume")  # the two that run a subject again: from scratch, or what is left of its round
+STARTS_WORK = (*RUNS, "snippets_go", "revise")  # steps the weekly limit counts
 CASE_DAYS = 30  # how far back a subject's earlier cases are read
 STEP_WAIT_S = 2 * 3600  # a step that is still not possible after this long ends its case
 ROUND_ENDED_S = 600  # a job still alive this long after its round ended is left over
@@ -256,7 +257,8 @@ class Sweep:
         return None
 
     async def _snippets(self, number: int, dataset: int) -> dict | None:
-        """The snippets issue as the rules read it: {issue, state, working, stopped, pr, mergeable, last_word}.
+        """The snippets issue as the rules read it: {issue, state, working, stopped, pr, mergeable, merged,
+        last_word}. `pr` is its open pull request, or the one autodev merged when the issue is closed.
         `last_word` is autodev's last comment on the issue or its pull request, on one line. None when the issue
         is not the one a round of this dataset opened: its number came from a timeline entry, which quotes what
         jobs and agents wrote."""
@@ -267,6 +269,8 @@ class Sweep:
             return None
         labels = {label["name"] for label in issue.get("labels", [])}
         found = await gh.find_pr(f"snippets/issue-{number}")
+        if found is None and issue.get("state") == "closed":  # autodev closes the issue when it has merged
+            found = await gh.find_pr(f"snippets/issue-{number}", state="closed")
         pull = await gh.get_pr(found["number"]) if found else None
         comments = await gh.issue_comments(number) + (await gh.issue_comments(pull["number"]) if pull else [])
         said = [
@@ -282,6 +286,7 @@ class Sweep:
             "stopped": "snippets:needs-human" in labels,
             "pr": pull["number"] if pull else None,
             "mergeable": pull.get("mergeable") if pull else None,
+            "merged": bool(pull and pull.get("merged")),
             "last_word": neutralize(" ".join((last.get("body") or "").split()))[:LAST_WORD_CHARS] if last else "",
         }
 
@@ -613,22 +618,24 @@ class Sweep:
         revision just read (buffer-api refuses it if the subject moved meanwhile), a key that makes a second
         send the same action, and for a stop the run it is about."""
         subject, do, data = timeline["subject"], step["do"], case["data"]
+        if do == "go" and case["kind"] == "prep":
+            do = "resume"  # a request's go starts every dataset it names over: the cleaner only ever resumes one
         if do not in subject["actions"]:
             return None
-        if do == "go" and case["kind"] == "prep" and not await self._request_may_go(subject):
+        if do == "resume" and case["kind"] == "prep" and not await self._request_may_go(subject):
             return None
         actor = CLEANER_ADVISED if do == "go" and step.get("note") else CLEANER  # advice makes the round match first
         fields: dict[str, Any] = {"key": f"cleaner/{case['id']}/{len(data['steps'])}", "actor": actor}
         fields["revision"] = subject["revision"]
         if do == "stop" and data.get("run_id"):
             fields["run"] = data["run_id"]
-        if do == "go":
-            gos = [
-                action for action in timeline["actions"] if action["action"] == "go" and action["payload"].get("root")
+        if do in RUNS:
+            ran = [
+                action for action in timeline["actions"] if action["action"] in RUNS and action["payload"].get("root")
             ]
-            if gos:
-                fields["root"] = gos[-1]["payload"]["root"]  # charged to whoever the last round was charged to
-            if step.get("note"):
+            if ran:
+                fields["root"] = ran[-1]["payload"]["root"]  # charged to whoever the last round was charged to
+            if do == "go" and step.get("note"):
                 fields["note"] = step["note"]
         path = ACTION_PATHS[case["kind"]].format(key=case["key"], number=case["number"])
         try:
@@ -727,20 +734,19 @@ class Sweep:
         return f"filed as issue #{created['number']}"
 
     async def _request_may_go(self, subject: dict) -> bool:
-        """Whether a `go` to the request would start no dataset round (spec §4.7): its text has no `again` and
-        every dataset it names is in a round, at a person's turn, prepared or shelved. A request's go is sent
-        as `prep:<number>`, past each dataset's own limits, so until then the request waits on its datasets'
-        cases. Refused when one of those needs a person, or the text says `again`."""
+        """Whether a `resume` of the request would run no dataset round (spec §4.7): every dataset it names is
+        in a round, at a person's turn, prepared or shelved. What a request sends its datasets goes as
+        `prep:<number>`, past each dataset's own limits, so until then the request waits on its datasets'
+        cases. Refused when one of those needs a person. The cleaner sends a request no `go`: that one starts
+        every dataset it names over."""
         from .spec import SpecError, load_prep_text
 
         try:
             spec = load_prep_text((subject.get("data") or {}).get("spec") or "")
         except SpecError:
-            raise Refused("its text cannot be read, so what a go would start is not known") from None
-        if spec.again:
-            raise Refused("its text says `again`: a go would run every dataset it names again")
+            raise Refused("its text cannot be read, so what a resume would start is not known") from None
         if spec.select is not None or not spec.records:
-            raise Refused("it selects its datasets: a go would start the rounds of whatever it selects")
+            raise Refused("it selects its datasets: a resume would run the rounds of whatever it selects")
         for view in await self._request_datasets(subject):
             if view["status"] in ("working", "waiting", "shelved") or view["stage"] == "done":
                 continue
@@ -809,7 +815,7 @@ def _patient(case: dict, step: dict) -> bool:
     """Whether the step has a wait of its own, so the common limit on a step that is not possible yet is not
     its limit: a wait, autodev's answer, a diagnosis (its job, the day's budget) and a request's go, which
     waits on its datasets' cases."""
-    return step["do"] in ("wait", "await_autodev", "diagnose") or (case["kind"] == "prep" and step["do"] == "go")
+    return step["do"] in ("wait", "await_autodev", "diagnose") or (case["kind"] == "prep" and step["do"] in RUNS)
 
 
 def _epoch(stamp: str | None) -> float:

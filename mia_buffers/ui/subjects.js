@@ -92,7 +92,7 @@ const hostsNotice = hosts =>
     el("b", {}, "A host is not approved. "),
     "Its jobs were refused ",
     ...mdInline(hosts.map(host => `\`${host}\``).join(", ")),
-    ": press Run again and check what its jobs may download from.",
+    ": press Resume and check what its jobs may download from.",
   );
 // A shelved subject (spec shelved-subjects): who set it aside, when and why. Its only button is Unshelve.
 export const shelvedNotice = hold =>

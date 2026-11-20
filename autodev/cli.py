@@ -22,6 +22,8 @@ from .config import STAGES, load_config
 if TYPE_CHECKING:
     from temporalio.client import Client
 
+    from mia_core.registry import Registry
+
     from .config import Config, Deployment
 
 log = logging.getLogger("autodev")
@@ -147,10 +149,23 @@ async def cmd_init_labels(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def report_code(registry: Registry | None, task_queue: str) -> asyncio.Task | None:
+    """Tell buffer-api, beside the worker's own work, what code this worker loaded: the cleaner names a worker
+    whose code is not the checkout's any more (`mia_core.registry.report_worker`). None for a deployment with no
+    buffer-api to tell."""
+    if registry is None:
+        return None
+    from mia_core.registry import report_worker
+
+    return asyncio.create_task(report_worker(registry, task_queue, log))
+
+
 async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     """Run the Temporal worker until SIGTERM: one worker for workflows and short activities, one for the
     long-running job waits."""
     from temporalio.worker import Worker
+
+    from mia_core.temporal import DRAIN, until_stopped
 
     from .activities import Activities
     from .agent import AgentJobs
@@ -178,9 +193,14 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         workflows=[IssueWorkflow, PollWorkflow],
         activities=activities.all(),
         max_concurrent_activities=8,
+        graceful_shutdown_timeout=DRAIN,
     )
     await_worker = Worker(
-        client, task_queue=f"{task_queue}-await", activities=[activities.await_agent], max_concurrent_activities=20
+        client,
+        task_queue=f"{task_queue}-await",
+        activities=[activities.await_agent],
+        max_concurrent_activities=20,
+        graceful_shutdown_timeout=DRAIN,
     )
     task = asyncio.current_task()
     assert task is not None  # we are inside the worker coroutine
@@ -193,12 +213,15 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         task_queue,
         task_queue,
     )
+    report = report_code(activities.registry, task_queue)
     try:
         async with main_worker, await_worker:
-            await asyncio.Event().wait()
+            await until_stopped(main_worker, await_worker)
     except asyncio.CancelledError:
         log.info("worker shutting down")
     finally:
+        if report is not None:
+            report.cancel()
         await gh.aclose()
     return 0
 

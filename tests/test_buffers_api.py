@@ -1353,7 +1353,11 @@ def test_adopt_then_read_a_subject(tmp_path):
     status, row, _ = call(s, "PUT", "/subjects/dataset/234", payload={"key": "rec-a", "stage": "review"})
     assert status == 200 and row["issue"] == 234
     status, row, _ = call(s, "GET", "/subjects/dataset/rec-a")
-    assert (status, row["status"], row["actions"]) == (200, "waiting", ["approve", "cancel", "go", "reject", "shelve"])
+    assert (status, row["status"], row["actions"]) == (
+        200,
+        "waiting",
+        ["approve", "cancel", "go", "reject", "resume", "shelve"],
+    )
     assert call(s, "GET", "/subjects/dataset/nope")[0] == 404
     assert call(s, "GET", "/subjects/widget/x")[0] == 404
     assert call(s, "PUT", "/subjects/dataset/235", payload={"key": "rec-b", "stage": "bogus"})[0] == 422
@@ -1607,6 +1611,75 @@ def test_a_record_with_a_gap_gets_no_subject(tmp_path):
     assert call(s, "GET", "/subjects/dataset/rec-c")[0] == 404 and not gateway.sent
 
 
+# --- resume (spec resume-restart §3, §4.3): accepted where a round stopped or waits for a verdict ---
+
+
+def _dataset_at(s, stage, sets=None, record="rec-a"):
+    """A dataset subject a round has left at `stage`; returns its number."""
+    number = act(s, f"/datasets/{record}/actions", {"action": "go", "key": f"start-{record}"})[1]["number"]
+    data = {} if sets is None else {"data": {"sets": sets}}
+    assert worker(s, "POST", f"/timeline/dataset/{number}", {"stage": stage, **data})[0] == 200
+    return number
+
+
+@pytest.mark.parametrize("stage", ["failed", "blocked", "needs-human", "cancelled", "review"])
+def test_a_resume_is_taken_where_a_round_stopped_and_sent_as_restart_with_its_own_kind(tmp_path, stage):
+    s, gateway = _acting(tmp_path)
+    number = _dataset_at(s, stage)
+    assert {"go", "resume"} <= set(call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"])
+    asked = {"action": "resume", "key": "click-2", "actor": "prep:9", "root": "o/buffers#9"}
+    status, action, _ = act(s, "/datasets/rec-a/actions", asked, AUTH)  # a worker's: it names who is charged
+    assert status == 202 and (action["action"], action["payload"]) == ("resume", {"root": "o/buffers#9"})
+    kind, sent_to, signal, event = gateway.sent[-1]
+    assert (kind, sent_to, signal) == ("dataset", number, "restart")  # as a go: the round goes on in a new run
+    assert (event.kind, event.event_id, event.actor) == ("resume", str(action["id"]), "prep:9")
+    assert s.ledger.timeline("dataset", number)[-1]["body"] == "**Action:** `resume` by `prep:9`"
+
+
+@pytest.mark.parametrize("stage", ["done", "debugging", "matching", "testing", "merging"])
+def test_a_resume_is_refused_where_nothing_is_left_or_a_round_works(tmp_path, stage):
+    s, gateway = _acting(tmp_path)
+    _dataset_at(s, stage)
+    assert "resume" not in call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"]
+    status, refused, _ = act(s, "/datasets/rec-a/actions", {"action": "resume", "key": "click-2"})
+    assert status == 409 and "not `resume`" in refused["error"] and len(gateway.sent) == 1
+
+
+def test_a_dataset_that_never_ran_takes_no_resume(tmp_path):
+    s, gateway = _acting(tmp_path)
+    assert act(s, "/datasets/rec-a/actions", {"action": "resume", "key": "click-1"})[0] == 404
+    assert not gateway.sent
+
+
+def test_a_dataset_whose_saved_crops_were_revoked_takes_a_go_and_no_resume(tmp_path):
+    s, gateway = _acting(tmp_path)
+    _dataset_at(s, "blocked", sets={"review": None, "held": None, "saved": None, "revoked": True})
+    actions = call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"]
+    assert "go" in actions and "resume" not in actions
+    assert act(s, "/datasets/rec-a/actions", {"action": "resume", "key": "click-2"})[0] == 409
+
+
+def test_a_dataset_whose_row_says_revoked_takes_no_resume_whatever_its_round_says(tmp_path):
+    """A round from before a revoke was marked on its sets: the registry row is what says it was revoked."""
+    s, gateway = _acting(tmp_path)
+    _dataset_at(s, "blocked", sets={"review": None, "held": None, "saved": {"set": "i1-e1:t", "approved_by": "a"}})
+    assert worker(s, "PUT", "/datasets/rec-a", {"state": "revoked", "data_stage": "blocked", "folder": "f"})[0] == 200
+    actions = call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"]
+    assert "go" in actions and "resume" not in actions
+    assert act(s, "/datasets/rec-a/actions", {"action": "resume", "key": "click-2"})[0] == 409
+
+
+def test_a_dataset_whose_record_cannot_be_run_takes_neither_go_nor_resume(tmp_path):
+    s, gateway = _acting(tmp_path)
+    _dataset_at(s, "blocked")
+    bare = [{"path": "rec-a.yaml", "record": {"id": "rec-a"}}]
+    assert worker(s, "PUT", f"/records/{'f' * 40}", {"records": bare})[0] == 200
+    actions = call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"]
+    assert "go" not in actions and "resume" not in actions
+    status, refused, _ = act(s, "/datasets/rec-a/actions", {"action": "resume", "key": "click-2"})
+    assert status == 409 and "the record cannot be run" in refused["error"]
+
+
 def test_a_first_go_creates_the_dataset_subject_and_starts_its_workflow(tmp_path):
     s, gateway = _acting(tmp_path)
     status, action, _ = act(s, "/datasets/rec-a/actions", {"action": "go", "key": "click-1"})
@@ -1675,7 +1748,7 @@ def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(
     worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "failed"})
     worker(s, "PUT", "/subjects/dataset/8", {"key": "rec-b", "stage": "testing"})
     worker(s, "PUT", "/datasets/rec-a", {"state": "prepared", "data_stage": "failed", "folder": "f"})
-    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"] == ["go", "revoke", "shelve"]
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"] == ["go", "resume", "revoke", "shelve"]
     assert act(s, "/datasets/rec-b/actions", {"action": "shelve", "note": "later"})[0] == 409  # a round is open
     assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "  "})[0] == 422  # it says why
     assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 409  # nothing to take back
@@ -1711,7 +1784,7 @@ def test_a_shelved_subject_takes_unshelve_alone_and_leaves_needs_and_every_plan(
 
     assert act(s, "/datasets/rec-a/actions", {"action": "unshelve"})[0] == 202
     view = call(s, "GET", "/subjects/dataset/rec-a")[1]
-    assert (view["status"], view["actions"], view["shelved"]) == ("stuck", ["go", "revoke", "shelve"], None)
+    assert (view["status"], view["actions"], view["shelved"]) == ("stuck", ["go", "resume", "revoke", "shelve"], None)
     assert [row["key"] for row in call(s, "GET", "/needs")[1]["needs"]] == ["rec-a"]
     assert call(s, "GET", "/datasets/rec-a")[1]["state"] == "prepared"
     assert [e["body"].split("\n")[0] for e in call(s, "GET", "/timeline/dataset/7")[1]["entries"]] == [
@@ -1957,7 +2030,7 @@ def test_a_cancel_with_no_workflow_running_settles_the_subject_itself(tmp_path):
     worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a", "stage": "matching"})  # its run was terminated by hand
     assert act(s, "/datasets/rec-a/actions", {"action": "cancel"})[0] == 202 and gateway.sent == []
     subject = call(s, "GET", "/subjects/dataset/rec-a")[1]
-    assert (subject["stage"], subject["actions"]) == ("cancelled", ["go", "revoke", "shelve"])
+    assert (subject["stage"], subject["actions"]) == ("cancelled", ["go", "resume", "revoke", "shelve"])
     assert "no workflow was running" in call(s, "GET", "/timeline/dataset/7")[1]["entries"][-1]["body"]
 
 
@@ -2278,6 +2351,26 @@ def test_stop_terminates_the_run_retires_the_subjects_buffers_and_says_what_it_l
     assert "workflow stopped" in said and f"`{mine}`" in said and "cluster job" in said
 
 
+@pytest.mark.parametrize("stage", ["done", "needs-human", "cancelled"])
+def test_a_request_takes_a_resume_where_it_takes_a_go_and_hears_it_as_its_go_signal(tmp_path, stage):
+    """spec resume-restart §5: the request's round reads from its action how it runs its datasets."""
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/prep", {"spec": PREP_TEXT, "key": "selection-1"})[1]["number"]
+    _stage(s, "prep", number, stage)
+    assert {"go", "resume"} <= set(call(s, "GET", f"/subjects/prep/prep-{number}")[1]["actions"])
+    status, action, _ = act(s, f"/prep/{number}/actions", {"action": "resume", "key": "click-2"})
+    assert status == 202 and (action["action"], action["payload"]) == ("resume", {"spec": PREP_TEXT})
+    kind, sent_to, signal, event = gateway.sent[-1]
+    assert (kind, sent_to, signal, event.kind) == ("prep", number, "go", "resume")
+
+
+def test_a_request_in_progress_takes_no_resume(tmp_path):
+    s, gateway = _acting(tmp_path)
+    number = act(s, "/prep", {"spec": PREP_TEXT, "key": "selection-1"})[1]["number"]
+    _stage(s, "prep", number, "requested")
+    assert act(s, f"/prep/{number}/actions", {"action": "resume"})[0] == 409 and len(gateway.sent) == 1
+
+
 def test_a_preparation_request_is_filed_and_run_in_one_post(tmp_path):
     s, gateway = _acting(tmp_path)
     status, action, _ = act(s, "/prep", {"spec": PREP_TEXT, "key": "selection-1"})
@@ -2476,6 +2569,9 @@ def test_catalog_datasets_filters_by_what_a_record_lacks(tmp_path):
     assert out["facets"]["lacks"]["anything"] >= out["total"]
     anything = call(s, "GET", "/catalog/datasets", {"lacks": "anything"})[1]
     assert anything["total"] == out["facets"]["lacks"]["anything"] and all(row["lacks"] for row in anything["rows"])
+    nothing = call(s, "GET", "/catalog/datasets", {"lacks": "nothing"})[1]
+    assert nothing["total"] == nothing["facets"]["lacks"]["nothing"] == len(records) - anything["total"]
+    assert nothing["total"] and not any(row["lacks"] for row in nothing["rows"])
     assert call(s, "GET", "/catalog/datasets", {"lacks": "patience"})[0] == 422
 
 
@@ -2632,15 +2728,12 @@ def test_plan_paged_answers_a_page_and_the_numbers_over_the_whole_plan(tmp_path)
     summary = out["summary"]
     assert (summary["fitting"], summary["pool"]) == (len(fitting), len(pool)) and summary["pool"] == 1
     assert summary["bytes_fitting"] == sum(row["bytes"] or 0 for row in fitting)
-    assert summary["to_prepare"] == sorted(row["id"] for row in fitting if row["prepared"] != "prepared")
     assert sum(step["value"] for step in summary["funnel"]) == whole["n_seen"]  # every record leaves or is in the pool
     row = next(r for r in call(s, "POST", "/plan", payload={"spec": text, "page": {"q": "u937"}})[1]["rows"])
     assert (row["id"], row["issue"], row["raw"], row["in_pool"]) == (U937, 9, {"state": "ready", "bytes": 10}, True)
     assert row["title"].startswith("Dataset of confocal") and row["licence"] == "CC-BY-4.0"
     only = call(s, "POST", "/plan", payload={"spec": text, "page": {"prepared_only": True}})[1]
     assert [r["id"] for r in only["rows"]] == [U937] and only["summary"]["fitting"] == 1
-    left = call(s, "POST", "/plan", payload={"spec": text, "page": {"to_prepare": True}})[1]
-    assert [r["id"] for r in left["rows"]] == summary["to_prepare"] and left["summary"]["fitting"] == len(fitting)
     assert call(s, "POST", "/plan", payload={"spec": text, "page": {"sort": "nope"}})[0] == 422
     assert call(s, "POST", "/plan", payload={"spec": text, "page": {"limit": 500}})[0] == 422
     assert call(s, "POST", "/plan", payload={"spec": text, "page": {"oops": 1}})[0] == 422
@@ -2649,13 +2742,14 @@ def test_plan_paged_answers_a_page_and_the_numbers_over_the_whole_plan(tmp_path)
 def test_a_kept_plan_is_rebuilt_when_a_dataset_changes_state(tmp_path):
     s = catalog_service(tmp_path)
     text = re.sub(r"ref: [0-9a-f]{40}", f"ref: {REF_A}", SPEC_2D_TEXT)
-    first = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]["summary"]
-    assert first["pool"] == 0 and first["to_prepare"]
+    whole = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]
+    first, waiting = whole["summary"], next(row["id"] for row in whole["rows"] if row["fits"])
+    assert first["pool"] == 0
     again = call(s, "POST", "/plan", payload={"spec": text, "page": {"offset": 1}})[1]["summary"]
     assert again == first  # the same plan, another page
-    call(s, "PUT", f"/datasets/{first['to_prepare'][0]}", payload={"state": "prepared"})
+    call(s, "PUT", f"/datasets/{waiting}", payload={"state": "prepared"})
     after = call(s, "POST", "/plan", payload={"spec": text, "page": {}})[1]["summary"]
-    assert after["pool"] == 1 and first["to_prepare"][0] not in after["to_prepare"]
+    assert after["pool"] == 1 and after["prepared"] == first["prepared"] + 1
     assert call(s, "POST", "/plan", payload={"spec": text.replace(REF_A, "c" * 40), "page": {}})[0] == 409  # not synced
 
 
@@ -2953,6 +3047,17 @@ def test_a_go_with_approve_hosts_approves_them_then_starts_the_round(tmp_path, _
     assert (line["host"], line["by"], line["kind"], line["number"]) == ("data.example.org", "page", "dataset", number)
     assert _missing(s, {"records": ["rec-a"]})[:2] == (200, {"hosts": []})
     assert len(gateway.sent) == 1
+
+
+def test_a_resume_with_approve_hosts_approves_them_as_a_go_does(tmp_path, _home):
+    s, gateway = _starting(tmp_path)
+    number = act(s, "/datasets/rec-b/actions", {"action": "go", "key": "start"})[1]["number"]
+    worker(s, "POST", f"/timeline/dataset/{number}", {"stage": "blocked"})
+    worker(s, "PUT", "/datasets/rec-b/hosts", {"hosts": ["cdn.example.net"]})
+    resume = {"action": "resume", "key": "click-2", "approve_hosts": ["cdn.example.net"]}
+    assert act(s, "/datasets/rec-b/actions", resume)[0] == 202
+    assert "**Hosts approved:** `cdn.example.net` by `page`" in _bodies(s, "dataset", number)
+    assert [sent[3].kind for sent in gateway.sent] == ["go", "resume"]
 
 
 def test_a_host_a_datasets_job_was_refused_is_offered_at_its_next_start(tmp_path, _home):

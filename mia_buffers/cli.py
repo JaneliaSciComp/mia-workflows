@@ -22,6 +22,7 @@ from autodev.auth import bot_login
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from mia_core.fs import require_local_dir, require_secret_file
 from mia_core.registry import Registry, RegistryError, read_token, report_worker
+from mia_core.temporal import DRAIN, until_stopped
 from mia_data.cli import _gh, _github_clients, _mirror_gh
 from mia_data.jobspec import harness_env, harness_pin
 
@@ -143,10 +144,15 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
         workflows=[MiaBuffer, MiaCacheKeeper, MiaCleaner, MiaPrep, MiaMirror],
         activities=activities.all(),
         max_concurrent_activities=8,
+        graceful_shutdown_timeout=DRAIN,
     )
     mirror_passes = mirror_worker(client, cfg.mirror_queue, mirror.mirror)
     await_worker = Worker(
-        client, task_queue=cfg.await_queue, activities=[activities.await_job], max_concurrent_activities=20
+        client,
+        task_queue=cfg.await_queue,
+        activities=[activities.await_job],
+        max_concurrent_activities=20,
+        graceful_shutdown_timeout=DRAIN,
     )
     task = asyncio.current_task()
     assert task is not None  # we are inside the worker coroutine
@@ -158,7 +164,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log))
     try:
         async with main_worker, await_worker, mirror_passes:
-            await asyncio.Event().wait()
+            await until_stopped(main_worker, await_worker, mirror_passes)
     except asyncio.CancelledError:
         print("worker shutting down")
     finally:

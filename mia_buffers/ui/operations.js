@@ -218,11 +218,11 @@ const plain = text => String(text || "").replaceAll("`", "");
 const RULE_HELP = {
   "no run": [
     "No workflow run",
-    "The registry says a round is in progress, but Temporal has no open run for it, so nothing will ever move it. The cleaner cancels the round, ends its cluster jobs and runs it again.",
+    "The registry says a round is in progress, but Temporal has no open run for it, so nothing will ever move it. The cleaner cancels the round, ends its cluster jobs and resumes it; a buffer is planned again.",
   ],
   "frozen run": [
     "Workflow run is frozen",
-    "The run's workflow task fails every time, so the run cannot take a step. The cleaner force-stops it, ends its cluster jobs and runs it again. A buffer's run is left to a person, because stopping it retires the buffer's versions.",
+    "The run's workflow task fails every time, so the run cannot take a step. The cleaner force-stops it, ends its cluster jobs and resumes it. A force stop loses what the round had, so it starts from the beginning. A buffer's run is left to a person, because stopping it retires the buffer's versions.",
   ],
   "activity retrying": [
     "A step keeps failing",
@@ -234,11 +234,11 @@ const RULE_HELP = {
   ],
   "autodev's run failed": [
     "Snippet agent's job failed",
-    "The dataset waited for a reader on a snippets issue, and autodev's agent job there failed before it opened a pull request. The cleaner asks autodev to try once more, waits until it has started, then runs the dataset again. A second failure on the same issue is diagnosed.",
+    "The dataset waited for a reader on a snippets issue, and autodev's agent job there failed before it opened a pull request. The cleaner asks autodev to try once more, waits until it has started, then resumes the dataset's round. A second failure on the same issue is diagnosed.",
   ],
   "merge conflict": [
     "Snippet pull request cannot merge",
-    "The pull request the dataset waited for conflicts with main. The cleaner asks autodev to merge main into it, or closes it to start over when autodev has no revision left, then runs the dataset again.",
+    "The pull request the dataset waited for conflicts with main. The cleaner asks autodev to merge main into it and resumes the dataset's round. When autodev has no revision left it closes the pull request and restarts the dataset.",
   ],
   "revision limit": [
     "Revisions used up",
@@ -250,27 +250,31 @@ const RULE_HELP = {
   ],
   "passing cause": [
     "Passing failure",
-    "The round stopped on something that usually passes by itself: a dropped connection, a time-out, a busy service. The cleaner waits, then runs it again, at most twice, and diagnoses it after that.",
+    "The round stopped on something that usually passes by itself: a dropped connection, a time-out, a busy service. The cleaner waits, then resumes it, at most twice, and diagnoses it after that.",
+  ],
+  "merged since": [
+    "Merged after the stop",
+    "The round stopped because autodev reported a problem with the reader's pull request, and that pull request was merged afterwards. The cleaner resumes the dataset, once per pull request: the round finds the merge and saves the crops that were approved.",
   ],
   "fixed since": [
     "Worker restarted since",
-    "The round stopped on an error of the worker, and the worker has since started on newer code. The cleaner runs it again, once per commit.",
+    "The round stopped on an error of the worker, and the worker has since started on newer code. The cleaner resumes it, once per commit.",
   ],
   "budget used up": [
     "Budget used up",
-    "The round was refused a job because the budget of what started it is used up. Only a person raises a cap: `autonomy.root` in mia.yaml, then a restart of the workers. After that, run it again.",
+    "The round was refused a job because the budget of what started it is used up. Only a person raises a cap: `autonomy.root` in mia.yaml, then a restart of the workers. After that, resume it.",
   ],
   "host not approved": [
     "Host not approved",
-    "A job needs a host nobody has approved. Only a person approves hosts: Run again on the subject's page, and check them.",
+    "A job needs a host nobody has approved. Only a person approves hosts: Resume on the subject's page, and check them.",
   ],
   "record gap": [
     "Catalog record is incomplete",
-    "The round could not go on because the dataset's catalog record lacks something or needs a decision. The cleaner cannot change a record; it runs the dataset again once the record has changed.",
+    "The round could not go on because the dataset's catalog record lacks something or needs a decision. The cleaner cannot change a record; it restarts the dataset once the record has changed.",
   ],
   "input changed": [
     "Catalog record changed",
-    "The record a stopped dataset waited on has changed, so the cleaner runs the dataset again.",
+    "The record a stopped dataset waited on has changed, so the cleaner restarts the dataset: a round is pinned to the record it began with.",
   ],
   "diagnosis": [
     "Cause not known",

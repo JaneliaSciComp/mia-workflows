@@ -159,3 +159,11 @@ def test_a_prep_request_can_ask_for_prepared_datasets_again():
     base = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "a" * 40}, "records": ["r"]}
     assert load_prep_text(yaml.safe_dump(base)).again is False
     assert load_prep_text(yaml.safe_dump({**base, "again": True})).again is True
+
+
+def test_a_prep_request_says_restart_and_a_stored_one_that_says_again_reads_the_same():
+    base = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "a" * 40}, "records": ["r"]}
+    assert load_prep_text(yaml.safe_dump(base)).restart is False
+    assert load_prep_text(yaml.safe_dump({**base, "restart": True})).restart is True
+    assert load_prep_text(yaml.safe_dump({**base, "again": True})).restart is True
+    assert load_prep_text(yaml.safe_dump({**base, "restart": True})).again is True  # what the round's pins carry

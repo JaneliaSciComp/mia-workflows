@@ -147,6 +147,9 @@ class DatasetState:
     pr: int | None = None
     tests: list[Test] = field(default_factory=list)
     attempts: dict[str, int] = field(default_factory=dict)  # stage -> attempts used
+    # which attempt of its steps the round is on: a step that runs again under the same round takes the next
+    # one, and with it a job key, a workspace, a test id and timeline markers of its own
+    attempt: int = 1
     pending: list[PrUpdate] = field(default_factory=list)  # PR updates not yet acted on
     published: bool = False  # some round of this issue published crops: there is something a data:revoke withdraws
     restart: LabelEvent | None = None  # the go a run was rolled over for: the new run's first step is its round
@@ -168,6 +171,7 @@ class DatasetState:
     saved: CropSet | None = None
     reworks: int = 0  # how often the crop judge sent this dataset's sets back since a person last acted
     accepting: str | None = None  # the PR head whose set a person accepted: autodev merges it, other heads are ignored
+    revoked: bool = False  # a person's revoke ended the round: it takes no resume, and a new round clears this
 
 
 def sets_view(state: DatasetState, stage: str) -> dict:
@@ -187,7 +191,44 @@ def sets_view(state: DatasetState, stage: str) -> dict:
         if held
         else None,
         "saved": {"set": saved.set_id, "approved_by": saved.test.approved_by} if saved else None,
+        "revoked": state.revoked,  # buffer-api offers no resume for it (spec resume-restart §4.3)
     }
+
+
+def resume_step(state: DatasetState, judge_on: bool) -> str:
+    """Where a resumed round starts: its first step with no result on `state` (spec resume-restart §4.2). A step
+    that finished is kept whatever changed since; a rule that voids a result when something changed is a
+    condition here (§8).
+
+    `restart`: the round was never admitted and has nothing to keep. `follow`: it follows a reader's snippets
+    issue, and acts on that as it is now. `saved`: its approved set is the saved one already, so nothing is left
+    (a set that was saved and then revoked reads so too, whatever marks the revoke). `save`: its set is approved
+    and not saved. `judge`: its set passed and the crop judge (`judge_on`) never looked. `review`: its set waits
+    for a verdict. `crops`: it has a binding and no passing set. `match`: it has no binding."""
+    if state.pins is None:
+        return "restart"
+    if state.snippet_issue and not merge_taken(state):
+        return "follow"
+    last = state.tests[-1] if state.tests else None
+    if last and last.ok:
+        if last.approved_at:
+            saved = state.saved is not None and state.saved.set_id == set_id(state.round_id, last)
+            return "saved" if saved else "save"
+        return "judge" if judge_on and not last.evidence else "review"
+    return "crops" if state.binding else "match"
+
+
+def merge_taken(state: DatasetState) -> bool:
+    """Whether the round has taken its reader's merge: it follows no pull request any more, its pins name the
+    merge commit, and its sets are its own, as a matched binding's are. Read from what the merge leaves on the
+    state: no `pr`, and a set made at a commit that is not the round's (a pull request's head).
+
+    # ponytail: a merge taken with no head ever tested leaves no such set and reads as not taken; the resumed
+    # round then waits on its closed issue and stops, and a Restart runs it. A `merged` field on the state
+    # when that is seen.
+    """
+    pins = state.pins
+    return state.pr is None and pins is not None and any(test.sha != pins.snippets_commit for test in state.tests)
 
 
 def job_key(issue: int, round_id: str, kind: str, attempt: int) -> str:

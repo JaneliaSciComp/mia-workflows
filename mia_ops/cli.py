@@ -18,24 +18,34 @@ from mia_core.judge import eval as judge_eval
 
 from . import services
 from .manifest import load_manifest
-from .services import Stack, Temporal, attach, dead_windows, is_running, kill, service_up, windows
+from .services import Service, Stack, Temporal, attach, dead_windows, is_running, kill, service_up, windows
+
+
+def _serves_api(svc: Service) -> bool:
+    """Whether the service runs buffer-api, which every worker writes to."""
+    return svc.app.api_endpoint(svc.cfg) is not None
 
 
 def cmd_up(stack: Stack, args: argparse.Namespace) -> int:
+    """Start Temporal, then the services: the one that runs buffer-api first, so that no worker starts before
+    the registry answers."""
     temporal = Temporal(stack)
     want_temporal, selected = stack.select(args.services)
     if want_temporal and not selected:  # `mia up temporal`
         temporal.up()
     rc = 0
-    for svc in selected:  # each call starts or verifies Temporal first; after the first that is a health check
+    # each call starts or verifies Temporal first; after the first that is a health check
+    for svc in sorted(selected, key=lambda svc: not _serves_api(svc)):
         rc |= service_up(svc, stack, temporal)  # 1 when its worker did not start: the others are still started
     return rc
 
 
 def cmd_down(stack: Stack, args: argparse.Namespace) -> int:
+    """Stop the services, then Temporal: the one that runs buffer-api last, so that every other worker hands
+    its work back while the registry still answers."""
     want_temporal, selected = stack.select(args.services)
     rc = 0
-    for svc in reversed(selected):
+    for svc in sorted(reversed(selected), key=_serves_api):
         rc |= kill(svc.name)
     if want_temporal:
         rc |= Temporal(stack).down(explicit="temporal" in args.services)
@@ -43,6 +53,10 @@ def cmd_down(stack: Stack, args: argparse.Namespace) -> int:
 
 
 def cmd_restart(stack: Stack, args: argparse.Namespace) -> int:
+    """Down, then up. With no names that is every service and not Temporal, which holds the rounds' state and
+    runs no code of this repository: it is restarted only when it is named."""
+    if not args.services:
+        args.services = list(stack.services)
     return cmd_down(stack, args) or cmd_up(stack, args)
 
 
@@ -173,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     for cmd, help_text in (
         ("up", "start all services (Temporal first), or the named ones"),
         ("down", "stop all services (Temporal last), or the named ones"),
-        ("restart", "down, then up, same selection"),
+        ("restart", "down, then up: the named services, or every one but Temporal"),
         ("ps", "show which services are running"),
     ):
         sub.add_parser(cmd, help=help_text).add_argument("services", nargs="*", metavar="SERVICE")

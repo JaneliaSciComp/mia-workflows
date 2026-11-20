@@ -97,7 +97,21 @@ posting it to GitHub.
 **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
 `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there. buffer-api
 refuses any other action and the page offers only these; a round in progress accepts only `cancel` (and, for a
-buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round). A new stage or action goes into the table first.
+buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round).
+A new stage or action goes into the table first.
+
+**Resume and Restart.** A dataset and a preparation request are run again in one of two ways (spec
+`2026-11-18-resume-restart.md`). **Restart** is the action `go`: the round's state is wiped, it is pinned anew
+(catalog, readers, harness) and every step runs. **Resume** is the action `resume`: the round keeps its id, its
+pins and every result on its state, and goes on from the first step with none, which `resume_step`
+(`mia_data/models.py`) names: the match, the crops, the judge, the save, or the reader's pull request as it is
+now. A step that failed, was refused, cancelled or skipped has no result and runs; a step that finished is kept
+whatever changed since. So a step that failed because of a fault in the pinned harness or reader fails again on
+Resume, and the fix is picked up by Restart. `resume` is taken at `failed`, `blocked`, `needs-human`, `cancelled`
+and `review`, and never by a dataset whose saved crops were revoked. The resumed round is charged to whoever
+asked for it, runs its steps as a new attempt (`DatasetState.attempt`: its own job keys, workspaces, test ids
+and markers), and says in its first entry what it kept. A round's results are in its workflow's state: a force
+stop ends the workflow, and a Resume after one starts from the beginning.
 
 **Shelving is beside the stage tables** (spec `docs/specs/2026-11-14-shelved-subjects.md`). A person sets a
 subject of any kind aside with a reason: `shelve`, with the reason in `note`, is accepted whenever the subject's
@@ -414,9 +428,9 @@ the reason.
 
 | subject | routes | actions |
 |---|---|---|
-| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*, at `review` *Restart*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
+| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Restart*, at `debugging` *Restart now*), `resume` (*Resume*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
 | buffer (`#buffer/<key>`) | `POST /specs`, `POST /specs/<key>/actions` | `edit` with `spec`, `go` (*Continue* on step 3, *Plan a new version*), `approve` (*Run* at the plan, *Approve and serve* at `staged`), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel` (also the way back from steps 4 and 5), `stop` |
-| preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go`, `cancel`, `stop` |
+| preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go` (*Restart*), `resume` (*Resume*), `cancel`, `stop` |
 
 `POST /specs` with `{spec}` saves a buffer as a new subject, every time, at `new`: the `name` in its definition
 (the text the code calls its spec) is a label and need not be unique (the first subject of a name has it as its
@@ -437,7 +451,6 @@ and its timeline entry shows it.
 `buffer: <number>` (a buffer's Prepare step) the request's data names that buffer, and `GET
 /subjects/prep?buffer=<number>` lists a buffer's requests; `MiaPrep` and the request's budget are the same either
 way. `GET /subjects/buffer` adds `serving` to each buffer: the id of the version consumers draw from now, or null.
-`POST /plan` with `page.to_prepare` answers only the rows that fit and are not prepared.
 
 - `cancel` ends a round in progress (`planning`, `plan-review`, `sourcing`, `staged`; a request at `requested`; a
   dataset from `matching` to `merging`): its dataset tasks are cancelled, every cluster job it waits on is killed by
@@ -479,6 +492,17 @@ in `mia.yaml` (a queue carries its service's name). The page asks every minute a
 long as one is away, with the `mia restart` that brings it back. Temporal remembers a poller for about five minutes,
 so a worker that stops is reported that long after; one that never started is reported at once.
 `GET /run/<kind>/<number>` is the Temporal status of a subject's latest run.
+
+**Restarts.** `mia restart` restarts the services and leaves Temporal running unless it is named. `mia down` stops
+the service that runs buffer-api last; `mia up` starts it first, and its worker only once buffer-api takes
+connections (`api_started`), so no worker runs against a registry that does not answer. A worker is stopped, not
+killed: `mia down` sends its process SIGTERM and waits for it (`drain`). The worker's task queues stop together
+(`mia_core.temporal.until_stopped`), a running activity gets `DRAIN` (10 s) to finish, and one still running then
+is cancelled and handed back to Temporal, which gives it to the next worker at once. A worker that dies any other
+way leaves each running activity to its timeout: a job wait three minutes (its heartbeat), a job submit two
+(`heartbeats`, `BEAT_TIMEOUT`), any other its `seconds`. The jobs on the cluster run on through all of it: a wait
+finds its job again by id, and a submit is at most once per key. An activity that a workflow gives a heartbeat
+timeout (`beats=True` in `_act`) carries `@heartbeats`; `tests/test_core_temporal.py` holds the two together.
 
 **Planning from outside.** `POST /plan` plans a spec against the synced catalog and the registry; datasets that
 are not `prepared` are out of the pool with the rule `not prepared`. The body is `{"spec": "<yaml text>"}`; read
@@ -542,8 +566,11 @@ the host to jobs of an approved dataset only (`granted_hosts`). autodev's agent 
 names its `agent.allow_hosts` plus the hosts its issue names, where the policy allows them
 (`autodev.agent.agent_hosts`); a job that would need more than csub's 64 is not started and its round fails saying so. An issue names hosts with `<!-- autodev: hosts a.org b.org -->` in its body
 (`hosts_marker`), and only when a bot of `github.trusted_bots` opened it: a dataset round writes there the hosts
-of its record's URLs and their redirect targets, so a reader's job reaches its own dataset's files and no other
-approved host.
+of its record's URLs and their configured redirect targets, and the hosts its own jobs were refused that a person
+has approved since (`granted_hosts`: where a download host hands the file to a storage host), so a reader's job
+reaches its own dataset's files and no other approved host. An open issue of an earlier round gets that line
+written again when a round comes back to it (`open_snippet_issue`), so a host approved after the issue was
+opened reaches its next agent job. No GitHub host is named: autodev grants none.
 
 1. **The go.** A `go` action carries the spec text (the page's *Plan*). With `plan_first` the round waits at its
    plan; without it the round stages first and asks once, at `staged`.
@@ -774,7 +801,7 @@ kind: preparation
 catalog: {repo: <owner/catalog>, ref: <40-hex commit>}
 records: [<record id>, ...]     # an explicit list, or
 select: {...}                   # the buffer spec's select block, run over the git catalog snapshot at catalog.ref
-again: false                    # optional; true also gives a new round to datasets that are prepared
+again: false                    # optional; true also gives a new round to datasets that are prepared or at review
 timeout_days: 14                # optional, default 14
 max_records: 25                 # optional; a request for more records must say so here (each is an agent run)
 ```
@@ -790,12 +817,17 @@ action carries, once.
 registry state. `cancelled`: a person cancelled it.
 
 **What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or shelved settles
-the record. A dataset that stopped (`needs-human`) is sent a `go`, and so is a prepared one when the request says
-`again`; its row is set to `in-progress` at once, so the request follows the new round instead of settling on
-what the last one left. A stopped dataset whose jobs were refused a host that no one approved yet is sent none
-(its note names the hosts, which Run again on its page lists to check). A dataset whose crops wait for a review is in a round, so it is left to it. Otherwise the dataset's
-subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
-any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
+the record. How the round runs its datasets is `PrepPins.again`: the text's `restart` (a stored request's
+`again` reads the same) for the request's first round; after that the action decides, a `resume` resuming them
+and a `go` restarting each. A round that resumes sends a dataset that never ran a `go`, and one that stopped or
+whose crops wait for a review a `resume`, which keeps what its round has. A round that restarts sends every
+dataset a `go`, a prepared one and one at review too. A dataset that is sent something has its row set to
+`in-progress` at once, so the request follows the round instead of settling on what the last one left; one
+resumed at review keeps its row, since it waits for a verdict unless its judge still has to look. A stopped
+dataset whose jobs were refused a host that no one approved yet is sent nothing (its note names the hosts,
+which Resume on its page lists to check). Otherwise the dataset's subject says where it stands: one in a round
+is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is
+`done-unpublished`, and any other is sent its action through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity
 sends no second go. The outcome is `opened` for a dataset started for the first time and `nudged` otherwise, and
 `unknown` for a go that failed (its error is the note). One entry lists each record with its outcome. A failed go
@@ -824,7 +856,9 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
 1. **The installation first.** `service_findings` reads `GET /health` (Temporal, a worker per task queue),
    `GET /workers` (what each worker said it started on: `mia_core.checkout.code_digest`, a digest of the
    packages as committed, against the checkout's now; a commit that touches only docs, tests or the page's
-   files changes nothing),
+   files changes nothing; every worker reports when it starts, the mia-data and mia-buffers ones and each
+   autodev deployment's, `mia_core.registry.report_worker`: a worker that does not is one the cleaner cannot
+   see),
    `GET /schedules` and `autonomy.pause`. Each finding names the subject kinds behind it, and those are left
    alone for the pass: a worker that is down or runs old code is said once, never "fixed" by cancelling what waits
    on it. Findings that only show across subjects (`evidence_findings`: workflow tasks failing on more than one
@@ -852,11 +886,13 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
 action since the case opened drops the case, and so does a subject that moved before the case did anything. An
 action goes to buffer-api as the actor `cleaner` with the revision just read (buffer-api refuses any action whose
 `revision` is not the subject's), the key `cleaner/<case>/<step>` and, for a `stop`, the run id the sweep saw
-(`run`). A `go` after a `cancel` that found no run, or after a `stop`, waits for `kill_jobs`: every job of the
-ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses while a
-job may still write. A dataset's `go` after a command to autodev waits until the snippets issue has lost
-`snippets:needs-human` (`await_autodev`). A request gets a `go` only when that starts no dataset round
-(`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The cleaner never
+(`run`). A subject is run again with a `resume`; a `go` stays for a buffer, and where the remedy needs more
+than the round's pins hold (a changed record, a pull request the plan closed, a run with the diagnosing
+agent's advice). Either, after a `cancel` that found no run or after a `stop`, waits for `kill_jobs`: every job
+of the ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses
+while a job may still write. A dataset's `resume` after a command to autodev waits until the snippets issue has
+lost `snippets:needs-human` (`await_autodev`). A request gets no `go` from the cleaner, and a `resume` only when
+that runs no dataset round (`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The cleaner never
 sends a `stop` to a buffer spec (it retires the spec's buffers), kills a left-over job only where no job of the
 round can be wanted any more (never at a person's turn or at `ready`), acts on a snippets issue only when its
 first line names the dataset and the bot wrote it, and judges a remedy's outcome only once the subject has moved
@@ -978,11 +1014,11 @@ Each tab is one kind of thing, and each thing has one page:
   its reason and *Unshelve*.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
   download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
-  (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, or `anything`; `record_row` names them,
+  (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, `anything` or `nothing`; `record_row` names them,
   whatever buffer asks, and the row shows each as a pill). Every row has a check (the
-  header's and *Select all* check the page that is showing). While something is checked, a box says how many datasets are
-  selected and offers *Prepare* and *Create buffer*. The checked are prepared in one request (one
-  `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a definition that
+  header's checks the page that is showing). While something is checked, a box says how many datasets are
+  selected and offers *Prepare* and *Create buffer* (`chosenBox`). The checked are prepared in one request (one
+  `POST /prep` that says `again`, so a prepared dataset and one at review get a new round), or opened in New buffer as a definition that
   selects exactly them (`specFromDatasets`: one `*/<id>.yaml` glob per dataset in `select.paths`). `#datasets?state=<state>` opens the list with a filter set.
 - **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`,
   its timeline, `/decisions?record=`, `/assets/staged?record=` and `/buffers?record=`: its record, preparation,
@@ -1007,8 +1043,10 @@ Each tab is one kind of thing, and each thing has one page:
     buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
     `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
     someone is changing (`ensureDefinition`).
-  - *Prepare* lists the plan's rows that are left to prepare (`page.to_prepare`), checks only what a request could
-    start (`summary.to_prepare`), files the request with `buffer`, and lists the buffer's requests. Its way
+  - *Prepare* lists the plan's rows that fit (`page.fit_only`) as the Datasets list lists datasets: the same
+    columns (`datasetCols`; `plan_view` gives a row those fields), a check per row, and the box of the checked
+    (`chosenBox`), whose *Prepare* files the request with `buffer` and `again`. It also lists the buffer's
+    requests. Its way
     forward is the one `go` a buffer gets from the page (`planRound`).
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the
     version's page) and *Files are in place*; *Serve* the version's id, the line a training script pastes, the

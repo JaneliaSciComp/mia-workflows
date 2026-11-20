@@ -30,6 +30,7 @@ from temporalio.exceptions import ApplicationError
 
 from autodev.activities import NO_COMMITS, PERMANENT_CSUB, permanent_errors
 from autodev.agent import hosts_marker
+from autodev.config import is_github_host
 from autodev.jobs import JobSpec
 from mia_core import autonomy
 from mia_core.assets import raw_asset
@@ -48,6 +49,7 @@ from mia_core.judge.schema import (
 )
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
+from mia_core.temporal import heartbeats
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_core.untrusted import text as _text
@@ -150,9 +152,12 @@ LOG_BYTES = 64 << 10  # the end of a job's stdout and stderr
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
+SNIPPET_BRANCH_RE = re.compile(r"snippets/issue-(\d+)")  # the branch of the pull request autodev makes for an issue
 # the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
 NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
 MARKER_RE = re.compile(r"(?s)<!--.*?-->")
+# the line of a snippets issue that names the hosts its agent's job may reach (`open_snippet_issue`)
+REACH_RE = re.compile(r"The reader's job may reach [^\n]*?<!-- autodev: hosts[^>]*?-->")
 EVIDENCE_FILE_BYTES = 64 << 20  # the largest file of the judge's evidence that is shared with the developer
 NO_CHANGE_RE = re.compile(r"<!-- \S+: no-change (\S+) -->")  # autodev's marker on a validated "nothing to change"
 CROP_STATUS = {
@@ -305,6 +310,8 @@ class Activities:
         """The main queue's activities; await_job runs on the -await queue."""
         return [
             self.admit,
+            self.resume_root,
+            self.ask_autodev,
             self.limits,
             self.poll,
             self.set_stage,
@@ -548,6 +555,16 @@ class Activities:
         write_atomic(round_dir / "downloads.json", json.dumps(entry, indent=1))
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted
         return pins
+
+    @activity.defn(name="resume_root")
+    @mia_permanent_errors
+    async def resume_root(self, issue: int, event_id: str) -> str:
+        """Who a resumed round is charged to: the root the resume's action carries, else the dataset itself, as
+        `admit` reads it for a go."""
+        action = await self._action(issue, event_id)
+        if action is None:
+            raise ValueError(f"event {event_id} is not an action: a round is resumed by one")
+        return action["payload"].get("root") or self.cfg.root_of(issue)
 
     @activity.defn(name="limits")
     async def limits(self) -> RoundLimits:
@@ -987,7 +1004,9 @@ class Activities:
 
     @activity.defn(name="prepare_debug")
     @mia_permanent_errors
-    async def prepare_debug(self, issue: int, round_id: str, pins: Pins, failure: str, binding: str | None) -> str:
+    async def prepare_debug(
+        self, issue: int, round_id: str, pins: Pins, failure: str, binding: str | None, attempt: int = 1
+    ) -> str:
         """Make the debugging agent's workspace: what the match agent reads, `failure.md` (what stopped the round
         and the limits its jobs ran under), the round's checked binding when it got that far, and `round/<job>/`
         with what each job of the round left (ROUND_FILES and the end of its stdout and stderr), read as untrusted,
@@ -995,7 +1014,7 @@ class Activities:
 
         It takes exactly the arguments the workflow sends: Temporal converts an argument to its annotated type
         only when their number matches the parameters', and `pins` must arrive as `Pins`."""
-        workspace = self._make_workspace(issue, round_id, "debug", 1)
+        workspace = self._make_workspace(issue, round_id, "debug", attempt)
         await self._agent_inputs(workspace, round_id, pins)
         (workspace / "binding.yaml").unlink(missing_ok=True)
         if binding:
@@ -1100,6 +1119,7 @@ class Activities:
 
     @activity.defn(name="submit")
     @mia_permanent_errors
+    @heartbeats
     async def submit(self, key: str, kind: str, args: JobArgs) -> str:
         """Build the job (the builders refuse a moved harness pin), let it reach what a person approved for its
         dataset beside its URLs' hosts (`granted_hosts`), refuse hosts a fresh `csub probe` doesn't allow, and submit at most
@@ -1564,24 +1584,45 @@ class Activities:
             if not (given.is_relative_to(rounds) and given.relative_to(rounds).parts[0].startswith(f"i{int(issue)}-e")):
                 raise ValueError(f"binding {binding} is not one of this dataset's rounds'")
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
+        record = self._record(round_id)
+        urls = record_urls(record)
+        # What the reader's job may reach: the hosts the dataset's files are on, and those its own jobs were
+        # refused that a person has approved since (a redirect target, mostly: a download host hands the file
+        # to a storage host). autodev grants its agent's job these, of what the policy allows, and no other
+        # approved host; it grants no GitHub host, so none is named.
+        patterns = await asyncio.to_thread(self.probe)
+        noted = await asyncio.to_thread(self.registry.dataset_hosts, pins.record)
+        reach = [
+            host
+            for host in dict.fromkeys([*hosts(urls, self.cfg), *granted_hosts(noted, patterns)])
+            if host not in self.cfg.network.package_hosts and not is_github_host(host)
+        ]
+        reach_line = f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
 
         def ours(existing: dict, prefix: str) -> bool:  # filter by author: an outsider can copy the marker
             return (existing.get("user") or {}).get("login") == self.bot and (existing.get("body") or "").startswith(
                 prefix
             )
 
+        async def found(existing: dict) -> int:
+            """An issue of an earlier round, with the hosts its next agent job may reach as they are now: one
+            approved since the issue was written is in its text from here on."""
+            body = existing.get("body") or ""
+            named = REACH_RE.sub(lambda _: reach_line, body, count=1)
+            if named != body:
+                await gh.update_issue(existing["number"], body=named)
+            return existing["number"]
+
         if snippet_issue:  # any round's marker for this data issue will do: the round id is new on a re-trigger
             remembered = await gh.get_issue(int(snippet_issue))
             any_round = self.cfg.marker(f"issue={int(issue)} round=").removesuffix(" -->")
             if remembered.get("state") != "closed" and ours(remembered, any_round):
-                return remembered["number"]
+                return await found(remembered)
         # ponytail: lists every issue; one call per round.
         for existing in await gh.list_issues(state="all"):
             # a closed one is done with (merged, or answered "nothing needs changing"): what is asked now is new
             if existing.get("state") != "closed" and ours(existing, marker):
-                return existing["number"]
-        record = self._record(round_id)
-        urls = record_urls(record)
+                return await found(existing)
         data_format = _text(((record.get("data") or {}).get("formats") or ["unknown"])[0], 40)
         # ponytail: container guessed from the record's URLs; the agent's what_fails is the authority
         container = (
@@ -1599,9 +1640,8 @@ class Activities:
         # number (spec webapp-actions §4.1, §9)
         data_link = f"[{pins.record}]({self.page_url}/#datasets/{quote(pins.record, safe='')})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
-        # the hosts the dataset's files are on: autodev grants its agent's job these and no other approved host
-        reach = [host for host in hosts(urls, self.cfg) if host not in self.cfg.network.package_hosts]
-        reach_line = f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
+        # the number is this issue's own, which it gets when it is created: `adopt_pr_binding` holds the PR to it
+        naming = "Name the new snippet `<what-it-reads>-i<N>`, N being this issue's number (SPEC §1)."
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}
             names = sorted(
@@ -1621,7 +1661,7 @@ class Activities:
                 _fenced(self._clean(_text(draft.get("what_fails"), 16000))),
                 f"Read {spec_link} first. A merged snippet is never edited: add a new one that **supersedes** the "
                 f"one at fault (`supersedes: <name>` in its `snippet.yaml`, SPEC §1), and add the binding you test, "
-                f"using the new snippet, as `examples/{pins.record}.yaml`.",
+                f"using the new snippet, as `examples/{pins.record}.yaml`. {naming}",
                 reach_line,
                 "**Record** (at `{pins.record_commit}`):".replace("{pins.record_commit}", pins.record_commit),
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
@@ -1633,7 +1673,7 @@ class Activities:
             parts = [
                 marker,
                 f"For {data_link}: dataset `{pins.record}` has no snippet that reads it.",
-                f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`.",
+                f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`. {naming}",
                 reach_line,
                 f"**Record** (at `{pins.record_commit}`):",
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
@@ -1647,12 +1687,22 @@ class Activities:
             title = f"New snippet for {self._clean(data_format)}/{container}: {self._clean(pins.record)}"
         return (await gh.create_issue(title, "\n\n".join(parts), ["snippets:go"]))["number"]
 
+    @activity.defn(name="ask_autodev")
+    @mia_permanent_errors
+    async def ask_autodev(self, snippet_issue: int, marker: str) -> None:
+        """Ask autodev to try a snippets issue again, for a resumed round whose developer had stopped before a
+        pull request: one comment per `marker`, and the label autodev starts on."""
+        full_marker = self.cfg.marker(marker)
+        said = "mia-data asks autodev to try this issue again: its dataset's round was resumed."
+        await self._comment_once(self.gh_snippets, int(snippet_issue), f"{said}\n\n{full_marker}", full_marker)
+        await self.gh_snippets.add_labels(int(snippet_issue), ["snippets:go"])
+
     @activity.defn(name="pr_state")
     @mia_permanent_errors
     async def pr_state(self, pr: int) -> PrUpdate:
         """The PR's current head, state and merge SHA, read fresh, and whether its issue needs a human."""
         pr_data = await self.gh_snippets.get_pr(pr)
-        match = re.fullmatch(r"snippets/issue-(\d+)", pr_data["head"]["ref"])
+        match = SNIPPET_BRANCH_RE.fullmatch(pr_data["head"]["ref"])
         if not match or ((pr_data["head"].get("repo") or {}).get("full_name")) != self.gh_snippets.repo:
             raise ValueError(f"PR #{pr} is not on a snippets/issue-<K> branch of {self.gh_snippets.repo}")
         snippet_issue, merged = int(match.group(1)), bool(pr_data.get("merged"))
@@ -1724,7 +1774,9 @@ class Activities:
     @mia_permanent_errors
     async def adopt_pr_binding(self, round_id: str, pr: int, sha: str) -> dict:
         """Take the PR's example binding, `snippets/<name>/examples/<record>.yaml` at `sha` (a head or the merge
-        commit), where <name> is the one snippet directory the PR adds.
+        commit), where <name> is the one snippet directory the PR adds. While the PR is open, <name> must end in
+        `-i<K>`, K being the mia-snippets issue the PR is for (its branch is `snippets/issue-<K>`): an issue has
+        one pull request, which adds one snippet, so no two pull requests can add the same name.
 
         It is checked like the match agent's binding (this record, its hosts, the schema; it may name a snippet
         superseded since it was written, never a withdrawn one) and must use <name>,
@@ -1738,6 +1790,17 @@ class Activities:
         )
         if len(names) != 1 or not NAME_RE.fullmatch(name := names[0]):
             return {"errors": [_text(f"the PR must add exactly one snippets/<name>/ directory, not {names}", 500)]}
+        pr_data = await gh.get_pr(pr)
+        asked = SNIPPET_BRANCH_RE.fullmatch(pr_data["head"]["ref"])
+        # a merged snippet keeps the name it has: nothing can change it any more
+        if asked and not pr_data.get("merged") and not re.fullmatch(rf".+-i{asked[1]}", name):
+            return {
+                "errors": [
+                    f"the snippet is named `{name}`, but a new snippet's name ends in its issue's number, like "
+                    f"`<what-it-reads>-i{asked[1]}` (SPEC §1): rename the directory, and write the new name in "
+                    "its snippet.yaml and in every `snippet:` of its example binding"
+                ]
+            }
         if not await gh.dir_sha(f"snippets/{name}", sha):
             return {"errors": [f"snippets/{name} is not in {sha}"]}
         rel = f"snippets/{name}/examples/{pins.record}.yaml"

@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from mia_data.binding import record_gaps
-from mia_data.config import round_open
 
 from .plan import NOT_PREPARED, lacks_shape
 from .specmap import facts
@@ -154,10 +153,13 @@ def record_row(path: str | None, record: dict) -> dict:
 
 LACKS = ("data URL", "array shape", "voxel size", "readable record")  # what a record can lack, as `lacks` names it
 ANYTHING = "anything"  # the `lacks` filter for a record that lacks any of them
+NOTHING = "nothing"  # and for a record that lacks none
 
 
 def lacks_filter(rows: list[dict], wanted: str) -> list[dict]:
-    """The rows whose record lacks `wanted` (one of `LACKS`), or anything at all (`ANYTHING`)."""
+    """The rows whose record lacks `wanted` (one of `LACKS`), anything at all (`ANYTHING`) or nothing (`NOTHING`)."""
+    if wanted == NOTHING:
+        return [row for row in rows if not row["lacks"]]
     return [row for row in rows if (row["lacks"] if wanted == ANYTHING else wanted in row["lacks"])]
 
 
@@ -215,9 +217,14 @@ def facets(rows: Iterable[dict]) -> dict[str, dict[str, int]]:
         for name in DATASET_FILTERS:
             if (value := row[name]) is not None:
                 counts[name][value] = counts[name].get(value, 0) + 1
-        for value in [*row["lacks"], *([ANYTHING] if row["lacks"] else [])]:
+        for value in [*row["lacks"], ANYTHING if row["lacks"] else NOTHING]:
             counts["lacks"][value] = counts["lacks"].get(value, 0) + 1
-    return {name: dict(sorted(values.items())) for name, values in counts.items()}
+
+    def in_order(item: tuple[str, int]) -> tuple[bool, str]:
+        """`anything` and `nothing` are about every lack, so a box offers them before the single ones."""
+        return item[0] not in (ANYTHING, NOTHING), item[0]
+
+    return {name: dict(sorted(values.items(), key=in_order)) for name, values in counts.items()}
 
 
 # --- a plan as the buffer designer shows it: one page of its rows, and the numbers over all of them ---------
@@ -288,6 +295,10 @@ PLAN_SORTS: dict[str, Callable[[dict], Any]] = {
     "modality": lambda row: row.get("modality_group"),
     "licence": lambda row: row["licence"],
     "state": lambda row: row.get("prepared"),
+    "stage": lambda row: row.get("stage"),  # where the dataset's preparation stands; one never started sorts last
+    "crops": lambda row: row.get("crops"),
+    "staged": lambda row: row.get("staged") or None,
+    "updated": lambda row: row.get("updated_at"),
     "raw": lambda row: (row["raw"] or {}).get("bytes"),
     "buffers": lambda row: len(row["buffers"]) or None,
     "bytes": lambda row: row.get("bytes"),
@@ -323,16 +334,13 @@ def plan_view(
     page: Page,
     *,
     fit_only: bool = False,
-    to_prepare: bool = False,
     prepared_only: bool = False,
     raw_cached: bool = False,
     staged_geom: bool = False,
 ) -> dict:
     """{rows, total, summary} of a plan (`Plan.to_dict` with states). `datasets` maps a record to its dataset_row.
     The three registry toggles narrow the rows and the summary's numbers; the funnel is the plan's own and
-    ignores them. `fit_only` and the page's search narrow only the rows and, the search, the datasets to prepare:
-    a request takes a bounded number, and the search is how a person prepares a large plan in parts.
-    `to_prepare` narrows the rows alone to the datasets that fit and are not prepared: a buffer's Prepare step.
+    ignores them. `fit_only` and the page's search narrow only the rows.
     A row whose record lacks what a plan needs (`RECORD_LACKS_GROUPS`) is counted (`record_lacks`) and never listed."""
     rows = []
     for row in sorted(plan["rows"], key=lambda row: row["path"]):
@@ -340,6 +348,10 @@ def plan_view(
         joined = {
             **row,
             **{name: known.get(name) for name in ("issue", "folder", "crops", "raw", "url", "stage")},
+            # what the Datasets list shows of a dataset, under its names there: a buffer's Prepare step has its columns
+            "state": row.get("prepared"),
+            "modality": row.get("modality_group"),
+            **{name: known.get(name) for name in ("reason", "staged", "lacks", "gaps", "updated_at")},
             "title": known.get("title") or "",
             "licence": known.get("licence"),
             "previews": known.get("previews") or [],
@@ -400,19 +412,9 @@ def plan_view(
             {name: row.get(name) for name in ("id", "modality_group", "positions", "channels", "weight")}
             for row in heaviest
         ],
-        "to_prepare": sorted(
-            row["id"]
-            for row in fitting
-            if row.get("prepared") not in ("prepared", "shelved")  # shelved: set aside by a person
-            and not round_open(row.get("stage"))  # in a round or at review: a request would start nothing
-            and not (datasets.get(row["id"]) or {}).get("gaps")  # the record cannot be run: nor would it there
-            and (not page.text or matches(page.text, _plan_haystack(row)))
-        ),
     }
     listed = [row for row in rows if row["decision"]["group"] not in RECORD_LACKS_GROUPS]
     summary["record_lacks"] = len(rows) - len(listed)
-    shown = [row for row in listed if row["fits"]] if fit_only or to_prepare else listed
-    if to_prepare:
-        shown = [row for row in shown if row.get("prepared") != "prepared"]
+    shown = [row for row in listed if row["fits"]] if fit_only else listed
     found, matched = paged(shown, page, PLAN_SORTS, _plan_haystack)
     return {"rows": found, "total": matched, "summary": summary}

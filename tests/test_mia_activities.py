@@ -101,6 +101,15 @@ def put_action(t, action_id: int, number: int = 1, action: str = "go", payload: 
         db.execute("INSERT OR REPLACE INTO actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sent', '')", row)
 
 
+async def test_resume_root_is_the_actions_root_or_the_datasets_own(tmp_path):
+    t = _setup(tmp_path)
+    put_action(t, 98, payload={"root": "o/buffers#9"})
+    assert await t.a.resume_root(1, "98") == "o/buffers#9"
+    assert await t.a.resume_root(1, "11") == f"{t.cfg.github.data_repo}#1"
+    with pytest.raises(ApplicationError, match="not an action"):
+        await t.a.resume_root(1, "nothing")
+
+
 async def test_admit_is_idempotent(tmp_path):
     t = _setup(tmp_path)
     p1 = await t.a.admit(1, "99")
@@ -168,6 +177,15 @@ async def test_prepare_debug_gives_the_agent_what_the_rounds_jobs_left(tmp_path)
     assert again == debug and not (debug / "binding.yaml").exists() and not (debug / "round" / "debug-1").exists()
     with pytest.raises(ApplicationError, match="is not one of round"):
         await t.a.prepare_debug(1, ROUND, pins, failure, str(tmp_path / "elsewhere.json"))
+
+
+async def test_prepare_debug_makes_a_workspace_per_attempt(tmp_path):
+    t = _setup(tmp_path)
+    pins = await t.a.admit(1, "99")
+    first = Path(await t.a.prepare_debug(1, ROUND, pins, "it failed", None, 1))
+    second = Path(await t.a.prepare_debug(1, ROUND, pins, "it failed again", None, 2))
+    assert (first.name, second.name) == ("debug-1", "debug-2") and first.parent == second.parent
+    assert "it failed again" in (second / "failure.md").read_text()
 
 
 async def test_read_debug_takes_one_of_two_outcomes(tmp_path):
@@ -526,6 +544,7 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
     draft = {"draft_binding": BINDING, "what_fails": "no reader for <!-- x --> files", "tried": []}
     n = await t.a.open_snippet_issue(1, ROUND, draft)
     assert await t.a.open_snippet_issue(1, ROUND, draft) == n and len(t.snip.created) == 1
+    assert "Name the new snippet `<what-it-reads>-i<N>`, N being this issue's number" in t.snip.created[0][1]
     title, body, labels = t.snip.created[0]
     assert labels == ["snippets:go"] and title == "New snippet for tiff/zip: rec-1"
     assert (
@@ -537,6 +556,30 @@ async def test_open_snippet_issue_twice_gives_one_issue(tmp_path):
     )
     # the hosts the reader's job may reach, for autodev: those of the record's URLs and their redirect targets
     assert issue_hosts(body) == ["data.example.org"] and "The reader's job may reach `data.example.org`." in body
+
+
+async def test_the_readers_job_may_reach_the_hosts_a_person_approved_for_its_dataset(tmp_path):
+    """2026-11-18, eight datasets: figshare and Hugging Face hand a download to a storage host. The dataset's
+    own jobs were refused it, a person approved it, and the match job read the files; the developer's job was
+    still granted the record's hosts alone, could read nothing and stopped with no commits. The issue names
+    what the dataset's jobs may reach by now, also an issue opened before the host was approved."""
+    t = _setup(tmp_path)  # the policy allows *.example.org
+    await t.a.admit(1, "99")
+    draft = {"draft_binding": BINDING, "what_fails": "no reader", "tried": []}
+    first = await t.a.open_snippet_issue(1, ROUND, draft)
+    assert issue_hosts(t.snip.issues[first]["body"]) == ["data.example.org"]
+    # its jobs are refused a redirect target and another host; a person approves the first (the policy has it)
+    t.a.registry.add_refused_hosts("rec-1", ["s3.example.org", "cdn.elsewhere.net"])
+    t.ledger.put_kv("dataset_hosts", {"rec-1": ["raw.githubusercontent.com"]})
+    assert await t.a.open_snippet_issue(1, ROUND, draft, first) == first and len(t.snip.created) == 1
+    body = t.snip.issues[first]["body"]
+    assert issue_hosts(body) == ["data.example.org", "s3.example.org"]  # not the unapproved one, never GitHub's
+    assert "The reader's job may reach `data.example.org`, `s3.example.org`." in body
+    assert body.count("<!-- autodev: hosts") == 1 and body.startswith("<!-- mia-data: issue=1 round=i1-e99 -->")
+    # and a new issue names them from the start
+    t.snip.issues[first]["state"] = "closed"
+    second = await t.a.open_snippet_issue(1, ROUND, draft)
+    assert second != first and issue_hosts(t.snip.issues[second]["body"]) == ["data.example.org", "s3.example.org"]
 
 
 async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(tmp_path):
@@ -604,22 +647,27 @@ async def test_open_snippet_issue_reuses_the_remembered_issue_in_a_new_round(tmp
     assert await t.a.open_snippet_issue(1, "i1-e101", draft, m) not in (n, m, other)  # not ours
 
 
-def _pr_binding(t, b, files=("snippets/new-snip/snippet.py", "snippets/new-snip/examples/rec-1.yaml")):
-    d = t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / "new-snip"  # the PR head's snapshot
+def _pr_binding(t, b, files=None, name="new-snip-i90", merged=False):
+    """PR 5, for mia-snippets issue 90, adds snippets/<name> with `b` as its example binding."""
+    files = files or (f"snippets/{name}/snippet.py", f"snippets/{name}/examples/rec-1.yaml")
+    d = t.cfg.paths.work_root / "_snapshots" / SNIP_SHA / "snippets" / name  # the PR head's snapshot
     d.mkdir()
-    (d / "snippet.yaml").write_text("name: new-snip\n")
-    t.snip.files[("snippets/new-snip/examples/rec-1.yaml", SNIP_SHA)] = yaml.safe_dump(b).encode()
+    (d / "snippet.yaml").write_text(f"name: {name}\n")
+    t.snip.files[(f"snippets/{name}/examples/rec-1.yaml", SNIP_SHA)] = yaml.safe_dump(b).encode()
 
     async def pr_files(n):
         return list(files)
 
+    async def get_pr(n):
+        return {"number": n, "head": {"ref": "snippets/issue-90", "sha": SNIP_SHA}, "merged": merged}
+
     async def dir_sha(path, ref):
-        return "tree1" if (path, ref) == ("snippets/new-snip", SNIP_SHA) else None
+        return "tree1" if (path, ref) == (f"snippets/{name}", SNIP_SHA) else None
 
-    t.snip.pr_files, t.snip.dir_sha = pr_files, dir_sha
+    t.snip.pr_files, t.snip.dir_sha, t.snip.get_pr = pr_files, dir_sha, get_pr
 
 
-NEW = {**BINDING, "snippets_commit": "f" * 40, "raw": [{**BINDING["raw"][0], "snippet": "new-snip"}]}
+NEW = {**BINDING, "snippets_commit": "f" * 40, "raw": [{**BINDING["raw"][0], "snippet": "new-snip-i90"}]}
 
 
 async def test_adopt_pr_binding_pins_it_to_the_sha(tmp_path):
@@ -628,7 +676,7 @@ async def test_adopt_pr_binding_pins_it_to_the_sha(tmp_path):
     _pr_binding(t, NEW)
     r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
     p = Path(r["path"])
-    assert r["errors"] == [] and r["name"] == "new-snip" and p.name == f"binding-pr-{SNIP_SHA[:7]}.yaml"
+    assert r["errors"] == [] and r["name"] == "new-snip-i90" and p.name == f"binding-pr-{SNIP_SHA[:7]}.yaml"
     assert yaml.safe_load(p.read_text()) == {**NEW, "snippets_commit": SNIP_SHA}
     assert r["hash"] == hashlib.sha256(p.read_bytes()).hexdigest()
 
@@ -669,17 +717,39 @@ async def test_adopt_pr_binding_takes_an_example_that_names_a_snippet_superseded
     [
         ({**NEW, "record": "rec-2"}, None, "rec-2"),
         ({**NEW, "raw": [{**NEW["raw"][0], "urls": ["https://evil.example.com/a.tif"]}]}, None, "evil.example.com"),
-        (BINDING, None, "new-snip"),  # the example doesn't use the PR's snippet
-        (NEW, ["snippets/new-snip/a.py", "snippets/other/b.py"], "exactly one"),
+        (BINDING, None, "new-snip-i90"),  # the example doesn't use the PR's snippet
+        (NEW, ["snippets/new-snip-i90/a.py", "snippets/other/b.py"], "exactly one"),
     ],
 )
 async def test_adopt_pr_binding_rejects(tmp_path, b, files, why):
     t = _setup(tmp_path)
     await t.a.admit(1, "99")
-    _pr_binding(t, b, *([files] if files else []))
+    _pr_binding(t, b, files)
     r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
     assert "path" not in r and why in " ".join(r["errors"])
     assert not list((t.cfg.paths.state_dir / "rounds" / ROUND).glob("binding-*"))
+
+
+@pytest.mark.parametrize("name", ["tiff-zip-member-3", "tiff-zip-member-i9", "tiff-zip-member-i900", "i90"])
+async def test_adopt_pr_binding_wants_the_snippet_named_after_its_issue(tmp_path, name):
+    """mia-snippets#91 added `tiff-zip-member-3`, the next number when it was written; main got another snippet
+    of that name a day later, and the approved pull request could not merge. A name that ends in the issue's
+    number is one no other pull request can add. Another issue's number, or the number alone, is not it."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    _pr_binding(t, {**NEW, "raw": [{**NEW["raw"][0], "snippet": name}]}, name=name)
+    (error,) = (await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA))["errors"]
+    assert f"named `{name}`" in error and "`<what-it-reads>-i90`" in error and "rename the directory" in error
+
+
+async def test_adopt_pr_binding_takes_a_merged_snippet_under_the_name_it_has(tmp_path):
+    """The merge commit's binding is adopted after the merge: a snippet merged under a counted name keeps it."""
+    t = _setup(tmp_path)
+    await t.a.admit(1, "99")
+    counted = {**NEW, "raw": [{**NEW["raw"][0], "snippet": "tiff-zip-member-3"}]}
+    _pr_binding(t, counted, name="tiff-zip-member-3", merged=True)
+    r = await t.a.adopt_pr_binding(ROUND, 5, SNIP_SHA)
+    assert r["errors"] == [] and r["name"] == "tiff-zip-member-3"
 
 
 async def test_comment_returns_its_url_once(tmp_path):
@@ -1301,7 +1371,7 @@ async def test_a_stage_write_tells_the_page_which_sets_a_verdict_may_name(tmp_pa
     state = DatasetState(1, round_id=ROUND, pins=pins, tests=[test])
     await t.a.set_stage(1, "review", state)
     sets = t.ledger.subject("dataset", "rec-1")["data"]["sets"]
-    assert sets == {"review": f"{ROUND}:t1", "held": None, "saved": None}
+    assert sets == {"review": f"{ROUND}:t1", "held": None, "saved": None, "revoked": False}
     findings = [{"item": "c1", "severity": "suspect", "note": "shifted <!-- x -->"}]
     state.held = CropSet(f"{ROUND}:t1", ROUND, test, pins, sent_back_by="judge", worst="suspect", findings=findings)
     state.saved = CropSet("i1-e5:t0", "i1-e5", test, pins)
@@ -1451,6 +1521,16 @@ async def test_close_snippet_issue_closes_what_is_open_with_one_comment(tmp_path
     assert len(said) == 1 and said[0].startswith("accepted as they are &lt;!-- x -->")
     await t.a.close_snippet_issue(81, None, "why")
     assert not t.snip.comments.get(81)
+
+
+async def test_ask_autodev_comments_once_and_labels_the_issue(tmp_path):
+    t = _setup(tmp_path)
+    t.snip.issues[72] = {"number": 72, "state": "open", "labels": [{"name": "snippets:needs-human"}]}
+    await t.a.ask_autodev(72, "resume i1-e99 12")
+    await t.a.ask_autodev(72, "resume i1-e99 12")  # a retried activity
+    (said,) = t.snip.comments[72]
+    assert "asks autodev to try this issue again" in said["body"] and "resume i1-e99 12" in said["body"]
+    assert {"name": "snippets:go"} in t.snip.issues[72]["labels"]
 
 
 async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp_path):

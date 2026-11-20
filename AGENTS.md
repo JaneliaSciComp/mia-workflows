@@ -33,6 +33,12 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   fields with defaults; never rename or remove one. (`VerifyResult.n` keeps its name for this reason.)
 - **Workflow code is deterministic.** If `test_replay_*` fails, your change alters the commands a workflow issues
   and will break in-flight runs. Guard with `workflow.patched()` and re-record the fixture (see the guide).
+- **A worker is stopped, never killed, and every activity can run again.** `mia down` sends the worker SIGTERM
+  and waits; the worker hands its running activities back to Temporal (`mia_core.temporal`: `DRAIN`,
+  `until_stopped`), which gives them to the next worker at once. So an activity starts what it starts at most
+  once per key and finds what it waits for by id. One that a workflow gives a heartbeat timeout (`beats=True`
+  in `_act`) carries `@heartbeats`, never one without the other. buffer-api stops last and starts first, and
+  `mia restart` leaves Temporal alone unless it is named.
 - **No real paths or hostnames in tracked files.** `git diff | grep -n 'rokickik\|/nrs/'` must be empty.
 - **One config file.** Deployments read their block of `mia.yaml` (`MIA_SERVICE`, `MIA_CONFIG`); the per-app YAML
   files are deprecated. `paths.local_root` and a managed `temporal.state_dir` must be host-local disk.
@@ -50,6 +56,16 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   (a changed definition, where the buffer rests) is in the table too, and buffer-api carries it out itself.
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
+- **A round is resumed or restarted.** A dataset and a request take two actions that run them again. `go`
+  (*Restart*) wipes the round's state and pins anew. `resume` (*Resume*) keeps the round id, the pins and every
+  result on the state, and starts at the first step with none (`resume_step` in `mia_data/models.py`, the one
+  place that decides it); it is accepted where a round stopped or waits for its verdict, never after a revoke.
+  A step that runs again takes the next attempt (`DatasetState.attempt`), which names its job key, workspace,
+  test id and timeline markers: the ledger keeps one body per marker. So a new step of a round records its
+  result on the state and gets a line in `resume_step`, and builds its keys and markers through `_job`,
+  `_test_id` and `_marker`. The round's results live in its workflow: a force stop loses them, and a resume
+  after one starts from the beginning. A request passes the choice to each dataset (`_nudge`), and the cleaner
+  resumes; it sends a `go` only where the remedy needs more than the round's pins hold, and never to a request.
 - **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
   `shelve` (with a reason); a shelved one reads the status `shelved` and takes `unshelve` alone (`_rules` in
   `mia_buffers/api.py`). The subject's workflow hears of neither, except that a shelve of a subject whose round
@@ -83,6 +99,11 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   pull request. An agent
   job Claude Code itself cut off (a lapsed login, an API error) is run once more by autodev before it stops.
   A new wait on something outside the round gets the same: a look and a limit.
+- **A new snippet is named after its issue.** `<what-it-reads>-i<K>`, K being the mia-snippets issue its pull
+  request is for: one issue has one pull request, which adds one snippet, so no two pull requests can add the
+  same name and a snippet PR cannot conflict with main. `adopt_pr_binding` fails an open PR's head whose
+  snippet is named otherwise, and the developer renames it; a merged snippet keeps the name it has. Nothing
+  reads a name for more than identity: lineage is `supersedes`.
 - **A person outranks the judge, and a verdict names its set.** An active crop judge approves a set or sends it
   back to the developer (`judge.crops.max_reworks` times since a person last acted); neither is final. The set
   that was sent back (`DatasetState.held`) and the saved one (`saved`) outlive their round: an approve of the
@@ -132,7 +153,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   that run's jobs need (records' URL hosts, bindings' too if the record names them, redirect targets, package hosts,
   the hosts a dataset's jobs were refused; never an IP or the deployment's own host); nothing writes the operator's
   `broker.toml`. A job that is refused a host notes it for its dataset; noting approves nothing, and the dataset's
-  jobs get the host only once the policy allows it; until then a request sends that dataset no `go` once it has
+  jobs, and the job of the reader autodev writes for it (its snippets issue names them), get the host only once
+  the policy allows it; until then a request sends that dataset no `go` once it has
   stopped, and the cleaner says which hosts wait. No job reaches a GitHub host, except that a person may approve
   `raw.githubusercontent.com` for one dataset at a time: the policy allowing it grants it to no other dataset's
   jobs. `policy_dir` is under home, apart from every directory a worker sandbox binds read-write, and its

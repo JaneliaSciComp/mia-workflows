@@ -35,10 +35,7 @@ import { stageOf } from "./buffers.js";
 // ---- datasets: every dataset of the catalog with what the registry knows about it, one page at a time
 // `lacks`: what the catalog record lacks whatever buffer asks for it (an array shape, a voxel size, a data URL)
 const DS_FILTER = { state: "", modality: "", dims: "", licence: "", lacks: "" };
-const CHOSEN = new Set(),
-  SETTLED = new Set(); // the checked datasets, and those of them that are prepared or in a round
-export const ROUND_OPEN = new Set(["matching", "developing", "testing", "review", "merging", "debugging"]); // the stages of a round under way or at review
-const PREPARABLE = row => row.state !== "prepared" && !ROUND_OPEN.has(row.stage);
+const CHOSEN = new Set(); // the checked datasets
 // the catalog the list is read from: its commit (linked into the catalog repo at that commit), how many datasets
 // it holds and when it was synced
 export const catalogLine = (catalog, repo) => {
@@ -52,6 +49,85 @@ export const catalogLine = (catalog, repo) => {
     when(catalog.synced_at),
   );
 };
+// The columns of a list of datasets: the Datasets list and a buffer's Prepare step show the same ones.
+export const datasetCols = () => [
+  {
+    key: "dataset",
+    label: "dataset",
+    cell: x => {
+      const a = datasetLink(x.id);
+      a.title = x.title || x.id;
+      return a;
+    },
+  },
+  { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
+  { key: "crops", label: "preview", cell: x => thumb(x) },
+  {
+    key: "state",
+    label: "state",
+    title:
+      'preparation, then the raw cache\'s state, then "staged" when a pyramid of it exists, then what its catalog record lacks',
+    cell: x => {
+      const state = x.state === "shelved" && x.reason ? pill("shelved", "", [{ t: x.reason }]) : statePill(x.state);
+      const pills = el("span", { class: "pills" }, state);
+      if (x.raw) pills.append(" ", assetPill(x.raw.state));
+      if (x.staged) pills.append(" ", pill("staged", "pool"));
+      if (x.quarantined) pills.append(" ", assetPill("quarantined"));
+      // what the record lacks, whatever buffer asks for it: each is a filter of this list, and each is
+      // marked, also a missing voxel size that a buffer may assume
+      const lacking = (x.lacks || []).map(name => pill(`no ${name}`, "warn"));
+      pills.append(...lacking.flatMap(node => [" ", node]));
+      if (x.gaps?.length)
+        pills.append(
+          " ",
+          pill(
+            "cannot start",
+            "warn",
+            x.gaps.map(t => ({ t })),
+          ),
+        );
+      return pills;
+    },
+  },
+  { key: "stage", label: "stage", cell: x => x.stage || "" },
+  { key: "dims", label: "dims", cell: x => x.dims || "" },
+  { key: "modality", label: "modality", cell: x => x.modality || "" },
+  { key: "licence", label: "licence", cell: x => x.licence || "" },
+  { key: "bytes", label: "size", num: true, cell: x => (x.bytes ? fmtBytes(x.bytes) : "") },
+  { key: "raw", label: "raw cache", num: true, cell: x => (x.raw?.bytes ? fmtBytes(x.raw.bytes) : "") },
+  { key: "staged", label: "staged", num: true, cell: x => (x.staged ? num(x.staged) : "") },
+  { key: "buffers", label: "buffers", num: true, cell: x => bufferCount(x.buffers) },
+  { key: "updated", label: "updated", cell: x => when(x.updated_at) },
+];
+// What can be done with the checked datasets: a box of its own colour, shown only while something is checked.
+// `show` draws it for what `chosen` holds now. `owner`: the buffer the request is filed for (its Prepare step);
+// without one the box also opens New buffer on the checked. `done` runs once a request was filed.
+export function chosenBox(chosen, done, owner) {
+  const resume = el("span"),
+    restart = el("span"),
+    count = el("b");
+  const spec =
+    owner == null
+      ? el(
+          "button",
+          { type: "button", class: "btn", title: BUTTON_HELP.specFrom, onclick: () => specFromDatasets([...chosen]) },
+          "Create buffer",
+        )
+      : null;
+  const box = el("span", { class: "chosen", hidden: true }, count, resume, restart, spec);
+  const filed = sent => {
+    for (const id of sent) chosen.delete(id);
+    if (done) done();
+  };
+  const show = () => {
+    box.hidden = !chosen.size;
+    if (!chosen.size) return;
+    count.textContent = `${plural(chosen.size, "dataset")} selected`;
+    prepareButton(resume, [...chosen], null, filed, "Resume", owner, false);
+    prepareButton(restart, [...chosen], null, filed, "Restart", owner, true);
+  };
+  return { box, show };
+}
 export function viewDatasetList(_arg, params) {
   const root = $("datasetsBody");
   if (!S.ref) {
@@ -70,8 +146,6 @@ export function viewDatasetList(_arg, params) {
       delete state.last;
     }
   }
-  const roots = S.meta.roots || {},
-    repo = S.meta.datasets_repo;
   const filters = () => Object.fromEntries(Object.entries(DS_FILTER).filter(([, value]) => value));
   const selects = Object.fromEntries(
     Object.keys(DS_FILTER).map(name => {
@@ -97,128 +171,19 @@ export function viewDatasetList(_arg, params) {
       select.value = DS_FILTER[name];
     }
   };
-  // what can be done with the checked datasets: a box of its own, shown only while something is checked
-  const prepare = el("span"),
-    count = el("b");
-  const spec = el(
-    "button",
-    { type: "button", class: "btn", title: BUTTON_HELP.specFrom, onclick: () => specFromDatasets([...CHOSEN]) },
-    "Create buffer",
-  );
-  const box = el("span", { class: "chosen", hidden: true }, count, prepare, spec);
-  const showChosen = () => {
-    box.hidden = !CHOSEN.size;
-    if (!CHOSEN.size) return;
-    count.textContent = `${plural(CHOSEN.size, "dataset")} selected`;
-    prepareButton(
-      prepare,
-      [...CHOSEN],
-      null,
-      sent =>
-        sent.forEach(id => {
-          CHOSEN.delete(id);
-          SETTLED.delete(id);
-        }),
-      SETTLED.size,
-      "Prepare",
-    );
-  };
-  const ticked = (row, on) => {
-    if (on && !PREPARABLE(row)) SETTLED.add(row.id);
-    else SETTLED.delete(row.id);
-    showChosen();
-  };
-  const selectAll = el(
-    "button",
-    {
-      type: "button",
-      class: "btn",
-      title: "checks every dataset on this page",
-      onclick: () => {
-        for (const row of TABLE_STATE.get("datasets").last?.rows || []) {
-          CHOSEN.add(row.id);
-          if (!PREPARABLE(row)) SETTLED.add(row.id);
-        }
-        list.reload();
-      },
-    },
-    "Select all",
-  );
-  const clear = el(
-    "button",
-    {
-      type: "button",
-      class: "btn",
-      title: BUTTON_HELP.clearSelection,
-      onclick: () => {
-        CHOSEN.clear();
-        SETTLED.clear();
-        list.reload();
-      },
-    },
-    "Clear selection",
-  );
+  const { box, show: showChosen } = chosenBox(CHOSEN);
   const list = pagedTable("datasets", {
     source: pageOf("/catalog/datasets", "rows", filters),
     sort: "dataset",
     search: "search id, title, modality, licence",
     tools: Object.values(selects),
     empty: "No dataset matches these filters.",
-    select: { chosen: CHOSEN, id: row => row.id, onchange: ticked },
+    select: { chosen: CHOSEN, id: row => row.id, onchange: showChosen },
     onPage: page => {
       fill(page.out.facets);
       showChosen();
     },
-    cols: [
-      {
-        key: "dataset",
-        label: "dataset",
-        cell: x => {
-          const a = datasetLink(x.id);
-          a.title = x.title || x.id;
-          return a;
-        },
-      },
-      { label: "issue", cell: x => ghIcon(repo, x.issue) },
-      { label: "files", cell: x => folderLink(roots.storage_root, x.folder) },
-      { key: "crops", label: "preview", cell: x => thumb(x) },
-      {
-        key: "state",
-        label: "state",
-        title:
-          'preparation, then the raw cache\'s state, then "staged" when a pyramid of it exists, then what its catalog record lacks',
-        cell: x => {
-          const state = x.state === "shelved" && x.reason ? pill("shelved", "", [{ t: x.reason }]) : statePill(x.state);
-          const pills = el("span", { class: "pills" }, state);
-          if (x.raw) pills.append(" ", assetPill(x.raw.state));
-          if (x.staged) pills.append(" ", pill("staged", "pool"));
-          if (x.quarantined) pills.append(" ", assetPill("quarantined"));
-          // what the record lacks, whatever buffer asks for it: each is a filter of this list, and each is
-          // marked, also a missing voxel size that a buffer may assume
-          const lacking = (x.lacks || []).map(name => pill(`no ${name}`, "warn"));
-          pills.append(...lacking.flatMap(node => [" ", node]));
-          if (x.gaps?.length)
-            pills.append(
-              " ",
-              pill(
-                "cannot start",
-                "warn",
-                x.gaps.map(t => ({ t })),
-              ),
-            );
-          return pills;
-        },
-      },
-      { key: "stage", label: "stage", cell: x => x.stage || "" },
-      { key: "dims", label: "dims", cell: x => x.dims || "" },
-      { key: "modality", label: "modality", cell: x => x.modality || "" },
-      { key: "licence", label: "licence", cell: x => x.licence || "" },
-      { key: "bytes", label: "size", num: true, cell: x => (x.bytes ? fmtBytes(x.bytes) : "") },
-      { key: "raw", label: "raw cache", num: true, cell: x => (x.raw?.bytes ? fmtBytes(x.raw.bytes) : "") },
-      { key: "staged", label: "staged", num: true, cell: x => (x.staged ? num(x.staged) : "") },
-      { key: "buffers", label: "buffers", num: true, cell: x => bufferCount(x.buffers) },
-      { key: "updated", label: "updated", cell: x => when(x.updated_at) },
-    ],
+    cols: datasetCols(),
   });
   root.replaceChildren(
     el("div", { class: "viewhead" }, el("h2", {}, "Datasets"), catalogLine(S.catalogs[0], S.meta.catalog_repo)),
@@ -228,7 +193,7 @@ export function viewDatasetList(_arg, params) {
       "Every dataset of the catalog and what is known about it. Open one for its record, crops, decisions, cache and timeline. Check datasets to prepare them in one request, or to start a buffer from them. ",
       el("a", { href: "#preparation", title: "every preparation request, with its stage" }, "Preparation requests"),
     ),
-    el("div", { class: "actions" }, selectAll, clear, box),
+    el("div", { class: "actions" }, box),
     list,
   );
 }

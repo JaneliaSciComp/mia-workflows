@@ -350,14 +350,6 @@ def test_the_page_says_which_workers_are_away_until_they_are_back() -> None:
     assert has('$("down").replaceChildren(') and has("setInterval(checkHealth, HEALTH_MS)")
 
 
-def test_what_can_be_prepared_is_read_from_the_stage_not_the_state() -> None:
-    from mia_data.config import STAGES, round_open
-
-    stages = run_js("print([...ROUND_OPEN]);", {"datasets.js": "ROUND_OPEN"})
-    assert stages == [stage for stage in STAGES if round_open(stage)]
-    assert has('row.state !== "prepared" && !ROUND_OPEN.has(row.stage)')
-
-
 def test_needs_you_is_narrowed_by_toggle_buttons_not_a_drop_down() -> None:
     view = squeezed(FILES["subjects.js"][FILES["subjects.js"].index("function viewNeeds(") :])
     assert (
@@ -378,9 +370,13 @@ def test_a_dataset_at_review_offers_a_restart_beside_its_verdicts() -> None:
     from mia_data.config import STAGE_ACTIONS
 
     assert "go" in STAGE_ACTIONS["review"][1]
-    assert has('action === "go" && subject.kind === "dataset" && subject.stage === "review" ? "Restart"')
-    order = run_js("print(ACTION_ORDER);", {"actions.js": "ACTION_ORDER"})
-    assert order.index("approve") < order.index("reject") < order.index("go") < order.index("cancel")
+    order, word = run_js(
+        'print([ACTION_ORDER, actionWord({ kind: "dataset", stage: "review" }, "go")]);',
+        {"actions.js": "ACTION_ORDER, actionWord"},
+    )
+    assert word == "Restart"
+    assert order.index("approve") < order.index("reject") < order.index("resume") < order.index("go")
+    assert order.index("go") < order.index("cancel")
 
 
 def test_a_timeline_entry_is_rendered_as_markdown() -> None:
@@ -798,6 +794,42 @@ def test_a_set_that_was_sent_back_is_shown_with_its_findings_and_an_accept() -> 
     assert has("`${finding.item} [${finding.severity}]: ${finding.note}`")
 
 
+def test_a_stopped_dataset_offers_resume_first_and_restart_beside_it() -> None:
+    """spec resume-restart §10: one word on each button; what sets the two apart is in their tooltips."""
+    buttons, words, hosts = run_js(
+        """
+        const subject = { kind: "dataset", key: "rec-a", number: 7, stage: "blocked", status: "stuck", revision: 3,
+                          actions: ["go", "resume", "revoke"], asked: null };
+        const bar = actionBar(subject, () => {});
+        const buttons = walk(bar).filter(node => node.tag === "button")
+            .map(node => [textOf(node), node.attrs.class, node.attrs.title]);
+        const words = input.map(([subject, action]) => actionWord(subject, action));
+        print([buttons, words, [hostsRun(subject, "resume"), hostsRun({ ...subject, kind: "buffer" }, "resume")]]);
+        """,
+        {"actions.js": "actionBar, actionWord, hostsRun"},
+        [
+            [{"kind": "dataset", "stage": "failed"}, "resume"],
+            [{"kind": "dataset", "stage": "failed"}, "go"],
+            [{"kind": "dataset", "stage": "done"}, "go"],
+            [{"kind": "dataset", "stage": "review"}, "go"],
+            [{"kind": "dataset", "stage": "debugging"}, "go"],
+            [{"kind": "dataset", "stage": "new"}, "go"],
+        ],
+    )
+    assert [(word, style) for word, style, _ in buttons] == [
+        ("Resume", "btn primary"),
+        ("Restart", "btn"),
+        ("Revoke", "btn danger"),
+    ]
+    resume, restart = buttons[0][2], buttons[1][2]
+    assert resume.startswith("Run what is left. Every step that finished is kept") and "use Restart" in resume
+    assert restart.startswith("Start over from scratch on today's catalog, readers and harness.")
+    assert words == ["Resume", "Restart", "Restart", "Restart", "Restart now", "Start"]
+    assert hosts == [{"records": ["rec-a"]}, None]  # a resume starts jobs: it asks for the hosts they lack
+    for file in ("dom.js", "subjects.js", "operations.js"):  # what a dataset's page says of its buttons
+        assert "Run again" not in (UI_DIR / file).read_text(), file
+
+
 def test_a_reject_of_the_saved_set_asks_for_missing_hosts_like_a_start() -> None:
     """spec judge-decides §5.2: the rework's jobs need the dataset's hosts, so the reject carries their approval."""
     got = run_js(
@@ -863,7 +895,7 @@ def test_shelve_sends_its_reason_once_one_is_typed() -> None:
         """,
         {"actions.js": "actionBar"},
     )
-    assert words == ["Run again", "Revoke", "Shelve…"] and blocked == [True, False]
+    assert words == ["Restart", "Revoke", "Shelve…"] and blocked == [True, False]
     assert calls == [
         ["/datasets/rec-a/actions", "shelve", "it needs a reader of its own", False]
     ]  # the empty one: none
@@ -943,6 +975,39 @@ def test_a_buffers_page_follows_a_datasets_name_links_then_workflow() -> None:
     assert has('buffer: "Buffer workflow:"')
 
 
+def test_a_request_filed_from_either_list_resumes_its_datasets_or_says_restart() -> None:
+    """The Datasets list and a buffer's Prepare step file the same two requests (spec resume-restart §5, §10):
+    Resume's says nothing of how it runs, Restart's says `restart`, so a checked dataset that is prepared or at
+    review starts over too. The buffer's request also names its buffer."""
+    sent = run_js(
+        "const { S } = await import(input.api);\n"
+        "S.ref = 'a'.repeat(40); S.meta = { catalog_repo: 'o/catalog' };\n"
+        "const posts = [];\n"
+        "globalThis.fetch = async (path, options) => {\n"
+        "  if (path === '/prep') posts.push(JSON.parse(options.body));\n"
+        "  const answer = path === '/prep' ? { number: 5 } : { hosts: [] };\n"
+        "  return { ok: true, status: 200, text: async () => JSON.stringify(answer) };\n"
+        "};\n"
+        "const titles = [];\n"
+        "for (const owner of [undefined, 7]) for (const restart of [false, true]) {\n"
+        "  const box = document.createElement('span');\n"
+        "  prepareButton(box, ['u937', 'bcss'], null, null, restart ? 'Restart' : 'Resume', owner, restart);\n"
+        "  const button = walk(box).find(node => node.tag === 'button');\n"
+        "  titles.push(button.attrs.title);\n"
+        "  button.fire('click');\n"
+        "  await new Promise(done => setTimeout(done, 20));\n"
+        "}\n"
+        "print([posts.map(post => [post.spec.includes('\\nrestart: true\\n'), post.spec.includes('again'),"
+        " post.buffer ?? null]), titles]);",
+        {"actions.js": "prepareButton"},
+        {"api": (UI_DIR / "api.js").as_uri()},
+    )
+    posts, titles = sent
+    assert posts == [[False, False, None], [True, False, None], [False, False, 7], [True, False, 7]]
+    assert titles[0].startswith("Prepare the selected datasets: one that never ran starts")
+    assert titles[1].startswith("Prepare every selected dataset from scratch")
+
+
 def test_any_dataset_can_be_ticked_and_the_ticked_prepared_or_made_a_spec() -> None:
     """Every row of the Datasets list has a check, prepared or not. The checked that still need it can be prepared
     in one request, and all of them can open New buffer as a spec that selects exactly them: each by a glob on
@@ -971,15 +1036,32 @@ def test_the_datasets_list_flags_and_filters_what_a_record_lacks() -> None:
     assert has("m.record_lacks", squeezed(FILES["designer.js"]))
 
 
-def test_the_datasets_selection_shows_its_actions_only_when_something_is_ticked() -> None:
-    """With nothing checked the list offers Select all and Clear selection and says nothing more. With a check, a
-    box of its own colour says how many datasets are selected and offers Prepare and Create buffer."""
-    assert has('"Select all")') and not has("Select all matching")
-    assert not has("check the datasets to prepare first")
-    assert has('class: "chosen", hidden: true') and has(".chosen[hidden]{display:none}")
-    assert has("box.hidden = !CHOSEN.size") and has('"Create buffer")')
-    # Select all takes the rows of the page that is showing, and asks the server for nothing
-    assert not has("datasets match; the first") and not has('ids: "1"')
+def test_a_list_of_datasets_shows_its_actions_only_when_something_is_ticked() -> None:
+    """With nothing checked a list of datasets says nothing: the header's check takes the page, and no button
+    repeats it. With a check, a box of its own colour says how many datasets are selected and offers Resume and
+    Restart; the Datasets list also offers Create buffer, a buffer's Prepare step files the request for its buffer. Both lists
+    have the same columns, and none links a folder."""
+    empty, lists, labels = run_js(
+        "const { S } = await import(input.api);\n"
+        "S.meta = { datasets_repo: 'o/data' };\n"
+        "const chosen = new Set();\n"
+        "const { box, show } = chosenBox(chosen);\n"
+        "show();\n"
+        "const empty = box.hidden;\n"
+        "const shown = owner => { const made = chosenBox(new Set(['u937', 'bcss']), null, owner); made.show();\n"
+        "  return [made.box.hidden, walk(made.box).find(node => node.tag === 'b').textContent, textOf(made.box)]; };\n"
+        "print([empty, [shown(undefined), shown(7)], datasetCols().map(col => col.label)]);",
+        {"datasets.js": "chosenBox, datasetCols"},
+        {"api": (UI_DIR / "api.js").as_uri()},
+    )
+    assert empty is True
+    assert [(hidden, count) for hidden, count, _ in lists] == [(False, "2 datasets selected")] * 2
+    assert [text for _, _, text in lists] == ["ResumeRestartCreate buffer", "ResumeRestart"]
+    assert labels[:5] == ["dataset", "issue", "preview", "state", "stage"] and "files" not in labels
+    datasets, flow = squeezed(FILES["datasets.js"]), squeezed(FILES["flow.js"])
+    assert has("cols: datasetCols()", datasets) and has("cols: datasetCols()", flow)
+    assert has("chosenBox(CHOSEN)", datasets) and has("chosenBox(chosen, redraw, subject.number)", flow)
+    assert not has('"Select all")', datasets) and not has("Clear selection") and has(".chosen[hidden]{display:none}")
 
 
 # strings a person can type into a spec's name or paths, or that a record's id can be: each reads as something
@@ -1133,16 +1215,18 @@ def test_the_definition_is_controls_and_yaml_over_one_text() -> None:
 
 
 def test_step_three_prepares_for_the_buffer_and_goes_on_with_what_is_prepared() -> None:
-    """Prepare lists the fitting datasets that are not prepared and the requests this buffer filed. A request
-    filed there names the buffer and leaves the person on the step. The way forward plans over whatever is
-    prepared now, and always stops at the plan."""
+    """Prepare lists the datasets that fit, each with a check as on the Datasets list, and the requests this
+    buffer filed. A request filed there names the buffer and leaves the person on the step. The way forward plans
+    over whatever is prepared now, and always stops at the plan."""
     flow, actions = squeezed(FILES["flow.js"]), squeezed(FILES["actions.js"])
-    assert has("to_prepare: true", flow)
+    assert has("fit_only: true", flow) and not has("to_prepare: true", flow)
     assert has('pageOf("/subjects/prep", "subjects", () => ({ buffer: subject.number }))', flow)
     assert has("...(owner == null ? {} : { buffer: owner })", actions)
     assert has('if (owner == null) location.hash = "#find/" + action.number;', actions)
-    # only what a request could start can be checked: the plan's own list, not every row
-    assert has("startable.has(x.id)", flow)
+    # any row can be checked, prepared or at review too
+    assert has("select: { chosen, id: x => x.id, onchange: show }", flow)
+    # both lists file the same requests: Restart's says so, Resume's says nothing
+    assert has('(restart ? "restart: true\\n" : "") +', actions) and not has("again: true", actions)
     assert has('{ action: "go", plan_first: true, revision: subject.revision, key: newKey() }', flow)
     assert count("plan_first: true") == 1 and has("title: BUTTON_HELP.plan", flow)  # every plan stops for its Run
     assert has("disabled: !!blocker || !!subject.asked", flow)

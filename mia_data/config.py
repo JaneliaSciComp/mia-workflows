@@ -45,6 +45,7 @@ STAGES = {
 }
 HUMAN_LABELS = {  # the actions a person takes
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
+    "resume": ("0e8a16", "Resume the round: every step that finished is kept, on the same pins"),
     "approve": (
         "0e8a16",
         "Approve the crops under review: they are saved to the dataset's folder (a snippet PR merges first)",
@@ -66,20 +67,23 @@ STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done", "shelved")
 # taken away from `review` when it names a set of its own (spec judge-decides §5): an `approve` of the set that
 # was sent back for rework, while that rework runs and after it stopped, and at `done` a `reject` of the saved
 # set. buffer-api refuses any other action and a verdict with no such set; the page offers only these. The
-# workflow stays the code that carries a round out.
+# workflow stays the code that carries a round out. `resume` (spec resume-restart §4.3) goes on with a round that
+# stopped or waits for its verdict: not where nothing has run, nothing is missing, or the debugger's own run
+# follows.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
     "matching": ("working", frozenset({"cancel", "stop"})),
     "developing": ("working", frozenset({"approve", "cancel", "stop"})),
     "testing": ("working", frozenset({"approve", "cancel", "stop"})),
-    "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),  # go: start over, the set is dropped
+    # go: start over, the set is dropped; resume: the set stays, and is judged if the judge never looked
+    "review": ("waiting", frozenset({"approve", "reject", "go", "resume", "cancel"})),
     "merging": ("working", frozenset({"cancel", "stop"})),
     "debugging": ("working", frozenset({"approve", "go", "cancel", "stop"})),
     "done": ("done", frozenset({"go", "reject", "revoke"})),
-    "failed": ("stuck", frozenset({"approve", "go", "revoke"})),
-    "blocked": ("stuck", frozenset({"approve", "go", "revoke"})),
-    "needs-human": ("stuck", frozenset({"approve", "go", "revoke"})),
-    "cancelled": ("done", frozenset({"approve", "go", "revoke"})),
+    "failed": ("stuck", frozenset({"approve", "go", "resume", "revoke"})),
+    "blocked": ("stuck", frozenset({"approve", "go", "resume", "revoke"})),
+    "needs-human": ("stuck", frozenset({"approve", "go", "resume", "revoke"})),
+    "cancelled": ("done", frozenset({"approve", "go", "resume", "revoke"})),
 }
 
 

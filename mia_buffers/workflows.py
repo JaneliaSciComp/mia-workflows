@@ -31,6 +31,7 @@ from temporalio.exceptions import ActivityError, CancelledError
 
 with workflow.unsafe.imports_passed_through():
     from autodev.workflows import QUEUE_SLACK, RETRY_MAX_INTERVAL, error_message
+    from mia_core.temporal import BEAT_TIMEOUT
     from mia_data.models import JobDone, LabelEvent, LockTaken, Reservation
 
     from .config import CANCELLABLE, PREP_STAGE_ACTIONS, stage_pass
@@ -322,8 +323,10 @@ class MiaBuffer:
         budget: timedelta = timedelta(hours=6),
         result_type: Any = None,
         cleanup: bool = False,
+        beats: bool = False,
     ) -> Any:
-        """Run an activity with a per-attempt timeout and an overall retry budget.
+        """Run an activity with a per-attempt timeout and an overall retry budget. `beats`: the activity
+        heartbeats (`mia_core.temporal.heartbeats`), so a worker that died under it is noticed in BEAT_TIMEOUT.
 
         While a cancel is in progress no task of the round starts a new activity: it is stopped here instead
         (clean-up, `cleanup` or anything a task runs after it was told to stop, goes through). An activity
@@ -341,6 +344,7 @@ class MiaBuffer:
                 args=list(args),
                 start_to_close_timeout=timedelta(seconds=seconds),
                 schedule_to_close_timeout=budget,
+                heartbeat_timeout=BEAT_TIMEOUT if beats else None,
                 retry_policy=RetryPolicy(maximum_interval=RETRY_MAX_INTERVAL),
                 result_type=result_type,
             )
@@ -1624,7 +1628,7 @@ class MiaBuffer:
             key = fetch_job_key(state.issue, round_id, record, attempt)
             budgeted = await self._charge(key, "fetch")
             try:
-                job_id = await self._act("submit_fetch", key, args, seconds=600, result_type=str)
+                job_id = await self._act("submit_fetch", key, args, seconds=600, result_type=str, beats=True)
                 self._ran(workspace)
                 job = await self._await_job(job_id, workspace, limits.fetch_walltime_min, ["raw", record, owner])
                 fetched = await self._act(
@@ -1744,7 +1748,7 @@ class MiaBuffer:
         key = job_key(state.issue, state.round_id, record, rebuild)
         budgeted = await self._charge(key, "stage")
         try:
-            job_id = await self._act("submit", key, args, seconds=600, result_type=str)
+            job_id = await self._act("submit", key, args, seconds=600, result_type=str, beats=True)
             self._ran(workspace)
             done = await self._await_job(job_id, workspace, (await self._limits()).walltime_min, lock)
         except (ActivityError, asyncio.CancelledError):

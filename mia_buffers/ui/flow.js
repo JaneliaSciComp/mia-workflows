@@ -1,25 +1,12 @@
 // A buffer's page: its name and state, the strip of its six steps, the step being shown, and its timeline.
 import { editable, STEP_TITLES, STEPS, stepOf, stepToShow, stripOf } from "./steps.js";
-import {
-  $,
-  bufferLink,
-  card,
-  datasetLink,
-  el,
-  fmtBytes,
-  ghIcon,
-  num,
-  pill,
-  stagePill,
-  statePill,
-  SUBJECT_HASH,
-  when,
-} from "./dom.js";
+import { $, bufferLink, card, el, ghIcon, num, pill, stagePill, statePill, SUBJECT_HASH, when } from "./dom.js";
 import { api, banner, JSON_HEADERS, load, newKey, S } from "./api.js";
 import { pagedTable, pageOf } from "./table.js";
 import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
-import { actionBar, askHosts, BUTTON_HELP, onScreen, prepareButton, sendAction, undelivered } from "./actions.js";
+import { actionBar, askHosts, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
 import { poolTable, servableText, stageOf } from "./buffers.js";
+import { chosenBox, datasetCols } from "./datasets.js";
 import {
   baseRevision,
   changed,
@@ -382,7 +369,8 @@ const cancelBack = (subject, redraw) =>
   );
 const approval = subject => ({ action: "approve", revision: subject.revision, key: newKey() });
 
-// ---- step 3: the fitting datasets that are not prepared, the requests this buffer filed, and the way on.
+// ---- step 3: the datasets that fit, listed and checked as on the Datasets list, the requests this buffer filed,
+// and the way on.
 // The buffer waits here for as long as the person likes; the way on takes what is prepared at that moment.
 const ticked = { key: null, chosen: new Set() }; // the checks of the buffer shown: they outlast the page's redraws
 // Why the planner would refuse this plan (`plan`: what POST /plan answered), or null when a round of it would run.
@@ -429,26 +417,11 @@ function prepareFoot(subject, plan, redraw) {
 function prepareStep(pane, subject, redraw, wanted) {
   if (ticked.key !== subject.key) Object.assign(ticked, { key: subject.key, chosen: new Set() });
   const chosen = ticked.chosen;
-  let startable = new Set(); // what a request could start: it fits, is not prepared, is in no round, its record can run
   const counts = el("p", {}, "planning…"),
-    bar = el("i"),
-    prepare = el("span", { class: "actions" });
-  const offer = () => {
-    prepareButton(
-      prepare,
-      [...chosen],
-      chosen.size ? null : "check the datasets to prepare",
-      () => {
-        chosen.clear();
-        redraw();
-      },
-      undefined,
-      chosen.size > 1 ? `Prepare the ${num(chosen.size)} checked datasets` : "Prepare the checked dataset",
-      subject.number,
-    );
-  };
-  const left = async state => {
-    // the plan of the stored definition, which is what a round runs, narrowed to what is left to prepare; its
+    bar = el("i");
+  const { box, show } = chosenBox(chosen, redraw, subject.number);
+  const fitting = async state => {
+    // the plan of the stored definition, which is what a round runs, narrowed to the datasets that fit; its
     // summary is over the whole plan
     let out = null;
     const page = {
@@ -457,7 +430,7 @@ function prepareStep(pane, subject, redraw, wanted) {
       dir: state.dir,
       q: state.q,
       ...(state.sort ? { sort: state.sort } : {}),
-      to_prepare: true,
+      fit_only: true,
     };
     try {
       out = await api("/plan", {
@@ -472,8 +445,6 @@ function prepareStep(pane, subject, redraw, wanted) {
   };
   const seen = page => {
     const m = page.out?.summary;
-    startable = new Set(m?.to_prepare || []);
-    for (const id of chosen) if (!startable.has(id)) chosen.delete(id); // prepared, or started, since it was checked
     if (m) {
       counts.replaceChildren(
         el("b", {}, `${num(m.prepared || 0)} of ${num(m.fitting || 0)}`),
@@ -481,40 +452,17 @@ function prepareStep(pane, subject, redraw, wanted) {
       );
       bar.style.width = `${m.fitting ? (100 * (m.prepared || 0)) / m.fitting : 0}%`;
     }
-    offer();
+    show();
     if (wanted() && page.out) prepareFoot(subject, page.out, redraw);
   };
   const table = pagedTable("to-prepare:" + subject.key, {
-    source: left,
+    source: fitting,
     onPage: seen,
     sort: "state",
     search: "search id, title, modality, licence",
-    empty: "Every dataset that fits is prepared.",
-    cols: [
-      {
-        label: "prepare",
-        title:
-          "check a dataset to prepare it; one that is in a round already, or whose record cannot run, has no checkbox",
-        cell: x => {
-          if (!startable.has(x.id)) return "";
-          const input = el("input", { type: "checkbox", "aria-label": "prepare " + x.id });
-          input.checked = chosen.has(x.id);
-          input.addEventListener("change", () => {
-            if (input.checked) chosen.add(x.id);
-            else chosen.delete(x.id);
-            offer();
-          });
-          return input;
-        },
-      },
-      { key: "dataset", label: "dataset", cell: x => datasetLink(x.id) },
-      { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
-      { key: "modality", label: "modality", cell: x => x.modality_group || "" },
-      { key: "dims", label: "dims", cell: x => x.dims || "" },
-      { key: "state", label: "state", cell: x => statePill(x.prepared) },
-      { label: "where it is", cell: x => x.stage || "" },
-      { key: "bytes", label: "size", num: true, cell: x => (x.bytes ? fmtBytes(x.bytes) : "") },
-    ],
+    empty: "No dataset fits this definition.",
+    select: { chosen, id: x => x.id, onchange: show },
+    cols: datasetCols(),
   });
   pane.replaceChildren(
     unsavedFor(subject.key)
@@ -528,26 +476,9 @@ function prepareStep(pane, subject, redraw, wanted) {
     counts,
     el("div", { class: "progress" }, bar),
     card(
-      "Left to prepare",
-      "The datasets that fit this definition and are not prepared. Preparing them is one request, filed for this buffer; the buffer waits here meanwhile.",
-      el(
-        "div",
-        { class: "actions" },
-        el(
-          "button",
-          {
-            type: "button",
-            class: "btn",
-            title: "Check every dataset that a request could start now.",
-            onclick: () => {
-              for (const id of startable) chosen.add(id);
-              table.reload();
-            },
-          },
-          "Check all",
-        ),
-        prepare,
-      ),
+      "Datasets that fit",
+      "Every dataset that fits this definition. Check any of them: preparing the checked is one request, filed for this buffer, and each gets a new run, also one that is prepared or waits at review. The buffer waits here meanwhile.",
+      el("div", { class: "actions" }, box),
       table,
     ),
     card(
@@ -568,7 +499,7 @@ function prepareStep(pane, subject, redraw, wanted) {
       }),
     ),
   );
-  offer();
+  show();
   prepareFoot(subject, null, redraw);
 }
 // ---- step 4: the plan as the round wrote it, and the Run that starts the jobs
