@@ -183,7 +183,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         cfg.paths.state_dir / "mirror" / f"{cfg.repo_slug}.git",
         cfg.git_url,
         tokens,
-        author=(bot, await noreply_email(cfg, bot)),
+        author=(bot, await noreply_email(cfg, bot, tokens())),
     )
     activities = Activities(cfg, gh, mirror, AgentJobs(cfg), bot, client)
     task_queue = cfg.task_queue

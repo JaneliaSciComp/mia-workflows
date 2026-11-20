@@ -123,9 +123,13 @@ async def bot_login(cfg: Deployment) -> str:
         return f"{response.json()['slug']}[bot]"
 
 
-async def noreply_email(cfg: Deployment, login: str) -> str:
-    """The address that links a commit to `login` on GitHub (for an app, the id of its [bot] user, not the app id)."""
+async def noreply_email(cfg: Deployment, login: str, token: str) -> str:
+    """The address that links a commit to `login` on GitHub (for an app, the id of its [bot] user, not the app id).
+
+    Asked with the token: a request without one counts against the 60 an hour that everyone behind this host's
+    address shares.
+    """
     async with httpx.AsyncClient(base_url=cfg.github.api_url, timeout=30, headers=_HEADERS) as http:
-        response = await http.get(f"/users/{quote(login)}")
+        response = await http.get(f"/users/{quote(login)}", headers={"Authorization": f"Bearer {token}"})
         response.raise_for_status()
         return f"{response.json()['id']}+{login}@users.noreply.github.com"
