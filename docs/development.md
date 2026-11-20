@@ -541,7 +541,10 @@ sandbox bypasses its proxy for loopback names, and inside it they point at the s
 
 **Hosts.** Every broker `mia up` starts runs `csub-broker --policy <csub.policy_dir>/broker.toml`, a file
 `mia_core.hosts` generates from the operator's `csub.base_policy` plus `<policy_dir>/approved-hosts.jsonl` (one line per
-host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the hosts
+host: `host`, `at`, `by`, `kind`, `number`). With `csub.broker: relay` (a host that cannot `bsub`; see
+[`deployment.md`](deployment.md)) the broker window runs `csub relay` on the same socket and the broker is this
+checkout's `csub-broker` on `csub.ssh_host`, reading the same generated policy through the shared home directory; the
+sockets live under `csub.run_dir`, host-local disk. Before a run starts, the page posts to `/hosts/missing` and lists the hosts
 the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request) or its
 saved bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
 pool), their `network.redirect_hosts` targets, the package hosts, and for a dataset the hosts its jobs were refused

@@ -11,7 +11,12 @@
 # to, plus the operator's switches. A number that is per job goes in limits, per root in quota, per request in
 # autonomy.
 
-# The agentic-sandbox checkout, relative to this repo: its scripts wrap every worker and job in a sandbox.
+# The host this file is for. When set, `mia` refuses to run on any other host, so an installation's stack cannot be
+# started elsewhere by mistake (the home directory is shared between hosts). Matched by the first label of the name.
+# host: prod1
+
+# The agentic-sandbox checkout, relative to this repo or absolute: its scripts wrap every worker in a sandbox on
+# this host. Jobs on compute nodes use the checkout the csub base policy names, which must be on the shared fs.
 sandbox_dir: ../agentic-sandbox/scripts
 
 # Temporal, the workflow engine. On a dev host `managed: true` makes `mia up` run a local dev server from
@@ -96,9 +101,20 @@ network:
 # home directory (csub lets no job mount anything there), and it neither contains nor lies inside any directory a
 # worker sandbox binds read-write (state dirs, work_root, storage_root, raw_root, staged_root, the lock directory).
 # Its broker.toml must not be the base policy itself.
+# Where the broker runs. `local`: `mia up` runs csub-broker on this host, which must be able to `bsub`. `relay`: this
+# host cannot; `mia up` runs `csub relay` on the same socket, which forwards each request over ssh to this checkout's
+# csub-broker on `ssh_host` (a submit host that sees the same home directory, so it runs on the same generated policy
+# and the checkout's own binary), as `ssh_user` (default: you) with `ssh_key` (the user's key, kept outside every
+# sandbox). `mia up` probes the broker through the relay once and fails with csub's message when the submit host does
+# not answer. `run_dir` holds the broker or relay sockets: host-local disk (default /scratch/<user>).
 csub:
   base_policy: ~/.config/csub/broker.toml
   # policy_dir: ~/.local/state/mia/csub
+  broker: local
+  # ssh_host: submit.example.org
+  # ssh_user: null
+  # ssh_key: ~/.ssh/csub_ed25519
+  # run_dir: /scratch/<user>
 
 # buffer-api (`mia-buffers serve`) and its clients. The port is required in `url`. `token_file` holds the worker
 # token its write routes need (chmod 600; `mia init-token` creates it). buffer-api also reaches Temporal (the
