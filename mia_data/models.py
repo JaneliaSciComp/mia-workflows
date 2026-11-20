@@ -46,7 +46,8 @@ class AutodevLook:
     pr: int | None  # the PR the round follows, else the open one on the issue's branch
     working: bool  # the issue has `snippets:working`: an agent round is running
     stopped: bool  # the issue is closed or has `snippets:needs-human`
-    last_word: str  # autodev's last comment on the issue or the PR: one line, cut and neutralized
+    # autodev's last comment on the issue or the PR: one line without markers or heading marks, cut and neutralized
+    last_word: str
     # the agent's summary of autodev's newest round that changed nothing (cut and neutralized), and when autodev
     # posted it (ISO time); "" when no round ended so
     answer: str = ""

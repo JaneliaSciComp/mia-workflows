@@ -157,6 +157,7 @@ SNIPPET_BRANCH_RE = re.compile(r"snippets/issue-(\d+)")  # the branch of the pul
 # the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
 NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
 MARKER_RE = re.compile(r"(?s)<!--.*?-->")
+HEADING_RE = re.compile(r"(?m)^#+\s*")  # a Markdown heading's hashes, which mean nothing inside a sentence
 # the line of a snippets issue that names the hosts its agent's job may reach (`open_snippet_issue`)
 REACH_RE = re.compile(r"The reader's job may reach [^\n]*?<!-- autodev: hosts[^>]*?-->")
 EVIDENCE_FILE_BYTES = 64 << 20  # the largest file of the judge's evidence that is shared with the developer
@@ -1767,8 +1768,10 @@ class Activities:
             pr,
             "snippets:working" in labels,
             issue.get("state") == "closed" or "snippets:needs-human" in labels,
-            _text(self._clean(" ".join((last.get("body") or "").split())), 400) if last else "",
-            _text(self._clean(NO_COMMITS_RE.sub("", MARKER_RE.sub("", answer["body"]), count=1).strip()), 1500)
+            _text(self._clean(" ".join(HEADING_RE.sub("", MARKER_RE.sub("", last.get("body") or "")).split())), 400)
+            if last
+            else "",
+            _text(self._clean(NO_COMMITS_RE.sub("", MARKER_RE.sub("", answer["body"]), count=1).strip()), 3000)
             if answer
             else "",
             str(answer.get("created_at") or "") if answer else "",

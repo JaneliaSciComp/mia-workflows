@@ -1594,7 +1594,8 @@ async def test_autodev_look_reads_the_issue_its_pr_and_autodevs_last_comment(tmp
     t.snip.comments[72] = [{"created_at": at, "user": {"login": who}, "body": body} for at, who, body in said]
     look = await t.a.autodev_look(72, None)
     assert (look.pr, look.working, look.stopped) == (None, False, True)
-    assert look.last_word == "### snippets: stopped **Error:** agent job 1 ended EXIT &lt;!-- snippets: failed x-1 -->"
+    # one line of a sentence: no marker and no heading marks
+    assert look.last_word == "snippets: stopped **Error:** agent job 1 ended EXIT"
 
     t.snip.issues[72]["labels"] = [{"name": "snippets:working"}]
     t.snip.open_prs = {"snippets/issue-72": {"number": 80}}
