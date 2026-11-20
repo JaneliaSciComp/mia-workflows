@@ -109,7 +109,7 @@ RAW_LOCK_TTL_S = 900  # a job lock lapses this long after its last heartbeat (aw
 
 STOPPED = ("failed", "blocked", "needs-human")  # a round that stopped; `needs-human` is a stop of unrecorded kind
 # activity errors a person has to resolve: the same run would stop on them again
-BLOCKING = ("Conflict", "HostsNotAllowed")
+BLOCKING = ("Conflict", "HostsNotAllowed", "NoReachableFiles")
 
 
 class RoundFailed(Exception):
@@ -1910,7 +1910,7 @@ class MiaDataDataset:
         if pr is None:
             again = ""
             if look.stopped:
-                await self._act("ask_autodev", state.snippet_issue, asked)
+                await self._act("ask_autodev", state.snippet_issue, asked, state.round_id)
                 again = "autodev had stopped and is asked again; "
             await self._stage(
                 "developing",

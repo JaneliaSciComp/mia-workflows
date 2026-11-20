@@ -570,17 +570,21 @@ No job reaches GitHub: a GitHub host among a record's or a binding's URLs is lef
 dataset at a time. The start dialog lists it for each record that names it and has no approval of its own
 (`per_dataset` in `/hosts/missing`), whatever the policy allows; an approval is written for each of the run's records
 that need it (the `kv` row `dataset_hosts`, `_approve_for`), beside the policy line the broker needs. A worker grants
-the host to jobs of an approved dataset only (`granted_hosts`). autodev's agent never gets it.
+the host to jobs of an approved dataset only (`granted_hosts`), and names it in that dataset's snippets issue, so the
+job that writes its reader gets it too and no other issue's does. No job gets another GitHub host.
 
 `mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
 names its `agent.allow_hosts` plus the hosts its issue names, where the policy allows them
 (`autodev.agent.agent_hosts`); a job that would need more than csub's 64 is not started and its round fails saying so. An issue names hosts with `<!-- autodev: hosts a.org b.org -->` in its body
 (`hosts_marker`), and only when a bot of `github.trusted_bots` opened it: a dataset round writes there the hosts
-of its record's URLs and their configured redirect targets, and the hosts its own jobs were refused that a person
-has approved since (`granted_hosts`: where a download host hands the file to a storage host), so a reader's job
-reaches its own dataset's files and no other approved host. An open issue of an earlier round gets that line
-written again when a round comes back to it (`open_snippet_issue`), so a host approved after the issue was
-opened reaches its next agent job. No GitHub host is named: autodev grants none.
+of its record's URLs and their configured redirect targets, and what a person has approved for the dataset since
+(`granted_hosts`: the hosts its own jobs were refused, where a download host hands the file to a storage host, and
+`raw.githubusercontent.com`), so a reader's job reaches its own dataset's files and no other approved host. An open
+issue of an earlier round gets that line written again when a round comes back to it (`open_snippet_issue`, and
+`ask_autodev` on a resume), so a host approved after the issue was opened reaches its next agent job. autodev grants
+no GitHub host but `raw.githubusercontent.com`, and that one only to an issue that names it. When the policy allows
+none of the hosts the line would name, the reader's job could read no file of the record: autodev is not asked, and
+the round ends `blocked` saying which host to approve (`NoReachableFiles`).
 
 1. **The go.** A `go` action carries the spec text (the page's *Plan*). With `plan_first` the round waits at its
    plan; without it the round stages first and asks once, at `staged`.

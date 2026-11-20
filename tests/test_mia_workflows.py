@@ -153,8 +153,8 @@ class Mocks:
             return self.resume_root or PINS.root
 
         @activity.defn(name="ask_autodev")
-        async def ask_autodev(snippet_issue: int, marker: str) -> None:
-            rec("ask_autodev", snippet_issue, marker)
+        async def ask_autodev(snippet_issue: int, marker: str, round_id: str | None = None) -> None:
+            rec("ask_autodev", snippet_issue, marker, round_id)
 
         @activity.defn(name="limits")
         async def limits() -> RoundLimits:
@@ -1802,7 +1802,9 @@ async def test_resume_asks_autodev_again_when_it_stopped_before_a_pull_request(e
         await idle(h, m, "developing")
         await wake(h, m, head(H1))  # autodev took it: its pull request is followed
         await idle(h, m, "review")
-    assert m.of("ask_autodev") == [(100, "resume i7-e11 12")] and m.of("open_snippet_issue") == [("i7-e11", None)]
+    assert m.of("ask_autodev") == [(100, "resume i7-e11 12", "i7-e11")] and m.of("open_snippet_issue") == [
+        ("i7-e11", None)
+    ]
     assert m.stages == ["matching", "developing", "blocked", "developing", "testing", "review"]
     assert "asked again" in m.of("set_stage")[3][1] and m.of("admit") == [("11",)]
 

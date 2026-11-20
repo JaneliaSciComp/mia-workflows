@@ -10,10 +10,10 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from autodev.config import is_github_host
+from autodev.config import RAW_GITHUB, is_github_host
 from mia_core.hosts import HOST_RE, allowed_patterns, approve_hosts, is_ip_literal, missing_hosts
 from mia_core.untrusted import read_untrusted
-from mia_data.binding import RAW_GITHUB, network_hosts, record_urls
+from mia_data.binding import network_hosts, record_urls
 from mia_data.config import NetworkCfg
 
 from .config import Config

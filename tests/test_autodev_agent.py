@@ -210,6 +210,23 @@ async def test_an_agent_job_names_its_configured_hosts_then_those_its_issue_name
     assert fake.submitted[1]["allow_hosts"] == ["pypi.org"]  # an issue that names none: nothing of the policy's
 
 
+async def test_an_agent_job_gets_raw_github_when_its_issue_names_it_and_no_other_github_host(tmp_path):
+    """2026-11-19, RV-PBS: a dataset whose files are on raw.githubusercontent.com alone. The reader's job was
+    granted no GitHub host whatever its issue named, so the agent could read nothing and made no commits."""
+    raw = "raw.githubusercontent.com"
+    named = [raw, "github.com", "gist.githubusercontent.com", "api.github.com"]
+    fake = FakeCsub(policy_hosts=[*named, "pypi.org"])
+    j = _jobs(tmp_path, fake, allow_hosts=["pypi.org"])
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"), named)
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", raw]
+    await j.submit(8, K, 1, Workspace(str(tmp_path / "work" / "r2"), "abc123", "autodev/issue-8"))
+    assert fake.submitted[1]["allow_hosts"] == ["pypi.org"]  # the policy allowing it grants it to no other issue
+    unapproved = FakeCsub(policy_hosts=["pypi.org"])
+    j = _jobs(tmp_path / "other", unapproved, allow_hosts=["pypi.org"])
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r3"), "abc123", "autodev/issue-7"), named)
+    assert unapproved.submitted[0]["allow_hosts"] == ["pypi.org"]
+
+
 def test_an_issue_names_its_jobs_hosts_in_a_marker():
     marker = hosts_marker(["zenodo.org", "ftp.ebi.ac.uk"])
     assert marker == "<!-- autodev: hosts zenodo.org ftp.ebi.ac.uk -->"

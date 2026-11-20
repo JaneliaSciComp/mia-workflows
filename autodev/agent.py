@@ -22,7 +22,7 @@ from mia_core.judge.evidence import EVIDENCE_DIR, QUESTION_FILE
 from mia_core.judge.evidence import command as judge_command
 
 from . import jobs
-from .config import is_github_host
+from .config import RAW_GITHUB, is_github_host
 from .jobs import read_untrusted
 from .models import JobOutcome, JobRef, Workspace, check_key
 
@@ -249,14 +249,15 @@ def issue_hosts(body: str | None) -> list[str]:
 def agent_hosts(configured: list[str], named: Sequence[str], policy: list[str]) -> list[str]:
     """What an agent's job may reach: the configured hosts, then those its issue names that the broker's policy
     allows (`policy`: its allowed_hosts patterns). The policy is the ceiling, never the list: a host no issue
-    names is not granted. Never a name csub refuses as a job host, an IP address or a GitHub host; without repeats.
-    More than MAX_JOB_HOSTS is a TooManyHostsError: none is dropped to fit."""
+    names is not granted. Never a name csub refuses as a job host, an IP address or a GitHub host other than
+    `raw.githubusercontent.com` (which a dataset round names once a person approved it for that dataset); without
+    repeats. More than MAX_JOB_HOSTS is a TooManyHostsError: none is dropped to fit."""
     usable = [
         host
         for host in named
         if HOST_RE.fullmatch(host)
         and not is_ip_literal(host)
-        and not is_github_host(host)
+        and (not is_github_host(host) or host == RAW_GITHUB)
         and not missing_hosts([host], policy)
     ]
     hosts = list(dict.fromkeys([*configured, *usable]))

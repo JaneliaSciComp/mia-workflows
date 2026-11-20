@@ -15,6 +15,7 @@ from mia_buffers.cleaner import (
     standing,
 )
 from mia_buffers.config import CleanerCfg
+from mia_data.jobspec import NoReachableFiles
 
 NOW = 1_800_000_000.0
 CFG = CleanerCfg()
@@ -312,6 +313,14 @@ def test_a_match_that_was_refused_a_host_waits_for_the_host_not_for_its_record()
     assert rule == "host not approved" and step["do"] == "needs" and "cdn.example.org, s3.example.org" in step["text"]
     assert stopped(said)[0] == "record gap"  # no host of its jobs waits: what is left is the record's
     assert stopped("match blocked: no class is named", hosts=["s3.example.org"])[0] == "record gap"
+
+
+def test_a_reader_whose_job_could_reach_no_file_waits_for_the_host():
+    """2026-11-19, RV-PBS: files on raw.githubusercontent.com alone, which the reader's job was not granted.
+    The round says so before autodev is asked, in the words a refused host is known by."""
+    rule, (step,) = stopped(str(NoReachableFiles(["raw.githubusercontent.com"])))
+    assert rule == "host not approved" and step["do"] == "needs" and "(raw.githubusercontent.com)" in step["text"]
+    assert stopped(str(NoReachableFiles([]))) == (None, [{"do": "diagnose"}])  # nothing a click could approve
 
 
 def test_a_round_its_budget_refused_is_left_to_a_person_and_not_diagnosed():

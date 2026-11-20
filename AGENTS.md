@@ -165,7 +165,9 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   the policy allows it; until then a request sends that dataset no `go` once it has
   stopped, and the repair agent says which hosts wait. No job reaches a GitHub host, except that a person may approve
   `raw.githubusercontent.com` for one dataset at a time: the policy allowing it grants it to no other dataset's
-  jobs. `policy_dir` is under home, apart from every directory a worker sandbox binds read-write, and its
+  jobs, and autodev grants it only to the reader's job of an issue that names it. A round asks for no reader
+  whose job could reach none of its record's files: it ends `blocked` naming the host to approve
+  (`NoReachableFiles`, raised where the issue's host line is written). `policy_dir` is under home, apart from every directory a worker sandbox binds read-write, and its
   `broker.toml` is not the base policy file.
 - **Output of sandboxed jobs is untrusted.** Read it with `read_untrusted`, reduce it to a small typed result,
   `neutralize` it before posting to GitHub.

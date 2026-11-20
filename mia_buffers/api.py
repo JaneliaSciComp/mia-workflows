@@ -27,6 +27,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from autodev.config import RAW_GITHUB
 from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
 from mia_core.hosts import HOST_RE, PolicyError, generate_policy, is_ip_literal
@@ -36,7 +37,6 @@ from mia_core.locks import LockDir
 from mia_core.registry import read_token
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
-from mia_data.binding import RAW_GITHUB
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config

@@ -14,7 +14,7 @@ from temporalio.testing import ActivityEnvironment
 from test_autodev_agent import FakeCsub
 from test_buffers_register import token_server  # noqa: F401  (fixture)
 
-from autodev.agent import issue_hosts
+from autodev.agent import hosts_marker, issue_hosts
 from autodev.jobs import CsubJobs
 from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
@@ -573,13 +573,57 @@ async def test_the_readers_job_may_reach_the_hosts_a_person_approved_for_its_dat
     t.ledger.put_kv("dataset_hosts", {"rec-1": ["raw.githubusercontent.com"]})
     assert await t.a.open_snippet_issue(1, ROUND, draft, first) == first and len(t.snip.created) == 1
     body = t.snip.issues[first]["body"]
-    assert issue_hosts(body) == ["data.example.org", "s3.example.org"]  # not the unapproved one, never GitHub's
+    # not the unapproved one, nor GitHub's file host while the policy lacks it
+    assert issue_hosts(body) == ["data.example.org", "s3.example.org"]
     assert "The reader's job may reach `data.example.org`, `s3.example.org`." in body
     assert body.count("<!-- autodev: hosts") == 1 and body.startswith("<!-- mia-data: issue=1 round=i1-e99 -->")
     # and a new issue names them from the start
     t.snip.issues[first]["state"] = "closed"
     second = await t.a.open_snippet_issue(1, ROUND, draft)
     assert second != first and issue_hosts(t.snip.issues[second]["body"]) == ["data.example.org", "s3.example.org"]
+
+
+async def test_no_reader_is_asked_for_while_its_job_could_reach_none_of_the_records_files(tmp_path):
+    """2026-11-19, RV-PBS: the record's files are on raw.githubusercontent.com alone. A person approved the host
+    for the dataset and the match job read them, but the snippets issue said "The reader's job may reach ." and
+    autodev's agent stopped three times with no commits, $4 of rounds that could not pass. The issue names the
+    host once it is approved for its dataset; until then autodev is not asked, on a resume either."""
+    raw = "raw.githubusercontent.com"
+    t = _setup(tmp_path, probe=lambda: ["*.example.org", raw])
+    record = {
+        **RECORD,
+        "data": {"download_url": "https://github.com/o/r", "formats": ["jpeg"]},
+        "technical": {"sample": {"urls": [f"https://{raw}/o/r/main/a.jpg"]}},
+    }
+    t.cat.files[("datasets/rec-1.yaml", REC_SHA)] = yaml.safe_dump(record).encode()
+    await t.a.admit(1, "99")
+    draft = {"draft_binding": BINDING, "what_fails": "no reader", "tried": []}
+    with pytest.raises(ApplicationError) as refused:
+        await t.a.open_snippet_issue(1, ROUND, draft)
+    assert refused.value.type == "NoReachableFiles" and refused.value.non_retryable and not t.snip.created
+    assert f"(host not allowed: {raw})" in str(refused.value)  # what the repair agent's "host not approved" reads
+    t.ledger.put_kv("dataset_hosts", {"rec-1": [raw]})
+    number = await t.a.open_snippet_issue(1, ROUND, draft)
+    assert issue_hosts(t.snip.issues[number]["body"]) == [raw]  # never github.com
+    assert f"The reader's job may reach `{raw}`." in t.snip.issues[number]["body"]
+
+    # an issue written before the approval names the host when a resumed round asks autodev again
+    body = t.snip.issues[number]["body"]
+    t.snip.issues[number]["body"] = body.replace(f"`{raw}`. {hosts_marker([raw])}", f". {hosts_marker([])}")
+    assert issue_hosts(t.snip.issues[number]["body"]) == []
+    await t.a.ask_autodev(number, "resume i1-e99 12", ROUND)
+    assert issue_hosts(t.snip.issues[number]["body"]) == [raw] and len(t.snip.comments[number]) == 1
+    t.ledger.put_kv("dataset_hosts", {})  # the approval is withdrawn: nobody is asked
+    with pytest.raises(ApplicationError, match="could reach none of this record's files"):
+        await t.a.ask_autodev(number, "resume i1-e99 13", ROUND)
+    assert len(t.snip.comments[number]) == 1
+
+    # a record on github.com alone has no host a person could approve
+    record["technical"] = {}
+    t.cat.files[("datasets/rec-1.yaml", REC_SHA)] = yaml.safe_dump(record).encode()
+    await t.a.admit(1, "98")  # a round pins its record
+    with pytest.raises(ApplicationError, match="GitHub hosts no job reaches"):
+        await t.a.open_snippet_issue(1, "i1-e98", draft)
 
 
 async def test_open_snippet_issue_with_a_binding_asks_to_supersede_its_snippets(tmp_path):
