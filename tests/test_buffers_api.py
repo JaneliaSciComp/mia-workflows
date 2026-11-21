@@ -3540,3 +3540,9 @@ def test_host_routes_read_the_transfers(tmp_path, monkeypatch):
     for bad in ({"days": "x"}, {"days": "0"}, {"days": "367"}):
         assert s.handle("GET", "/hosts", bad, b"", {})[0] == 422
     assert s.handle("GET", "/hosts/a.org/minutes", {"from": "0", "to": str(8 * 86400)}, b"", {})[0] == 422
+    assert s.handle("GET", "/hosts", {"days": "nan"}, b"", {})[0] == 422
+    for bad in ({"from": "nan"}, {"to": "inf"}, {"from": "200", "to": "100"}):
+        assert s.handle("GET", "/hosts/a.org/minutes", bad, b"", {})[0] == 422
+    one = {"from": str(101 * 60), "to": str(101 * 60 + 59)}
+    only = s.handle("GET", "/hosts/a.org/minutes", one, b"", {})[1]["minutes"]
+    assert [minute["minute"] for minute in only] == [101]

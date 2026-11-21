@@ -10,6 +10,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -894,9 +895,12 @@ class BufferService:
     @staticmethod
     def _number(query: dict[str, str], key: str, default: float) -> float:
         try:
-            return float(query.get(key, default))
+            value = float(query.get(key, default))
         except ValueError:
-            raise HttpError(422, f"query {key} must be a number") from None
+            value = math.nan
+        if not math.isfinite(value):
+            raise HttpError(422, f"query {key} must be a finite number")
+        return value
 
     def _window(self, query: dict[str, str]) -> tuple[float, int, int]:
         """The `days` asked for (default 7) and the minutes it covers, ending with the current one."""
@@ -929,8 +933,8 @@ class BufferService:
         """One host's minutes between `from` and `to` (unix seconds; `to` defaults to now, `from` to a day before)."""
         end = self._number(query, "to", time.time())
         start = self._number(query, "from", end - 86400)
-        if end - start > 7 * 86400:
-            raise HttpError(422, "from and to span at most 7 days")
+        if not 0 <= end - start <= 7 * 86400:
+            raise HttpError(422, "from is not after to, and they span at most 7 days")
         host = host.lower()
         rows = self.ledger.transfers(int(start // 60), int(end // 60), host)
         return 200, {"host": host, "minutes": by_minute(rows)}, {}
