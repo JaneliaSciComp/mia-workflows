@@ -1390,6 +1390,9 @@ def test_steps_four_to_six_are_the_rounds_own_buttons_and_back_is_a_cancel() -> 
         '...droppedNotices(subject, board, redraw), buttons, version ? card("The datasets of this version"', flow
     )
     assert has("nextLink(subject), buttons, );", flow)
+    # while sourcing, the step says what it waits for: the datasets still staging or pending
+    assert has("Sourcing ends, and Approve and serve opens, when none is left.", flow)
+    assert has("`Sourcing: ${num(staging + queued)} datasets to go.`", flow)
     # the plan is shown as the round wrote it, as text
     assert has(r"/^\*\*Plan\*\* for /.test(entry.body)", flow) and has("markdown(plan.body", flow)
     # step 6: the id a training run names, never the buffer's name

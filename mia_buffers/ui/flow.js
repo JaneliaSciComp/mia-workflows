@@ -557,7 +557,10 @@ async function sourceStep(pane, subject, redraw, wanted) {
   const { version, board } = await newestVersion(subject);
   if (!wanted()) return;
   const here = stepOf(subject.stage) === "source",
-    onDisk = board.filter(d => d.status === "servable").length,
+    count = status => board.filter(d => d.status === status).length,
+    onDisk = count("servable"),
+    staging = count("staging"),
+    queued = count("pending"), // the two statuses with a job running or still to run: sourcing lasts while any is left
     cfg = version?.config || {},
     bar = el("i"),
     buttons = el("div", { class: "stepfoot above" }); // above the datasets, where a long table cannot hide them
@@ -569,6 +572,9 @@ async function sourceStep(pane, subject, redraw, wanted) {
       el("b", {}, `${num(onDisk)} of ${num(board.length)}`),
       " datasets of this version are on disk.",
       subject.stage === "staged" ? " No job is left to run: it waits for an approve." : "",
+      subject.stage === "sourcing"
+        ? ` ${num(staging)} are being staged and ${num(queued)} wait for their turn. Sourcing ends, and Approve and serve opens, when none is left. A dataset that failed, or that waits for its files, for quota or for a lock, does not hold it back.`
+        : "",
     ),
     el("div", { class: "progress" }, bar),
     ...droppedNotices(subject, board, redraw),
@@ -583,7 +589,11 @@ async function sourceStep(pane, subject, redraw, wanted) {
   );
   foot(
     here ? cancelBack(subject, redraw) : backLink(subject, "plan"),
-    here ? (subject.stage === "staged" ? "The approve serves what is on disk now." : "Jobs are running.") : null,
+    here
+      ? subject.stage === "staged"
+        ? "The approve serves what is on disk now."
+        : `Sourcing: ${num(staging + queued)} datasets to go.`
+      : null,
     here
       ? el(
           "button",
