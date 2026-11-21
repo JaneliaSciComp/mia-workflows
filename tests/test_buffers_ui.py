@@ -337,6 +337,9 @@ FAKE_DOM = """
 class FakeNode {
   constructor(tag) { this.tag = tag; this.attrs = {}; this.kids = []; this.listeners = {}; this.dataset = {}; this.checked = false; this.disabled = false; }
   setAttribute(name, value) { this.attrs[name] = value; if (name.startsWith("data-")) this.dataset[name.slice(5)] = value; }
+  getAttribute(name) { return this.attrs[name] ?? null; }
+  removeAttribute(name) { delete this.attrs[name]; }
+  get parentNode() { return this.parent; }
   set className(value) { this.attrs.class = value; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   fire(type) { (this.listeners[type] || []).forEach(fn => fn({ target: this })); }
@@ -355,6 +358,7 @@ const nodes = {};
 globalThis.document = {
   body: new FakeNode("body"), createElement: tag => new FakeNode(tag), createElementNS: (space, tag) => new FakeNode(tag),
   getElementById: id => (nodes[id] ||= new FakeNode("#" + id)),
+  listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; },
 };
 const walk = (node, found = []) => { if (typeof node === "string") return found; found.push(node); node.kids.forEach(kid => walk(kid, found)); return found; };
 const textOf = node => typeof node === "string" ? node : node.kids.map(textOf).join("");
@@ -431,6 +435,49 @@ def test_every_file_the_page_loads_is_one_of_its_own() -> None:
 def rendered(*bodies: str) -> list[str]:
     """What the page's `markdown()` builds for each timeline body, as HTML text (a string child is a text node)."""
     return run_js("print(input.map(body => markdown(body).map(html).join('')));", {"markdown.js": "markdown"}, bodies)
+
+
+def test_every_title_shows_in_the_pages_tooltip() -> None:
+    """The pointer over a node brings up the page's tooltip with the nearest help: a node's own lines, else a
+    `title`, which leaves the attribute so that the browser shows no box of its own."""
+    out = run_js(
+        """
+        const tip = document.getElementById("tip");
+        tip.style = {};
+        globalThis.window = { innerWidth: 1000, innerHeight: 800 };
+        const over = target => document.listeners.pointerover({ target, clientX: 0, clientY: 0 });
+        const inner = el("span", {}, "size"), head = el("th", { title: "Its size.\\nOn disk." }, inner);
+        const state = pill("servable", "pool"), bare = el("p", {}, "text");
+        el("div", {}, head, el("td", { title: "the cell's" }, state), bare);
+        over(inner);
+        const titled = [textOf(tip), tip.kids.length, head.attrs.title ?? null, head.attrs["aria-description"]];
+        over(state);
+        const own = textOf(tip).startsWith("servable ");
+        over(bare);
+        print([titled, own, tip.hidden]);
+        """,
+        {"dom.js": "el, pill"},
+    )
+    assert out == [["Its size.On disk.", 2, None, "Its size.\nOn disk."], True, True]
+
+
+def test_every_column_and_button_says_what_it_is() -> None:
+    """A table's column says what it holds on its header's hover (its own `title`, else the shared COLUMN_HELP by
+    its label), and every button what pressing it does."""
+    shared = set(run_js("print(Object.keys(COLUMN_HELP))", {"table.js": "COLUMN_HELP"}))
+    for name, text in FILES.items():
+        if not name.endswith(".js"):
+            continue
+        for found in re.finditer(r'label: "([^"]+)"', text):
+            column = text[found.end() : text.find("cell:", found.end())]
+            assert found[1] in shared or "title:" in column, (name, found[1])
+        for found in re.finditer(r'el\(\s*"button",\s*\{', text):
+            depth, end = 1, found.end()
+            while depth:  # the attributes: up to the brace that closes them
+                depth += {"{": 1, "}": -1}.get(text[end], 0)
+                end += 1
+            attrs = text[found.end() : end]
+            assert "title" in attrs or "...dialog." in attrs, (name, attrs[:80])
 
 
 def test_servable_counts_read_train_val_test() -> None:
@@ -1359,7 +1406,7 @@ def test_a_buffer_is_one_page_and_the_tabs_name_no_spec_and_no_preparation() -> 
     assert all(f'data-step="{step}"' in index for step in ("define", "datasets", "prepare", "plan", "source", "serve"))
     assert has('el("a", { href: "#preparation"', squeezed(FILES["datasets.js"]))
     assert count('pageOf("/subjects/buffer", "subjects")') == 1 and not has('source: pageOf("/buffers", "buffers"),')
-    assert has('el("a", { class: "btn primary", href: "#buffers/new" }, "New buffer")')
+    assert has('class: "btn primary", href: "#buffers/new",') and has('"New buffer"')
     assert not has("Buffer specs") and not has("specControls")
     # an old address of a buffer's page still opens it
     assert not has('"#specs/"') and has('if (name === "specs" && rest.length)')
@@ -1367,7 +1414,9 @@ def test_a_buffer_is_one_page_and_the_tabs_name_no_spec_and_no_preparation() -> 
     assert "/#buffer/" in (UI_DIR.parent / "mirror.py").read_text()
     # the strip, and what is not a step
     assert has("stripOf(subject?.stage, step)", flow) and has("stepToShow(subject.stage, asked)", flow)
-    assert has('el("summary", { class: "btn" }, "Actions…")', flow) and has("actionBar(subject, redraw, ", flow)
+    assert has('el("summary", { class: "btn", title: BUTTON_HELP.more }, "Actions…")', flow) and has(
+        "actionBar(subject, redraw, ", flow
+    )
     assert has("bar.prepend(", flow) and has('document.querySelectorAll("details.more[open]")')  # Clone first; closes
     assert has("bufferTimeline(entries)", flow) and has("shelvedNotice(subject.shelved)", flow)
     # the stream redraws the buffer's page, not a subject's

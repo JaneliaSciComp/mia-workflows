@@ -40,6 +40,13 @@ export const BUTTON_HELP = {
     "Start with the policy as it is. A dataset on one of these hosts stops and needs a human; a buffer waits for that dataset's files to be copied in by hand, or refuses its job.",
   cancelHosts: "Close this without starting anything.",
   showChange: "Redraw the page with what changed; what you typed here is dropped.",
+  nextDatasets: "Go on to step 2: the datasets this definition takes.",
+  toDefinition: "Back to step 1: the definition.",
+  toDatasets: "Back to step 2: the datasets this definition takes.",
+  nextPrepare: "Go on to step 3: prepare the datasets.",
+  nextStep: "Go to the step this buffer is on now.",
+  backStep: "Back to an earlier step. The buffer stays as it is.",
+  more: "What else this buffer takes now: a copy of its definition, and the actions of its stage.",
 };
 // Shelving is the same for every kind of subject: the service carries it out itself, and a workflow hears only the
 // cancel of a round that was waiting for a verdict.

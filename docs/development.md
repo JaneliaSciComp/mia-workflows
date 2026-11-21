@@ -1096,7 +1096,7 @@ above it in this table, never in a circle:
 | `steps.js` | a buffer's six steps: which step a stage is, which step an address may show, the list's words; no DOM |
 | `dom.js` | nodes built from text (never parsed HTML), numbers and times, links and addresses, pills, the tooltip, cards, a lifecycle's line |
 | `api.js` | the page's one `fetch`, the banner its errors go to, and what the service said at boot |
-| `table.js` | a table paged by the server |
+| `table.js` | a table paged by the server, and what the shared column names mean |
 | `markdown.js` | a timeline entry's markdown as DOM nodes, and its gist as one line |
 | `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
 | `job.js` | a job's record, every value of it inserted as text |
@@ -1110,6 +1110,12 @@ together. `tests/test_buffers_ui.py` imports the modules under node (a test depe
 small fake DOM, and reads all the files as one text for the rules about the page as a whole; a rule about the
 code is compared without whitespace (`has()`, `count()`), so it holds however Biome lays the code out.
 `ui/package.json` only tells node that the files are modules; the service does not serve it.
+
+Every help text shows in the page's one tooltip (`dom.js`): the pointer brings up the nearest node's own lines
+(`tipOn`: a pill, a crop) or its `title`, so a new control needs only a `title` and the browser's own box never
+shows. Every button has one (`BUTTON_HELP` and `ACTION_HELP` in `actions.js`) and so has every column: its own
+`title` where its meaning is its table's, else `COLUMN_HELP` in `table.js` by its label. A test fails a column or
+a button that has none.
 
 Each tab is one kind of thing, and each thing has one page:
 

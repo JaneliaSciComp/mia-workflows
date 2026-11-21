@@ -47,7 +47,11 @@ export function banner(message) {
       "div",
       { "data-message": message },
       el("span", {}, message),
-      el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"),
+      el(
+        "button",
+        { type: "button", "aria-label": "dismiss", title: "Dismiss this message.", onclick: () => line.remove() },
+        "×",
+      ),
     );
   line.timer = setTimeout(() => line.remove(), 20000);
   if (!same) {

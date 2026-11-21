@@ -1,5 +1,5 @@
 // Overview, the landing page: the whole system in sections that fold (spec overview §5).
-import { $, ago, el, KIND_WORDS, kv, num, stageHelp, stagePill, SUBJECT_HASH, when } from "./dom.js";
+import { $, ago, el, KIND_WORDS, kv, num, PILL_HELP, stageHelp, stagePill, SUBJECT_HASH, when } from "./dom.js";
 import { downLines, load, newKey } from "./api.js";
 import { pagedTable, pageOf, TABLE_STATE } from "./table.js";
 import { actionBar, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
@@ -82,6 +82,16 @@ const NEEDS_KINDS = [
 const KIND_ROWS = { dataset: "Datasets", buffer: "Buffers", prep: "Requests" };
 const KIND_LIST = { dataset: "#datasets", buffer: "#buffers", prep: "#preparation" };
 const STATUS_ORDER = ["needs human", "in repair", "working", "shelved", "done", "not started"];
+// what a status means, said on the hover of its column in Counts
+const STATUS_HELP = {
+  "needs human": PILL_HELP["needs human"],
+  "in repair": PILL_HELP["in repair"],
+  "working": "A round is in progress. Nothing here waits for a person.",
+  "shelved": PILL_HELP.shelved,
+  "done":
+    "It rests where its last round left it and nothing is wanted: a prepared dataset, a buffer being served, a settled request, or one that was cancelled or retired.",
+  "not started": "No round has run for it yet.",
+};
 const SECTION_OF = { "needs human": "needs", "in repair": "repair", "working": "working", "shelved": "shelved" };
 const plain = text => String(text || "").replaceAll("`", "");
 let needsKind = ""; // the kind Needs human is narrowed to; kept while the page redraws, set by the address
@@ -90,10 +100,25 @@ const again = () => viewOverview("", true);
 
 function subjectCols() {
   return [
-    { key: "kind", label: "what", cell: x => KIND_WORDS[x.kind] },
-    { key: "key", label: "name", cell: x => el("a", { href: SUBJECT_HASH[x.kind](x.key) }, x.name || x.key) },
-    { key: "status", label: "stage", cell: x => stagePill(x.stage) },
-    { key: "updated", label: "since", cell: x => when(x.updated) },
+    {
+      key: "kind",
+      label: "what",
+      title: "A dataset, a buffer or a preparation request.",
+      cell: x => KIND_WORDS[x.kind],
+    },
+    {
+      key: "key",
+      label: "name",
+      title: "Its name. It opens its page.",
+      cell: x => el("a", { href: SUBJECT_HASH[x.kind](x.key) }, x.name || x.key),
+    },
+    {
+      key: "status",
+      label: "stage",
+      title: "The stage it is at. Hover a stage for what it means.",
+      cell: x => stagePill(x.stage),
+    },
+    { key: "updated", label: "since", title: "When it last changed.", cell: x => when(x.updated) },
   ];
 }
 function whyCell(subject) {
@@ -155,6 +180,9 @@ function build(root) {
           "aria-pressed": String(kind === needsKind),
           "data-kind": kind,
           "data-word": word,
+          title: kind
+            ? `List only the ${word.toLowerCase()} that need a human.`
+            : "List everything that needs a human.",
           onclick: () => show(kind),
         },
         word,
@@ -194,9 +222,15 @@ function build(root) {
       },
       cols: [
         ...subjectCols(),
-        { label: "why", wrap: true, cell: whyCell },
+        {
+          label: "why",
+          title: "Why it needs a human. Where the repair agent gave up, its case opens here.",
+          wrap: true,
+          cell: whyCell,
+        },
         {
           label: "answer",
+          title: "What it accepts now. Hover a button for what it does.",
           wrap: true,
           cell: x => el("div", {}, actionBar(x, again, x.kind === "buffer" ? ["go", "revoke"] : []), ...dropNotices(x)),
         },
@@ -216,8 +250,18 @@ function build(root) {
       empty: "Nothing is shelved.",
       cols: [
         ...subjectCols(),
-        { label: "reason", wrap: true, cell: x => x.shelved?.reason || "" },
-        { label: "answer", wrap: true, cell: x => actionBar(x, again) },
+        {
+          label: "reason",
+          title: "The reason given when it was shelved.",
+          wrap: true,
+          cell: x => x.shelved?.reason || "",
+        },
+        {
+          label: "answer",
+          title: "What it accepts now. Hover a button for what it does.",
+          wrap: true,
+          cell: x => actionBar(x, again),
+        },
       ],
     }),
   };
@@ -265,7 +309,16 @@ function countsTable(counts, open) {
   return el(
     "table",
     { class: "plain" },
-    el("thead", {}, el("tr", {}, el("th", {}, ""), ...STATUS_ORDER.map(status => el("th", { class: "num" }, status)))),
+    el(
+      "thead",
+      {},
+      el(
+        "tr",
+        {},
+        el("th", {}, ""),
+        ...STATUS_ORDER.map(status => el("th", { class: "num", title: STATUS_HELP[status] }, status)),
+      ),
+    ),
     el(
       "tbody",
       {},

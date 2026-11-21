@@ -168,9 +168,7 @@ export const PILL_HELP = {
 export function tipOn(node, lines) {
   // the page's tooltip on hover (no tab stop: tables hold hundreds of pills). A line is {k, b, t, img, full}:
   // a colour key, a bold word, text, a 256 px picture, a picture at its own size (as far as the window has room)
-  node.addEventListener("pointerenter", e => showTip(e, lines));
-  node.addEventListener("pointermove", moveTip);
-  node.addEventListener("pointerleave", hideTip);
+  node.tipLines = lines;
   return node;
 }
 // a pill explains itself on hover: PILL_HELP by its text, plus any extra lines (a count pill passes its own)
@@ -251,10 +249,41 @@ function moveTip(evt) {
 export function hideTip() {
   tip.hidden = true;
 }
+// What the pointer is over says its tooltip: the nearest node with lines of its own (tipOn) or a `title`. So every
+// `title` of the page shows here, never in the browser's own box: the pointer's first visit moves its text to
+// `data-tip` (and to `aria-description`, which a screen reader still reads). A line of a title is a line here.
+function tipLines(node) {
+  const title = node.getAttribute?.("title");
+  if (title) {
+    node.dataset.tip = title;
+    node.setAttribute("aria-description", title);
+    node.removeAttribute("title");
+  }
+  return node.tipLines || (node.dataset?.tip ? node.dataset.tip.split("\n").map(t => ({ t })) : null);
+}
+let tipped = null; // the node whose tooltip the pointer brought up
+document.addEventListener("pointerover", evt => {
+  let node = evt.target,
+    lines = null;
+  for (; node; node = node.parentNode) {
+    lines = tipLines(node);
+    if (lines) break;
+  }
+  if (node === tipped) return;
+  tipped = node;
+  if (node) showTip(evt, lines);
+  else hideTip();
+});
+document.addEventListener("pointermove", evt => tipped && moveTip(evt));
+document.addEventListener("pointerout", evt => {
+  if (evt.relatedTarget) return; // the pointer left the window
+  tipped = null;
+  hideTip();
+});
+document.addEventListener("pointerdown", hideTip); // a press may redraw the page under the pointer
+// a mark that is reached by keyboard too (a chart's bar): its tooltip also shows while it has the focus
 export function hoverable(node, lines) {
-  node.addEventListener("pointerenter", e => showTip(e, lines));
-  node.addEventListener("pointermove", moveTip);
-  node.addEventListener("pointerleave", hideTip);
+  tipOn(node, lines);
   node.setAttribute("tabindex", "0");
   node.addEventListener("focus", () => {
     const b = node.getBoundingClientRect();

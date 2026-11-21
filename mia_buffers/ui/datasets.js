@@ -66,7 +66,7 @@ export const datasetCols = () => [
     key: "state",
     label: "state",
     title:
-      'preparation, then the raw cache\'s state, then "staged" when a pyramid of it exists, then what its catalog record lacks',
+      'Its preparation, then its raw cache\'s state, then "staged" when a pyramid of it exists, then what its catalog record lacks. Hover a pill for what it means.',
     cell: x => {
       const state = x.state === "shelved" && x.reason ? pill("shelved", "", [{ t: x.reason }]) : statePill(x.state);
       const pills = el("span", { class: "pills" }, state);
@@ -89,13 +89,19 @@ export const datasetCols = () => [
       return pills;
     },
   },
-  { key: "stage", label: "stage", cell: x => x.stage || "" },
+  { key: "stage", label: "stage", title: "The stage of its preparation round.", cell: x => x.stage || "" },
   { key: "dims", label: "dims", cell: x => x.dims || "" },
   { key: "modality", label: "modality", cell: x => x.modality || "" },
   { key: "licence", label: "licence", cell: x => x.licence || "" },
   { key: "bytes", label: "size", num: true, cell: x => (x.bytes ? fmtBytes(x.bytes) : "") },
   { key: "raw", label: "raw cache", num: true, cell: x => (x.raw?.bytes ? fmtBytes(x.raw.bytes) : "") },
-  { key: "staged", label: "staged", num: true, cell: x => (x.staged ? num(x.staged) : "") },
+  {
+    key: "staged",
+    label: "staged",
+    title: "How many staged artifacts of it are on disk.",
+    num: true,
+    cell: x => (x.staged ? num(x.staged) : ""),
+  },
   { key: "buffers", label: "buffers", num: true, cell: x => bufferCount(x.buffers) },
   { key: "updated", label: "updated", cell: x => when(x.updated_at) },
 ];
@@ -456,11 +462,13 @@ export function datasetCards(d) {
           },
           {
             label: "files",
+            title: "Opens the staged artifact's directory.",
             cell: a => folderLink(roots.staged_root, data(a).levels_key && `${data(a).levels_key}/${row.id}/${a.key}`),
           },
           {
             key: "state",
             label: "state",
+            title: "Whether the artifact is on disk. Hover a state for what it means.",
             cell: a => {
               const pills = el("span", { class: "pills" }, assetPill(data(a).state));
               if (data(a).quarantined) pills.append(" ", assetPill("quarantined"));
@@ -486,17 +494,28 @@ export function datasetCards(d) {
         search: false,
         empty: "In no buffer's pool.",
         cols: [
-          { key: "buffer", label: "buffer", cell: b => bufferLink(b.id) },
+          {
+            key: "buffer",
+            label: "buffer",
+            title: "The version's id: what a training run names.",
+            cell: b => bufferLink(b.id),
+          },
           {
             key: "spec",
             label: "buffer",
+            title: "The buffer the version belongs to. It opens the buffer's page.",
             cell: b => (b.spec ? el("a", { href: SUBJECT_HASH.buffer(b.spec) }, b.spec) : b.config?.spec_name || ""),
           },
-          { label: "in its pool", cell: b => statePill(b.board?.status) },
+          {
+            label: "in its pool",
+            title: "Where this dataset stands in that version's sourcing. Hover a status for what it means.",
+            cell: b => statePill(b.board?.status),
+          },
           { label: "reason", wrap: true, cell: b => b.board?.reason || "" },
           {
             key: "updated",
             label: "buffer state",
+            title: "The version's newest event, and when it happened.",
             cell: b =>
               b.latest_event ? el("span", {}, statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at)) : "",
           },

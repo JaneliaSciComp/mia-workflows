@@ -61,7 +61,15 @@ export function viewBuffers(id, refresh) {
       "div",
       { class: "viewhead" },
       el("h2", {}, "Buffers"),
-      el("a", { class: "btn primary", href: "#buffers/new" }, "New buffer"),
+      el(
+        "a",
+        {
+          class: "btn primary",
+          href: "#buffers/new",
+          title: "Define a new buffer. Nothing is saved until its second step.",
+        },
+        "New buffer",
+      ),
     ),
     el(
       "p",
@@ -83,6 +91,7 @@ export function viewBuffers(id, refresh) {
         {
           key: "key",
           label: "buffer",
+          title: "The buffer's name and its key. A name may repeat; the key tells two apart.",
           // a name is a label and may repeat: the key beside it tells two apart
           cell: x =>
             el(
@@ -96,11 +105,13 @@ export function viewBuffers(id, refresh) {
         {
           key: "stage",
           label: "step",
+          title: "Which of its six steps the buffer is on.",
           cell: x => `${STEPS.indexOf(stepOf(x.stage)) + 1} · ${STEP_TITLES[stepOf(x.stage)]}`,
         },
         {
           key: "status",
           label: "status",
+          title: "What the buffer is doing, or that it waits for a person. Hover a status for its stage.",
           cell: x => {
             const word = statusWord(x);
             return pill(word, word === "needs human" ? "warn" : "", [{ b: x.stage, t: " is its stage" }]);
@@ -108,7 +119,7 @@ export function viewBuffers(id, refresh) {
         },
         {
           label: "serving",
-          title: "the id of the version being served: what a training run names",
+          title: "The id of the version being served: what a training run names.",
           cell: x => (x.serving ? bufferLink(x.serving) : ""),
         },
         { key: "updated", label: "changed", cell: x => when(x.updated) },
@@ -128,16 +139,21 @@ export const poolTable = (id, levelsKey) =>
       { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
       {
         label: "files",
-        title: "the dataset's saved crops",
+        title: "Opens the dataset's saved crops.",
         cell: x => folderLink(S.meta.roots?.storage_root, x.folder),
       },
       {
         label: "staged",
-        title: "the staged artifact this buffer draws from",
+        title: "Opens the staged artifact this buffer draws from.",
         cell: x => folderLink(S.meta.roots?.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)),
       },
       { label: "preview", cell: x => thumb(x) },
-      { key: "status", label: "status", cell: x => statePill(x.status) },
+      {
+        key: "status",
+        label: "status",
+        title: "Where the dataset stands in this version's sourcing. Hover a status for what it means.",
+        cell: x => statePill(x.status),
+      },
       { label: "reason", wrap: true, cell: x => x.reason || "" },
       { key: "job", label: "job", cell: x => (x.job ? el("code", {}, x.job) : "") },
       { key: "updated", label: "updated", cell: x => when(x.updated_at) },
@@ -335,10 +351,22 @@ async function viewBuffer(root, id, refresh) {
                 search: false,
                 empty: "No usage yet.",
                 cols: [
-                  { key: "day", label: "day", cell: d => d.day },
-                  { key: "draws", label: "draws", num: true, cell: d => num(d.draws) },
-                  { key: "consumers", label: "consumers", num: true, cell: d => num(d.consumers) },
-                  { key: "empty", label: "empty", num: true, cell: d => num(d.empty) },
+                  { key: "day", label: "day", title: "The day the numbers are for.", cell: d => d.day },
+                  { key: "draws", label: "draws", title: "Crops drawn that day.", num: true, cell: d => num(d.draws) },
+                  {
+                    key: "consumers",
+                    label: "consumers",
+                    title: "Training jobs that drew that day.",
+                    num: true,
+                    cell: d => num(d.consumers),
+                  },
+                  {
+                    key: "empty",
+                    label: "empty",
+                    title: "Requests answered with no crop that day.",
+                    num: true,
+                    cell: d => num(d.empty),
+                  },
                 ],
               })
             : null,
@@ -390,10 +418,21 @@ async function viewBuffer(root, id, refresh) {
           source: pageOf(`/buffers/${e}/events`, "events"),
           empty: "No event yet.",
           cols: [
-            { key: "seq", label: "#", num: true, cell: x => num(x.seq) },
-            { key: "kind", label: "event", cell: x => statePill(x.kind) },
+            {
+              key: "seq",
+              label: "#",
+              title: "The event's number in this version's history.",
+              num: true,
+              cell: x => num(x.seq),
+            },
+            {
+              key: "kind",
+              label: "event",
+              title: "What happened. Hover an event for what it means.",
+              cell: x => statePill(x.kind),
+            },
             { key: "at", label: "when", cell: x => when(x.at) },
-            { label: "detail", wrap: true, cell: x => x.detail || "" },
+            { label: "detail", title: "What the event recorded.", wrap: true, cell: x => x.detail || "" },
           ],
         }),
       ),
@@ -417,8 +456,13 @@ async function viewBuffer(root, id, refresh) {
                 dir: "desc",
                 empty: "No volume registered.",
                 cols: [
-                  { key: "volume", label: "volume", cell: v => el("code", {}, v.id) },
-                  { key: "draws", label: "draws", num: true, cell: v => num(v.draws) },
+                  {
+                    key: "volume",
+                    label: "volume",
+                    title: "The volume's id. It starts with its dataset.",
+                    cell: v => el("code", {}, v.id),
+                  },
+                  { key: "draws", label: "draws", title: "Crops drawn from it.", num: true, cell: v => num(v.draws) },
                   { key: "missing", label: "", cell: v => (v.missing ? pill("missing", "warn") : "") },
                 ],
               }),
@@ -433,12 +477,33 @@ async function viewBuffer(root, id, refresh) {
                 search: false,
                 empty: "No consumer has registered.",
                 cols: [
-                  { key: "name", label: "name", cell: c => c.name },
-                  { key: "host", label: "host", cell: c => c.host },
-                  { label: "pid", num: true, cell: c => String(c.pid ?? "") },
-                  { key: "rank", label: "rank", num: true, cell: c => (c.rank == null ? "" : String(c.rank)) },
-                  { key: "split", label: "split", cell: c => c.split },
-                  { key: "last_seen", label: "last seen", cell: c => when(c.last_seen) },
+                  {
+                    key: "name",
+                    label: "name",
+                    title: "The name the training job registered under.",
+                    cell: c => c.name,
+                  },
+                  { key: "host", label: "host", title: "The machine it runs on.", cell: c => c.host },
+                  { label: "pid", title: "Its process id on that machine.", num: true, cell: c => String(c.pid ?? "") },
+                  {
+                    key: "rank",
+                    label: "rank",
+                    title: "Its rank among the processes of a distributed run.",
+                    num: true,
+                    cell: c => (c.rank == null ? "" : String(c.rank)),
+                  },
+                  {
+                    key: "split",
+                    label: "split",
+                    title: "The split it draws from: train, val or test.",
+                    cell: c => c.split,
+                  },
+                  {
+                    key: "last_seen",
+                    label: "last seen",
+                    title: "When the service last heard from it.",
+                    cell: c => when(c.last_seen),
+                  },
                   { label: "", cell: c => (c.stale ? pill("stale", "warn") : "") },
                 ],
               }),

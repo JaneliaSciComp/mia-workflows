@@ -131,7 +131,12 @@ function head(subject, redraw, skip) {
       { class: "viewhead" },
       el("h2", {}, name, " ", subject ? standing(subject) : pill("not saved", "")),
       subject
-        ? el("details", { class: "more" }, el("summary", { class: "btn" }, "Actions…"), menu(subject, redraw, skip))
+        ? el(
+            "details",
+            { class: "more" },
+            el("summary", { class: "btn", title: BUTTON_HELP.more }, "Actions…"),
+            menu(subject, redraw, skip),
+          )
         : null,
     ),
     subject
@@ -287,6 +292,7 @@ function includedCard(subject, version, redraw) {
         {
           key: "status",
           label: "state",
+          title: "included: this version serves it. revoked: a person withdrew it from this version.",
           cell: x =>
             x.revoked
               ? tipOn(el("span", { class: "pill warn" }, "revoked"), [{ t: x.reason || "revoked from this version" }])
@@ -296,39 +302,44 @@ function includedCard(subject, version, redraw) {
         },
         {
           label: "stage dir",
-          title: "the staged pyramids this version draws from",
+          title: "Opens the staged pyramids this version draws from.",
           cell: x => folderLink(S.meta.roots?.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)),
         },
         {
           key: "bytes",
           label: "size",
           num: true,
-          title: "its size upstream",
+          title: "Its size upstream, as the catalog record gives it.",
           cell: x => (x.bytes ? fmtBytes(x.bytes) : ""),
         },
         {
           key: "raw",
           label: "raw cache",
           num: true,
-          title: "what its raw cache holds now",
+          title: "What its raw cache holds on disk now: the files a reader took whole.",
           cell: x => (x.raw_bytes ? fmtBytes(x.raw_bytes) : ""),
         },
         {
           key: "staged",
           label: "staged",
           num: true,
-          title: "the size of its staged pyramids",
+          title: "The size of its staged pyramids on disk.",
           cell: x => (x.staged_bytes ? fmtBytes(x.staged_bytes) : ""),
         },
         {
           label: "splits",
-          title: "the crops the plan gave it, per split",
+          title: "The crops the plan gave it, per split.",
           cell: x =>
             Object.entries(x.splits || {})
               .map(([split, crops]) => `${split} ${num(crops)}`)
               .join(" / "),
         },
-        { label: "notes", wrap: true, cell: x => (x.notes || []).join("; ") },
+        {
+          label: "notes",
+          title: "What the planner remarked about the dataset.",
+          wrap: true,
+          cell: x => (x.notes || []).join("; "),
+        },
       ],
     }),
   );
@@ -343,17 +354,33 @@ const versionsCard = subject =>
       search: false,
       empty: "No version yet.",
       cols: [
-        { key: "buffer", label: "id", cell: b => bufferLink(b.id) },
+        {
+          key: "buffer",
+          label: "id",
+          title: "The version's id: what a training run names.",
+          cell: b => bufferLink(b.id),
+        },
         {
           key: "updated",
           label: "state",
+          title: "The version's newest event, and when it happened.",
           cell: b =>
             b.latest_event
               ? el("span", {}, statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at))
               : "no events",
         },
-        { key: "volumes", label: "volumes", num: true, cell: b => num(b.volumes) },
-        { label: "servable", cell: b => servableText(b.servable) },
+        {
+          key: "volumes",
+          label: "volumes",
+          title: "How many volumes the version has registered.",
+          num: true,
+          cell: b => num(b.volumes),
+        },
+        {
+          label: "servable",
+          title: "The volumes crops can be drawn from now, per split.",
+          cell: b => servableText(b.servable),
+        },
       ],
     }),
   );
@@ -384,7 +411,13 @@ function defineFoot(subject) {
     savedHint(subject),
     el(
       "button",
-      { type: "button", class: "btn primary", disabled: !!problem(), onclick: () => goTo(subject, "datasets") },
+      {
+        type: "button",
+        class: "btn primary",
+        title: BUTTON_HELP.nextDatasets,
+        disabled: !!problem(),
+        onclick: () => goTo(subject, "datasets"),
+      },
       fitting == null ? "Next: the datasets" : `Next: the ${num(fitting)} ${fitting === 1 ? "dataset" : "datasets"}`,
     ),
   );
@@ -394,7 +427,7 @@ function datasetsFoot(subject) {
   foot(
     el(
       "button",
-      { type: "button", class: "btn", onclick: () => goTo(subject, "define") },
+      { type: "button", class: "btn", title: BUTTON_HELP.toDefinition, onclick: () => goTo(subject, "define") },
       lockReason(subject) ? "← The definition" : "← Change the definition",
     ),
     subject ? savedHint(subject) : problem() || "Saving creates the buffer; nothing runs yet.",
@@ -403,7 +436,11 @@ function datasetsFoot(subject) {
       {
         type: "button",
         class: "btn primary",
-        ...(!subject ? { title: BUTTON_HELP.save } : saves ? { title: BUTTON_HELP.saveChanges } : {}),
+        ...(!subject
+          ? { title: BUTTON_HELP.save }
+          : saves
+            ? { title: BUTTON_HELP.saveChanges }
+            : { title: BUTTON_HELP.nextPrepare }),
         disabled: !!problem(),
         onclick: e => leave(subject, "prepare", e.target),
       },
@@ -432,10 +469,11 @@ function planRound(subject, redraw) {
 const nextLink = subject =>
   el(
     "a",
-    { class: "btn primary", href: SUBJECT_HASH.buffer(subject.key) },
+    { class: "btn primary", title: BUTTON_HELP.nextStep, href: SUBJECT_HASH.buffer(subject.key) },
     `Next: ${STEP_TITLES[stepOf(subject.stage)].toLowerCase()}`,
   );
-const backLink = (subject, step) => el("a", { class: "btn", href: stepHash(subject, step) }, `← ${STEP_TITLES[step]}`);
+const backLink = (subject, step) =>
+  el("a", { class: "btn", title: BUTTON_HELP.backStep, href: stepHash(subject, step) }, `← ${STEP_TITLES[step]}`);
 // The way back from a round in progress: it asks, then cancels the round, and the buffer rests where it can change.
 const cancelBack = (subject, redraw) =>
   el(
@@ -483,7 +521,11 @@ function prepareFoot(subject, plan, redraw) {
       ? lockReason(subject) || "Nothing can be planned at this stage."
       : planRefusal(plan);
   foot(
-    el("button", { type: "button", class: "btn", onclick: () => goTo(subject, "datasets") }, "← Datasets"),
+    el(
+      "button",
+      { type: "button", class: "btn", title: BUTTON_HELP.toDatasets, onclick: () => goTo(subject, "datasets") },
+      "← Datasets",
+    ),
     resting ? blocker || "You can come back and prepare more later." : null,
     resting
       ? el(

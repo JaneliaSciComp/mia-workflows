@@ -245,7 +245,7 @@ const splitText = x =>
 const PLAN_COLS = [
   {
     label: "selected",
-    title: "uncheck a dataset that fits to take it out of this buffer; it is then listed above the table",
+    title: "Uncheck a dataset that fits to take it out of this buffer. It is then listed above the table.",
     cell: x => {
       if (!x.fits) return ""; // a rule of the definition keeps it out: there is nothing to check
       const input = el("input", {
@@ -275,6 +275,8 @@ const PLAN_COLS = [
   {
     key: "decision",
     label: "decision",
+    title:
+      "Whether the definition takes the dataset, and if not, the rule that keeps it out. Hover a decision for the reason.",
     cell: x =>
       pill(
         x.decision.group,
@@ -283,12 +285,18 @@ const PLAN_COLS = [
       ),
   },
   { key: "dims", label: "dims", cell: x => x.dims || "" },
-  { key: "modality", label: "modality", cell: x => x.modality_group || "" },
+  {
+    key: "modality",
+    label: "modality",
+    title: "The modality family the definition selects and weighs it by.",
+    cell: x => x.modality_group || "",
+  },
   { key: "licence", label: "licence", cell: x => x.licence || "" },
   {
     key: "state",
     label: "state",
-    title: 'preparation, then the raw cache\'s state, then "staged" when a pyramid of it exists for this geometry',
+    title:
+      'Its preparation, then its raw cache\'s state, then "staged" when a pyramid of it exists for this geometry. Hover a pill for what it means.',
     cell: x => {
       const pills = el("span", { class: "pills" }, statePill(x.prepared));
       if (x.raw) pills.append(" ", assetPill(x.raw.state));
@@ -300,8 +308,14 @@ const PLAN_COLS = [
   { key: "raw", label: "raw cache", num: true, cell: x => (x.raw?.bytes ? fmtBytes(x.raw.bytes) : "") },
   { key: "buffers", label: "buffers", num: true, cell: x => bufferCount(x.buffers) },
   { key: "bytes", label: "size", num: true, cell: x => (x.bytes ? fmtBytes(x.bytes) : "") },
-  { key: "weight", label: "weight", num: true, cell: x => (x.weight ? pct(x.weight) : "") },
-  { label: "split", cell: splitText },
+  {
+    key: "weight",
+    label: "weight",
+    title: "Its share of the crops drawn for training.",
+    num: true,
+    cell: x => (x.weight ? pct(x.weight) : ""),
+  },
+  { label: "split", title: "The crops the plan gives it, per split.", cell: splitText },
 ];
 
 // ---- controls → the definition → POST /plan (debounced) → numbers, funnel, charts, table
@@ -602,7 +616,7 @@ function renderDesigner() {
                   {
                     type: "button",
                     class: "btn",
-                    title: "select this dataset again",
+                    title: "Select this dataset again.",
                     disabled: LOCKED || LOST.length > 0,
                     onclick: () => {
                       C.exclude.delete(id);

@@ -70,6 +70,7 @@ export async function viewCache() {
     {
       key: "state",
       label: "state",
+      title: "Whether it is on disk. Hover a state for what it means.",
       cell: a => {
         const td = el("span", { class: "pills" }, assetPill(data(a).state));
         if (data(a).quarantined) td.append(" ", assetPill("quarantined"));
@@ -175,11 +176,26 @@ export async function viewCache() {
         sort: "key",
         empty: "No locks held.",
         cols: [
-          { key: "kind", label: "kind", cell: l => l.kind },
-          { key: "key", label: "key", cell: l => el("code", {}, l.key) },
-          { key: "owner", label: "owner", cell: l => el("code", {}, l.owner) },
-          { key: "taken_at", label: "taken", cell: l => when(l.taken_at) },
-          { key: "heartbeat_at", label: "heartbeat", cell: l => when(l.heartbeat_at) },
+          { key: "kind", label: "kind", title: "What kind of thing the lock guards.", cell: l => l.kind },
+          {
+            key: "key",
+            label: "key",
+            title: "What is locked: for a raw cache, its dataset.",
+            cell: l => el("code", {}, l.key),
+          },
+          {
+            key: "owner",
+            label: "owner",
+            title: "The worker that holds the lock.",
+            cell: l => el("code", {}, l.owner),
+          },
+          { key: "taken_at", label: "taken", title: "When its holder took it.", cell: l => when(l.taken_at) },
+          {
+            key: "heartbeat_at",
+            label: "heartbeat",
+            title: "When its holder last renewed it. A lock that is not renewed goes stale.",
+            cell: l => when(l.heartbeat_at),
+          },
           { label: "", cell: l => (l.stale ? pill("stale", "warn") : "") },
         ],
       }),
@@ -405,7 +421,13 @@ export function caseList(cases, empty) {
     el(
       "div",
       { class: "caserow casehead" },
-      ...["Subject", "Problem", "Status", "Steps", "Last change"].map(h => el("span", {}, h)),
+      ...[
+        ["Subject", "What the case is about: a dataset, a buffer, a request or a part of the installation."],
+        ["Problem", "What is wrong, in a few words. Open the row for the whole case."],
+        ["Status", "How far the repair agent is with the case. Hover a status for what it means."],
+        ["Steps", "How many of the case's steps are done and how many are left."],
+        ["Last change", "When the case last changed."],
+      ].map(([head, title]) => el("span", { title }, head)),
     ),
     ...caseRows(cases).map(row => {
       const [, kind, help] = CASE_STATUS[row.state] || [];
@@ -514,6 +536,7 @@ export function viewDecisions(arg) {
           },
           {
             label: "verdict",
+            title: "approve, reject, or escalate (handed to a person). Overruled: a person later decided otherwise.",
             cell: r =>
               el(
                 "span",
@@ -524,7 +547,7 @@ export function viewDecisions(arg) {
           },
           { label: "by", cell: r => r.by },
           { label: "confidence", num: true, cell: r => (r.confidence == null ? "" : Number(r.confidence).toFixed(2)) },
-          { label: "model", cell: r => (r.model ? code(r.model, 24) : "") },
+          { label: "model", title: "The model the judge ran on.", cell: r => (r.model ? code(r.model, 24) : "") },
           { label: "summary", wrap: true, cell: r => r.note || r.summary || "" },
         ],
       }),
