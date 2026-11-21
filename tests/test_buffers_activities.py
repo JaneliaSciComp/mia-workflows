@@ -2064,3 +2064,9 @@ async def test_revoke_artifacts_rejects_and_quarantines_this_buffers_artifacts_o
     assert "quarantined" not in acts.registry.asset("staged", "art-x")
     assert "quarantined" not in (acts.registry.asset("staged", art_b) or {})  # the other record: untouched
     assert acts.registry.assessments(subject_kind="artifact", subject_ref=art_u)[0]["verdict"] == "reject"
+
+
+def test_the_job_runner_is_given_the_registry_as_the_transfers_sink(tmp_path):
+    runner = SimpleNamespace(transfers_sink=None)
+    a = Activities(make_cfg(tmp_path), None, None, None, runner, bot="bot")
+    assert runner.transfers_sink == a.registry.put_transfers

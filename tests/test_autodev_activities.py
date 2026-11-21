@@ -1,6 +1,7 @@
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -766,3 +767,13 @@ async def test_a_merge_whose_issue_github_closed_in_the_same_moment_is_a_merge(t
     with pytest.raises(ApplicationError) as refused:
         await acts(tmp_path, gh).merge_pr(MergeInput(1, 5, "a" * 40))
     assert refused.value.non_retryable
+
+
+def test_the_job_runner_is_given_the_registry_as_the_transfers_sink(tmp_path):
+    cfg = make_cfg(tmp_path, service={"url": "http://svc.example.org:8765"})
+    runner = SimpleNamespace(jobs=SimpleNamespace(transfers_sink=None))
+    a = Activities(cfg, None, None, runner, "bot")
+    assert runner.jobs.transfers_sink == a.registry.put_transfers
+    alone = SimpleNamespace(jobs=SimpleNamespace(transfers_sink=None))
+    Activities(make_cfg(tmp_path), None, None, alone, "bot")
+    assert alone.jobs.transfers_sink is None  # no `service` block: no registry, the records alone

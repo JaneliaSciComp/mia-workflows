@@ -179,6 +179,8 @@ class Activities:
         self.cfg, self.gh_issues, self.gh_snippets, self.gh_catalog = cfg, gh_issues, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
         self.registry = Registry.from_config(cfg.service)  # synchronous: call it through asyncio.to_thread
+        if jobs is not None:  # a job's transfer rows go to the ledger at its end
+            jobs.transfers_sink = self.registry.put_transfers
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
 
     def all(self) -> list:

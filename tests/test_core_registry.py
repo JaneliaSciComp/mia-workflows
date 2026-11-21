@@ -4,7 +4,8 @@ import logging
 import httpx
 import pytest
 
-from mia_core.registry import Registry, RegistryError, best_effort, read_token
+from mia_core import jobrecord
+from mia_core.registry import Registry, RegistryError, best_effort, put_transfers_again, read_token, report_worker
 
 
 def transport(seen, status=200, body=None):
@@ -285,3 +286,27 @@ def test_put_transfers():
     assert reg.put_transfers("r1/stage-1", [ROW], "buffers") == {"job": "r1/stage-1", "rows": 1}
     assert seen[0].method == "PUT" and seen[0].url.path == "/transfers/r1/stage-1"
     assert json.loads(seen[0].read()) == {"service": "buffers", "rows": [ROW]}
+
+
+def _records_with_transfers(root):
+    jobrecord._store(jobrecord.record_path(root, "r1/a"), {"service": "dep", "finished_at": "x", "transfers": [ROW]})
+    jobrecord._store(jobrecord.record_path(root, "r1/b"), {"service": "dep", "finished_at": "x"})
+
+
+async def test_a_starting_worker_puts_its_records_transfers_again(tmp_path):
+    root, seen = tmp_path / "work", []
+    _records_with_transfers(root)
+    reg = Registry("http://svc", "t", transport=transport(seen, body={}))
+    assert await put_transfers_again(reg, root, logging.getLogger("t")) == 1
+    assert seen[0].url.path == "/transfers/r1/a" and json.loads(seen[0].read()) == {"service": "dep", "rows": [ROW]}
+    down = Registry("http://svc", "t", transport=transport([], status=503))
+    assert await put_transfers_again(down, root, logging.getLogger("t")) == 0  # logged, not raised
+
+
+async def test_the_start_up_report_puts_transfers_again_once_the_commit_is_written(tmp_path):
+    root, seen = tmp_path / "work", []
+    _records_with_transfers(root)
+    reg = Registry("http://svc", "t", transport=transport(seen, body={}))
+    await report_worker(reg, "dep", logging.getLogger("t"), work_root=root)
+    assert [request.url.path for request in seen][-1] == "/transfers/r1/a"
+    assert seen[0].url.path.startswith("/workers") and len(seen) == 2

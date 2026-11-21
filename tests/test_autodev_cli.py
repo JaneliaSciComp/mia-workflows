@@ -134,7 +134,7 @@ async def test_apply_schedule_retries_a_server_that_is_still_starting_instead_of
     assert Handle.deleted == 0
 
 
-async def test_an_autodev_worker_says_what_code_it_started_on():
+async def test_an_autodev_worker_says_what_code_it_started_on(tmp_path):
     """Incident 2026-11-17: the cleaner compares the code of every worker that reports, and the autodev workers
     (this repo's and the snippets one) reported nothing, so one on old code was never named."""
     import asyncio
@@ -148,11 +148,11 @@ async def test_an_autodev_worker_says_what_code_it_started_on():
         def put_worker(self, service, commit, code):
             calls.append((service, commit, code))
 
-    report = report_code(Registry(), "snippets")
+    report = report_code(Registry(), "snippets", tmp_path)
     assert isinstance(report, asyncio.Task)
     await report
     assert calls == [("snippets", head_commit(), code_digest())]
-    assert report_code(None, "snippets") is None  # a deployment with no buffer-api has nobody to tell
+    assert report_code(None, "snippets", tmp_path) is None  # a deployment with no buffer-api has nobody to tell
 
 
 def test_every_worker_entry_point_reports_its_code():

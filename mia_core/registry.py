@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
@@ -12,6 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
+from mia_core import jobrecord
 from mia_core.checkout import code_digest, head_commit
 from mia_core.config import ServiceCfg
 
@@ -351,9 +354,31 @@ def best_effort(action: Callable[[], Any], what: str, log: logging.Logger) -> bo
     return True
 
 
-async def report_worker(registry: Registry, service: str, log: logging.Logger, retry_s: float = 30.0) -> None:
+async def put_transfers_again(registry: Registry, work_root: Path, log: logging.Logger, days: float = 7.0) -> int:
+    """Put to the ledger the transfer rows of every record under `work_root` that ended in the last `days` days
+    (a put replaces, so rows already there stay as they are). One record per thread hop, so a cancel lands
+    between records; a put that fails is logged and the rest go on. The number of records delivered."""
+    delivered, ended = 0, jobrecord.ended_since(work_root, time.time() - days * 86400)
+    while (found := await asyncio.to_thread(next, ended, None)) is not None:
+        where, record = found
+        if rows := record.get("transfers"):
+            put = functools.partial(registry.put_transfers, where, rows, str(record.get("service") or ""))
+            delivered += await asyncio.to_thread(best_effort, put, f"transfers of {where}", log)
+    return delivered
+
+
+async def report_worker(
+    registry: Registry,
+    service: str,
+    log: logging.Logger,
+    retry_s: float = 30.0,
+    work_root: Path | None = None,
+) -> None:
     """Tell the registry what code this worker loaded (read now, when it starts), again until it is written:
-    buffer-api may come up after the worker does, and the cleaner compares the last report it has."""
+    buffer-api may come up after the worker does, and the cleaner compares the last report it has. Once that is
+    written, with a `work_root`, the transfer rows of its recent job records are put again."""
     started_on = (service, head_commit(), code_digest())
     while not await asyncio.to_thread(best_effort, lambda: registry.put_worker(*started_on), "worker commit", log):
         await asyncio.sleep(retry_s)
+    if work_root is not None:
+        await put_transfers_again(registry, work_root, log)

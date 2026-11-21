@@ -1,5 +1,6 @@
 import gzip
 import json
+import os
 import subprocess
 import time
 
@@ -164,3 +165,13 @@ def test_the_end_without_a_first_half_keeps_no_transfers(tmp_path, monkeypatch):
     assert jobrecord.write_finished(root, ws, job_id="9", outcome={"state": "DONE"}) == []
     record = json.loads(gzip.decompress((root / "_jobs" / "r1" / "job-1.json.gz").read_bytes()))
     assert "transfers_refused" in record and "transfers" not in record
+
+
+def test_records_that_ended_lately_are_listed(tmp_path):
+    root = tmp_path / "work"
+    ended = {"finished_at": "x"}
+    for where, extra in (("r1/a", {**ended, "transfers": [{"host": "a.org"}]}), ("r1/b", {}), ("r1/old", ended)):
+        jobrecord._store(jobrecord.record_path(root, where), {"service": "dep", **extra})
+    os.utime(jobrecord.record_path(root, "r1/old"), (1.0, 1.0))
+    assert [where for where, _ in jobrecord.ended_since(root, time.time() - 60)] == ["r1/a"]
+    assert list(jobrecord.ended_since(tmp_path / "nothing", 0.0)) == []

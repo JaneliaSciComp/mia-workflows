@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,21 @@ def round_records(work_root: Path, under: str) -> dict[str, dict]:
         f"{under}/{path.name.removesuffix('.json.gz')}": _load(path) for path in sorted(directory.glob("*.json.gz"))
     }
     return {address: record for address, record in found.items() if record}
+
+
+def ended_since(work_root: Path, since: float) -> Iterator[tuple[str, dict]]:
+    """(address, record) of each record under `work_root` last written at or after `since` (a time.time() value;
+    a record is written last when its job ends) that has a `finished_at`."""
+    directory = Path(work_root) / RECORDS_DIR
+    for path in sorted(directory.rglob("*.json.gz")):
+        try:
+            if path.stat().st_mtime < since:
+                continue
+        except OSError:
+            continue
+        record = _load(path)
+        if record.get("finished_at"):
+            yield path.relative_to(directory).as_posix().removesuffix(".json.gz"), record
 
 
 def open_records(work_root: Path, under: str) -> list[dict]:

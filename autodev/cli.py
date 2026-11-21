@@ -149,7 +149,7 @@ async def cmd_init_labels(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def report_code(registry: Registry | None, task_queue: str) -> asyncio.Task | None:
+def report_code(registry: Registry | None, task_queue: str, work_root: Path) -> asyncio.Task | None:
     """Tell buffer-api, beside the worker's own work, what code this worker loaded: the cleaner names a worker
     whose code is not the checkout's any more (`mia_core.registry.report_worker`). None for a deployment with no
     buffer-api to tell."""
@@ -157,7 +157,7 @@ def report_code(registry: Registry | None, task_queue: str) -> asyncio.Task | No
         return None
     from mia_core.registry import report_worker
 
-    return asyncio.create_task(report_worker(registry, task_queue, log))
+    return asyncio.create_task(report_worker(registry, task_queue, log, work_root=work_root))
 
 
 async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
@@ -213,7 +213,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         task_queue,
         task_queue,
     )
-    report = report_code(activities.registry, task_queue)
+    report = report_code(activities.registry, task_queue, cfg.paths.work_root)
     try:
         async with main_worker, await_worker:
             await until_stopped(main_worker, await_worker)

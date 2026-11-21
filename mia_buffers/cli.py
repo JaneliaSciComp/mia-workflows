@@ -183,7 +183,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
         f"worker up as {bot}: {cfg.temporal.address} ns={cfg.temporal.namespace} queues {cfg.task_queue}, {cfg.await_queue}, {cfg.mirror_queue}"
     )
     # the code this worker's activities were loaded from: the cleaner says when a restart is owed
-    report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log))
+    report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log, work_root=cfg.paths.work_root))
     try:
         async with main_worker, await_worker, mirror_passes:
             await until_stopped(main_worker, await_worker, mirror_passes)

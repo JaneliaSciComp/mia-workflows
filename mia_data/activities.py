@@ -297,6 +297,8 @@ class Activities:
         if cfg.service is None:
             raise ValueError("mia-data needs a `service` section: buffer-api holds its stages and timelines")
         self.registry = Registry.from_config(cfg.service)  # buffer-api: stages, timelines, actions, budgets
+        if jobs is not None:  # a job's transfer rows go to the ledger at its end
+            jobs.transfers_sink = self.registry.put_transfers
         self.page_url = cfg.service.url.rstrip("/")
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))
         # ponytail: in memory, so a worker restart re-sends each PR once (the workflow dedupes by pr_state)

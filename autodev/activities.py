@@ -184,6 +184,8 @@ class Activities:
     ):
         self.cfg, self.gh, self.mirror, self.jobs, self.bot, self.client = cfg, gh, mirror, jobs, bot, client
         self.registry = Registry.from_config(cfg.service) if cfg.service else None  # where assessments go
+        if self.registry is not None and jobs is not None:  # a job's transfer rows go to the ledger at its end
+            jobs.jobs.transfers_sink = self.registry.put_transfers
 
     @property
     def temporal(self) -> Client:

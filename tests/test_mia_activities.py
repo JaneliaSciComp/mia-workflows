@@ -85,6 +85,7 @@ def _setup(tmp_path, probe=None, csub=None):
     a = Activities(
         cfg, data, snip, cat, jobs, bot="bot", probe=probe or (lambda: ["*.example.org", *cfg.network.package_hosts])
     )
+    assert jobs.transfers_sink == a.registry.put_transfers
     ledger = Ledger(tmp_path / "ledger.sqlite")  # buffer-api in this process: dataset 1 is rec-1
     a.registry = registry_for(BufferService(ledger))
     ledger.adopt_subject("dataset", 1, "rec-1")
