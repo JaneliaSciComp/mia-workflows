@@ -27,10 +27,23 @@ def test_csub_problems_roots_are_path_prefixes():
 
     cfg = SimpleNamespace(agent=SimpleNamespace(allow_hosts=[]), paths=SimpleNamespace(work_root=Path("/x/work2")))
     hosts = ["api.anthropic.com", "claude.ai", "platform.claude.com"]
-    probe = SimpleNamespace(agents=["claude"], allowed_hosts=hosts, allowed_roots=["/x/work"])
+    probe = SimpleNamespace(agents=["claude"], allowed_hosts=hosts, allowed_roots=["/x/work"], env_allow=["MIA_*"])
     assert any("allowed_roots" in m for m in _csub_problems(cfg, probe))
     probe.allowed_roots = ["/x"]
     assert _csub_problems(cfg, probe) == []
+
+
+def test_csub_problems_name_the_transfers_variable():
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from autodev.cli import _csub_problems
+
+    cfg = SimpleNamespace(agent=SimpleNamespace(allow_hosts=[]), paths=SimpleNamespace(work_root=Path("/x/work")))
+    probe = SimpleNamespace(agents=["claude"], allowed_hosts=[], allowed_roots=["/x"], env_allow=["ANTHROPIC_*"])
+    assert _csub_problems(cfg, probe) == [
+        'env not allowed: MIA_HARNESS_TRANSFERS_DIR (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)'
+    ]
 
 
 async def test_apply_schedule_updates_when_the_server_says_already_registered():

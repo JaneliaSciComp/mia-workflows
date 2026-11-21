@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import math
+import itertools
 import os
 import re
 from pathlib import Path
@@ -43,12 +43,7 @@ def reduce_row(value: Any) -> dict | None:
         row[name] = field
     for name in _SECONDS:
         field = value.get(name, 0)
-        if (
-            isinstance(field, bool)
-            or not isinstance(field, int | float)
-            or not math.isfinite(field)
-            or not 0 <= field <= MAX_SECONDS
-        ):
+        if isinstance(field, bool) or not isinstance(field, int | float) or not 0 <= field <= MAX_SECONDS:
             return None
         row[name] = field
     for name in _MAPS:
@@ -83,7 +78,8 @@ def collect(workspace: Path, allow_hosts: list[str] | None, now: float) -> dict:
     try:
         if directory.is_symlink() or not directory.is_dir() or not directory.resolve().is_relative_to(root):
             return {}
-        entries = os.listdir(directory)
+        with os.scandir(directory) as listing:
+            entries = [entry.name for entry in itertools.islice(listing, MAX_FILES + 1)]
     except OSError:
         return {}
     if len(entries) > MAX_FILES:

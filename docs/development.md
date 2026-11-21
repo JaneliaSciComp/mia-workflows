@@ -311,12 +311,14 @@ ended a call, and the seconds spent waiting. When the wait sees the job end, `mi
 files with `read_untrusted` (at most 256 files, 8 MiB and 20,000 rows), reduces each line to a typed row with bounded
 numbers, keeps only rows of hosts in the request's `allow_hosts` and of minutes not after the read and not more than 7
 days before it, and adds up the rows of one host and minute. The record holds them as `transfers`, the lines it
-dropped as `transfers_dropped`, and `transfers_refused` (with the reason) in place of rows for a job over a limit or
-with no `allow_hosts`. The same rows go to the ledger through `CsubJobs.transfers_sink`, which each worker's
-`Activities` sets to `Registry.put_transfers` (autodev with no `service` block has no registry and sets none).
-Both are best effort and fail no wait. A worker that starts puts the rows of every record of its work root that ended
-in the last 7 days (`mia_core.registry.put_transfers_again`, inside the start-up report, one record at a time); a put
-replaces the rows of its job, so this repeats nothing.
+dropped as `transfers_dropped`, and `transfers_refused` (with the reason) in place of rows for a job over a limit, a
+record with no first half (no `request`, so no `allow_hosts`; an empty list is not refused) or files that could not be
+read. A later end of the same job leaves what a record holds of these as it is. The same rows go to the ledger through
+`CsubJobs.transfers_sink`, which each worker's `Activities` sets to `Registry.put_transfers` (autodev with no `service`
+block has no registry and sets none). Both are best effort and fail no wait. A worker that starts puts the rows of every
+record of its work root that ended in the last 7 days (`mia_core.registry.put_transfers_again`, inside the start-up
+report, one record at a time); the ledger replaces row by row (a row put again replaces itself, and rows absent from a
+later put stay), so this repeats nothing.
 
 ## Style
 
@@ -378,18 +380,20 @@ A volume leaves a buffer with `DELETE /buffers/<b>/volumes/<vid>` (worker; drops
 reference no other volume needs); `GET /buffers/<b>/volumes` (read) lists `{id, artifact, record, missing}` rows,
 and `GET /buffers/<b>/status` names the `quarantined` volumes (those whose artifact row is quarantined).
 
-**Hosts.** `PUT /transfers/<job address>` (worker; `{service, rows}`) replaces the ledger's rows of that job (table
-`transfers`, key host, minute and job). `GET /hosts?days=7` lists each host over the window (minutes with load, bytes,
-bytes per second, requests, the answers, the last minute seen), `GET /hosts/<host>?days=7` the same host by load level,
-and `GET /hosts/<host>/minutes?from=&to=` its minutes added over jobs (all read; the arithmetic is in
-`mia_buffers/throughput.py`). The routes compute and label nothing. A minute's level is its mean connections open
-(`connection_seconds / 60`, rounded), so three connections open for twenty seconds and one open for the whole minute
-are both level 1, and `peak` added over jobs is only an upper bound. The levels are the loads that rounds ran at; a
-host's limit is found by raising `sourcing.per_source` for a while. A job the installation kills itself (a cancelled
-round, the repair agent's kill, a lost raw-cache lock) leaves no rows, and neither does a job whose record kept none
-(`transfers_refused`) or one that ran on a harness without the files. Rows can be missing without a sign in the
-routes: the minutes such jobs shared with others show less load than there was, and the job records say which jobs
-these are.
+**Hosts.** `PUT /transfers/<job address>` (worker; `{service, rows}`) stores the rows of that job row by row (table
+`transfers`, key host, minute and job): a row put again replaces itself, and rows absent from a later put stay.
+`GET /hosts?days=7` lists each host over the window (minutes with load, bytes, bytes per second, requests, the answers,
+the last minute seen), `GET /hosts/<host>?days=7` the same host by load level, and `GET /hosts/<host>/minutes?from=&to=`
+its minutes added over jobs (`from` and `to` in unix seconds, `to` by default now and `from` a day before `to`, a span
+of at most 7 days; all read; the arithmetic is in `mia_buffers/throughput.py`). The routes compute and label nothing. A
+minute's level is its mean connections open (`connection_seconds / 60`, rounded), so three connections open for twenty
+seconds and one open for the whole minute are both level 1, and `peak` added over jobs is only an upper bound. The
+levels are the loads that rounds ran at; a host's limit is found by raising `sourcing.per_source` for a while. A job the
+installation kills itself (a cancelled round, the repair agent's kill, a lost raw-cache lock) leaves no rows, and
+neither does a job whose record kept none (`transfers_refused`), one that ran on a harness without the files, or one
+under an autodev with no `service` block. A job whose delivery to the ledger failed is missing until its worker next
+starts. Rows can be missing without a sign in the routes: the minutes such jobs shared with others show less load than
+there was, and the job records say which jobs these are.
 
 **Sync commands**, for a service with an empty ledger or one that missed writes:
 

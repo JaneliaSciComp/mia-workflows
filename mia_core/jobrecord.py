@@ -82,6 +82,8 @@ def ended_since(work_root: Path, since: float) -> Iterator[tuple[str, dict]]:
     """(address, record) of each record under `work_root` last written at or after `since` (a time.time() value;
     a record is written last when its job ends) that has a `finished_at`."""
     directory = Path(work_root) / RECORDS_DIR
+    # ponytail: stats every record ever written, and nothing deletes one, so the walk grows without end; skip a
+    # round's directory whose own modification time is older than `since` once a worker's start feels it.
     for path in sorted(directory.rglob("*.json.gz")):
         try:
             if path.stat().st_mtime < since:
@@ -178,8 +180,9 @@ def write_submitted(
 def write_finished(work_root: Path | None, workspace: str | Path, *, job_id: str, outcome: dict) -> list[dict]:
     """The second half, when the wait saw the job end: how it ended, what LSF says it used, the ends of its
     stdout and stderr, and for an agent its prompt and reduced conversation. Without a first half (its
-    write failed) it writes what it has. It also keeps the job's transfer rows (`mia_core.transfers.collect`) and
-    returns the rows the stored record holds: none when it holds none or was not stored."""
+    write failed) it writes what it has. It also keeps the job's transfer rows (`mia_core.transfers.collect`), once:
+    a record that holds them keeps them on a later end. It returns the rows the stored record holds: none when it
+    holds none or was not stored."""
     try:
         where = address(work_root, workspace) if work_root else None
         if where is None or work_root is None:
@@ -200,9 +203,14 @@ def write_finished(work_root: Path | None, workspace: str | Path, *, job_id: str
             prompt = record.get("prompt_file")
             agent["prompt"] = (read_untrusted(job_dir, str(prompt), PROMPT_BYTES) or "") if prompt else ""
             record["agent"] = agent
-        request = record.get("request")
-        hosts = request.get("allow_hosts") if isinstance(request, dict) else None
-        record.update(collect(job_dir, hosts, time.time()))
+        if not any(name in record for name in ("transfers", "transfers_dropped", "transfers_refused")):
+            request = record.get("request")
+            hosts = request.get("allow_hosts") if isinstance(request, dict) else None
+            try:
+                record.update(collect(job_dir, hosts, time.time()))
+            except Exception:  # job output is untrusted: its transfers never cost the record its end
+                log.warning("transfers of %s could not be read", workspace, exc_info=True)
+                record["transfers_refused"] = "the job's transfer files could not be read"
         _store(path, record)
         return record.get("transfers", [])
     except Exception:  # best effort: a record never fails a wait

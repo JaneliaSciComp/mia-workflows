@@ -303,6 +303,18 @@ async def test_a_starting_worker_puts_its_records_transfers_again(tmp_path):
     assert await put_transfers_again(down, root, logging.getLogger("t")) == 0  # logged, not raised
 
 
+async def test_a_walk_that_fails_ends_the_put_again_with_what_it_delivered(tmp_path, monkeypatch, caplog):
+    def ended_then_broken(work_root, since):
+        yield "r1/a", {"service": "dep", "finished_at": "x", "transfers": [ROW]}
+        raise OSError("planted")
+
+    monkeypatch.setattr(jobrecord, "ended_since", ended_then_broken)
+    seen = []
+    reg = Registry("http://svc", "t", transport=transport(seen, body={}))
+    assert await put_transfers_again(reg, tmp_path, logging.getLogger("t")) == 1
+    assert [request.url.path for request in seen] == ["/transfers/r1/a"] and "planted" in caplog.text
+
+
 async def test_the_start_up_report_puts_transfers_again_once_the_commit_is_written(tmp_path):
     root, seen = tmp_path / "work", []
     _records_with_transfers(root)

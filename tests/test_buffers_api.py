@@ -3516,6 +3516,8 @@ def test_put_transfers_takes_the_token_and_only_rows(tmp_path):
     assert s.handle("PUT", "/transfers/r1/stage-1", {}, body, ok)[:2] == (200, {"job": "r1/stage-1", "rows": 1})
     bad_row = json.dumps({"service": "buffers", "rows": [ROW, {**ROW, "bytes": -1}]}).encode()
     assert s.handle("PUT", "/transfers/r1/stage-2", {}, bad_row, ok)[0] == 422
+    huge = json.dumps({"service": "buffers", "rows": [{**ROW, "connection_seconds": 10**400}]}).encode()
+    assert s.handle("PUT", "/transfers/r1/stage-3", {}, huge, ok)[0] == 422
     assert s.handle("PUT", "/transfers/r1/../x", {}, body, ok)[0] == 422
     assert [row["job"] for row in s.ledger.transfers(0, 200)] == ["r1/stage-1"]
 

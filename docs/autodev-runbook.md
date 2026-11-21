@@ -146,6 +146,7 @@ over the gate's evidence. It earns authority in three steps, per gate, and nothi
 Prerequisites P1-P4 ([plan](plans/2026-10-11-mia-crops-poc.md)): P1 repos `mia-workflow-data` and `mia-snippets`
 with the GitHub App installed; P2 shared dirs for `state_dir`, `work_root`, `storage_root` (all under `paths`) visible from compute
 nodes; P3 csub broker policy (`[broker]` in `broker.toml`: `env_allow` includes `"MIA_HARNESS_*"`;
+every broker (autodev, mia-data, mia-buffers) allows it: the job runner sets `MIA_HARNESS_TRANSFERS_DIR` for every job;
 `allowed_roots` covers `harness.dir`, `work_root` and `storage_root`, none of them under `$HOME`, which csub never
 mounts; `[agents]`, data hosts, redirect probe; CPU queue tables named after real `bqueues` queues; `mia exec mia-data check`
 names what is missing); P4 see the plan.

@@ -13,9 +13,12 @@ import signal
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
+
+from mia_core.transfers import TRANSFERS_ENV
 
 from .config import STAGES, load_config
 
@@ -77,6 +80,11 @@ def _csub_problems(cfg: Config, probe: Any) -> list[str]:
             []
             if any(work_root.is_relative_to(Path(root).resolve()) for root in probe.allowed_roots)
             else [f"work_root {work_root} not under allowed_roots {probe.allowed_roots}"]
+        ),
+        *(
+            []  # the job runner sets TRANSFERS_ENV for every job, and csub refuses a submit whose env it does not allow
+            if any(fnmatchcase(TRANSFERS_ENV, pattern) for pattern in probe.env_allow)
+            else [f'env not allowed: {TRANSFERS_ENV} (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)']
         ),
     ]
 

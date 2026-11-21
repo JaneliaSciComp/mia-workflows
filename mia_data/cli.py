@@ -30,6 +30,7 @@ from autodev.github import GitHub
 from mia_core.fs import require_local_dir, require_secret_file
 from mia_core.registry import report_worker
 from mia_core.temporal import DRAIN, until_stopped
+from mia_core.transfers import TRANSFERS_ENV
 
 from .config import EXTRA_LABELS, STAGES, load_config
 
@@ -103,7 +104,8 @@ def _csub_problems(cfg: Config, probe: Any, lsf_queues: set[str] | None) -> list
             'agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '
             '"claude.ai", "platform.claude.com"])'
         )
-    if missing := [var for var in HARNESS_ENV if not any(fnmatchcase(var, pattern) for pattern in probe.env_allow)]:
+    every_job_env = (*HARNESS_ENV, TRANSFERS_ENV)  # the job runner sets TRANSFERS_ENV for every job
+    if missing := [var for var in every_job_env if not any(fnmatchcase(var, pattern) for pattern in probe.env_allow)]:
         problems.append(
             f'env not allowed: {", ".join(missing)} (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)'
         )

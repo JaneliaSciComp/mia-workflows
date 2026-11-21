@@ -105,6 +105,7 @@ CREATE INDEX IF NOT EXISTS cases_state ON cases (state);
 CREATE TABLE IF NOT EXISTS transfers (host TEXT, minute INTEGER, job TEXT, service TEXT, requests INTEGER,
     connection_seconds REAL, peak INTEGER, bytes INTEGER, asked_wait_seconds REAL, backoff_seconds REAL,
     answers TEXT NOT NULL, recovered TEXT NOT NULL, final TEXT NOT NULL, PRIMARY KEY (host, minute, job));
+CREATE INDEX IF NOT EXISTS transfers_minute ON transfers (minute);
 """
 
 CASE_COLUMNS = ("id", "kind", "number", "key", "rule", "state", "opened", "updated", "data")

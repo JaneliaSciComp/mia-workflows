@@ -357,14 +357,21 @@ def best_effort(action: Callable[[], Any], what: str, log: logging.Logger) -> bo
 async def put_transfers_again(registry: Registry, work_root: Path, log: logging.Logger, days: float = 7.0) -> int:
     """Put to the ledger the transfer rows of every record under `work_root` that ended in the last `days` days
     (a put replaces, so rows already there stay as they are). One record per thread hop, so a cancel lands
-    between records; a put that fails is logged and the rest go on. The number of records delivered."""
+    between records; a put that fails is logged and the rest go on, a walk that fails is logged and ends the pass.
+    The number of records delivered."""
     delivered, ended = 0, jobrecord.ended_since(work_root, time.time() - days * 86400)
-    while (found := await asyncio.to_thread(next, ended, None)) is not None:
+    while True:
+        try:
+            found = await asyncio.to_thread(next, ended, None)
+        except OSError as error:
+            log.warning("the walk of job records under %s stopped: %s", work_root, error)
+            return delivered
+        if found is None:
+            return delivered
         where, record = found
         if rows := record.get("transfers"):
             put = functools.partial(registry.put_transfers, where, rows, str(record.get("service") or ""))
             delivered += await asyncio.to_thread(best_effort, put, f"transfers of {where}", log)
-    return delivered
 
 
 async def report_worker(

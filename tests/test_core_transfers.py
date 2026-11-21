@@ -59,6 +59,7 @@ def test_a_line_that_is_not_a_row_is_dropped_and_counted(tmp_path):
         {**OK, "minute": 100001},  # after the collection
         {**OK, "minute": 100000 - 7 * 1440 - 1},  # over 7 days old
         '{"minute": 100000, "host": "a.o',  # the line a killed process was writing
+        '{"minute": 100000, "host": "a.org", "connection_seconds": ' + "9" * 400 + "}",  # past float range
     ]
     write(tmp_path, "5-1.jsonl", {**OK, "host": "A.ORG"}, *bad)
     out = collect(tmp_path, ["A.org"], NOW)
