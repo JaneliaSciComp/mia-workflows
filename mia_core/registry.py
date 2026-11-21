@@ -191,6 +191,10 @@ class Registry:
         body = {"records": [{"path": path, "record": record} for path, record in records]}
         return self.request("PUT", f"/records/{quote(ref, safe='')}", json=body)
 
+    def put_transfers(self, job: str, rows: list[dict], service: str = "") -> dict:
+        """Store a job's transfer rows (job: its record's address, slashes kept)."""
+        return self.request("PUT", f"/transfers/{quote(job)}", json={"service": service, "rows": rows})
+
     def sync_datasets(self) -> dict:
         return self.request("POST", "/sync/datasets", timeout=SYNC_TIMEOUT_S)
 

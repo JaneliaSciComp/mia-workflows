@@ -35,6 +35,7 @@ from mia_core.jobrecord import RECORDS_DIR
 from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
+from mia_core.transfers import MAX_ROWS, reduce_row
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
 from mia_data.models import LabelEvent
@@ -598,6 +599,7 @@ ROUTES = [
     ("GET", re.compile(r"^/assets/([a-z]+)/(.+)$"), "get_asset", "read"),
     ("GET", re.compile(r"^/assets/([a-z]+)$"), "list_assets", "read"),
     ("PUT", re.compile(r"^/records/([^/]+)$"), "put_records", "worker"),
+    ("PUT", re.compile(r"^/transfers/(.+)$"), "put_transfers", "worker"),
     ("GET", re.compile(r"^/records$"), "records", "read"),
     ("GET", re.compile(r"^/catalogs$"), "catalogs", "read"),
     ("GET", re.compile(r"^/datasets$"), "list_datasets", "read"),
@@ -890,6 +892,26 @@ class BufferService:
             raise HttpError(422, f"ref {ref!r} is not a 40-hex commit")
         records = [(item.path, item.record) for item in _parse(RecordsBody, body).records]
         return 200, {"ref": ref, "count": self.ledger.put_records(ref, records)}, {}
+
+    def _put_transfers(self, job: str, *, query: dict[str, str], body: bytes) -> Response:
+        """Store one job's transfer rows (job: the record's address); one invalid row refuses them all."""
+        if not all(UI_NAME_RE.fullmatch(segment) for segment in job.split("/")):
+            raise HttpError(422, f"{job!r} is not a job address")
+        try:
+            data = json.loads(body)
+        except ValueError as error:
+            raise HttpError(422, f"invalid JSON: {error}") from None
+        if not (isinstance(data, dict) and isinstance(data.get("service"), str) and isinstance(data.get("rows"), list)):
+            raise HttpError(422, 'the body is {"service": str, "rows": [...]}')
+        if len(data["rows"]) > MAX_ROWS:
+            raise HttpError(422, f"at most {MAX_ROWS} rows")
+        rows = []
+        for item in data["rows"]:
+            row = reduce_row(item)
+            if row is None:
+                raise HttpError(422, "a row is not a transfer row")
+            rows.append(row)
+        return 200, {"job": job, "rows": self.ledger.put_transfers(job, data["service"], rows)}, {}
 
     def _records(self, *, query: dict[str, str], body: bytes) -> Response:
         ref = query.get("ref") or self.ledger.latest_catalog()

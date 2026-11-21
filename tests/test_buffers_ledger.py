@@ -783,3 +783,30 @@ def test_a_case_stored_as_needs_person_is_read_as_gave_up(tmp_path):
     ledger._db.execute("UPDATE cases SET state = 'needs-person' WHERE id = ?", (case["id"],))
     ledger.close()
     assert [row["state"] for row in Ledger(tmp_path / "l.sqlite").cases()] == ["gave-up"]
+
+
+ROW = {
+    "minute": 100,
+    "host": "a.org",
+    "requests": 2,
+    "connection_seconds": 3.5,
+    "peak": 1,
+    "bytes": 10,
+    "answers": {"206": 2},
+    "recovered": {},
+    "final": {},
+    "asked_wait_seconds": 0.0,
+    "backoff_seconds": 0.0,
+}
+
+
+def test_a_transfer_row_put_again_replaces_itself(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    assert ledger.put_transfers("r1/stage-1", "buffers", [ROW, {**ROW, "minute": 101}]) == 2
+    ledger.put_transfers("r1/stage-1", "buffers", [{**ROW, "bytes": 99}])
+    ledger.put_transfers("r1/stage-2", "buffers", [ROW])
+    assert ledger.transfers(100, 100, "a.org") == [
+        {**ROW, "bytes": 99, "job": "r1/stage-1", "service": "buffers"},
+        {**ROW, "job": "r1/stage-2", "service": "buffers"},
+    ]
+    assert len(ledger.transfers(0, 200)) == 3 and ledger.transfers(100, 101, "b.org") == []

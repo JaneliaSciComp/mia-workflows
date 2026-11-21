@@ -3491,3 +3491,30 @@ def test_two_approvals_at_once_both_land(tmp_path, _home):
     assert [results[name][0] for name in results] == [202, 202]
     policy = (s.hosts.policy_dir / "broker.toml").read_text()
     assert "rec-c.example.org" in policy and "rec-d.example.org" in policy
+
+
+ROW = {
+    "minute": 100,
+    "host": "a.org",
+    "requests": 2,
+    "connection_seconds": 3.5,
+    "peak": 1,
+    "bytes": 10,
+    "answers": {"206": 2},
+    "recovered": {},
+    "final": {},
+    "asked_wait_seconds": 0.0,
+    "backoff_seconds": 0.0,
+}
+
+
+def test_put_transfers_takes_the_token_and_only_rows(tmp_path):
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="secret")
+    body = json.dumps({"service": "buffers", "rows": [ROW]}).encode()
+    assert s.handle("PUT", "/transfers/r1/stage-1", {}, body, {})[0] == 401
+    ok = {"Authorization": "Bearer secret"}
+    assert s.handle("PUT", "/transfers/r1/stage-1", {}, body, ok)[:2] == (200, {"job": "r1/stage-1", "rows": 1})
+    bad_row = json.dumps({"service": "buffers", "rows": [ROW, {**ROW, "bytes": -1}]}).encode()
+    assert s.handle("PUT", "/transfers/r1/stage-2", {}, bad_row, ok)[0] == 422
+    assert s.handle("PUT", "/transfers/r1/../x", {}, body, ok)[0] == 422
+    assert [row["job"] for row in s.ledger.transfers(0, 200)] == ["r1/stage-1"]

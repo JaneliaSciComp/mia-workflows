@@ -262,3 +262,26 @@ def test_a_worker_reports_its_code_until_the_registry_takes_it():
 
     asyncio.run(report_worker(Down(), "mia-data", logging.getLogger("test"), retry_s=0))
     assert len(calls) == 3 and len(set(calls)) == 1 and calls[0][0] == "mia-data"
+
+
+ROW = {
+    "minute": 100,
+    "host": "a.org",
+    "requests": 2,
+    "connection_seconds": 3.5,
+    "peak": 1,
+    "bytes": 10,
+    "answers": {"206": 2},
+    "recovered": {},
+    "final": {},
+    "asked_wait_seconds": 0.0,
+    "backoff_seconds": 0.0,
+}
+
+
+def test_put_transfers():
+    seen = []
+    reg = Registry("http://svc", "t", transport=transport(seen, body={"job": "r1/stage-1", "rows": 1}))
+    assert reg.put_transfers("r1/stage-1", [ROW], "buffers") == {"job": "r1/stage-1", "rows": 1}
+    assert seen[0].method == "PUT" and seen[0].url.path == "/transfers/r1/stage-1"
+    assert json.loads(seen[0].read()) == {"service": "buffers", "rows": [ROW]}

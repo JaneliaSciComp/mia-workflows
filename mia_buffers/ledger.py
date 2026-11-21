@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS shelved (kind TEXT, number INTEGER, by TEXT, at TEXT,
 CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, number INTEGER, key TEXT NOT NULL,
     rule TEXT NOT NULL, state TEXT NOT NULL, opened REAL, updated REAL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS cases_state ON cases (state);
+CREATE TABLE IF NOT EXISTS transfers (host TEXT, minute INTEGER, job TEXT, service TEXT, requests INTEGER,
+    connection_seconds REAL, peak INTEGER, bytes INTEGER, asked_wait_seconds REAL, backoff_seconds REAL,
+    answers TEXT NOT NULL, recovered TEXT NOT NULL, final TEXT NOT NULL, PRIMARY KEY (host, minute, job));
 """
 
 CASE_COLUMNS = ("id", "kind", "number", "key", "rule", "state", "opened", "updated", "data")
@@ -422,6 +425,50 @@ class Ledger:
         finally:
             target.close()
         os.replace(tmp, dest)
+
+    # --- transfers: what jobs asked of each host, per clock minute ---------------------------------
+
+    def put_transfers(self, job: str, service: str, rows: list[dict]) -> int:
+        """Store a job's transfer rows; a row put again replaces itself. Returns how many were written."""
+        with self._transaction() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO transfers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        row["host"],
+                        row["minute"],
+                        job,
+                        service,
+                        row["requests"],
+                        row["connection_seconds"],
+                        row["peak"],
+                        row["bytes"],
+                        row["asked_wait_seconds"],
+                        row["backoff_seconds"],
+                        json.dumps(row["answers"]),
+                        json.dumps(row["recovered"]),
+                        json.dumps(row["final"]),
+                    )
+                    for row in rows
+                ],
+            )
+        return len(rows)
+
+    def transfers(self, since_minute: int, until_minute: int, host: str | None = None) -> list[dict]:
+        """The stored rows of minutes since..until (one host when given), ordered by host, minute, job."""
+        query = "SELECT * FROM transfers WHERE minute BETWEEN ? AND ?"
+        arguments: list[int | str] = [since_minute, until_minute]
+        if host is not None:
+            query, arguments = query + " AND host = ?", [*arguments, host]
+        with self._lock:
+            cursor = self._db.execute(query + " ORDER BY host, minute, job", arguments)
+            names = [column[0] for column in cursor.description]
+            found = cursor.fetchall()
+        rows = [dict(zip(names, values, strict=True)) for values in found]
+        for row in rows:
+            for name in ("answers", "recovered", "final"):
+                row[name] = json.loads(row[name])
+        return rows
 
     # --- catalogs and records: the parsed dataset records of a git ref ---------------------------
 
