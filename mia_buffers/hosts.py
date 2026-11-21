@@ -106,15 +106,20 @@ class HostCheck:
                 continue
         return self.group(hosts_by_record)
 
-    def pool(self, round_id: str) -> list[str]:
-        """Ids of the in_pool rows of the round's plan.json; ValueError when it cannot be read as a plan."""
+    def plan_rows(self, round_id: str) -> dict[str, dict]:
+        """The in_pool rows of the round's plan.json by record id, in the plan's order; ValueError when it cannot
+        be read as a plan."""
         text = read_untrusted(self.rounds_dir, f"{round_id}/plan.json", PLAN_LIMIT)
         try:
             if text is None:
                 raise ValueError("no plan")
-            return [row["id"] for row in json.loads(text)["rows"] if _in_pool(row)]
+            return {row["id"]: row for row in json.loads(text)["rows"] if _in_pool(row)}
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             raise ValueError(f"round {round_id!r} has no readable plan") from error
+
+    def pool(self, round_id: str) -> list[str]:
+        """Ids of the in_pool rows of the round's plan.json; ValueError when it cannot be read as a plan."""
+        return list(self.plan_rows(round_id))
 
     def missing(self, needed: Needed, approved: dict[str, list[str]] | None = None) -> Needed:
         """The needed hosts the csub policy does not allow. `raw.githubusercontent.com` is approved for one dataset

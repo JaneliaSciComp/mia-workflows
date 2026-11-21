@@ -2947,6 +2947,31 @@ def test_a_buffers_events_pool_volumes_and_consumers_paged(tmp_path):
     assert call(s, "GET", "/buffers/zz/consumers")[0] == 404
 
 
+def test_a_versions_included_datasets_carry_the_plans_row_their_sizes_and_what_a_person_revoked(tmp_path, _home):
+    s = _checking(tmp_path)
+    plan = [
+        {"id": "rec-a", "admitted": True, "fit": {"ok": True}, "bytes": 7, "splits": {"train": 3}, "notes": ["n"]},
+        {"id": "rec-b", "admitted": True, "fit": {"ok": True}},
+    ]
+    (tmp_path / "rounds" / "b").mkdir(parents=True)
+    (tmp_path / "rounds" / "b" / "plan.json").write_text(json.dumps({"rows": plan}))
+    worker(s, "PUT", "/buffers/b", CFG)
+    worker(s, "POST", "/buffers/b/events", {"kind": "created", "issue": 3})
+    for record, status in (("rec-a", "servable"), ("rec-b", "failed"), ("rec-c", "failed")):
+        worker(s, "PUT", f"/buffers/b/datasets/{record}", {"status": status})
+    worker(s, "PUT", "/assets/raw/rec-a", {"state": "ready", "bytes": 10})
+    worker(s, "PUT", "/assets/staged/art", {"state": "ready", "record": "rec-a", "levels_key": "p1-l1", "bytes": 5})
+    s.ledger.add_ref("b", "staged", "art")
+    s.ledger.add_action("buffer", 3, "revoke", "page", payload={"records": ["rec-b"]})
+    out = call(s, "GET", "/buffers/b/datasets", {"limit": "5", "included": "1", "sort": "staged", "dir": "desc"})[1]
+    named = ("record", "revoked", "bytes", "raw_bytes", "staged", "staged_bytes", "splits", "notes")
+    assert [tuple(row[name] for name in named) for row in out["datasets"]] == [
+        ("rec-a", False, 7, 10, "p1-l1/rec-a/art", 5, {"train": 3}, ["n"]),
+        ("rec-b", True, None, None, None, None, {}, []),  # named by a revoke; rec-c failed for a reason of its own
+    ]
+    assert out["total"] == 2 and call(s, "GET", "/buffers/b/datasets", {"limit": "5"})[1]["total"] == 3
+
+
 def test_usage_days_paged(tmp_path):
     s = svc(tmp_path)
     call(s, "PUT", "/buffers/b", payload=CFG)

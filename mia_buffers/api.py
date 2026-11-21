@@ -497,6 +497,9 @@ BOARD_SORTS = {
     "status": _field("status"),
     "job": _field("job"),
     "updated": _field("updated_at"),
+    "bytes": _field("bytes"),
+    "raw": _field("raw_bytes"),
+    "staged": _field("staged_bytes"),
 }
 EVENT_SORTS = {name: _field(name) for name in ("seq", "kind", "at")}
 VOLUME_SORTS = {"volume": _field("id"), "draws": _field("draws"), "missing": _field("missing")}
@@ -2316,25 +2319,57 @@ class BufferService:
         board = self.ledger.buffer_datasets(buffer)
         if page is None:
             return 200, {"buffer": buffer, "datasets": board}, {}
-        # the page's row names its dataset: its issue, its crops, and the staged artifact this buffer draws from
+        # the page's row names its dataset: its issue, its crops, the staged artifact this buffer draws from, what
+        # the plan gave it (size upstream, crops per split, notes), and what its raw cache and its pyramid hold
         datasets = {row["id"]: row for row in self.ledger.datasets()}
         staged = {
-            asset["data"].get(
-                "record"
-            ): f"{asset['data'].get('levels_key')}/{asset['data'].get('record')}/{asset['key']}"
+            asset["data"].get("record"): asset
             for asset in self.ledger.assets("staged")
             if asset["data"] and buffer in asset["refs"] and asset["data"].get("levels_key")
         }
+        raw = {asset["key"]: asset["data"] or {} for asset in self.ledger.assets("raw")}
         issues = self._dataset_issues()
+        plan, revoked = self._plan_rows(buffer), self._revoked(buffer)
         for row in board:
-            known = datasets.get(row["record"]) or {}
+            record = row["record"]
+            known, pyramid, planned = datasets.get(record) or {}, staged.get(record), plan.get(record) or {}
             row.update({name: known.get(name) for name in ("folder", "previews", "crops")})
-            row["issue"] = issues.get(row["record"])
-            row["staged"] = staged.get(row["record"])
+            row["issue"] = issues.get(record)
+            row["staged"] = f"{pyramid['data']['levels_key']}/{record}/{pyramid['key']}" if pyramid else None
+            row["staged_bytes"] = pyramid["data"].get("bytes") if pyramid else None
+            row["raw_bytes"] = (raw.get(record) or {}).get("bytes")
+            row.update(bytes=planned.get("bytes"), splits=planned.get("splits") or {}, notes=planned.get("notes") or [])
+            row["revoked"] = row["status"] != "servable" and record in revoked
+        if query.get("included"):  # what the version serves, and what a person took out of it
+            board = [row for row in board if row["status"] == "servable" or row["revoked"]]
         rows, total = paged(
             board, page, BOARD_SORTS, lambda row: (row["record"], row["status"], row["reason"], row["job"])
         )
         return 200, {"buffer": buffer, "datasets": rows, "total": total}, {}
+
+    def _plan_rows(self, buffer: str) -> dict[str, dict]:
+        """The plan's row of each dataset of the buffer's pool (a buffer's id is its round's); none when the plan
+        cannot be read."""
+        if self.hosts is None:
+            return {}
+        try:
+            return self.hosts.plan_rows(buffer)
+        except ValueError:
+            return {}
+
+    def _revoked(self, buffer: str) -> set[str]:
+        """The records a person's `revoke` named since this version was created."""
+        # ponytail: a revocation that reaches the buffer from a dataset's reject (the keeper's signal) names no
+        # record here and its row reads `failed`; a board status of its own is the upgrade
+        events = self.ledger.events(buffer)
+        if not events or events[0]["issue"] is None:
+            return set()
+        return {
+            str(record)
+            for action in self.ledger.actions("buffer", events[0]["issue"])
+            if action["action"] == "revoke" and datetime.fromisoformat(action["at"]).timestamp() >= events[0]["at"]
+            for record in action["payload"].get("records", [])
+        }
 
     def _add_event(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         # no config check: `created` and `planned` precede the buffer's config (create_buffer runs at sourcing)
