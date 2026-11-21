@@ -269,9 +269,10 @@ const versionsCard = subject =>
   );
 
 // ---- the steps. Each draws its pane; `turnOf()` tells a step that loaded something whether it is still wanted.
-// the footer of a step: on the left the way back, on the right a line on where things stand and the way forward
-function foot(back, hint, forward) {
-  $("bufferFoot").replaceChildren(
+// the footer of a step: on the left the way back, on the right a line on where things stand and the way forward.
+// `bar`: where it is drawn; a step whose pane ends in a long table gives one of its own, above that table.
+function foot(back, hint, forward, bar = $("bufferFoot")) {
+  bar.replaceChildren(
     back || el("span"),
     el("div", { class: "right" }, hint ? el("span", { class: "small" }, hint) : null, forward),
   );
@@ -558,7 +559,8 @@ async function sourceStep(pane, subject, redraw, wanted) {
   const here = stepOf(subject.stage) === "source",
     onDisk = board.filter(d => d.status === "servable").length,
     cfg = version?.config || {},
-    bar = el("i");
+    bar = el("i"),
+    buttons = el("div", { class: "stepfoot above" }); // above the datasets, where a long table cannot hide them
   bar.style.width = `${board.length ? (100 * onDisk) / board.length : 0}%`;
   pane.replaceChildren(
     el(
@@ -570,6 +572,7 @@ async function sourceStep(pane, subject, redraw, wanted) {
     ),
     el("div", { class: "progress" }, bar),
     ...droppedNotices(subject, board, redraw),
+    buttons,
     version
       ? card(
           "The datasets of this version",
@@ -597,6 +600,7 @@ async function sourceStep(pane, subject, redraw, wanted) {
           subject.asked?.action === "approve" ? "Approving…" : "Approve and serve",
         )
       : nextLink(subject),
+    buttons,
   );
 }
 // ---- step 6: the version being served, by the id a training run names

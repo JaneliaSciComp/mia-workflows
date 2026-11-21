@@ -1385,6 +1385,11 @@ def test_steps_four_to_six_are_the_rounds_own_buttons_and_back_is_a_cancel() -> 
     assert has('disabled: subject.stage !== "staged" || !!subject.asked', flow)  # Approve and serve
     assert has('sendAction(subject, { action: "cancel", key: newKey() }, redraw)', flow) and has("if (!confirm(", flow)
     assert has("droppedNotices(subject, board, redraw)", flow) and has("poolTable(version.id", flow)
+    # step 5's buttons are drawn above its datasets table, in the pane
+    assert has(
+        '...droppedNotices(subject, board, redraw), buttons, version ? card("The datasets of this version"', flow
+    )
+    assert has("nextLink(subject), buttons, );", flow)
     # the plan is shown as the round wrote it, as text
     assert has(r"/^\*\*Plan\*\* for /.test(entry.body)", flow) and has("markdown(plan.body", flow)
     # step 6: the id a training run names, never the buffer's name
