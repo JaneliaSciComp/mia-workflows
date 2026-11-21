@@ -506,7 +506,7 @@ function prepareStep(pane, subject, redraw, wanted) {
 function planStep(pane, subject, redraw, _wanted, entries) {
   const here = stepOf(subject.stage) === "plan",
     planning = subject.stage === "planning";
-  const plan = planning ? null : [...entries].reverse().find(entry => /^# Plan for /.test(entry.body));
+  const plan = planning ? null : [...entries].reverse().find(entry => /^\*\*Plan\*\* for /.test(entry.body));
   pane.replaceChildren(
     planning
       ? el(
