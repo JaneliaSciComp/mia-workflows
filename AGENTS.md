@@ -96,6 +96,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   nothing deletes a record, buffer-api serves the file as it is (`GET /jobs/<address>`) and the page shows it at
   `#job/<address>`. Writing one is best effort and never fails a submit or a wait. An agent command prints
   `stream-json` to `claude.jsonl` and `keep_result` copies its last line to the file the result is read from.
+  The job runner also reads `<workspace>/transfers` into the record and the ledger's `transfers`; nothing stored
+  names what an answer meant.
 - **A round's wait on autodev is timed.** While a dataset round waits for a snippet PR, a new head or a merge it
   looks at the snippets issue itself every 15 minutes (`autodev_look`, `_look` in `mia_data/workflows.py`) and
   ends `blocked` when autodev stopped or `limits.autodev_quiet_hours` passed with no agent round running; the
