@@ -108,7 +108,8 @@ async def test_a_kick_during_a_pass_runs_another_pass():
             await first_started.wait()
             await handle.signal("kick")  # an entry appended while the first pass is posting
             release.set()
-            await handle.result()
+            with env.auto_time_skipping_disabled():  # see the next test
+                await handle.result()
     finally:
         await env.shutdown()
     assert passes == [("dataset", 7)] * 2
@@ -140,7 +141,10 @@ async def test_passes_run_one_at_a_time_on_the_mirror_queue_and_take_no_slot_of_
                 )
                 for number in range(6)
             ]
-            await asyncio.gather(*(handle.result() for handle in handles))
+            # The passes take real time and queue behind one slot. Waiting for a result lets the test server skip
+            # its clock to the next timer, and between two passes that is the workflows' own timeout.
+            with env.auto_time_skipping_disabled():
+                await asyncio.gather(*(handle.result() for handle in handles))
     finally:
         await env.shutdown()
     assert most == 1
