@@ -1080,7 +1080,9 @@ async def test_read_verify_puts_the_raw_asset_and_survives_a_down_registry(tmp_p
     )
     (vw / "verify.json").write_text(json.dumps({"n": 0}))
     await t.a.read_verify(str(vw), str(cw), "rec-1")
-    assert [(path, row["state"]) for path, row in seen] == [("/assets/raw/rec-1", "partial")]  # b.zip not cached
+    assert [(path, row["state"]) for path, row in seen] == [
+        ("/assets/raw/rec-1", "ready")
+    ]  # at rest, whatever it holds
     _registry_seen(t, down)
     with caplog.at_level(logging.WARNING):
         assert (await t.a.read_verify(str(vw), str(cw), "rec-1")).errors == ["verify checked no crops"]

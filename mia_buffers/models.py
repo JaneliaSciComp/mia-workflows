@@ -111,62 +111,24 @@ class StageJobArgs:
     patch: int
     out: str = ""
     voxel_size_nm: dict[str, float] | None = None
-    cache_writable: bool = True  # False: an offline stage after the fetch phase reads the raw cache only
+    cache_writable: bool = True  # False: a stage of files a person dropped reads the raw cache only
     rebuild: int = 0  # the dataset's rebuilds: a re-stage of a degraded pyramid gets its own job key and build dir
 
 
 @dataclass
-class FetchJobArgs:
-    """Arguments of the `submit_fetch` activity (not replayed): the fetch job fills the record's raw cache."""
-
-    workspace: str
-    round_id: str
-    pins: BufferPins
-    record: str
-    hosts: list[str]
-    attempt: int
-
-
-@dataclass
-class FetchResult:
-    """The fetch job's fetch.json, reduced. `partial`: the job stopped before every file (byte budget, walltime);
-    `stream`: urls the harness reads in place at stage time; `failed`: urls that could not be fetched."""
-
-    ok: bool
-    partial: bool = False
-    bytes_fetched: int = 0
-    stream: list[str] = field(default_factory=list)
-    failed: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    host_not_allowed: str | None = None
-
-
-@dataclass
 class QuotaCheck:
-    """Whether the raw cache has room for a record: `expected` is its catalog size, `over_by` the bytes too many."""
+    """Whether the raw cache is within its quota; `over_by` is the bytes it holds too many."""
 
     ok: bool
     over_by: int = 0
-    expected: int = 0
-
-
-@dataclass
-class RawStatus:
-    """Whether the record's raw cache holds every file of its binding; `missing` lists the whole-file urls not.
-    `stream`: urls an earlier fetch found the harness reads in place, so a stage needs their hosts and a writable
-    cache (at most 20 listed)."""
-
-    ready: bool
-    missing: list[str] = field(default_factory=list)
-    stream: list[str] = field(default_factory=list)
 
 
 @dataclass
 class KeeperReport:
     """One pass of the cache keeper: the asset sync's counts, what it evicted, reset (`stale`, "<kind> <key>
     <state>") and removed (`.building-*` paths, empty raw directories), the bytes each kind is still over quota by, the catalog it synced
-    ("<ref> (<n> records)", "" when not due), the steps that failed, and the free assets spared because a fetch
-    or stage holds their record's raw lock."""
+    ("<ref> (<n> records)", "" when not due), the steps that failed, and the free assets spared because a stage
+    holds their record's raw lock."""
 
     scanned: int = 0
     missing: int = 0
@@ -216,9 +178,6 @@ class SourcingLimits:
     parallel: int
     walltime_min: int
     service_url: str
-    parallel_fetch: int = 2  # fetch jobs in flight per buffer
-    fetch_walltime_min: int = 480
-    fetch_attempts: int = 4
     poll_minutes: int = 2
     lock_ttl_s: int = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
     max_tick_minutes: int = 30  # the round's shared ticker backs off from poll_minutes up to this (d-tick)
@@ -239,10 +198,9 @@ class DatasetIssue:
 @dataclass
 class DatasetStatus:
     """Where one dataset of the pool is in sourcing:
-    pending | waiting-dataset | waiting-drop | waiting-lock | fetching | blocked | staging | servable | failed |
-    dropped.
+    pending | waiting-dataset | waiting-drop | waiting-lock | blocked | staging | servable | failed | dropped.
     `waiting-dataset`: no approved binding yet, mia-data is working on `issue` (spec §3 step 1); `waiting-lock`:
-    another job holds the record's raw-cache lock; `blocked`: the raw cache is over its quota, the fetch waits;
+    another job holds the record's raw-cache lock; `blocked`: the raw cache is over its quota, the stage waits;
     `dropped`: left out of the plan (still waiting at the timeout) and of the ready denominator."""
 
     record: str
@@ -254,8 +212,8 @@ class DatasetStatus:
     issue: int | None = None  # the dataset's issue number in the datasets repo, once looked up
     folder: str = ""  # <storage_root>/<folder>/binding.yaml is what the poller watches while waiting-dataset
     voxel_size_nm: dict[str, float] | None = None  # from the plan, handed to the stage job
-    weight: float = 0.0  # the plan's weight, so the heaviest datasets are fetched first
-    rebuilds: int = 0  # times a degraded (missing) pyramid was staged again from the raw cache
+    weight: float = 0.0  # the plan's weight, so the heaviest datasets are staged first
+    rebuilds: int = 0  # times a degraded (missing) pyramid was staged again
     artifact: str = ""  # the staged artifact the dataset's volumes live in, from the binding
 
 
@@ -367,9 +325,3 @@ def job_key(issue: int, round_id: str, record: str, rebuild: int = 0) -> str:
     digest = hashlib.sha256(record.encode()).hexdigest()[:8]
     stage = f"stage{rebuild}" if rebuild else "stage"
     return f"buf-{issue}-{round_id}-{stage}-{record[:40]}-{digest}"
-
-
-def fetch_job_key(issue: int, round_id: str, record: str, attempt: int) -> str:
-    """csub job key of a dataset's fetch job, one per attempt; otherwise as job_key."""
-    digest = hashlib.sha256(record.encode()).hexdigest()[:8]
-    return f"buf-{issue}-{round_id}-fetch{attempt}-{record[:40]}-{digest}"

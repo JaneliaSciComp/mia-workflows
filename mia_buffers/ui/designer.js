@@ -518,9 +518,9 @@ function renderDesigner() {
       `${num(m.needs_human || 0)} ${m.needs_human === 1 ? "needs" : "need"} a human`,
     ),
     tile(
-      "Raw bytes",
+      "Size upstream",
       `${fmtBytes(m.bytes_pool || 0)} / ${fmtBytes(m.bytes_fitting || 0)}`,
-      `the prepared datasets now / every fitting dataset; ${fmtBytes(m.bytes_to_fetch || 0)} not in the raw cache`,
+      "the prepared datasets now / every fitting dataset; a buffer reads only what its crops touch",
     ),
     tile(
       "Dimensionalities",

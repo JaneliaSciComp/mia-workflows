@@ -1386,7 +1386,7 @@ def test_steps_four_to_six_are_the_rounds_own_buttons_and_back_is_a_cancel() -> 
     assert has('sendAction(subject, { action: "cancel", key: newKey() }, redraw)', flow) and has("if (!confirm(", flow)
     assert has("droppedNotices(subject, board, redraw)", flow) and has("poolTable(version.id", flow)
     # the plan is shown as the round wrote it, as text
-    assert has("/^# Plan for /.test(entry.body)", flow) and has("markdown(plan.body", flow)
+    assert has(r"/^\*\*Plan\*\* for /.test(entry.body)", flow) and has("markdown(plan.body", flow)
     # step 6: the id a training run names, never the buffer's name
     assert has('buffer="${version.id}"', flow) and has("versionsCard(subject)", flow)
     assert count("plan_first: true") == 1  # one place builds a plan's go: step 3 and "Plan a new version" share it

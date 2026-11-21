@@ -66,8 +66,8 @@ from .config import (
 )
 from .drop import drop_names, merge_manifest, read_manifest
 from .explore import start_gaps
-from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
-from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
+from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, levels_key, stage_job
+from .keeper import evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
     MAX_POLL_MINUTES,
     BindingInfo,
@@ -78,15 +78,12 @@ from .models import (
     DatasetPlan,
     DegradedSignal,
     DropResult,
-    FetchJobArgs,
-    FetchResult,
     KeeperReport,
     PlanResult,
     PrepOutcome,
     PrepPins,
     PrepState,
     QuotaCheck,
-    RawStatus,
     RegisterResult,
     RevokedArtifacts,
     RevokedSignal,
@@ -116,8 +113,6 @@ ROUND_RE = re.compile(r"[ip]\d+-e\d+")  # i<issue>-e<event>: a buffer round; p<i
 BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
 MANIFEST_SOURCE_MANUAL = "manual"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
-FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
-FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
 KEEPER = "keeper"  # the cache keeper's lock owner
 KEEPER_LOCK_TTL_S = 900
 KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, whatever step it is in
@@ -203,11 +198,7 @@ class Activities:
             self.read_stage,
             self.take_lock,
             self.release_lock,
-            self.raw_status,
             self.check_quota,
-            self.prepare_fetch,
-            self.submit_fetch,
-            self.read_fetch,
             self.mark_asset,
             self.verify_drop,
             self.create_buffer,
@@ -587,9 +578,6 @@ class Activities:
             cfg.sourcing.parallel,
             cfg.limits.job_walltime_min,
             cfg.service.url,
-            parallel_fetch=cfg.sourcing.parallel_fetch,
-            fetch_walltime_min=cfg.limits.fetch_walltime_min,
-            fetch_attempts=cfg.limits.fetch_attempts,
             poll_minutes=cfg.temporal.poll_minutes,
             max_tick_minutes=MAX_POLL_MINUTES,
         )
@@ -1231,7 +1219,7 @@ class Activities:
     async def _record_assets(self, round_id: str, record: str, result: StageResult, rebuild: bool = False) -> None:
         """Register with buffer-api what the stage job left on disk: the staged artifact under its id (with every
         input the id hashes, so a later round can reuse it; `ready`, or `partial` when the job failed) and the
-        record's raw cache as files.json lists it, both just used. A failed build beside a published artifact (not
+        record's raw cache as it is on disk (`ready`: at rest, whatever the job left in it), both just used. A failed build beside a published artifact (not
         a rebuild of it) leaves that artifact's row as it was before submit marked it `staging`."""
         block, cache = self._artifact_block(round_id, record), self._cache_dir(record)
         binding = yaml.safe_load(self._binding_path(round_id, record).read_text())
@@ -1261,13 +1249,12 @@ class Activities:
                 "last_used": now,
                 "job": None,
             }
-        raw = await asyncio.to_thread(raw_asset, cache, self._binding_urls(round_id, record))
-        del raw["state"]  # the fetch phase owns the raw state (it knows the stream urls); a stage updates the rest
+        raw = await asyncio.to_thread(raw_asset, cache)  # at rest: while a job writes it, the lock spares it
         raw["last_used"] = now
         await asyncio.to_thread(self.registry.put_asset, "staged", artifact, staged)
         await asyncio.to_thread(self.registry.put_asset, "raw", record, raw)
 
-    # --- the fetch phase: locks, quota, the fetch job, raw-cache state ---------------------------
+    # --- locks, the quota, raw-cache state -------------------------------------------------------
 
     @activity.defn(name="take_lock")
     @mia_permanent_errors
@@ -1281,115 +1268,30 @@ class Activities:
         """Release the lock if `owner` still holds it; a lock that lapsed or changed hands is logged and left."""
         await asyncio.to_thread(release_or_log, lock_dir(self.cfg), kind, key, owner)
 
-    @activity.defn(name="raw_status")
-    @mia_permanent_errors
-    async def raw_status(self, round_id: str, record: str) -> RawStatus:
-        """Whether the record's raw cache holds every file of the round's binding (`cache_missing`) but the
-        stream urls an earlier fetch recorded on the raw row (buffer-api unreachable: none known). The row's
-        `last_used` is touched, so the keeper's hold rule spares what this buffer is about to use."""
-        try:
-            row = await asyncio.to_thread(self.registry.asset, "raw", record)
-        except RegistryError as error:
-            log.warning("%s: registry unavailable, no stream urls known: %s", record, error)
-            row = None
-        if isinstance(row, dict):
-            await self.mark_asset("raw", record, {"last_used": time.time()})
-        recorded = row.get("stream") if isinstance(row, dict) else None
-        urls = self._binding_urls(round_id, record)
-        stream = [url for url in urls if isinstance(recorded, list) and url in recorded]
-        cache = self._cache_dir(record)
-        manifest = await asyncio.to_thread(read_files_json, cache)
-        # raw_asset's `ready` rule, without the du
-        ready, missing = await asyncio.to_thread(cache_missing, cache, manifest, urls, stream)
-        return RawStatus(ready, missing, texts(stream))
-
     @activity.defn(name="raw_ready")
     @mia_permanent_errors
     async def raw_ready(self, round_id: str, record: str) -> bool:
-        """Whether the record's raw cache still holds its binding's files: a missing pyramid can be staged again."""
-        return (await self.raw_status(round_id, record)).ready
+        """Whether the record's raw cache holds every file of the round's binding (`cache_missing`): asked for a
+        record whose files a person dropped, which a rebuild can only take from there. The row's `last_used` is
+        touched, so the keeper's hold rule spares what this buffer is about to use."""
+        await self.mark_asset("raw", record, {"last_used": time.time()})
+        cache = self._cache_dir(record)
+        manifest = await asyncio.to_thread(read_files_json, cache)
+        ready, _ = await asyncio.to_thread(cache_missing, cache, manifest, self._binding_urls(round_id, record))
+        return ready
 
     @activity.defn(name="check_quota")
     @mia_permanent_errors
     async def check_quota(self, round_id: str, record: str) -> QuotaCheck:
-        """Whether fetching the record (its catalog size) keeps the raw cache within `quota.raw_bytes` (0 is no
-        limit). The record's own row is left out of the total, so a resumed fetch does not count its partial
-        cache twice. Over: the row records `wanted` (the catalog size) and `blocked_at`, best effort, for the
-        keeper. A RegistryError propagates: the workflow retries rather than fetch past the quota."""
+        """Whether the raw cache, as the registry sums it, is within `quota.raw_bytes` (0 is no limit). The record
+        is charged nothing: what its stage adds is known only once its readers have run. A RegistryError
+        propagates: the workflow retries rather than stage past the quota."""
         limit = int(self.cfg.quota.raw_bytes)
         if limit == 0:
             return QuotaCheck(True)
-        expected = int(self._row(round_id, record).get("bytes") or 0)
         listing = await asyncio.to_thread(self.registry.assets, "raw")
-        own = next((asset.get("data") or {} for asset in listing["assets"] if asset.get("key") == record), {})
-        counted = own.get("state") not in ("missing", "evicted")  # the rows the registry's `bytes` total sums
-        own_bytes = own.get("bytes")
-        own_bytes = own_bytes if counted and type(own_bytes) is int else 0
-        over_by = int(listing["bytes"]) - own_bytes + expected - limit
-        if over_by > 0:  # the keeper frees room for the largest blocked fetch (`wanted`), not only the headroom
-            await self.mark_asset("raw", record, {"wanted": expected, "blocked_at": time.time()})
-        return QuotaCheck(over_by <= 0, max(over_by, 0), expected)
-
-    @activity.defn(name="prepare_fetch")
-    @mia_permanent_errors
-    async def prepare_fetch(self, issue: int, round_id: str, record: str, attempt: int) -> str:
-        """The fetch job's workspace, one per attempt, with record.yaml and binding.yaml; the raw cache exists
-        afterwards (a mount must). Returns the workspace path."""
-        workspace = self._round_workspace(issue, round_id) / f"fetch-{record}-{int(attempt)}"
-        workspace.mkdir(parents=True, exist_ok=True)
-        write_atomic(workspace / "record.yaml", yaml.safe_dump(self._record(round_id, record), sort_keys=False))
-        shutil.copyfile(self._binding_path(round_id, record), workspace / "binding.yaml")
-        self._cache_dir(record).mkdir(parents=True, exist_ok=True)
-        return str(workspace)
-
-    @activity.defn(name="submit_fetch")
-    @mia_permanent_errors
-    @heartbeats
-    async def submit_fetch(self, key: str, args: FetchJobArgs) -> str:
-        """Submit the fetch job at most once per key, hosts checked as `submit` does. Returns the job id; the raw
-        asset row says `fetching` under it (best effort)."""
-        job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: fetch_job(self.cfg, args, snap))
-        await self.mark_asset("raw", args.record, {"state": "fetching", "job": job_id})
-        return job_id
-
-    @activity.defn(name="read_fetch")
-    @mia_permanent_errors
-    async def read_fetch(self, round_id: str, record: str, workspace: str) -> FetchResult:
-        """The fetch job's fetch.json, reduced; none (a job killed at its walltime) is partial, since the next
-        attempt resumes from the cache. The raw asset row is then put from the cache as it is (best effort)."""
-        report = loads(read_untrusted(Path(workspace), "fetch.json", FETCH_JSON_LIMIT))
-        stream: list[str] | None = None  # no report: the row keeps the stream urls it has
-        if not isinstance(report, dict):
-            result = FetchResult(True, partial=True, errors=[FETCH_JSON_MISSING])
-        else:
-            reported = report.get("files")
-            entries = reported if isinstance(reported, list) else []
-            files = [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("url"), str)]
-            files = [entry for entry in files if entry["url"]]
-
-            def urls(outcome: str) -> list[str]:
-                return texts([entry["url"] for entry in files if entry.get("outcome") == outcome])
-
-            fetched, blocked, failed = report.get("bytes_fetched"), report.get("host_not_allowed"), urls("failed")
-            result = FetchResult(
-                report.get("ok") is True and not failed,
-                report.get("partial") is True or any(entry.get("outcome") == "pending" for entry in files),
-                fetched if type(fetched) is int and fetched >= 0 else 0,
-                urls("stream"),
-                failed,
-                texts(report.get("errors")),
-                text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
-            )
-            # the binding's own urls the harness streams, kept on the row so raw_status leaves them out
-            streamed = {entry["url"] for entry in files if entry.get("outcome") == "stream"}
-            stream = [url for url in self._binding_urls(round_id, record) if url in streamed]
-        row = await asyncio.to_thread(raw_asset, self._cache_dir(record), self._binding_urls(round_id, record))
-        row.update(state="ready" if result.ok and not result.partial else "partial", job=None, last_used=time.time())
-        row.update(wanted=None, blocked_at=None)  # the fetch ran: no longer blocked
-        if stream is not None:
-            row["stream"] = stream
-        await self.mark_asset("raw", record, row)
-        return result
+        over_by = int(listing["bytes"]) - limit
+        return QuotaCheck(over_by <= 0, max(over_by, 0))
 
     @activity.defn(name="mark_asset")
     @mia_permanent_errors
@@ -1403,7 +1305,8 @@ class Activities:
     async def verify_drop(self, round_id: str, record: str) -> DropResult:
         """Move the files a human placed under raw_root/<record>/incoming/ into the cache under the harness's
         key and list them in files.json. A listed file that is missing, empty or a symlink stays missing. When none
-        is, the raw row becomes `ready` (best effort)."""
+        is, the raw row becomes `ready` and just used (best effort): these files exist nowhere else, and the
+        keeper's hold rule spares them while the record waits for its stage slot."""
         urls = self._binding_urls(round_id, record)
         cache, known = self._cache_dir(record), read_manifest(self._cache_dir(record))
         placed, missing, entries = [], [], {}
@@ -1433,8 +1336,8 @@ class Activities:
             placed.append(name)
         if entries:
             merge_manifest(cache, entries)
-        if not missing:  # the row said waiting-drop: the files are in (best effort)
-            await self.mark_asset("raw", record, {"state": "ready"})
+        if not missing:  # the row said waiting-drop: the files are in, and about to be used (best effort)
+            await self.mark_asset("raw", record, {"state": "ready", "last_used": time.time()})
         return DropResult(not missing, placed, missing)
 
     @activity.defn(name="create_buffer")
@@ -1784,7 +1687,7 @@ class Activities:
         }
         locks = lock_dir(self.cfg)
 
-        def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its fetch and stage of the record
+        def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its stage of the record
             return row["key"] if kind == "raw" else str((row.get("data") or {}).get("record") or row["key"])
 
         def spare(row: dict, owner: str) -> dict:  # a lock holder counts as a reference: plan around the row
@@ -1800,7 +1703,6 @@ class Activities:
             planned,
             quota_bytes=limit,
             headroom_bytes=self.cfg.quota.headroom_bytes,
-            demand_bytes=demand(rows, hold_s=hold_s, now=now) if kind == "raw" else 0,
             **rules,
         )
         evicted: list[dict] = []
@@ -1830,15 +1732,15 @@ class Activities:
         self, report: KeeperReport, kind: str, row: dict, roots: tuple[Path, ...], now: float
     ) -> bool:
         """Remove one asset's directory and mark its row `evicted`. A refusal leaves the row; a removal that failed
-        half way marks it damaged (`partial` raw, a fetch resumes it; `missing` staged, it is staged again)."""
+        half way marks it `missing` (nothing is left at its path: a staged artifact is staged again, a raw cache
+        is read from its source again)."""
         data, key, registry = row["data"], row["key"], self.registry
         path = data.get("path")
         try:
             removed = isinstance(path, str) and await asyncio.to_thread(evict_path, Path(path), roots)
         except OSError as error:
-            damaged = "partial" if kind == "raw" else "missing"
-            report.errors.append(text(f"evict {kind}: removing {key} at {path} failed, now {damaged}: {error}", 500))
-            await asyncio.to_thread(registry.put_asset, kind, key, {"state": damaged, "job": None})
+            report.errors.append(text(f"evict {kind}: removing {key} at {path} failed, now missing: {error}", 500))
+            await asyncio.to_thread(registry.put_asset, kind, key, {"state": "missing", "job": None})
             return False
         if not removed:
             report.errors.append(text(f"evict {kind}: refused to remove {key} at {path}", 500))

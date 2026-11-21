@@ -66,7 +66,7 @@ export async function viewCache() {
   const k = keeper;
   const data = a => a.data || {};
   const assetCols = [
-    // what a raw download and a staged artifact share, in the one order every table uses
+    // what a raw cache and a staged artifact share, in the one order every table uses
     {
       key: "state",
       label: "state",
@@ -129,18 +129,12 @@ export async function viewCache() {
     ),
     card(
       "Raw cache",
-      "One row per dataset's download.",
+      "One row per dataset: the files its readers took whole.",
       pagedTable("cache-raw", {
         source: pageOf("/assets/raw", "assets"),
         sort: "dataset",
         empty: "Nothing in the raw cache yet.",
-        cols: [
-          ...dataset,
-          { label: "files", cell: a => folderLink(roots.raw_root, a.key) },
-          ...assetCols,
-          job,
-          { label: "streams", num: true, cell: a => (Array.isArray(data(a).stream) ? num(data(a).stream.length) : "") },
-        ],
+        cols: [...dataset, { label: "files", cell: a => folderLink(roots.raw_root, a.key) }, ...assetCols, job],
       }),
     ),
     card(

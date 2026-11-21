@@ -3,7 +3,7 @@
 import pytest
 
 from mia_buffers import keeper
-from mia_buffers.keeper import demand, evict_path, free_assets, plan_evictions, stale_builds
+from mia_buffers.keeper import evict_path, free_assets, plan_evictions, stale_builds
 
 
 def test_plan_evictions_skips_referenced_and_held_assets():
@@ -21,26 +21,19 @@ def test_plan_evictions_skips_referenced_and_held_assets():
     assert [r["key"] for r in picked] == ["a"]
 
 
-def test_a_blocked_fetch_larger_than_the_headroom_sets_the_target():
-    now, hold_s = 10_000.0, 3600
+def test_a_row_marked_wanted_asks_the_keeper_for_nothing():
+    """buffer-27716818 left `wanted: 3.07 TB` on a raw row: the keeper evicts to the quota minus the headroom."""
+    now = 10_000.0
     rows = [
         {"key": "old", "data": {"state": "ready", "bytes": 30, "last_used": 1.0}, "refs": []},
         {"key": "older", "data": {"state": "ready", "bytes": 30, "last_used": 0.5}, "refs": []},
-        {"key": "want", "data": {"state": "missing", "wanted": 50, "blocked_at": now - 60}, "refs": []},
-        {"key": "stale", "data": {"state": "missing", "wanted": 90, "blocked_at": now - hold_s - 1}, "refs": []},
-        {"key": "odd", "data": {"wanted": 70, "blocked_at": "yesterday"}, "refs": []},
-        {
-            "key": "cleared",
-            "data": {"state": "ready", "wanted": None, "blocked_at": None, "last_used": now},
-            "refs": [],
-        },
+        {"key": "oldest", "data": {"state": "ready", "bytes": 45, "last_used": 0.1}, "refs": []},
+        {"key": "want", "data": {"state": "missing", "wanted": 3e12, "blocked_at": now - 60}, "refs": []},
     ]
-    assert demand(rows, hold_s=hold_s, now=now) == 50  # stale, non-numeric and cleared marks do not count
-    rules = {"hold_s": hold_s, "now": now, "in_round": set(), "kind": "raw"}
-    # 60 live under a quota of 100: the headroom of 10 needs nothing, the blocked fetch's 50 needs one eviction
-    assert plan_evictions(rows, quota_bytes=100, headroom_bytes=10, **rules) == []
-    picked = plan_evictions(rows, quota_bytes=100, headroom_bytes=10, demand_bytes=50, **rules)
-    assert [row["key"] for row in picked] == ["older"]
+    rules = {"hold_s": 3600, "now": now, "in_round": set(), "kind": "raw"}
+    picked = plan_evictions(rows, quota_bytes=100, headroom_bytes=10, **rules)
+    assert [row["key"] for row in picked] == ["oldest"]  # 105 live → 60, under 90; the other free rows stay
+    assert len(free_assets(rows, **rules)) == 3
 
 
 def test_zero_quota_never_evicts():
@@ -99,11 +92,11 @@ def test_a_row_without_last_used_counts_as_never_used():
 
 def test_stale_builds():
     rows = [
-        {"kind": "raw", "key": "r", "data": {"state": "fetching", "job": "1"}},
+        {"kind": "raw", "key": "r", "data": {"state": "ready", "job": "1"}},
         {"kind": "staged", "key": "s", "data": {"state": "staging", "job": "2"}},
         {"kind": "staged", "key": "t", "data": {"state": "staging", "job": "3"}},
     ]
-    assert stale_builds(rows, finished=lambda job: job != "3") == [("raw", "r", "partial"), ("staged", "s", "missing")]
+    assert stale_builds(rows, finished=lambda job: job != "3") == [("staged", "s", "missing")]
 
 
 def test_a_quarantined_asset_is_held_for_the_quarantine_then_free():

@@ -69,7 +69,7 @@ class Row:
     voxel_size_nm: dict[str, float | None] = field(default_factory=dict)
     assumed: list[str] = field(default_factory=list)  # axes whose voxel size is a guess (mia_buffers.assume)
     channel_recipe: dict | None = None  # how a crop gets the spec's channel count; None for `all`/first-c
-    bytes: int | None = None  # the record's size_bytes: what fetching it adds to the raw cache
+    bytes: int | None = None  # the record's size_bytes: its size upstream; nothing decides by it
     # The rule the harness derives this record's samples from (its crops per split), and its sha256; pool rows only.
     # Named plan_rule because `rule` is the selection rule above.
     plan_rule: dict | None = None

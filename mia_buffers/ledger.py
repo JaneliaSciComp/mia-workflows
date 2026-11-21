@@ -33,7 +33,6 @@ BOARD_STATUSES = (
     "waiting-dataset",
     "waiting-lock",
     "waiting-drop",
-    "fetching",
     "blocked",
     "staging",
     "servable",
@@ -1185,7 +1184,8 @@ class Ledger:
         older_than: float | None = None,
         kinds: tuple[str, ...] = ("raw", "staged"),
     ) -> dict:
-        """Merge what a scan found (a new, stateless, missing or evicted row becomes ready; other states are kept),
+        """Merge what a scan found (a new, stateless, missing or evicted row becomes ready, and so does a raw row at
+        `partial` or `fetching`, which no job completes; other states are kept),
         mark `missing` every row of `kinds` the scan did not find unless a job is building it or it is evicted (a raw
         row with nothing cached, no bytes and no files, is dropped instead: the scan skips its empty directory), then
         merge each staged row's `last_used` from the draws (a new row, or a known one without it, starts with its
@@ -1207,13 +1207,15 @@ class Ledger:
                 if "scanned_at" in fields and (known is None or not known[0].get("last_used")):
                     # a new row (or one from before last_used) was last used when first seen, never later
                     fields = {"last_used": fields["scanned_at"], **fields}
-                becomes_ready = known is None or known[0].get("state") in (None, "missing", "evicted")
-                self._merge_asset(db, kind, key, {**fields, "state": "ready"} if becomes_ready else fields, now)
+                at_rest = (None, "missing", "evicted") + (("partial", "fetching") if kind == "raw" else ())
+                becomes_ready = known is None or known[0].get("state") in at_rest  # no job holds a raw row
+                ready = {**fields, "state": "ready"} | ({"job": None} if kind == "raw" else {})
+                self._merge_asset(db, kind, key, ready if becomes_ready else fields, now)
             missing = dropped = 0
             for (kind, key), (data, updated) in rows.items():
                 if kind not in kinds or (kind, key) in found or (older_than is not None and updated >= older_than):
                     continue
-                if data.get("state") in ("fetching", "staging", "waiting-drop", "evicted", "missing"):
+                if data.get("state") in ("staging", "waiting-drop", "evicted", "missing"):
                     continue
                 if kind == "raw" and not data.get("bytes") and not data.get("files"):
                     db.execute("DELETE FROM assets WHERE kind = ? AND key = ?", (kind, key))

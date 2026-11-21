@@ -168,7 +168,7 @@ def test_check_reports_every_row_and_fails_on_the_bad_ones(tmp_path, monkeypatch
     (tdir / "tensorizer.yaml").write_text("name: x\n")
     python = cfg.harness.dir / "harness" / ".pixi" / "envs" / "default" / "bin" / "python"
     python.parent.mkdir(parents=True)
-    python.write_text('#!/bin/sh\n[ "$3" = fetch ] && [ "$4" = --help ]\n')  # a harness that has `fetch`
+    python.write_text('#!/bin/sh\n[ "$3" = stage ] && [ "$4" = --help ]\n')  # a harness that has `stage`
     python.chmod(0o755)
 
     async def login(cfg_):
@@ -186,12 +186,12 @@ def test_check_reports_every_row_and_fails_on_the_bad_ones(tmp_path, monkeypatch
     rows = capsys.readouterr().out.rstrip("\n").split("\n")
     assert [r[:3] for r in rows] == ["ok ", "ok ", "ok ", "BAD", "BAD", "ok ", "ok ", "ok ", "ok ", "ok ", "ok "]
     assert rows[3].startswith("BAD  github catalog") and "down" in rows[4]
-    assert rows[9].startswith("ok   harness fetch") and rows[10].startswith("ok   buffer-api")
+    assert rows[9].startswith("ok   harness stage") and rows[10].startswith("ok   buffer-api")
     assert "http://svc:1" in rows[10]
-    python.write_text("#!/bin/sh\necho 'invalid choice: fetch' >&2; exit 2\n")  # a checkout from before the fetch
+    python.write_text("#!/bin/sh\necho 'invalid choice: stage' >&2; exit 2\n")  # a checkout without the command
     assert cli.main(["check"]) == 1
     rows = capsys.readouterr().out.rstrip("\n").split("\n")
-    assert rows[9].startswith("BAD  harness fetch") and "exited 2: invalid choice: fetch" in rows[9]
+    assert rows[9].startswith("BAD  harness stage") and "exited 2: invalid choice: stage" in rows[9]
 
 
 def test_serve_takes_config_only(capsys):

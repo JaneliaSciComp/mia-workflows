@@ -506,7 +506,7 @@ function prepareStep(pane, subject, redraw, wanted) {
 function planStep(pane, subject, redraw, _wanted, entries) {
   const here = stepOf(subject.stage) === "plan",
     planning = subject.stage === "planning";
-  const plan = planning ? null : [...entries].reverse().find(entry => /^# Plan for /.test(entry.body));
+  const plan = planning ? null : [...entries].reverse().find(entry => /^\*\*Plan\*\* for /.test(entry.body));
   pane.replaceChildren(
     planning
       ? el(
@@ -525,7 +525,7 @@ function planStep(pane, subject, redraw, _wanted, entries) {
   let checking = false; // a click while the host check or its dialog is open starts nothing
   foot(
     here ? cancelBack(subject, redraw) : backLink(subject, "prepare"),
-    here ? (planning ? "Planning…" : "Nothing is fetched until you press Run.") : null,
+    here ? (planning ? "Planning…" : "Nothing is staged until you press Run.") : null,
     here
       ? el(
           "button",
@@ -546,12 +546,12 @@ function planStep(pane, subject, redraw, _wanted, entries) {
               });
             },
           },
-          subject.asked?.action === "approve" ? "Starting…" : "Run: fetch and stage",
+          subject.asked?.action === "approve" ? "Starting…" : "Run: stage",
         )
       : nextLink(subject),
   );
 }
-// ---- step 5: the datasets of this version as they are fetched and staged, then the approve that serves it
+// ---- step 5: the datasets of this version as they are staged, then the approve that serves it
 async function sourceStep(pane, subject, redraw, wanted) {
   const { version, board } = await newestVersion(subject);
   if (!wanted()) return;
@@ -573,7 +573,7 @@ async function sourceStep(pane, subject, redraw, wanted) {
     version
       ? card(
           "The datasets of this version",
-          "One row per dataset of the plan: on disk (servable), fetching with its job, staging, blocked by quota, waiting for its files, or failed with the reason.",
+          "One row per dataset of the plan: on disk (servable), staging with its job, blocked by quota, waiting for its files, or failed with the reason.",
           poolTable(version.id, cfg.patch && cfg.levels?.length ? `p${cfg.patch}-l${cfg.levels.join("-")}` : null),
         )
       : el("div", { class: "empty" }, "Sourcing has not started."),

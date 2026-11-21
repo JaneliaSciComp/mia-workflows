@@ -29,14 +29,11 @@ from mia_buffers.models import (
     DatasetStatus,
     DegradedSignal,
     DropResult,
-    FetchJobArgs,
-    FetchResult,
     PlanResult,
     PrepOutcome,
     PrepPins,
     PrepState,
     QuotaCheck,
-    RawStatus,
     RegisterResult,
     RevokedArtifacts,
     RevokedSignal,
@@ -44,7 +41,6 @@ from mia_buffers.models import (
     StagedSummary,
     StageJobArgs,
     StageResult,
-    fetch_job_key,
     job_key,
 )
 from mia_buffers.workflows import MiaBuffer
@@ -105,8 +101,6 @@ class Mocks:
         unbound=(),
         nudges=None,
         locks=None,
-        raw=None,
-        fetches=None,
         quotas=None,
         limits=None,
         release_gates=None,
@@ -129,14 +123,13 @@ class Mocks:
         self.gate, self.gate_on = gate, gate_on
         self.unbound, self.bound = set(unbound), set()  # records without a binding until added to `bound`
         self.nudges = nudges or {}  # record -> DatasetIssue
-        # record -> answers in turn (the last one repeats): take_lock, read_fetch, check_quota; raw_status as is
-        self.locks, self.fetches, self.quotas = locks or {}, fetches or {}, quotas or {}
-        self.raw = raw or {}  # record -> RawStatus; default: the raw cache is complete, nothing to fetch
+        # record -> answers in turn (the last one repeats): take_lock, check_quota
+        self.locks, self.quotas = locks or {}, quotas or {}
         self.limits = limits or SourcingLimits(2, 120, "http://svc:8765")
         self.release_gates = release_gates or {}  # record -> asyncio.Event its release_lock waits for
         self.raw_ready = raw_ready or {}  # record -> raw_ready's answer; default True
         self.board: list[tuple[str, str]] = []  # (record, status) as mark_dataset received them
-        self.quota_after = quota_after or {}  # record -> the record whose fetch must be submitted before its quota
+        self.quota_after = quota_after or {}  # record -> the record whose stage must be submitted before its quota
         self.missing = missing  # missing_records' answers in turn (the last repeats); default: every pool record
         self.paused, self.reservations = paused, reservations or {}  # job kind -> Reservation (default ok)
         self.assess_refused = assess_refused or {}  # record -> the policy's reason at the gate approve
@@ -307,33 +300,13 @@ class Mocks:
             if gate := self.release_gates.get(key):
                 await gate.wait()
 
-        @activity.defn(name="raw_status")
-        async def raw_status(round_id: str, record: str) -> RawStatus:
-            rec("raw_status", record)
-            return self.raw.get(record, RawStatus(True))
-
         @activity.defn(name="check_quota")
         async def check_quota(round_id: str, record: str) -> QuotaCheck:
             if other := self.quota_after.get(record):  # the activities of two datasets race: fix their order
-                while not any(args[1].record == other for args in self.of("submit_fetch")):
+                while not any(args[1].record == other for args in self.of("submit")):
                     await asyncio.sleep(0.01)
             rec("check_quota", record)
             return turn(self.quotas, record, QuotaCheck(True))
-
-        @activity.defn(name="prepare_fetch")
-        async def prepare_fetch(issue: int, round_id: str, record: str, attempt: int) -> str:
-            rec("prepare_fetch", record, attempt)
-            return f"/w/{round_id}/fetch-{record}-{attempt}"
-
-        @activity.defn(name="submit_fetch")
-        async def submit_fetch(key: str, args: FetchJobArgs) -> str:
-            rec("submit_fetch", key, args)
-            return f"job-{key}"
-
-        @activity.defn(name="read_fetch")
-        async def read_fetch(round_id: str, record: str, workspace: str) -> FetchResult:
-            rec("read_fetch", record, workspace)
-            return turn(self.fetches, record, FetchResult(True))
 
         @activity.defn(name="mark_asset")
         async def mark_asset(kind: str, key: str, fields: dict) -> None:
@@ -393,11 +366,7 @@ class Mocks:
         return [
             take_lock,
             release_lock,
-            raw_status,
             check_quota,
-            prepare_fetch,
-            submit_fetch,
-            read_fetch,
             mark_asset,
             mark_dataset,
             staged_summary,
@@ -925,7 +894,7 @@ async def test_timeout_at_the_gate_drops_waiting_and_keeps_the_gate(env):
 
 
 async def test_each_pass_result_is_carried_by_the_stage_write_that_ends_it(env):
-    m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])})
+    m = Mocks(plan=ONLY_U937)
     async with started(env, m) as h:
         await approve(h, m)
         await ready(h, m)
@@ -940,7 +909,7 @@ async def test_each_pass_result_is_carried_by_the_stage_write_that_ends_it(env):
     assert planned[1].startswith("Planned: 1 dataset(s) in the pool") and planned[3] == []
     assert reviewed[1] == "Approved by alice: sourcing starts." and reviewed[3] == []
     assert sourced[1] == "Datasets of the pool: 1 servable."
-    assert sourced[3] == ["/w/i7-e11/fetch-u937-1", "/w/i7-e11/stage-u937"]  # the fetch job, then the stage job
+    assert sourced[3] == ["/w/i7-e11/stage-u937"]  # the stage job's record
     assert staged[1] == "Approved by human:alice: the buffer serves what is staged." and staged[3] == []
     assert m.of("set_stage")[3][1] == workflows.STAGED_NEXT and "BufferDataset(" in m.of("set_stage")[4][2]
 
@@ -1031,11 +1000,11 @@ async def test_replay_buffer_history(env):
 
 
 async def test_replay_buffer_history_c(env):
-    """The go → ready run under the `c-cache` patch: u937 waits once for its raw lock, fetches and stages offline,
+    """The go → ready run under the `c-cache` patch: u937 waits once for its raw lock and stages online,
     bcss is dropped by hand; as test_replay_buffer_history. Re-record this one alone, so the older fixture keeps
     the unpatched path: MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_c"""
     if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
-        m = Mocks(locks={"u937": [HELD, LockTaken(True)]}, raw={"u937": RawStatus(False, [U937_URL])})
+        m = Mocks(locks={"u937": [HELD, LockTaken(True)]})
         async with started(env, m) as h:
             await approve(h, m)
             await waits_on_lock(h, "u937")
@@ -1061,12 +1030,12 @@ async def test_replay_buffer_history_k(env):
 
 
 async def test_replay_buffer_history_r(env):
-    """A run under the `stage-results` patch (each stage pass writes a start and a result): a `go` round fetches and
+    """A run under the `stage-results` patch (each stage pass writes a start and a result): a `go` round
     stages u937 and is approved to `ready`, the buffer goes idle, and a new go writes the idle pass's result before
     its own round stages again. Re-record this one alone, so the older fixtures keep their paths:
     MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_r"""
     if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
-        m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])})
+        m = Mocks(plan=ONLY_U937)
         async with started(env, m, signal="go") as h:
             await ready(h, m)
             await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])  # as the keeper sends it
@@ -1151,7 +1120,7 @@ async def test_timeout_lets_a_staging_job_finish_then_announces_ready(env):
     assert dataset(state, "u937").status == "servable" and state.ready and m.stages[-1] == "ready"
 
 
-# --- the raw-cache lock, the fetch phase, the offline stage ------------------------------
+# --- the raw-cache lock, the quota wait, the stage ---------------------------------------
 
 ONLY_U937 = PlanResult(True, [], [DatasetPlan("u937", "confocal", 1.0, False)], 1, levels=[1], patch=64)
 U937_URL = "https://zenodo.org/u937.zip"
@@ -1214,7 +1183,7 @@ async def test_two_buffers_one_record_second_waits_then_reuses(env):
         state = await h.query(MiaBuffer.status)
         assert await poll_timers(h) == [2, 4]  # poll_minutes, doubling
     assert m.of("take_lock") == [("raw", "u937", OWNER, 900)] * 3
-    assert not m.of("submit_fetch") and not m.of("submit") and not m.of("prepare_stage")
+    assert not m.of("submit") and not m.of("prepare_stage")
     assert order(m, "take_lock", "read_binding", "read_stage", "register_dataset", "release_lock") == [
         "read_binding",
         "take_lock",
@@ -1230,116 +1199,112 @@ async def test_two_buffers_one_record_second_waits_then_reuses(env):
     assert "staged by mia-buffers i9-e9 rec while this buffer waited and reused" in servable
 
 
-async def test_fetch_then_offline_stage(env):
-    m = Mocks(
-        plan=ONLY_U937,
-        raw={"u937": RawStatus(False, [U937_URL])},
-        fetches={"u937": [FetchResult(True, partial=True), FetchResult(True, bytes_fetched=9)]},
-    )
+async def test_a_round_stages_online_with_no_fetch(env):
+    """The stage job has the binding's hosts and the raw cache read-write: its readers decide what is transferred."""
+    m = Mocks(plan=ONLY_U937)
     async with started(env, m) as h:
         await approve(h, m)
         await ready(h, m)
-    assert [a[0] for a in m.of("submit_fetch")] == [fetch_job_key(7, "i7-e11", "u937", n) for n in (1, 2)]
-    assert [a[1].attempt for a in m.of("submit_fetch")] == [1, 2] and m.of("submit_fetch")[0][1].hosts == ["zenodo.org"]
-    assert fetch_job_key(7, "i7-e11", "u937", 1).startswith("buf-7-i7-e11-fetch1-u937-")
-    assert [a[2] for a in m.of("await")] == [["raw", "u937", OWNER]] * 3  # two fetch jobs, then the stage job
-    ((_, stage),) = m.of("submit")
-    assert stage.cache_writable is False and stage.hosts == []
-    assert order(m, "take_lock", "submit_fetch", "submit", "register_dataset", "release_lock") == [
-        "take_lock",  # the fetch slot was free: no re-take before the fetch
-        "submit_fetch",
-        "submit_fetch",
-        "take_lock",  # and once the stage slot is
+    ((key, stage),) = m.of("submit")
+    assert key == job_key(7, "i7-e11", "u937") and stage.hosts == ["zenodo.org"] and stage.cache_writable is True
+    assert [a[2] for a in m.of("await")] == [["raw", "u937", OWNER]]  # the stage job's wait keeps the lock alive
+    assert m.board == [("u937", "pending"), ("u937", "staging"), ("u937", "servable")]
+    assert order(m, "take_lock", "check_quota", "submit", "register_dataset", "release_lock") == [
+        "take_lock",
+        "check_quota",  # room: on to the stage slot
+        "take_lock",  # refreshed once the slot is ours
         "submit",
         "register_dataset",
         "release_lock",
     ]
 
 
-async def test_stream_url_keeps_the_stage_online(env):
-    m = Mocks(
-        plan=ONLY_U937,
-        raw={"u937": RawStatus(False, [U937_URL])},
-        fetches={"u937": FetchResult(True, stream=["https://h/x.zarr/"])},
-    )
-    async with started(env, m) as h:
-        await approve(h, m)
-        await ready(h, m)
-    ((_, stage),) = m.of("submit")
-    assert stage.cache_writable is True and stage.hosts == ["zenodo.org"] and len(m.of("submit_fetch")) == 1
-
-
-async def test_fetch_still_partial_fails_and_releases(env):
-    m = Mocks(
-        plan=ONLY_U937,
-        raw={"u937": RawStatus(False, [U937_URL])},
-        fetches={"u937": FetchResult(True, partial=True)},
-        states={"fetch-u937-4": ("EXIT", 137)},  # the last attempt was killed
-    )
+async def test_a_stage_over_its_byte_cap_fails_the_dataset_with_the_harness_message(env):
+    over = "https://zenodo.org/u937.zip: 6000000000 more bytes would pass the cap (0 of 5000000000 used)"
+    m = Mocks(plan=ONLY_U937, stage={"u937": StageResult(False, errors=[over])}, states={"stage-u937": ("EXIT", 1)})
     async with started(env, m) as h:
         await approve(h, m)
         await idle(h, m, "needs-human")
         state = await h.query(MiaBuffer.status)
-    last = f"job-{fetch_job_key(7, 'i7-e11', 'u937', 4)}"
-    assert dataset(state, "u937").reason == f"fetch still partial after 4 attempts (last job {last} EXIT exit 137)"
-    assert not m.of("submit")
-    assert len(m.of("submit_fetch")) == 4 and order(m, "read_fetch", "release_lock")[-2:] == [
-        "read_fetch",
-        "release_lock",
-    ]
+    assert dataset(state, "u937").status == "failed" and over in dataset(state, "u937").reason
+    assert len(m.of("submit")) == 1 and m.of("release_lock") == [("raw", "u937", OWNER)]
 
 
-async def test_fetch_of_a_host_not_allowed_fails_without_retrying(env):
-    refused = FetchResult(False, errors=["egress refused"], host_not_allowed="zenodo.org")
-    m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])}, fetches={"u937": refused})
-    async with started(env, m) as h:
-        await approve(h, m)
-        await idle(h, m, "needs-human")
-        state = await h.query(MiaBuffer.status)
-    reason = dataset(state, "u937").reason
-    assert reason == "fetch failed: egress refused (host not allowed: zenodo.org)" and len(m.of("submit_fetch")) == 1
-    assert not m.of("submit") and m.of("release_lock") == [("raw", "u937", OWNER)]
-
-
-async def test_blocked_waits_for_quota_then_fetches(env):
-    m = Mocks(
-        plan=ONLY_U937,
-        raw={"u937": RawStatus(False, [U937_URL])},
-        quotas={"u937": [QuotaCheck(False, over_by=5)] * 3 + [QuotaCheck(True)]},
-    )
+async def test_blocked_waits_for_quota_then_stages(env):
+    m = Mocks(plan=ONLY_U937, quotas={"u937": [QuotaCheck(False, over_by=5)] * 3 + [QuotaCheck(True)]})
     async with started(env, m) as h:
         await approve(h, m)
         blocked = await waits_on_lock(h, "u937", "blocked")
-        assert "over by 5 bytes" in blocked.reason and not m.of("submit_fetch")
+        assert blocked.reason == "raw cache over its quota by 5 bytes" and not m.of("submit")
         await env.sleep(timedelta(minutes=15))  # the polls back off: 2, 4, 8 minutes
         await ready(h, m)
         assert await poll_timers(h) == [2, 4, 8]
-    assert len([c for c in m.of("comment") if c[1] == "dataset i7-e11 u937 blocked"]) == 1
-    assert len(m.of("check_quota")) == 4 and len(m.of("submit_fetch")) == 1
-    assert order(m, "check_quota", "take_lock", "submit_fetch", "release_lock") == [
+    (said,) = [c[0] for c in m.of("comment") if c[1] == "dataset i7-e11 u937 blocked"]
+    assert said.endswith("It is staged once the keeper frees space or the quota is raised.")
+    assert len(m.of("check_quota")) == 4 and len(m.of("submit")) == 1
+    assert order(m, "check_quota", "take_lock", "submit", "release_lock") == [
         "take_lock",
-        "check_quota",  # before the fetch slot: a blocked dataset holds none
-        "release_lock",  # released while blocked (spec §5.2)
+        "check_quota",  # before the stage slot: a blocked dataset holds none
+        "release_lock",  # released while blocked
         "check_quota",
         "check_quota",
         "check_quota",
-        "take_lock",  # taken again before the fetch
-        "submit_fetch",
-        "take_lock",  # refreshed once the stage slot is free
+        "take_lock",  # taken again once the cache has room
+        "take_lock",  # refreshed once the stage slot is ours (it was free: the quota is not asked again)
+        "submit",
         "release_lock",
     ]
 
 
-async def test_dropped_files_mark_the_raw_row_and_stage_offline(env):
+async def test_a_dataset_that_waited_for_a_stage_slot_is_checked_again_and_waits_again(env):
+    """Jobs that passed the check together can fill the cache: with one stage slot `second` waits behind `first`'s
+    job, the quota asked again in the slot is over, so it gives the slot back and waits, and stages once the
+    cache has room."""
+    two = [DatasetPlan("first", "TEM", 0.6, False), DatasetPlan("second", "TEM", 0.4, False)]
+    over = QuotaCheck(False, over_by=5)
+    m = Mocks(
+        plan=PlanResult(True, [], two, 1, levels=[1], patch=64),
+        quotas={"second": [QuotaCheck(True), over, over, QuotaCheck(True)]},  # room, until first's stage filled it
+        limits=SourcingLimits(1, 120, "http://svc:8765"),
+        gate=asyncio.Event(),
+        gate_on="stage-first",
+        quota_after={"second": "first"},
+    )
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("await") and len(m.of("check_quota")) == 2, m=m)  # second waits for the slot
+        m.gate.set()
+        blocked = await waits_on_lock(h, "second", "blocked")
+        assert blocked.reason == "raw cache over its quota by 5 bytes"
+        await env.sleep(timedelta(minutes=3))
+        await ready(h, m)
+    assert [args[1].record for args in m.of("submit")] == ["first", "second"]
+    assert order(m, "take_lock", "check_quota", "release_lock", record="second") == [
+        "take_lock",
+        "check_quota",  # room: on to the stage slot, which first holds
+        "take_lock",  # refreshed after the slot wait
+        "check_quota",  # asked again in the slot: over
+        "check_quota",  # back outside the slot: over, blocked
+        "release_lock",
+        "check_quota",  # room again
+        "take_lock",
+        "take_lock",  # the slot is free this time: no third check
+        "release_lock",
+    ]
+
+
+async def test_dropped_files_mark_the_raw_row_and_stage_offline_without_a_quota_wait(env):
+    """Files a person dropped are read from the cache alone and add nothing to it: no hosts, and a cache over its
+    quota does not hold the record up."""
     only = PlanResult(True, [], [DatasetPlan("bcss", "histology-WSI", 1.0, True)], 1, levels=[1], patch=64)
-    m = Mocks(plan=only, raw={"bcss": RawStatus(False, ["manual://bcss/a.zip"])})
+    m = Mocks(plan=only, quotas={"bcss": QuotaCheck(False, over_by=5)})
     async with started(env, m) as h:
         await approve(h, m)
         await until(lambda: m.of("comment_drop"), m=m)
         await h.signal(MiaBuffer.dropped, "bcss")
         await ready(h, m)
     assert m.of("mark_asset") == [("raw", "bcss", {"state": "waiting-drop"})]
-    assert m.names().index("mark_asset") < m.names().index("comment_drop") and not m.of("submit_fetch")
+    assert m.names().index("mark_asset") < m.names().index("comment_drop") and not m.of("check_quota")
     ((_, stage),) = m.of("submit")
     assert stage.cache_writable is False and stage.hosts == []
 
@@ -1360,28 +1325,27 @@ async def test_timeout_drops_a_blocked_dataset_and_releases_its_lock(env):
     """`blocked` is waiting: the timeout cancels the dataset inside its lock, and the lock is released."""
     # a real-time timeout of ~5 s, as test_timeout_lets_a_staging_job_finish_then_announces_ready
     short = PlanResult(True, [], ONLY_U937.pool, 1, levels=[1], patch=64, timeout_days=6e-5)
-    m = Mocks(plan=short, raw={"u937": RawStatus(False, [U937_URL])}, quotas={"u937": QuotaCheck(False, over_by=5)})
+    m = Mocks(plan=short, quotas={"u937": QuotaCheck(False, over_by=5)})
     async with started(env, m) as h:
         await approve(h, m)
         await idle(h, m, "needs-human")
         await until(lambda: m.of("release_lock"), m=m)
         state = await h.query(MiaBuffer.status)
     assert dataset(state, "u937").status == "dropped" and "still blocked" in dataset(state, "u937").reason
-    assert m.of("release_lock") == [("raw", "u937", OWNER)] and not m.of("submit_fetch")
+    assert m.of("release_lock") == [("raw", "u937", OWNER)] and not m.of("submit")
 
 
 async def test_a_dataset_blocked_after_the_timeout_is_dropped_too(env):
-    """Review fix: with one fetch slot, `second` waits for it (behind `first`'s fetch job) past the timeout; the
-    quota re-checked in the slot is then over, so it is dropped rather than blocked forever, and the round ends."""
+    """With one stage slot, `second` waits for it (behind `first`'s stage job) past the timeout; the quota asked
+    again in the slot is then over, so it is dropped rather than blocked forever, and the round ends."""
     two = [DatasetPlan("first", "TEM", 0.6, False), DatasetPlan("second", "TEM", 0.4, False)]
     short = PlanResult(True, [], two, 1, levels=[1], patch=64, timeout_days=SHORT_DAYS)
     m = Mocks(
         plan=short,
-        raw={record: RawStatus(False, [U937_URL]) for record in ("first", "second")},
-        quotas={"second": [QuotaCheck(True), QuotaCheck(False, over_by=5)]},  # room, until first's fetch filled it
-        limits=SourcingLimits(2, 120, "http://svc:8765", parallel_fetch=1),
+        quotas={"second": [QuotaCheck(True), QuotaCheck(False, over_by=5)]},  # room, until first's stage filled it
+        limits=SourcingLimits(1, 120, "http://svc:8765"),
         gate=asyncio.Event(),
-        gate_on="fetch-first",
+        gate_on="stage-first",
         quota_after={"second": "first"},
     )
     async with started(env, m) as h:
@@ -1401,33 +1365,32 @@ async def test_a_dataset_blocked_after_the_timeout_is_dropped_too(env):
     }
     assert order(m, "take_lock", "check_quota", "release_lock", record="second") == [
         "take_lock",
-        "check_quota",  # room: on to the fetch slot, which first holds
+        "check_quota",  # room: on to the stage slot, which first holds
         "take_lock",  # refreshed after the slot wait
-        "check_quota",  # re-checked in the slot: over
+        "check_quota",  # asked again in the slot: over
         "check_quota",  # back outside the slot: over, and the day limit has fired
         "release_lock",
     ]
-    assert [args[1].record for args in m.of("submit_fetch")] == ["first"]
+    assert [args[1].record for args in m.of("submit")] == ["first"]
 
 
-async def test_a_blocked_dataset_leaves_its_fetch_slot_to_others(env):
-    """Review fix: the quota wait comes before the fetch slot, so with one slot a blocked dataset does not hold up
-    another dataset's fetch."""
+async def test_a_blocked_dataset_leaves_its_stage_slot_to_others(env):
+    """The quota wait comes before the stage slot, so with one slot a blocked dataset does not hold up another
+    dataset's stage."""
     two = [DatasetPlan("first", "TEM", 0.6, False), DatasetPlan("second", "TEM", 0.4, False)]
     m = Mocks(
         plan=PlanResult(True, [], two, 1, levels=[1], patch=64),
-        raw={record: RawStatus(False, [U937_URL]) for record in ("first", "second")},
         quotas={"first": [QuotaCheck(False, over_by=5), QuotaCheck(True)]},
-        limits=SourcingLimits(2, 120, "http://svc:8765", parallel_fetch=1),
+        limits=SourcingLimits(1, 120, "http://svc:8765"),
     )
     async with started(env, m) as h:
         await approve(h, m)
-        await until(lambda: m.of("submit_fetch"), m=m)
-        assert [args[1].record for args in m.of("submit_fetch")] == ["second"]  # while first is blocked
+        await until(lambda: m.of("submit"), m=m)
+        assert [args[1].record for args in m.of("submit")] == ["second"]  # while first is blocked
         assert dataset(await h.query(MiaBuffer.status), "first").status == "blocked"
         await env.sleep(timedelta(minutes=3))
         await ready(h, m)
-    assert [args[1].record for args in m.of("submit_fetch")] == ["second", "first"]
+    assert [args[1].record for args in m.of("submit")] == ["second", "first"]
 
 
 async def test_a_retake_that_waited_decides_again(env):
@@ -1444,11 +1407,10 @@ async def test_a_retake_that_waited_decides_again(env):
         await waits_on_lock(h, "u937")
         await env.sleep(timedelta(minutes=3))
         await ready(h, m)
-    assert order(m, "take_lock", "read_binding", "raw_status", "read_stage", "release_lock") == [
+    assert order(m, "take_lock", "read_binding", "read_stage", "release_lock") == [
         "read_binding",
         "take_lock",
         "read_binding",
-        "raw_status",
         "take_lock",  # the stage slot's re-take: held by another owner
         "take_lock",
         "read_binding",  # decided again: staged meanwhile
@@ -1462,12 +1424,11 @@ async def test_a_retake_that_waited_decides_again(env):
 
 async def test_a_go_while_blocked_stops_the_blocked_dataset(env):
     """Review fix: a new go abandons a blocked straggler; the cancel lands in the release of its lock, which must
-    end the task (before, the release swallowed it and the task polled on, re-took the lock and fetched)."""
+    end the task (a release that swallowed it would let the task poll on, re-take the lock and stage)."""
     two = [DatasetPlan("a", "TEM", 0.5, False), DatasetPlan("b", "TEM", 0.5, False)]
     gate = asyncio.Event()
     m = Mocks(
         plan=PlanResult(True, [], two, 1, min_fraction=0.5, levels=[1], patch=64),
-        raw={"b": RawStatus(False, [U937_URL])},
         quotas={"b": [QuotaCheck(False, over_by=5), QuotaCheck(True)]},
         release_gates={"b": gate},
     )
@@ -1477,13 +1438,13 @@ async def test_a_go_while_blocked_stops_the_blocked_dataset(env):
         await until(lambda: ("release_lock", ("raw", "b", "mia-buffers i7-e11 b")) in m.calls, m=m)
         await h.signal(MiaBuffer.plan, ev("plan", "15"))
         await idle(h, m, "plan-review")
-        before = order(m, "check_quota", "take_lock", "submit_fetch", record="b")
+        before = order(m, "check_quota", "take_lock", record="b")
         gate.set()
         await env.sleep(timedelta(minutes=10))
         await asyncio.sleep(0.5)
         state = await h.query(MiaBuffer.status)
-    assert order(m, "check_quota", "take_lock", "submit_fetch", record="b") == before
-    assert not m.of("submit_fetch") and state.round_id == "i7-e15"
+    assert order(m, "check_quota", "take_lock", record="b") == before
+    assert [args[1].record for args in m.of("submit")] == ["a"] and state.round_id == "i7-e15"
     assert not [c for c in m.of("comment") if c[1] == "dataset i7-e11 b blocked"]  # it never went on to say so
 
 
@@ -1545,12 +1506,12 @@ async def test_auto_approve_does_not_skip_the_plan_gate_of_a_plan_round(env):
 
 
 async def test_board_is_written_on_every_status_change(env):
-    m = Mocks(plan=ONLY_U937, raw={"u937": RawStatus(False, [U937_URL])})
+    m = Mocks(plan=ONLY_U937)
     async with started(env, m) as h:
         await approve(h, m)
         await ready(h, m)
-        await until(lambda: len(m.board) == 4, m=m)
-    assert m.board == [("u937", "pending"), ("u937", "fetching"), ("u937", "staging"), ("u937", "servable")]
+        await until(lambda: len(m.board) == 3, m=m)
+    assert m.board == [("u937", "pending"), ("u937", "staging"), ("u937", "servable")]
     assert {args[0] for args in m.of("mark_dataset")} == {"i7-e11"}
 
 
@@ -1620,7 +1581,7 @@ async def test_degraded_rebuilds_from_the_raw_cache(env):
     u937 = dataset(state, "u937")
     assert (u937.status, u937.rebuilds) == ("servable", 1) and state.stage == "ready"
     assert m.stages == ["planning", "plan-review", "sourcing", "staged", "ready"]
-    assert m.of("raw_ready") == [("u937",)] and m.of("prepare_stage") == [("u937",), ("u937", 1)]
+    assert not m.of("raw_ready") and m.of("prepare_stage") == [("u937",), ("u937", 1)]  # it reads upstream again
     assert [args[0] for args in m.of("submit")] == [job_key(7, "i7-e11", "u937"), job_key(7, "i7-e11", "u937", 1)]
     assert m.of("submit")[1][1].rebuild == 1 and m.of("read_stage") == [("u937",), ("u937", 1)]
     assert len(m.of("register_dataset")) == 2
@@ -1643,10 +1604,62 @@ async def test_degraded_manual_dataset_rebuilds_without_a_new_drop(env):
     assert dataset(state, "bcss").rebuilds == 1 and m.of("prepare_stage") == [("bcss",), ("bcss", 1)]
 
 
-async def test_degraded_without_raw_is_needs_human_only_below_the_floor(env):
-    m = Mocks(plan=TWO, raw_ready={"a": False, "b": False})
+async def test_a_rebuild_reads_upstream_and_does_not_ask_for_the_raw_cache(env):
+    m = Mocks(plan=ONLY_U937, missing=[["u937"]], raw_ready={"u937": False})
     async with started(env, m) as h:
         await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert not m.of("raw_ready") and dataset(state, "u937").status == "servable"
+    rebuild = m.of("submit")[1][1]
+    assert rebuild.rebuild == 1 and rebuild.hosts == ["zenodo.org"] and rebuild.cache_writable is True
+
+
+async def test_a_rebuild_follows_the_binding_not_the_catalogs_download_method(env):
+    """The plan marks a record `manual` by its catalog download method; what the stage does is decided by the
+    binding. A record so marked whose binding is reachable is staged online, and its rebuild reads upstream."""
+    marked = replace(ONLY_U937, pool=[replace(ONLY_U937.pool[0], manual=True)])
+    reachable = BindingInfo(True, "/s/u937.yaml", "bh", ["zenodo.org"])
+    m = Mocks(plan=marked, bindings={"u937": reachable}, missing=[["u937"]], raw_ready={"u937": False})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
+        state = await h.query(MiaBuffer.status)
+    assert not m.of("raw_ready") and not m.of("comment_drop") and dataset(state, "u937").status == "servable"
+    assert [args[1].hosts for args in m.of("submit")] == [["zenodo.org"]] * 2
+
+
+async def test_a_rebuild_of_a_record_dropped_for_its_host_is_raw_gone_once_its_files_left(env):
+    """A record the plan does not mark, dropped by hand because the policy refuses its host: the stage is offline,
+    so a rebuild whose files left the raw cache fails as `raw cache gone` and submits no job that could only fail."""
+    refused_host = BindingInfo(True, "/s/u937.yaml", "bh", [], [["https://refused.example.org/a.zip", "a.zip"]])
+    m = Mocks(plan=ONLY_U937, bindings={"u937": refused_host}, missing=[["u937"]], raw_ready={"u937": False})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: m.of("comment_drop"), m=m)
+        await h.signal(MiaBuffer.dropped, "u937")
+        await ready(h, m)
+        await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed" and dataset(state, "u937").reason == workflows.RAW_GONE
+    assert m.of("raw_ready") == [("u937",)] and len(m.of("submit")) == 1
+
+
+async def test_degraded_without_dropped_files_is_needs_human_only_below_the_floor(env):
+    """Files a person dropped exist nowhere else: once they left the raw cache, a pyramid that vanished cannot be
+    staged again."""
+    dropped = replace(TWO, pool=[replace(planned, manual=True) for planned in TWO.pool])
+    m = Mocks(plan=dropped, raw_ready={"a": False, "b": False})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: len(m.of("comment_drop")) == 2, m=m)
+        await h.signal(MiaBuffer.dropped, "a")
+        await h.signal(MiaBuffer.dropped, "b")
         await ready(h, m)
         await h.signal(MiaBuffer.degraded, DegradedSignal(["a"], "pyramid missing: a/v0.zarr"))
         await until(lambda: any("`a` failed" in c[0] for c in m.of("comment")), m=m)
@@ -1663,7 +1676,7 @@ async def test_degraded_without_raw_is_needs_human_only_below_the_floor(env):
         state = await h.query(MiaBuffer.status)
     assert m.of("raw_ready") == [("a",), ("b",)] and dataset(state, "b").status == "failed"
     detail = m.of("set_stage")[-1][1]
-    assert "a, b" in detail and "TEM" in detail and not m.of("prepare_fetch")
+    assert "a, b" in detail and "TEM" in detail
 
 
 async def test_waiters_share_one_ticker(env):
@@ -1709,7 +1722,7 @@ async def test_waiters_share_one_ticker(env):
 async def test_ticker_stops_with_the_round(env):
     """b is blocked on quota (it waits on the ticker) when a go abandons it: the ticker is cancelled with the
     round and no further timers fire."""
-    m = Mocks(plan=TWO, raw={"b": RawStatus(False, [U937_URL])}, quotas={"b": QuotaCheck(False, over_by=5)})
+    m = Mocks(plan=TWO, quotas={"b": QuotaCheck(False, over_by=5)})
     async with started(env, m) as h:
         await approve(h, m)
         await ready(h, m)
@@ -1733,15 +1746,15 @@ async def test_replay_buffer_history_d(env):
     """
     if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
         m = Mocks(plan=replace(ONLY_U937, auto_approve=True), locks={"u937": [HELD, LockTaken(True)]})
-        async with started(env, m) as h:
+        async with started(env, m, signal="go") as h:  # a go round with auto_approve stops at no gate
             await until(lambda: m.of("take_lock"), m=m)
             await waits_on_lock(h, "u937")
             await env.sleep(timedelta(minutes=3))
-            await ready(h, m)
+            await idle(h, m, "ready")
             await h.signal(MiaBuffer.idle, args=[None, "i7-e11"])  # as the keeper sends it
             await idle(h, m, "idle")
             await h.signal(MiaBuffer.keep, ev("keep", "31"))
-            await ready(h, m)
+            await idle(h, m, "ready")
             await h.signal(MiaBuffer.retire, ev("retire", "32"))
             await idle(h, m, "retired")
             LIFECYCLE_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
@@ -1830,7 +1843,7 @@ async def test_a_rebuild_another_buffer_finished_while_this_one_waited_is_reused
         await env.sleep(timedelta(minutes=3))
         await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
         state = await h.query(MiaBuffer.status)
-    assert len(m.of("submit")) == 1 and m.of("prepare_stage") == [("u937",)] and not m.of("raw_status")[1:]
+    assert len(m.of("submit")) == 1 and m.of("prepare_stage") == [("u937",)]
     assert m.of("read_stage") == [("u937",), ("u937", 1)] and len(m.of("register_dataset")) == 2
     servable = [c[0] for c in m.of("comment") if c[1] == "dataset i7-e11 u937 servable"]
     assert servable[-1].endswith("rebuilt by mia-buffers i9-e9 rec while this buffer waited and reused.")
@@ -1910,8 +1923,8 @@ async def test_a_lifecycle_label_while_sourcing_is_refused_at_once(env):
 
 async def test_replay_buffer_history_d_rebuild(env):
     """The degraded path under `d-lifecycle` and `d-tick`: ready, the keeper finds u937's pyramid gone, it is still
-    missing when asked again under the raw lock, so it is staged again from the raw cache with a job of its own and
-    the buffer stays ready; as test_replay_buffer_history. Re-record this one alone:
+    missing when asked again under the raw lock, so it is staged again with a job of its own and the buffer stays
+    ready; as test_replay_buffer_history. Re-record this one alone:
     MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_d_rebuild"""
     if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
         m = Mocks(plan=ONLY_U937, missing=[["u937"]])
@@ -1920,7 +1933,7 @@ async def test_replay_buffer_history_d_rebuild(env):
             await ready(h, m)
             await h.signal(MiaBuffer.degraded, DegradedSignal(["u937"], "pyramid missing: u937/v0.zarr", "i7-e11"))
             await until(lambda: any(c[0] == "rebuilt u937" for c in m.of("comment")), m=m)
-            await ready(h, m)
+            await until(lambda: m.board.count(("u937", "servable")) == 2, m=m)  # the rebuild is on the board
             assert len(m.of("submit")) == 2 and len(m.of("missing_records")) == 2
             REBUILD_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-d-rebuild", REBUILD_HISTORY.read_text())
@@ -2276,18 +2289,30 @@ async def test_replay_buffer_history_e(env):
 # --- budgets and the pause ---------------------------------------------------------
 
 
-async def test_stage_and_fetch_jobs_are_reserved_and_settled_with_their_bytes(env):
-    m = Mocks(
-        plan=ONLY_U937,
-        raw={"u937": RawStatus(False, ["https://zenodo.org/f"])},
-        fetches={"u937": FetchResult(True, bytes_fetched=4096)},
-    )
+async def test_a_stage_job_is_reserved_and_settled_once_with_what_it_transferred(env):
+    m = Mocks(plan=ONLY_U937, stage={"u937": StageResult(True, 1, bytes_fetched=4096)})
     async with started(env, m, signal="go") as h:
         await idle(h, m, "staged")
-    assert [a[2] for a in m.of("reserve")] == ["fetch", "stage"]
-    assert all(a[0] == "o/buffers#7" for a in m.of("reserve"))
-    assert [a[1] for a in m.of("reserve")] == [m.of("submit_fetch")[0][0], m.of("submit")[0][0]]
-    assert [(a[1], a[3]) for a in m.of("settle")] == [(m.of("reserve")[0][1], 4096), (m.of("reserve")[1][1], 0)]
+    assert [(a[0], a[2]) for a in m.of("reserve")] == [("o/buffers#7", "stage")]
+    assert m.of("reserve")[0][1] == m.of("submit")[0][0]
+    assert [(a[1], a[3]) for a in m.of("settle")] == [(m.of("submit")[0][0], 4096)]
+
+
+async def test_a_failed_stage_settles_what_its_report_says(env):
+    failed = StageResult(False, errors=["boom"], bytes_fetched=1234)  # the harness writes the count in a failed report
+    m = Mocks(plan=ONLY_U937, stage={"u937": failed}, states={"stage-u937": ("EXIT", 1)})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+    assert [(a[1], a[3]) for a in m.of("settle")] == [(m.of("submit")[0][0], 1234)]
+
+
+async def test_a_stage_killed_with_no_report_fails_the_dataset_and_settles_zero(env):
+    m = Mocks(plan=ONLY_U937, states={"stage-u937": ("KILLED", None)})
+    async with started(env, m, signal="go") as h:
+        await idle(h, m, "needs-human")
+        state = await h.query(MiaBuffer.status)
+    assert dataset(state, "u937").status == "failed" and "ended in state KILLED" in dataset(state, "u937").reason
+    assert not m.of("read_stage") and [(a[1], a[3]) for a in m.of("settle")] == [(m.of("submit")[0][0], 0)]
 
 
 async def test_a_refused_reservation_fails_the_dataset_with_the_reason(env):
@@ -2515,7 +2540,7 @@ async def test_cancel_while_sourcing_kills_the_jobs_releases_what_the_round_held
     assert m.of("retire_buffer") == [("i7-e11",)] and not m.of("refuse_label")  # retired once, at the cancel
 
 
-async def test_cancel_at_the_plan_gate_ends_the_round_before_anything_was_fetched(env):
+async def test_cancel_at_the_plan_gate_ends_the_round_before_anything_was_staged(env):
     m = Mocks()
     async with started(env, m) as h:
         await idle(h, m, "plan-review")

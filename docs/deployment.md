@@ -26,7 +26,7 @@ Temporal is only orchestration state and can live anywhere the workers can reach
 |---|---|---|
 | Temporal server, UI, Postgres | Kubernetes | one cluster; one namespace per service (`autodev`, `snippets`, `mia-data`, `mia-buffers`); TLS on the frontend; UI behind SSO |
 | csub broker + sandboxed worker, one pair per service | cluster-attached host, service account | systemd user units with linger, `Restart=always`, logs in journald |
-| buffer-api (`mia-buffers serve`) and its read-only page | same host, beside the mia-buffers broker, unsandboxed | a third unit for that service; its SQLite ledger lives in the service's `state_dir`, backed up every `keeper.minutes` |
+| buffer-api (`mia-buffers serve`) and its page | same host, beside the mia-buffers broker, unsandboxed | a third unit for that service; its SQLite ledger is `<paths.local_root>/service/buffers.sqlite`, copied to the service's `state_dir/backups` every `keeper.minutes` |
 | agent and harness jobs | LSF via csub | unchanged |
 | configs and secrets | the service account's home | one `~svc/.config/mia/mia.yaml` named by `$MIA_CONFIG`, every service a block under `services:`; the App PEM, token files |
 | code | a tagged checkout at a fixed path, with a `current` symlink | the sandbox binds it read-only; deploy = `pixi install` in the new checkout, flip the symlink, `mia restart <service>` |
@@ -67,9 +67,9 @@ None of these touch `workflows.py`, so there is no replay risk.
    account. Add `agent.api_key_file`, bind it read-only into the job and set `ANTHROPIC_API_KEY` from it (the
    broker policy's `env_allow` must cover it), and drop the `mia up` refusal of `api_key_env`.
 5. **State on backed-up storage.** `paths.state_root` is the durable record on the cluster side (job ids, mirrors,
-   logs, buffer-api's ledger); put it under `/groups`, which is backed up, not under `/nrs`. `paths.local_root`
-   is the exception: it holds the raw-cache locks and must be host-local disk, never NFS (`mia_core.locks`), so
-   the VM needs a local scratch volume. The Temporal database is the other half; back up Postgres in Kubernetes.
+   logs, the backups of buffer-api's ledger); put it under `/groups`, which is backed up, not under `/nrs`.
+   `paths.local_root` is the exception: it holds the raw-cache locks and buffer-api's ledger itself, and must be
+   host-local disk, never NFS (`mia_core.locks`), so the VM needs a local scratch volume. The Temporal database is the other half; back up Postgres in Kubernetes.
 6. **Release procedure.** Tag, `git clone` into `releases/<tag>`, `pixi install`, `pixi run mia exec <service> check`
    against production config, flip `current`, `mia restart <service>`. A broker reads the policy file it was started
    with, so `mia restart` puts each service's broker on the generated csub policy (`--policy`, see

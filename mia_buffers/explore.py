@@ -401,7 +401,6 @@ def plan_view(
         "not_prepared": sum(1 for row in plan["rows"] if row["rule"] == NOT_PREPARED),
         "bytes_fitting": total(fitting, "bytes"),
         "bytes_pool": total(pool, "bytes"),
-        "bytes_to_fetch": total([row for row in fitting if (row["raw"] or {}).get("state") != "ready"], "bytes"),
         "dims": sorted({row["dims"] for row in fitting if row.get("dims")}),
         "capacity": total(fitting, "positions"),
         "top_share": max((row.get("weight") or 0 for row in pool), default=0),

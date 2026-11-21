@@ -168,9 +168,9 @@ def test_backup_is_a_consistent_copy(tmp_path):
 
 def test_put_asset_merges_and_filters(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite")
-    ledger.put_asset("raw", "rec", {"state": "fetching", "job": "1", "path": "/netfs/lab/raw/rec"})
+    ledger.put_asset("raw", "rec", {"state": "waiting-drop", "job": "1", "path": "/netfs/lab/raw/rec"})
     merged = ledger.put_asset("raw", "rec", {"bytes": 10, "scanned_at": 5.0})
-    assert merged["state"] == "fetching" and merged["job"] == "1" and merged["bytes"] == 10
+    assert merged["state"] == "waiting-drop" and merged["job"] == "1" and merged["bytes"] == 10
     ledger.put_asset("staged", "art1", {"state": "ready", "record": "rec", "bytes": 100})
     ledger.put_asset("staged", "art2", {"state": "evicted", "record": "rec", "bytes": 0})
     ledger.add_ref("b", "staged", "ref-only")
@@ -248,7 +248,7 @@ def test_staged_last_used_comes_from_draws(tmp_path):
 
 def test_status_board_and_events(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite")
-    ledger.put_buffer_dataset("b1", "rec", "fetching", job="j1")
+    ledger.put_buffer_dataset("b1", "rec", "staging", job="j1")
     row = ledger.put_buffer_dataset("b1", "rec", "servable")
     assert row["status"] == "servable" and row["job"] is None and ledger.buffer_datasets("b1")[0]["record"] == "rec"
     assert ledger.buffer_datasets("b2") == [] and ledger.latest_event("b1") is None
@@ -378,16 +378,38 @@ def test_kv(tmp_path):
 
 def test_sync_assets_drops_a_raw_row_with_nothing_cached_that_the_scan_skipped(tmp_path):
     """The scan skips an empty raw directory; its row (registered by an earlier scan) goes rather than turning
-    `missing`. A row with content is still marked missing, and a fetch in progress is untouched."""
+    `missing`. A row with content is still marked missing."""
     ledger = Ledger(tmp_path / "l.sqlite")
     ledger.put_asset("raw", "phantom", {"state": "ready", "bytes": 0, "files": {}})
     ledger.put_asset("raw", "wiped", {"state": "ready", "bytes": 12, "files": {}})
-    ledger.put_asset("raw", "fetching", {"state": "fetching", "bytes": 0, "files": {}, "job": "1"})
     counts = ledger.sync_assets({}, older_than=time.time() + 1, kinds=("raw",))
     by_key = {a["key"]: a["data"] for a in ledger.assets("raw")}
-    assert "phantom" not in by_key
-    assert by_key["wiped"]["state"] == "missing" and by_key["fetching"]["state"] == "fetching"
+    assert "phantom" not in by_key and by_key["wiped"]["state"] == "missing"
     assert counts == {"scanned": 0, "new": 0, "missing": 1, "dropped": 1}
+
+
+def test_sync_assets_readies_a_raw_row_left_partial_or_fetching(tmp_path):
+    """A raw cache has no state but at rest: a row at `partial` or `fetching`, which no job completes, is `ready`
+    once the scan finds its directory, so the keeper may evict it. A staged row at `partial` is a failed build
+    and stays one."""
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_asset("raw", "half", {"state": "partial", "bytes": 3, "scanned_at": 1.0, "last_used": 1.0})
+    ledger.put_asset("raw", "busy", {"state": "fetching", "bytes": 3, "job": "1", "last_used": 1.0})
+    ledger.put_asset("staged", "failed", {"state": "partial", "bytes": 3})
+    found = {
+        ("raw", "half"): {"bytes": 10, "scanned_at": 9.0},  # a stage with no report wrote 7 more bytes
+        ("raw", "busy"): {"bytes": 3, "scanned_at": 9.0},
+        ("staged", "failed"): {"bytes": 3, "scanned_at": 9.0},
+    }
+    ledger.sync_assets(found, older_than=time.time() + 1)
+    half = ledger.asset("raw", "half")
+    assert half["state"] == "ready" and half["bytes"] == 10 and half["last_used"] == 1.0
+    busy = ledger.asset("raw", "busy")
+    assert busy["state"] == "ready" and busy["job"] is None  # the job that held it is long gone
+    assert ledger.asset("staged", "failed")["state"] == "partial"
+    ledger.put_asset("raw", "gone", {"state": "fetching", "bytes": 3, "job": "1"})
+    ledger.sync_assets({}, older_than=time.time() + 1, kinds=("raw",))
+    assert ledger.asset("raw", "gone")["state"] == "missing"  # not on disk: no job holds a raw row
 
 
 # --- assessments, budgets, revoked rows, quarantined volumes ------------------------

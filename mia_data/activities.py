@@ -1250,25 +1250,12 @@ class Activities:
         write_atomic(path, data := yaml.safe_dump(binding, sort_keys=False).encode())
         return str(path), hashlib.sha256(data).hexdigest()
 
-    def _put_raw_asset(self, record: str, workspace: str) -> None:
-        """Report the record's raw cache (what `_spec` mounts) to the registry, best effort; its urls are those of
-        the binding.yaml in `workspace`, read as untrusted since the job could write there."""
+    def _put_raw_asset(self, record: str) -> None:
+        """Report the record's raw cache (what `_spec` mounts) to the registry as it is on disk, best effort."""
         if not ID_RE.fullmatch(record):
             raise ValueError(f"bad record id {record!r}")
         registry = self.registry
-        try:
-            binding = yaml.safe_load(read_untrusted(Path(workspace), "binding.yaml", 1 << 20) or "")
-        except yaml.YAMLError:
-            binding = None
-        arrays = [
-            array
-            for name in ("raw", "labels")
-            for array in ((binding.get(name) if isinstance(binding, dict) else None) or [])
-            if isinstance(array, dict) and isinstance(array.get("urls"), list)
-        ]
-        urls = [url for array in arrays for url in array["urls"] if isinstance(url, str)]
-        cache_dir = self.cfg.paths.work_root / "_cache" / record
-        row = {**raw_asset(cache_dir, urls), "last_used": time.time()}
+        row = {**raw_asset(self.cfg.paths.work_root / "_cache" / record), "last_used": time.time()}
         best_effort(lambda: registry.put_asset("raw", record, row), f"raw asset {record}", log)
 
     @activity.defn(name="read_smoke")
@@ -1277,7 +1264,7 @@ class Activities:
         """Read the smoke job's smoke.json into a SmokeResult, tolerating any shape. With `record` (the job held
         its raw-cache lock), the record's raw asset row is put to the registry first."""
         if record is not None:
-            await asyncio.to_thread(self._put_raw_asset, record, workspace)
+            await asyncio.to_thread(self._put_raw_asset, record)
         report = _job_json(workspace, "smoke.json")
         if not isinstance(report, dict):
             return SmokeResult(False, errors=["smoke.json is missing, unreadable or not a JSON object"])
@@ -1304,7 +1291,7 @@ class Activities:
         crop_errors and host_not_allowed come from the crop job's report.json. With `record` (a trusted crop job that held the raw-cache
         lock), the record's raw asset row is put to the registry first, with the urls of the crop job's binding."""
         if record is not None:
-            await asyncio.to_thread(self._put_raw_asset, record, crop_workspace or workspace)
+            await asyncio.to_thread(self._put_raw_asset, record)
         report = _job_json(workspace, "verify.json")
         if not isinstance(report, dict):
             return VerifyResult(0, 0, ["verify.json is missing, unreadable or not a JSON object"], [])

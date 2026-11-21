@@ -9,7 +9,7 @@ flowchart TD
     catalog[("mia-agentic-search<br/>catalog records")]
 
     subgraph page["the page (buffer-api)"]
-        go{{"Start / Run again"}}
+        go{{"Start / Resume / Restart"}}
         approve{{"Approve"}}
         reject{{"Reject… with feedback"}}
         timeline[("the dataset's timeline<br/>stages, crops, verdicts")]
@@ -70,33 +70,39 @@ The pieces, and where they live:
 | catalog | [mia-agentic-search](https://github.com/AI-HHMI/mia-agentic-search) | dataset records on `main`; read-only here |
 | job submission | [csub](https://github.com/krokicki/csub) | submits each job to LSF through a broker that enforces the service account's policy: allowed hosts, roots, agents |
 | sandboxing | [agentic-sandbox](https://github.com/JaneliaSciComp/agentic-sandbox) | wraps the worker and every job: read-only code, read-write only its own directories, a network allowlist |
-| orchestration | [Temporal](https://temporal.io) | one dev server shared with autodev; namespace `mia-data`, task queues `mia-data` and `mia-data-await` |
+| orchestration | [Temporal](https://temporal.io) | one dev server shared with autodev; namespace `mia-data`, task queues `mia-data`, `mia-data-await` and `mia-data-mirror` |
 | folder links | [Fileglancer](https://github.com/JaneliaSciComp/fileglancer) | timeline entries link the round's workspace and the dataset's crops folder when `paths.*.url` is set |
 
 ## The steps
 
 ### 1. Start
 
-*Start* on a dataset's page (`#datasets/<record>`) is a `go` sent to buffer-api's action route. The service
-checks it against the dataset's stage (`STAGE_ACTIONS` in `mia_data/config.py`), creates the dataset's subject on
-its first `go`, records the action and starts the dataset's `MiaDataDataset` workflow with the action as its
-signal. A preparation request (*Prepare these datasets*) sends the same `go` for each of its datasets, with the
-worker token, and is charged for their jobs. Preparation judges nothing about who may use a dataset: licence and
-size are a buffer spec's filters, so a GPL dataset or one of 60-pixel images is prepared like any other. A round
-in progress accepts only *Cancel the round*; `debugging`, between a failed round and its re-run, also takes
-*Run again now*. Components: the page, buffer-api, Temporal.
+*Start* on a dataset's page (`#datasets/<record>`) is a `go` sent to buffer-api's action route. The service checks
+it against the dataset's stage (`STAGE_ACTIONS` in `mia_data/config.py`), creates the dataset's subject on its
+first `go`, records the action and starts the dataset's `MiaDataDataset` workflow with the action as its signal. A
+preparation request (*Prepare these datasets*, as *Resume* or *Restart*) sends each of its datasets an action with
+the worker token and is charged for their jobs: a `go` to one that never ran, a `resume` to one that stopped or
+whose set waits at review (*Restart* sends every one a `go`). It sends nothing to a dataset that is prepared,
+shelved or working, nor to a stopped one whose jobs were refused a host nobody has approved. Preparation judges
+nothing about who may use a dataset: licence and size are a buffer spec's filters, so a GPL dataset or one of
+60-pixel images is prepared like any other. A round in progress accepts only *Cancel the round* and, for a run that
+cannot answer one, *Force stop*; `debugging`, between a failed round and its re-run, also takes *Restart now*.
+Components: the page, buffer-api, Temporal.
 
 The round pins the record at the catalog's commit: the commit in the catalog's downloads state when the record
 has an entry there, else the head of `main`.
 
-A record must have what a round needs before it can be started (`record_gaps` in `mia_data/binding.py`): a data
-URL with a host, in `data.download_url`, `technical.sample.urls` or an array's `path_pattern`. A binding may only
-use URLs on hosts those name, and a job reaches no other host, so a record with none (file names and a landing
-page only) can never be bound. buffer-api reads the record from the newest synced catalog on every request: a
-dataset whose record has such a gap gets no *Start* (its page and the Datasets list say what is missing), a `go`
-for it is refused, and a preparation request that names it settles it at once with the reason. Nothing is stored,
-so a record fixed in the catalog can be started after the next catalog sync (`keeper.catalog_sync_hours`).
-The worker checks the pinned record again at admission, where a gap ends the round `blocked` before any job runs.
+A record must have what a round needs before it can be started (`record_gaps` in `mia_data/binding.py`): a data URL
+with a host, in `data.download_url`, `technical.sample.urls` or an array's `path_pattern`. A binding may only use
+URLs on hosts those name, and a job reaches no other host, so a record with none (file names and a landing page
+only) can never be bound. It must also have what a plan needs to place a crop in it (`start_gaps` in
+`mia_buffers/explore.py`): a record the planner can read, with the shape of its largest raw array; without those a
+round would prepare what no buffer can take. buffer-api reads the record from the newest synced catalog on every
+request: a dataset whose record has such a gap gets no *Start* (its page and the Datasets list say what is
+missing), a `go` for it is refused, and a preparation request that names it settles it at once with the reason.
+Nothing is stored, so a record fixed in the catalog can be started after the next catalog sync
+(`keeper.catalog_sync_hours`). The worker checks the pinned record again at admission (`record_gaps`), where a gap
+ends the round `blocked` before any job runs.
 
 ### 2. Match
 
@@ -124,51 +130,55 @@ agent mounts no writable cache and takes no lock.
 
 ### 3. Develop (only when no snippet fits)
 
-When the agent answers `needs_snippet`, the worker opens an issue in mia-snippets labelled `snippets:go`, with
-the draft binding and what failed. A second autodev deployment, `snippets`, turns that issue into a PR adding
-`snippets/<name>/` and an example binding. The dataset sits in `developing` and wakes up whenever the PR changes:
-`MiaDataPoll`, a Temporal schedule, looks at the snippets repo's pull requests and signals the dataset whose PR
-moved. Every new PR head gets the round's crops (step 4), made by an untrusted job with a private cache, and a
-required `mia-data/crops` commit status on that exact commit. The example may read some arrays with snippets
-that are already merged; one of those that another snippet superseded while the PR was open is still accepted
-(at a head and at the merge), a withdrawn one never. A head whose crops pass goes to `review` like a
-matched binding's; one whose crops fail gets the report as a `/revise` on the PR, and autodev fixes it. When
-autodev stops instead (a failed round, its revision limit, a merge that fails), the snippets issue is labelled
-`snippets:needs-human` and the round ends `blocked`, naming the PR and quoting autodev's last comment (a merge
-refused for conflicts says so there). The round does not rely on being told: while
-it waits for autodev (`developing`, `testing` after a failed head, `merging`; not `review`, where a person is
-awaited) it looks at the snippets issue itself every 15 minutes. A PR is acted on as it is then; an issue that
-stopped before any PR was opened ends the round `blocked`; and so does `limits.autodev_quiet_hours` (default 2)
-with no change and no agent round running (`snippets:working` starts the limit over). Either end quotes
-autodev's last comment. Nobody
-merges the PR by hand: *Approve* on the dataset's page makes the worker post `/approve <head>` on the PR (stage
-`merging`), autodev merges, and if the merged snippet tree is the approved head's, the approved crops are
-saved; otherwise the merge commit gets its own crops, reviewed again. If the round stops (`failed` or `blocked`)
-while the PR is still open (a lost job, a failed status write), *Run again* resumes that PR: the current head is
-tested again under a new round, and no second snippets issue is opened. The new round has its own pins: the PR's
-example binding is adopted whatever catalog commit it names (the round that asked for the reader wrote it), and the
-stored binding names the commits of the round that adopted it. A PR closed or merged by then means a new
-match, and a reader that match asks for gets a new snippets issue: closing a snippet PR is how a person has the
-reader written again. A go that carries advice (the debugger's, and the repair agent's after its diagnosis: actor
-`cleaner-advice`) matches first even while the PR is open, so that its advice is read; the PR is resumed only if
-that match asks for a reader again. The repair agent's plain go (actor `cleaner`) is a *Run again*. Components: autodev (its own namespace; the two workflows interact only through GitHub, and autodev takes
-`/approve` and `/revise` from the worker because its login is in autodev's `github.trusted_bots`), mia-snippets
-CI, the GitHub client.
+When the agent answers `needs_snippet`, the worker opens an issue in mia-snippets labelled `snippets:go`, with the
+draft binding and what failed. A second autodev deployment, `snippets`, turns that issue into a PR adding
+`snippets/<name>/` and an example binding. A new snippet is named `<what-it-reads>-i<K>`, K being its issue's
+number, so no two pull requests can add the same name; an open PR's head whose snippet is named otherwise fails,
+and the developer renames it. The dataset sits in `developing` and wakes up whenever the PR changes: `MiaDataPoll`,
+a Temporal schedule, looks at the snippets repo's pull requests and signals the dataset whose PR moved. Every new
+PR head gets the round's crops (step 4), made by an untrusted job with a private cache, and a required
+`mia-data/crops` commit status on that exact commit. The example may read some arrays with snippets that are
+already merged; one of those that another snippet superseded while the PR was open is still accepted (at a head and
+at the merge), a withdrawn one never. A head whose crops pass goes to `review` like a matched binding's; one whose
+crops fail gets the report as a `/revise` on the PR, and autodev fixes it. When autodev stops instead (a failed
+round, its revision limit, a merge that fails), the snippets issue is labelled `snippets:needs-human` and the round
+ends `blocked`, naming the PR and quoting why (`autodev_said`): what the agent wrote when its round made no
+commits, else autodev's last comment (a merge refused for conflicts says so there). The round does not rely on
+being told: while it waits for autodev (`developing`, `testing` after a failed head, `merging`; not `review`, where
+a person is awaited) it looks at the snippets issue itself every 15 minutes. A PR is acted on as it is then; an
+issue that stopped before any PR was opened ends the round `blocked`; and so does `limits.autodev_quiet_hours`
+(default 2) with no change and no agent round running (`snippets:working` starts the limit over). Either end quotes
+why autodev stopped, as above. Nobody merges the PR by hand: *Approve* on the dataset's page makes the worker post
+`/approve <head>` on the PR (stage `merging`), autodev merges, and if the merged snippet tree is the approved
+head's, the approved crops are saved; otherwise the merge commit gets its own crops, reviewed again. If the round
+stops (`failed` or `blocked`) while the PR is still open (a lost job, a failed status write), *Resume* goes on with
+the same round and acts on the PR as it is then (see "Resume and Restart"), and *Restart* picks the PR up under a
+new round: the current head is tested again, and no second snippets issue is opened. The new round has its own
+pins: the PR's example binding is adopted whatever catalog commit it names (the round that asked for the reader
+wrote it), and the stored binding names the commits of the round that adopted it. A PR closed or merged by then
+means a new match, and a reader that match asks for gets a new snippets issue: closing a snippet PR is how a person
+has the reader written again. A go that carries advice (the debugger's, and the repair agent's after its diagnosis:
+actor `cleaner-advice`) matches first even while the PR is open, so that its advice is read; the PR is resumed only
+if that match asks for a reader again. The repair agent (actor `cleaner`) sends a `resume`, and a `go` only where
+the remedy needs more than the round's pins hold (a changed record, a pull request it closed). Components: autodev
+(its own namespace; the two workflows interact only through GitHub, and autodev takes `/approve` and `/revise` from
+the worker because its login is in autodev's `github.trusted_bots`), mia-snippets CI, the GitHub client.
 
 ### 4. Crops, review and saving
 
-One set of crops per round. Two plain jobs at the pinned snippets commit: `harness crop --n 16`
-(`crops.per_round`) with the round's seed and `--existing` pointing at the dataset's current manifest, so a later
-round adds crops rather than duplicating them; then `harness verify` and `harness preview` in a separate
-workspace that loads no snippet code. Verify checks each crop is a square 16-bit PNG of the crop edge (256, or
-the image's own extent when it is smaller: a small dataset is cropped whole, never refused) with matching labels
-and writes overlay PNGs. At least half of the set must verify (verify exits 1 whenever one crop fails, so its
-report is the judge); fewer ends the round `failed` with nothing saved. The passing crops' `raw.png`
-and `overlay.png` are committed to the `galleries` branch of mia-workflow-data, and a timeline entry shows them
-with the binding and the agent's reasons. The stage is `review`, and the dataset is listed under *Needs human* on Overview.
+One set of crops per round. Two plain jobs at the pinned snippets commit: `harness crop --n 16` (`crops.per_round`)
+with the round's seed and `--existing` pointing at the dataset's current manifest, so a later round adds crops
+rather than duplicating them; then `harness verify` and `harness preview` in a separate workspace that loads no
+snippet code. Verify checks each crop is a square 16-bit PNG of the crop edge (256, or the image's own extent when
+it is smaller: a small dataset is cropped whole, never refused) with matching labels and writes overlay PNGs. At
+least half of the set must verify (verify exits 1 whenever one crop fails, so its report is the judge); fewer ends
+the round `failed` with nothing saved. The passing crops' `raw.png` and `overlay.png` are committed to the
+`galleries` branch of mia-workflow-data, and a timeline entry shows them with the binding and the agent's reasons.
+The stage is `review`, and the dataset is listed under *Needs human* on Overview.
 
 **The crop judge.** With `judge.crops.mode: shadow` or `active`, a second model looks at the same set before the
-person does: the worker builds an evidence directory under the round's workspace (`judge-crops-1/evidence/`: the
+person does: the worker builds an evidence directory under the round's workspace
+(`judge-crops-<tested commit>-<attempt>/evidence/`: the
 question, every verified crop's raw and overlay PNG, `verify.json`, the binding without the agent's reasons, the
 record) and runs a read-only Claude Code job over it, budgeted against the root like the match agent. Its verdict
 is written as an assessment `by: judge` on the same subject the person's verdict will use, and posted as a second
@@ -176,40 +186,53 @@ entry under the crop table (verdict, findings per crop, confidence, model, promp
 what the verdict does). A judge job that fails leaves a one-line entry instead. In shadow the dataset still
 waits at `review` for the person, and the Decisions tab shows the agreement. In active an approve the policy takes
 ends the review with no person: the entry says "Approved by the crop judge", the set is saved, or the snippet PR
-head is approved and autodev merges it. A reject, an escalate, or a verdict a person gave while the judge looked
-leaves the dataset at `review`. `mode: off` skips all of it.
+head is approved and autodev merges it. A set in which the active judge finds a `suspect` or `bad` crop goes back
+to the developer with the judge's findings, as a person's reject would (`/revise` on the snippet PR, else a
+snippets issue for a reader superseding the binding's), at most `judge.crops.max_reworks` times since a person
+last acted; after that the set waits at `review`. The developer either changes the reader, whose next crops are
+judged again, or answers with a validated `no-change <request>` that the crops are right as they are: a set with
+only `suspect` findings is then approved (`policy:developer`), one with a `bad` finding goes to `review` with the
+answer. An escalate, a judge that did not run and a verdict a person gave while the judge looked leave the
+decision to the person. `mode: off` skips all of it.
 
 **Validation.** A person approves the set with *Approve* on the dataset's page, or rejects it with *Reject…*,
-which opens a dialog for the feedback. Either verdict carries the revision the page was showing, and buffer-api
-refuses one about a set that is not the newest. The verdict is recorded as an assessment in the registry (`by:
+which opens a dialog for the feedback. Either verdict names the set it is about and carries the revision the
+page was showing: buffer-api refuses one about any set but the one under review, and one decided at a revision
+the dataset has left. A person outranks the judge: once a person gave a verdict on a set, what the judge or the
+developer wrote about it authorizes nothing. The verdict is recorded as an assessment in the registry (`by:
 human:<who>`), and the save is authorized from the assessments on record, never from the click alone. On
 a reject the feedback goes to the agent: as `/revise` on the snippet PR when the round is following one, else in
 a new mia-snippets issue asking autodev to supersede the binding's snippet (a merged snippet is never edited).
-The next crops come back to `review`; the loop runs until an approve.
+The next crops come back to `review`; so does the rejected set, with autodev's answer as the pass's result, when
+autodev answers the request with a round of no commits and no new head will come. The loop runs until an
+approve. *Reject…* is also offered at `done`, about the saved set: it revokes that set and starts its rework as a
+round of its own, which asks the developer for a reader superseding the rejected binding's.
 
 **Revocation.** *Revoke* on the dataset's page, once it has saved crops, withdraws them: a `reject`
 assessment supersedes the approve, every staged artifact of the record is quarantined and rejected, the registry
 row becomes `revoked` and `revoked.json` is written beside the manifest, so no buffer plans or reuses the dataset
 and the buffers that drew from it unregister its volumes (the keeper tells them). Nothing is deleted; the dataset
-ends in `blocked` listing the artifacts and buffers, and *Run again* with a round that saves its crops repairs
-it.
+ends in `blocked` listing the artifacts and buffers, and *Restart* with a round that saves its crops repairs
+it (a revoked dataset takes no *Resume*, which would save the revoked set again).
 
 **Saving.** The approve saves the very crops that were reviewed: the worker reads the round's verify
 report back from its workspaces and copies every crop that passed into `paths.storage_root/<dataset>/<crop_id>/`
 by an idempotent activity (a retry never duplicates or overwrites), beside `binding.yaml`, and
 rebuilds the dataset's `manifest.json`. The final entry carries the totals and links to the crops folder, its
-gallery and the round's workspace. The stage is `done` and the registry row `prepared`; *Run again* later starts
+gallery and the round's workspace. The stage is `done` and the registry row `prepared`; *Restart* later starts
 another round and adds more crops.
 
-The trusted crop job writes the record's raw download cache (`paths.work_root/_cache/<record>`), so the worker
-first takes the record's **raw lock**, the lock file `paths.local_root/locks/raw/<record>` with the owner
-`mia-data <round> crop`. The waits for the crop and verify jobs heartbeat it (TTL 900 s) and the lock is released
-after the verify report is read, whatever it says. When another job holds it (a buffers stage or fetch, another
-round), the timeline gets one entry per round, ``waiting for the raw cache of `<record>`: held by <owner>``, and
-the workflow tries again every `temporal.poll_minutes`. After the verify report the worker puts the cache's `raw`
-asset row (files, bytes, `ready` or `partial`, `last_used`) to buffer-api. A trusted crop job that was refused a
-host (a redirect to one that is not allowed) ends the round `blocked`, naming the host. A PR head's crop job mounts
-the cache read-only, writes a private one and takes no lock.
+The trusted crop job reads its record on demand, as a buffer's stage job does: by range where the reader can, and a
+file whole into the record's raw cache (`paths.work_root/_cache/<record>`) where it cannot, within
+`limits.job_bytes`. It may write that cache, so the worker first takes the record's **raw lock**, the lock file
+`paths.local_root/locks/raw/<record>` with the owner `mia-data <round> crop`. The waits for the crop and verify
+jobs heartbeat it (TTL 900 s) and the lock is released after the verify report is read, whatever it says. When
+another job holds it (a buffers stage, another round), the timeline gets one entry per round, ``waiting for the raw
+cache of `<record>`: held by <owner>``, and the workflow tries again after `temporal.poll_minutes`, doubling each
+try up to 30 minutes. After the verify report the worker puts the cache's `raw` asset row (files, bytes, the state
+`ready`, `last_used`) to buffer-api. A trusted crop job that was refused a host (a redirect to one that is not
+allowed) ends the round `blocked`, naming the host. A PR head's crop job mounts the cache read-only, writes a
+private one and takes no lock.
 
 ## When a round fails
 
@@ -231,36 +254,57 @@ small `harness smoke`, `harness list` and `harness describe` probes, and writes 
   defect, data that is gone). The stage is `blocked`, with the failure, the diagnosis and what it needs.
 
 A debugger that does not run or leaves no readable outcome ends the round `failed`, with both reasons. A re-run
-that fails stops as `failed` too, saying it was the re-run: the cycles are used up. *Run again now* at `debugging`
+that fails stops as `failed` too, saying it was the re-run: the cycles are used up. *Restart now* at `debugging`
 ends the cycle and starts a person's round at once, which has its own cycles. A round a person cancelled is never
 debugged. A request that is cancelled cancels the debugger's round like its own.
+
+## Resume and Restart
+
+A dataset takes two actions that run it again.
+
+- **Restart** (a `go`) wipes the round's state and pins anew: a new round id, a new seed, the catalog and the
+  snippets as they are now. It starts at the match, or, when the round before was following a snippet PR that is
+  still open, picks that PR up and tests its current head. It never fails on what an earlier round pinned. At
+  `review` it drops the set under review unsaved; at `done` it adds crops to a prepared dataset.
+- **Resume** (a `resume`) keeps the round id, the pins and every result the round has, and starts at the first
+  step with none (`resume_step` in `mia_data/models.py`): the match when there is no binding, the crops when no
+  set passed, the judge when it never looked at a passing set, the save when an approved set is not saved; a
+  round that follows a snippets issue looks at its pull request as it is now and goes on from there, and a head
+  it has tested is not tested again. It is accepted where a round stopped (`failed`, `blocked`, `needs-human`,
+  `cancelled`) or waits for its verdict (`review`), never after a revoke.
+
+A step that runs again takes the round's next attempt, which names its job key, workspace, test id and timeline
+markers, so an earlier attempt's job record and entries stay as they are. The round's results live in its
+workflow: a *Force stop* loses them, and a resume after one starts from the beginning. A preparation request
+passes the choice on to each of its datasets, and the repair agent resumes.
 
 ## How the timeline reads
 
 A round is a series of stage passes, and a pass writes two entries, never an edit. Its start, `Stage:
-data:matching`, says what the stage is doing and links the folders to look at. Its result, `Result:
-data:matching`, says what happened (what the agent matched and why, the crops report with its table and binding,
-who decided what at review, the debugger's diagnosis) and links the record of every job the pass ran: the script
-that was sent, what the cluster answered and used, and for an agent its prompt and conversation. A record is
-linked once, as a `Jobs:` line under the entry that says what the job found: the crop judge's job under the
-judge's own entry, every other job under its pass's result. A stage the round
-comes back to (`testing` again for the next head of a snippet PR) is a pass of its own. A pass that fails, is
-blocked or is cancelled says so in its own result, which also moves the dataset to the stage it rests at and
-names it; only a round that ends with no pass open (a `go` refused at admission) writes that stage as an entry of
-its own. The crop judge's verdict is an entry of its own and links the judge's record. The
-dataset is in exactly one stage at a time, written only by the workflow: `matching`, `developing`, `testing`,
-`review`, `merging`, `debugging`, `done`, `failed`, `blocked` or `cancelled`. The buttons on its page are the actions its stage
-accepts. A round that cannot go on stops with an entry saying why, in one of two stages: `failed` when a job or a
-check failed and running it again may pass, `blocked` when a person has to decide or change something first (the
-match agent says so, a host is not approved, admission refuses the record, the policy refuses an approve, a
-revocation, a pause). `needs-human` is the stage of a stop that says neither;
-*Run again* afterwards retries from the start with a new seed, or, when the round was following a snippet PR that
-is still open, picks that PR up again. At `review` the same action is *Restart*: the set under review is dropped
-unsaved and the dataset is prepared again (a snippet PR's current head is tested again). buffer-api delivers a
-dataset's `go` as the workflow's `restart` signal: a run that has carried a round continues as new first, so every
-round begins in a run that takes all of today's code paths, the crop judge among them (a run keeps the patches it
-started with). *Cancel the round* ends a round in progress: its jobs are killed and the
-stage is `cancelled`.
+data:matching`, says what the stage is doing and links the folders to look at. Its result, `Result: data:matching`,
+says what happened (what the agent matched and why, the crops report with its table and binding, who decided what
+at review, the debugger's diagnosis) and links the record of every job the pass ran: the script that was sent, what
+the cluster answered and used, and for an agent its prompt and conversation. A record is linked once, as a `Jobs:`
+line under the entry that says what the job found: the crop judge's job under the judge's own entry, every other
+job under its pass's result. A stage the round comes back to (`testing` again for the next head of a snippet PR) is
+a pass of its own. A pass that fails, is blocked or is cancelled says so in its own result, which also moves the
+dataset to the stage it rests at and names it; only a round that ends with no pass open (a `go` refused at
+admission) writes that stage as an entry of its own. The crop judge's verdict is an entry of its own and links the
+judge's record. The dataset is in exactly one stage at a time, written by the workflow (buffer-api writes
+`cancelled` itself for a *Force stop*, and for a cancel that finds no run): `matching`, `developing`, `testing`,
+`review`, `merging`, `debugging`, `done`, `failed`, `blocked`, `needs-human` or `cancelled`. The buttons on its
+page are the actions its stage accepts. A round that cannot go on stops with an entry saying why, in one of two
+stages: `failed` when a job or a check failed and running it again may pass, `blocked` when a person has to decide
+or change something first (the match agent says so, a host is not approved, admission refuses the record, the
+policy refuses an approve, a revocation, a pause). `needs-human` is the stage of a stop that says neither. What
+*Resume* and *Restart* do from there is "Resume and Restart". buffer-api delivers a dataset's `go` as the
+workflow's `restart` signal: a run that has carried a round continues as new first, so every round begins in a run
+that takes all of today's code paths, the crop judge among them (a run keeps the patches it started with). *Cancel
+the round* ends a round in progress: its jobs are killed and the stage is `cancelled`.
+
+**Shelving** is beside the stages. A dataset with no round working takes *Shelve…* (with a reason): it then
+reads the status `shelved`, no plan and no request takes it, and it accepts *Unshelve* alone. Its stage and its
+saved crops stay as they are; a round that waits for a verdict at `review` is cancelled by the shelve.
 
 The `MiaMirror` workflow copies each entry to the dataset's GitHub issue as a comment and sets the stage as the
 issue's `data:<stage>` label. Nothing done to the issue reaches the system.
@@ -271,19 +315,23 @@ issue's `data:<stage>` label. Nothing done to the issue reaches the system.
 the workflow waits for the write: the registry's stage is what buffer-api checks an action against. `prepared`
 means a round that ended `done` with `binding.yaml` plus a `manifest.json` whose binding hash matches it. Until
 then the row says `in-progress` while the round works by itself and `needs-human` whenever a person has to act,
-which includes `review`; a new round on a prepared dataset starts that over. `mia-buffers datasets sync` rebuilds
+which includes `review`; a new round on a prepared dataset starts that over. A shelved dataset reads `shelved`
+there, whatever its stored row says. `mia-buffers datasets sync` rebuilds
 the prepared rows from `storage_root`.
 
 ## Trust boundaries in one paragraph
 
-Agents never hold GitHub credentials or reach GitHub; the worker does every GitHub write. Each job asks csub
-only for the hosts in its binding, and the broker's policy is the ceiling: a host missing from the policy fails
-the round before submission, with an entry naming it (a person can approve the host from the page when starting
-the run). The snippets issue a round opens names the dataset's hosts, and autodev grants its agent's job those
-beside its package hosts. Unreviewed snippet code from a PR head runs only inside
-job sandboxes, and the verify job that judges its output loads no snippet code. Merging a snippet needs a
-person's approve of the crops its exact head made, plus the required status; so does saving them. The page's
-buttons need no login: they can ask the workflow to act, and cannot write what a workflow found.
+Agents never hold GitHub credentials, and the worker does every GitHub write. No job reaches a GitHub host, with
+one exception a person makes for one dataset at a time: `raw.githubusercontent.com` (file contents, read only),
+approved on the page for a record that names it. Each job asks csub only for the hosts in its binding, plus the
+hosts the dataset's earlier jobs were refused and a person has approved since, and the broker's policy is the
+ceiling: a host missing from the policy fails the round before submission, with an entry naming it (a person can
+approve the host from the page when starting the run). The snippets issue a round opens names the dataset's hosts,
+and autodev grants its agent's job those beside its package hosts; a round whose reader's job could reach none of
+the record's files asks for no reader and ends `blocked`, naming the host to approve. Unreviewed snippet code from
+a PR head runs only inside job sandboxes, and the verify job that judges its output loads no snippet code. Merging
+a snippet needs a person's approve of the crops its exact head made, plus the required status; so does saving them.
+The page's buttons need no login: they can ask the workflow to act, and cannot write what a workflow found.
 
 ## Operating it
 

@@ -196,9 +196,6 @@ class LimitsCfg(BaseModel):
     autodev_quiet_hours: float = (
         2  # a round waiting for a snippet ends `blocked` after this long without autodev at work
     )
-    fetch_bytes: float = 50e9
-    fetch_walltime_min: int = 480
-    fetch_attempts: int = 4
 
 
 class HarnessCfg(BaseModel):

@@ -420,11 +420,11 @@ export function datasetCards(d) {
   cards.push(
     card(
       "Cache",
-      "Its download in the raw cache, and each staged artifact: this dataset staged for one crop geometry by one recipe.",
+      "What its readers took whole, in the raw cache, and each staged artifact: this dataset staged for one crop geometry by one recipe.",
       raw
         ? kv([
             [
-              "raw download",
+              "raw cache",
               el(
                 "span",
                 { class: "pills" },

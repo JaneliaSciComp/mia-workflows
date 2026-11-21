@@ -53,7 +53,8 @@ datasets by catalog fields, patch size and pyramid levels, splits, weighting, ho
 created and run on the buffers page (*Create buffer*, *Run*); its issue in
 [mia-buffers](https://github.com/JaneliaSciComp/mia-buffers) is a copy of its timeline. On *Run* the worker plans it
 against the catalog at a pinned commit and the registry's **prepared** datasets, then sources every dataset of the
-pool in parallel: the raw files are fetched into a shared raw cache (one writer per record), and a harness job
+pool in parallel: a harness job reads from the source what the planned samples touch (a file its reader must
+take whole lands in a shared raw cache, one writer per record) and
 stages one **sparse OME-Zarr 0.6 pyramid per volume**, holding only the chunks that cover the planned samples, with
 the derivation (source bytes, code commits, plan, voxel size, verification) recorded in the Zarr itself and
 checked against the 0.6 schemas before it is saved. Each volume is registered with buffer-api as it becomes
@@ -67,6 +68,15 @@ A repair agent looks every few minutes for rounds that read "in progress" with n
 for a reason with a known remedy, and jobs, issues and pull requests a round left behind; it says what is wrong
 with the installation, resolves what it can through the same actions the page's buttons send, and leaves the
 rest under *Needs human* on the Overview page with what it takes.
+
+**A buffer is sourced on demand.** Nothing is downloaded ahead of a stage, and a dataset's size upstream decides
+nothing: a record of terabytes costs what its few hundred planned crops touch. The stage job is online, and the
+dataset's reader decides what crosses the network: it reads by HTTP range, in 1 MiB blocks kept in the job's own
+workspace, and takes a file whole only where ranges will not do (a server that ignores Range, a compressed zip
+member). Only a file taken whole lands in the raw cache, where later jobs find it. One job transfers at most
+`limits.job_bytes`; the raw quota is where staging waits while the cache is over it, never a charge for the
+record; and a dataset whose files a person placed by hand is staged from the cache with no network. The path of
+one record, the caps and what a rebuild reads: [Sourcing on demand](docs/development.md#sourcing-on-demand).
 
 A dataset that is not prepared is out of the pool. A preparation request (*Prepare these datasets* on the page)
 hands its records to mia-data, each with a `go` sent through buffer-api and charged to the request, and follows

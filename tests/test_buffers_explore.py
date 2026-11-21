@@ -117,7 +117,8 @@ def test_the_plan_summary_counts_over_every_row() -> None:
     summary = plan_view(PLAN, DATASETS, "p256-l1-2", ALL)["summary"]
     assert (summary["fitting"], summary["pool"], summary["prepared"], summary["in_progress"]) == (3, 2, 2, 0)
     assert (summary["unprepared"], summary["needs_human"], summary["not_prepared"]) == (1, 0, 1)
-    assert (summary["bytes_fitting"], summary["bytes_pool"], summary["bytes_to_fetch"]) == (180, 150, 80)
+    assert (summary["bytes_fitting"], summary["bytes_pool"]) == (180, 150)  # the datasets' size upstream
+    assert "bytes_to_fetch" not in summary  # a stage reads what its crops touch: no dataset is fetched
     assert (summary["dims"], summary["capacity"], summary["top_share"]) == (["2D"], 22, 0.75)
     assert [(step["label"], step["value"], step.get("remaining")) for step in summary["funnel"]] == [
         ("dims not selected", 4, 7),
