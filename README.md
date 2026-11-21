@@ -9,7 +9,7 @@ binding; **mia-buffers** turns a training-buffer spec into staged OME-Zarr pyram
 multi-resolution crops to training jobs. The three meet in **buffer-api**'s registry and its web page, where a
 person starts, approves and cancels rounds.
 Setup: [`docs/autodev-local-setup.md`](docs/autodev-local-setup.md). Running it under a bot identity:
-[`docs/github-app.md`](docs/github-app.md). Production layout: [`docs/deployment.md`](docs/deployment.md).
+[`docs/github-app.md`](docs/github-app.md). Installations, releases and the relay: [`docs/deployment.md`](docs/deployment.md).
 
 ## autodev
 

@@ -16,7 +16,7 @@ from mia_core.autonomy import set_pause
 from mia_core.config import JudgeCfg, manifest_path, read_manifest
 from mia_core.judge import eval as judge_eval
 
-from . import services
+from . import release, services
 from .manifest import load_manifest
 from .services import Service, Stack, Temporal, attach, dead_windows, is_running, kill, service_up, windows
 
@@ -165,6 +165,17 @@ def cmd_judge(stack: Stack, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_release(args: argparse.Namespace) -> int:
+    """`mia release <tag>` on this installation, or with `--to HOST:ROOT` on that one over ssh. Needs no manifest,
+    so it runs from any checkout with an `origin`."""
+    try:
+        if args.to:
+            return release.release_to(args.tag, args.to)
+        return release.release(args.tag)
+    except release.LayoutError as error:
+        sys.exit(f"mia release: {error}")
+
+
 COMMANDS = {
     "up": cmd_up,
     "down": cmd_down,
@@ -212,7 +223,12 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("dir")
     ev.add_argument("--limit", type=int, help="only the first N items")
     ev.add_argument("--model", help="override judge.model for this run")
+    rel = sub.add_parser("release", help="put a tagged checkout live: clone, install, check, flip current, restart")
+    rel.add_argument("tag")
+    rel.add_argument("--to", metavar="HOST:ROOT", help="push the tag and run the release on that installation over ssh")
     args = parser.parse_args(argv)
+    if args.cmd == "release":  # no manifest: it runs from any checkout with an origin
+        return cmd_release(args)
     stack = Stack(load_manifest(args.manifest))
     return COMMANDS[args.cmd](stack, args)
 

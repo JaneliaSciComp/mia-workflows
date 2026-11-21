@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from autodev.config import PROJECT_DIR
+from mia_core.config import CsubCfg
 from mia_core.fs import require_local_dir, require_secret_file
 from mia_core.hosts import PolicyError, generate_policy, placement_problem
 
@@ -29,7 +30,8 @@ from .manifest import Manifest
 
 PY = PROJECT_DIR / ".pixi/envs/default/bin/python"
 BROKER = PROJECT_DIR / ".pixi/envs/default/bin/csub-broker"
-SCRATCH = Path("/scratch")  # node-local; the csub broker's unix socket lives under it
+CSUB = PROJECT_DIR / ".pixi/envs/default/bin/csub"  # `csub relay` and `csub probe`
+SCRATCH = Path("/scratch")  # node-local; the csub broker's unix socket lives under it unless csub.run_dir says
 TEMPORAL_CLI_URL = "https://temporal.download/cli/archive/latest?platform=linux&arch=amd64"
 
 
@@ -216,6 +218,7 @@ class Service:
     config_path: Path  # the file the worker reads: mia.yaml, or the legacy per-app file
     cfg: Any  # the app's validated Config
     legacy: bool = False  # mia.yaml named a per-app config file (`services.<name>.config`)
+    run_dir: Path | None = None  # csub.run_dir: where the broker sockets go; None: /scratch/<user>
 
     def env(self) -> dict[str, str]:
         """The variables that point the app's CLI at its config."""
@@ -232,8 +235,8 @@ class Service:
         return self.state.with_name(self.state.name + "-host")
 
     @property
-    def run(self) -> Path:  # the csub broker's unix socket dir
-        return SCRATCH / (os.environ.get("USER") or getpass.getuser()) / self.name
+    def run(self) -> Path:  # the csub broker's (or relay's) unix socket dir
+        return (self.run_dir or SCRATCH / (os.environ.get("USER") or getpass.getuser())) / self.name
 
     @property
     def secret(self) -> Path | None:
@@ -261,13 +264,16 @@ class Stack:
         self.services: dict[str, Service] = {}
         for name, block in manifest.services.items():
             app = APPS[block.app]
+            run_dir = manifest.csub.run_dir
             if block.config:
                 print(f"{name}: services.{name}.config is deprecated; move its sections into mia.yaml", file=sys.stderr)
-                self.services[name] = Service(name, app, block.config, app.load_config(block.config), legacy=True)
+                cfg = app.load_config(block.config)
+                self.services[name] = Service(name, app, block.config, cfg, legacy=True, run_dir=run_dir)
             elif manifest.path is None:
                 sys.exit(f"mia: service {name!r} has no config: file and the manifest was not loaded from a file")
             else:
-                self.services[name] = Service(name, app, manifest.path, app.load_config(manifest.path, service=name))
+                cfg = app.load_config(manifest.path, service=name)
+                self.services[name] = Service(name, app, manifest.path, cfg, run_dir=run_dir)
         addresses = {s.cfg.temporal.address for s in self.services.values()}
         if len(addresses) != 1:
             sys.exit(f"mia: services disagree on temporal.address: {sorted(addresses)}")
@@ -415,6 +421,42 @@ def ensure_policy(stack: Stack) -> Path:
         sys.exit(f"mia: csub.base_policy: {error}")
 
 
+def broker_command(svc: Service, csub: CsubCfg, policy: Path, sock: Path) -> str:
+    """The broker window's command line: `csub-broker --serve` on this host, or with `csub.broker: relay` a
+    `csub relay` on the same socket that forwards each request over ssh to this checkout's csub-broker on the
+    submit host, on the same generated policy (the home directory is shared with it)."""
+    log = svc.host / "logs/broker.log"
+    if csub.broker == "local":
+        command = shell(BROKER, "--policy", policy, "--serve", sock)
+    else:
+        env = ["CSUB_TRANSPORT=ssh", f"CSUB_SSH_HOST={csub.ssh_host}"]
+        if csub.ssh_user:
+            env.append(f"CSUB_SSH_USER={csub.ssh_user}")
+        env += [f"CSUB_SSH_KEY={csub.ssh_key}", f"CSUB_BROKER_CMD={BROKER} --policy {policy}"]
+        command = shell("env", *env, CSUB, "relay", sock)
+    return f"{command} 2>&1 | tee -a {shell(log)}"
+
+
+BROKER_START_S = 15  # how long `mia up` waits for a relay's socket before probing the broker through it
+
+
+def broker_answers(sock: Path) -> str | None:
+    """Ask the broker behind `sock` what it allows (`csub probe`) once the socket is there: None when it answers,
+    else the last line of what csub said, so a key the submit host refuses is found at start, not at the first job."""
+    for _ in range(BROKER_START_S * 5):
+        if sock.exists():
+            break
+        time.sleep(0.2)
+    else:
+        return f"relay: no socket at {sock} after {BROKER_START_S} s"
+    env = {**os.environ, "CSUB_TRANSPORT": "unix", "CSUB_SOCKET": str(sock)}
+    done = subprocess.run([str(CSUB), "probe"], env=env, capture_output=True, text=True)
+    if done.returncode == 0:
+        return None
+    lines = (done.stderr or done.stdout).strip().splitlines()
+    return lines[-1] if lines else f"csub probe exited {done.returncode}"
+
+
 WORKER_START_S = 90  # how long `mia up` waits for a new worker's first poll
 API_START_S = 30  # ... and for buffer-api to take connections, before any worker that writes to it starts
 
@@ -466,11 +508,14 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
     if not svc.secret:  # the sandbox masks .env and tmux passes no env, so the GitHub secret must be a file
         sys.exit(f"{svc.name}: set github.token_file (auth: token) or github.private_key_path (auth: app)")
     sandbox = stack.manifest.sandbox_dir / "sandbox-run.sh"
-    prerequisites = (
+    csub = stack.manifest.csub
+    prerequisites = [
         (PY, "run `pixi install`"),
         (BROKER, "run `pixi install`"),
         (sandbox, "set sandbox_dir in mia.yaml"),
-    )
+    ]
+    if csub.broker == "relay":
+        prerequisites.append((CSUB, "run `pixi install`"))
     for path, hint in prerequisites:
         if not os.access(path, os.X_OK):
             sys.exit(f"{svc.name}: {path} not found ({hint})")
@@ -500,6 +545,10 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
         except RuntimeError as error:
             sys.exit(f"{svc.name}: {error}")
     policy = ensure_policy(stack)
+    try:
+        require_local_dir(svc.run)  # the socket dir: host-local, like local_root
+    except RuntimeError as error:
+        sys.exit(f"{svc.name}: csub.run_dir: {error}")
     for d in (svc.state / "logs", svc.host / "logs", *_rw_binds(svc)):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -517,9 +566,12 @@ def service_up(svc: Service, stack: Stack, temporal: Temporal) -> int:
         return 0
 
     sock = svc.run / "csub.sock"
-    broker_log = svc.host / "logs/broker.log"
-    broker = f"{shell(BROKER, '--policy', policy, '--serve', sock)} 2>&1 | tee -a {shell(broker_log)}"
-    new_session(svc.name, "broker", broker, keep=True)
+    sock.unlink(missing_ok=True)  # a broker killed with its session left its socket; the probe must not reach it
+    new_session(svc.name, "broker", broker_command(svc, csub, policy, sock), keep=True)
+    if csub.broker == "relay" and (problem := broker_answers(sock)) is not None:
+        print(f"{svc.name}: NOT RUNNING: the relay cannot reach the broker: {problem}", file=sys.stderr)
+        print(f"{svc.name}: see `mia logs {svc.name} broker`; then `mia restart {svc.name}`", file=sys.stderr)
+        return 1
     allow = ["github.com", "api.github.com", temporal.host]
     if (service := getattr(cfg, "service", None)) and (host := urlparse(service.url).hostname):
         allow.append(host)  # every worker with a `service` block writes the registry (mia-data's dataset rows too)

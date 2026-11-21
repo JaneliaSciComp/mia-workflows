@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import sys
 from pathlib import Path
 from typing import Literal
@@ -33,6 +34,7 @@ class ServiceCfg(BaseModel):
 
 
 class Manifest(BaseModel):
+    host: str | None = None  # the host this file is for; `mia` refuses to run elsewhere
     sandbox_dir: Path = Path("../agentic-sandbox/scripts")  # relative to the repo
     temporal: TemporalCfg = TemporalCfg()
     services: dict[str, ServiceCfg]
@@ -67,6 +69,10 @@ def load_manifest(path: str | os.PathLike | None = None) -> Manifest:
     path = manifest_path(path or os.environ.get("MIA_CONFIG")).expanduser().resolve()
     data = read_manifest(path)
     try:
-        return Manifest(**{**data, "csub": csub_config(data), "path": path})
+        manifest = Manifest(**{**data, "csub": csub_config(data), "path": path})
     except ValidationError as e:
         sys.exit(f"mia: {path}: {e}")
+    hostname = socket.gethostname()
+    if manifest.host and manifest.host.split(".")[0] != hostname.split(".")[0]:
+        sys.exit(f"mia: {path} is for host {manifest.host}; this is {hostname}")
+    return manifest
