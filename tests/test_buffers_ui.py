@@ -433,6 +433,14 @@ def rendered(*bodies: str) -> list[str]:
     return run_js("print(input.map(body => markdown(body).map(html).join('')));", {"markdown.js": "markdown"}, bodies)
 
 
+def test_servable_counts_read_train_val_test() -> None:
+    """The splits of a servable count read train, val, test, whatever order the server sent them in."""
+    out = run_js(
+        "print(servableText(input))", {"buffers.js": "servableText"}, {"test": 1, "extra": 4, "train": 2, "val": 3}
+    )
+    assert out == "train 2 · val 3 · test 1 · extra 4"
+
+
 def test_a_buffers_timeline_says_how_many_datasets_never_which() -> None:
     """The step above the timeline lists the datasets. An entry about one dataset is left out; a plan and a staged
     board lose their table, a result its fold of jobs and its list of what is servable, whose length stays."""

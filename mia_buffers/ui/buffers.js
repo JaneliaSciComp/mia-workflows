@@ -31,8 +31,10 @@ import { load, S } from "./api.js";
 import { pagedTable, pageOf, reloadTables } from "./table.js";
 
 // ---- buffers
+const SPLIT_ORDER = ["train", "val", "test"]; // a split of another name follows them
 export function servableText(servable) {
-  const e = Object.entries(servable || {});
+  const at = ([split]) => SPLIT_ORDER.indexOf(split) + 1 || SPLIT_ORDER.length + 1;
+  const e = Object.entries(servable || {}).sort((a, b) => at(a) - at(b));
   return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none";
 }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
