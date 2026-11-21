@@ -3518,3 +3518,25 @@ def test_put_transfers_takes_the_token_and_only_rows(tmp_path):
     assert s.handle("PUT", "/transfers/r1/stage-2", {}, bad_row, ok)[0] == 422
     assert s.handle("PUT", "/transfers/r1/../x", {}, body, ok)[0] == 422
     assert [row["job"] for row in s.ledger.transfers(0, 200)] == ["r1/stage-1"]
+
+
+def test_host_routes_read_the_transfers(tmp_path, monkeypatch):
+    from tests.test_buffers_throughput import ROWS, row
+
+    now = 102 * 60 + 30
+    monkeypatch.setattr("mia_buffers.api.time.time", lambda: now)
+    s = BufferService(Ledger(tmp_path / "l.sqlite"), token="secret")
+    for job in ("j1", "j2"):
+        s.ledger.put_transfers(job, "buffers", [r for r in ROWS if r["job"] == job])
+    s.ledger.put_transfers("j3", "buffers", [row(102, "j3", 60, 100, {"200": 1}, host="b.org")])
+    hosts = s.handle("GET", "/hosts", {}, b"", {})[1]
+    assert [h["host"] for h in hosts["hosts"]] == ["a.org", "b.org"] and hosts["hosts"][0]["bytes"] == 10800
+    assert hosts["days"] == 7.0
+    out = s.handle("GET", "/hosts/A.org", {}, b"", {})[1]
+    assert out["host"] == "a.org" and [lv["level"] for lv in out["levels"]] == [0, 3, 4]
+    minutes = s.handle("GET", "/hosts/a.org/minutes", {}, b"", {})[1]["minutes"]
+    assert len(minutes) == 3 and minutes[0]["jobs"] == 2
+    assert s.handle("GET", "/hosts/none.org", {}, b"", {}) == (200, {"host": "none.org", "days": 7.0, "levels": []}, {})
+    for bad in ({"days": "x"}, {"days": "0"}, {"days": "367"}):
+        assert s.handle("GET", "/hosts", bad, b"", {})[0] == 422
+    assert s.handle("GET", "/hosts/a.org/minutes", {"from": "0", "to": str(8 * 86400)}, b"", {})[0] == 422

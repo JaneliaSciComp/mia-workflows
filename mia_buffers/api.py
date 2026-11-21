@@ -68,6 +68,7 @@ from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
 from .stream import Changes
 from .sync import scan_assets, scan_storage
+from .throughput import by_level, by_minute, summary
 
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
@@ -655,6 +656,9 @@ ROUTES = [
     ("GET", re.compile(r"^/health$"), "health", "read"),
     ("GET", re.compile(r"^/run/([a-z]+)/(\d+)$"), "run_status", "read"),
     ("POST", re.compile(r"^/hosts/missing$"), "hosts_missing", "read"),
+    ("GET", re.compile(r"^/hosts$"), "host_summaries", "read"),
+    ("GET", re.compile(r"^/hosts/([^/]+)/minutes$"), "host_minutes", "read"),
+    ("GET", re.compile(r"^/hosts/([^/]+)$"), "host_levels", "read"),
     ("POST", re.compile(r"^/cases$"), "open_case", "worker"),
     ("PUT", re.compile(r"^/cases/(\d+)$"), "update_case", "worker"),
     ("GET", re.compile(r"^/cases$"), "cases", "read"),
@@ -884,6 +888,52 @@ class BufferService:
             return 200, {"locks": locks}, {}
         rows, total = paged(locks, page, LOCK_SORTS, lambda row: (row["kind"], row["key"], row["owner"]))
         return 200, {"locks": rows, "total": total}, {}
+
+    # --- what each host gave: the transfer rows read per host, by load level and by minute -------
+
+    @staticmethod
+    def _number(query: dict[str, str], key: str, default: float) -> float:
+        try:
+            return float(query.get(key, default))
+        except ValueError:
+            raise HttpError(422, f"query {key} must be a number") from None
+
+    def _window(self, query: dict[str, str]) -> tuple[float, int, int]:
+        """The `days` asked for (default 7) and the minutes it covers, ending with the current one."""
+        days = self._number(query, "days", 7)
+        if not 0 < days <= 366:
+            raise HttpError(422, f"query days must be over 0 and at most 366, got {days}")
+        until = int(time.time() // 60)
+        return days, until - int(days * 1440), until
+
+    def _host_summaries(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Every host with rows in the window: its minutes added over jobs and read as one row, most bytes first."""
+        days, since, until = self._window(query)
+        minutes: dict[str, list[dict]] = {}
+        for minute in by_minute(self.ledger.transfers(since, until)):
+            minutes.setdefault(minute["host"], []).append(minute)
+        hosts = [{"host": host, **summary(rows)} for host, rows in minutes.items()]
+        return 200, {"days": days, "hosts": sorted(hosts, key=lambda row: (-row["bytes"], row["host"]))}, {}
+
+    def _host_levels(self, host: str, *, query: dict[str, str], body: bytes) -> Response:
+        """One host's window by load level; a host with no rows has no levels."""
+        days, since, until = self._window(query)
+        host = host.lower()
+        return (
+            200,
+            {"host": host, "days": days, "levels": by_level(by_minute(self.ledger.transfers(since, until, host)))},
+            {},
+        )
+
+    def _host_minutes(self, host: str, *, query: dict[str, str], body: bytes) -> Response:
+        """One host's minutes between `from` and `to` (unix seconds; `to` defaults to now, `from` to a day before)."""
+        end = self._number(query, "to", time.time())
+        start = self._number(query, "from", end - 86400)
+        if end - start > 7 * 86400:
+            raise HttpError(422, "from and to span at most 7 days")
+        host = host.lower()
+        rows = self.ledger.transfers(int(start // 60), int(end // 60), host)
+        return 200, {"host": host, "minutes": by_minute(rows)}, {}
 
     # --- records, datasets and the plan: what the catalog holds and which of it is prepared ------
 
