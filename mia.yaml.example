@@ -271,7 +271,8 @@ services:
 
   # mia-buffers: training buffers. `buffers_repo` receives one issue per buffer spec and per preparation request,
   # a copy of its timeline (they are created and run on the page); `datasets_repo` is mia-data's issue repo.
-  # `sourcing`: stage jobs in flight per buffer (`parallel`) and the tensorizer under <harness.dir>/tensorizers/.
+  # `sourcing`: stage jobs in flight per buffer (`parallel`), of those on any one host a dataset's files are on
+  # (`per_source`), and the tensorizer under <harness.dir>/tensorizers/.
   mia-buffers:
     app: mia-buffers
     temporal: {namespace: mia-buffers}
@@ -279,5 +280,6 @@ services:
       buffers_repo: JaneliaSciComp/mia-buffers
       datasets_repo: JaneliaSciComp/mia-workflow-data
     sourcing:
-      parallel: 4
+      parallel: 20
+      per_source: 1
       tensorizer: muvit-2d

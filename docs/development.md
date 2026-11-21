@@ -605,7 +605,8 @@ the round ends `blocked` saying which host to approve (`NoReachableFiles`).
 3. **The plan gate** (a `plan_first` round). The stage is `plan-review`. `approve` (the page's *Run*) starts
    sourcing; a new `go` with an edited spec plans again.
 4. **Sourcing.** The buffer is created in buffer-api (id = round id, `i<number>-e<action id>`). Per dataset, in
-   parallel (`sourcing.parallel` stage jobs at a time, heaviest first): the binding is read from
+   parallel (`sourcing.parallel` stage jobs at a time, `sourcing.per_source` of them on one host, heaviest
+   first): the binding is read from
    `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data saved for
    it (`mia_data.publish.prepared_row`, the registry's rule too); the quota is waited for and the pyramid staged,
    its job reading from the source what the planned crops touch (see "Sourcing on demand" and "The cache"); then
@@ -670,8 +671,12 @@ terabytes whose planned crops touch a few hundred megabytes costs those megabyte
 2. **Lock.** The worker takes `locks/raw/<record>` and holds it until the volumes are registered.
 3. **Quota wait.** While the raw cache is over `quota.raw_bytes` the dataset is `blocked`, with its lock released
    and no stage slot held. The check is about what the cache holds now; the record is charged nothing.
-4. **Stage slot.** One of `sourcing.parallel`. A dataset that had to wait for it is checked against the quota once
-   more, and goes back to waiting without the slot when the cache filled meanwhile.
+4. **Stage slot.** One of `sourcing.parallel` in all, and one of `sourcing.per_source` on each host the binding's
+   files are on (`BindingInfo.sources`, the hosts of its URLs), so one archive is asked by few jobs at a time
+   while the datasets of other archives go on (`StageSlots` in `mia_buffers/workflows.py`). A job that stages
+   dropped files reads the cache alone and counts against no source. A dataset that had to wait for its slot is
+   checked against the quota once more, and goes back to waiting without the slot when the cache filled
+   meanwhile.
 5. **Stage job.** `harness stage`, then `harness check-stage`, with the binding's hosts and the record's raw cache
    read-write. The job opens the binding's arrays and reads the planned regions; each read goes where its reader
    sends it (the table below).

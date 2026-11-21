@@ -580,6 +580,7 @@ class Activities:
             cfg.service.url,
             poll_minutes=cfg.temporal.poll_minutes,
             max_tick_minutes=MAX_POLL_MINUTES,
+            per_source=cfg.sourcing.per_source,
         )
 
     # --- the issue ---------------------------------------------------------------------------
@@ -1038,7 +1039,9 @@ class Activities:
             activity.logger.warning("%s: registry unavailable, no host of its own granted: %s", record, error)
             granted = []
         hosts = sorted({*job_hosts(urls, self.cfg), *granted})
-        return BindingInfo(True, str(dest), digest, hosts, staged=staged, artifact=artifact, refused=refused)
+        return BindingInfo(
+            True, str(dest), digest, hosts, sources=url_hosts, staged=staged, artifact=artifact, refused=refused
+        )
 
     async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str, str]:
         """(found, artifact id, refused): found when buffer-api's registry holds an `ok` pyramid under this artifact

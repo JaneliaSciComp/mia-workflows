@@ -65,7 +65,7 @@ def test_roots_accept_path_and_url_form(tmp_path):
     assert cfg.paths.staged_root == (tmp_path / "staged").resolve() and cfg.paths.staged_root_url is None
     assert cfg.paths.link(cfg.paths.raw_root / "r 1") == "https://b/raw/r%201"
     assert cfg.paths.link(cfg.paths.staged_root) is None
-    assert cfg.sourcing.parallel == 4 and cfg.sourcing.tensorizer == "muvit-2d"
+    assert (cfg.sourcing.parallel, cfg.sourcing.per_source, cfg.sourcing.tensorizer) == (20, 1, "muvit-2d")
     assert cfg.service.url == "http://127.0.0.1:8765"
 
 

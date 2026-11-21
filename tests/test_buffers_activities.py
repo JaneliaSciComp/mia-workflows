@@ -536,6 +536,7 @@ async def test_read_binding_found_hosts_and_copy(acts):
     info = await acts.read_binding(ROUND, U937)
     assert info.found and info.errors == [] and info.manual == []
     assert info.hosts == ["conda.anaconda.org", "files.pythonhosted.org", "pypi.org", "repo.prefix.dev", "zenodo.org"]
+    assert info.sources == ["zenodo.org"]  # where its files are: no package host
     copied = acts.cfg.paths.state_dir / "rounds" / ROUND / "bindings" / f"{U937}.yaml"
     assert Path(info.path) == copied and info.hash == hashlib.sha256(copied.read_bytes()).hexdigest()
 
@@ -546,6 +547,7 @@ async def test_read_binding_manual_when_host_not_allowed(acts):
     write_binding(acts, BCSS, urls, snippet="png-pairs")
     info = await acts.read_binding(ROUND, BCSS)
     assert info.found and info.hosts == []
+    assert info.sources == []  # dropped files are read from the cache: no source is asked
     assert info.manual == [
         ["https://drive.google.com/uc?export=download&id=1", "file-0"],
         ["manual://x/b.zip", "b.zip"],
@@ -860,7 +862,8 @@ async def test_refusing_an_event_that_is_no_action_explains_and_touches_no_label
 
 async def test_limits_come_from_config(acts):
     limits = await acts.limits()
-    assert (limits.parallel, limits.walltime_min, limits.service_url) == (4, 120, "http://127.0.0.1:8765")
+    assert (limits.parallel, limits.walltime_min, limits.service_url) == (20, 120, "http://127.0.0.1:8765")
+    assert limits.per_source == 1
     assert (limits.poll_minutes, limits.lock_ttl_s) == (2, 900)
 
 

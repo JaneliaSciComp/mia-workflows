@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -103,6 +103,40 @@ PREP_DONE = ("prepared", "shelved")
 # nudge outcomes that settle a record as needs-human: done but unpublished needs a human run, a failed nudge a look
 PREP_HUMAN = ("done-unpublished", "unknown")
 NEW_ROUND = "Ended: a new round was started."  # the result of a pass a new round found still open
+
+
+class StageSlots:
+    """The stage jobs a round runs at once: `total` in all and, of those, `per_source` on any one host a dataset's
+    files are on (0: no limit by source). A dataset takes its sources first and then its slot of the total, so
+    one that waits for the total keeps a second dataset of its source waiting too."""
+
+    def __init__(self, total: int, per_source: int) -> None:
+        self.total, self.per_source = asyncio.Semaphore(max(1, total)), per_source
+        self.taken: list[list[str]] = []  # the sources of each dataset that holds a slot or waits for the total
+
+    def _crowded(self, sources: list[str]) -> bool:
+        """Whether one of `sources` has as many datasets on it as it may."""
+        return self.per_source > 0 and any(
+            sum(source in other for other in self.taken) >= self.per_source for source in sources
+        )
+
+    def busy(self, sources: list[str]) -> bool:
+        """Whether a dataset of these sources would wait for its slot."""
+        return self.total.locked() or self._crowded(sources)
+
+    @contextlib.asynccontextmanager
+    async def take(self, sources: list[str]) -> AsyncIterator[None]:
+        """Hold a stage slot for a dataset whose files are on `sources` (none: a slot of the total alone)."""
+        # ponytail: a dataset on several sources waits until all are free at once and can be passed by many that
+        # need one; fine while nearly every dataset has one source, a queue per source is the upgrade
+        while self._crowded(sources):  # one release wakes every waiter of the source: the first takes it
+            await workflow.wait_condition(lambda: not self._crowded(sources))
+        self.taken.append(sources)
+        try:
+            async with self.total:
+                yield
+        finally:
+            self.taken.remove(sources)
 
 
 class RoundFailed(Exception):
@@ -206,7 +240,7 @@ class MiaBuffer:
         self.wanted = 0  # the tick a waiter waits for; the ticker starts no timer while it has been reached
         self._ticker: asyncio.Task | None = None
         self.rebuild: list[tuple[asyncio.Task, DatasetStatus]] = []  # degraded datasets staging again (d-lifecycle)
-        self.rebuild_slots: asyncio.Semaphore | None = None  # their stage slots
+        self.rebuild_slots: StageSlots | None = None  # their stage slots
         self.degraded_records: set[str] = set()  # records of the degraded signals the running rebuild answers
         self.degraded_reason = ""
         self.paused_round = False  # a job of this round met autonomy.pause: the round stops once nothing runs
@@ -763,14 +797,14 @@ class MiaBuffer:
 
     async def _source_all(self, limits: SourcingLimits) -> bool:
         state = self.state
-        semaphore = asyncio.Semaphore(max(1, limits.parallel))
+        slots = self._slots(limits)
         # ponytail: no continue-as-new during sourcing (the tasks live in this run); fine below ~2,000 datasets per
         # buffer, beyond that persist per-dataset progress and resume from it
         datasets = state.datasets
         starts = list(range(len(datasets)))
         if workflow.patched("c-cache"):  # the heaviest first, so they take the first stage slots
             starts = sorted(starts, key=lambda index: (-datasets[index].weight, datasets[index].record))
-        created = {index: asyncio.create_task(self._source(datasets[index], semaphore)) for index in starts}
+        created = {index: asyncio.create_task(self._source(datasets[index], slots)) for index in starts}
         tasks = [created[index] for index in range(len(datasets))]  # in state.datasets order, as the zips below need
         self.sourcing_tasks = tasks
         deadline = workflow.now() + timedelta(days=state.timeout_days)
@@ -834,10 +868,10 @@ class MiaBuffer:
         """Source every dataset; once nothing runs and something is servable, stop at the staged gate; after the
         approve, wait for the stragglers. Approves that come while jobs run are refused (no gate is open)."""
         state = self.state
-        semaphore = asyncio.Semaphore(max(1, limits.parallel))
+        slots = self._slots(limits)
         datasets = state.datasets
         starts = sorted(range(len(datasets)), key=lambda index: (-datasets[index].weight, datasets[index].record))
-        created = {index: asyncio.create_task(self._source(datasets[index], semaphore)) for index in starts}
+        created = {index: asyncio.create_task(self._source(datasets[index], slots)) for index in starts}
         tasks = [created[index] for index in range(len(datasets))]
         self.sourcing_tasks = tasks
         # one timer for the round's day limit: the waits below start none of their own (a timer per wake would
@@ -1141,7 +1175,7 @@ class MiaBuffer:
             self._set(dataset, "pending")
             if self.rebuild_slots is None:  # the first of this rebuild: its slots and its ticker
                 self.timed_out = False  # the round's day limit is long past; a quota block waits, not drops
-                self.rebuild_slots = asyncio.Semaphore(max(1, limits.parallel))
+                self.rebuild_slots = self._slots(limits)
                 self._start_ticker(limits)
             self.rebuild.append((asyncio.create_task(self._source(dataset, self.rebuild_slots)), dataset))
         return True if self.rebuild else await self._end_rebuild()
@@ -1303,11 +1337,15 @@ class MiaBuffer:
         extra = render_ready(state.buffer_id or "", limits.service_url, servable, short or [], state.min_fraction)
         await self._stage("ready", detail, extra=extra)
 
-    async def _source(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
+    def _slots(self, limits: SourcingLimits) -> StageSlots:
+        """The stage slots of a round or a rebuild: by source too, in a run that began with that limit."""
+        return StageSlots(limits.parallel, limits.per_source if workflow.patched("m-sources") else 0)
+
+    async def _source(self, dataset: DatasetStatus, slots: StageSlots) -> None:
         """Binding → (drop) → stage job → register; the dataset's status records the outcome. An activity that
         gives up fails this dataset alone, never the round."""
         try:
-            await self._source_steps(dataset, semaphore)
+            await self._source_steps(dataset, slots)
         except BudgetRefused as error:
             if str(error) == PAUSED:  # the round stops once nothing runs; the dataset is not at fault
                 self._set(dataset, "pending", PAUSED)
@@ -1321,9 +1359,9 @@ class MiaBuffer:
                 return  # a cancel that landed inside an activity: the drop or abandon already says why
             await self._fail(dataset, error_message(error))
 
-    async def _source_steps(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
+    async def _source_steps(self, dataset: DatasetStatus, slots: StageSlots) -> None:
         if workflow.patched("c-cache"):
-            return await self._source_cached(dataset, semaphore)
+            return await self._source_cached(dataset, slots)
         state = self.state
         assert state.round_id and state.pins and state.buffer_id
         round_id, record = state.round_id, dataset.record
@@ -1336,7 +1374,7 @@ class MiaBuffer:
             return await self._fail(dataset, REFUSED_ARTIFACT.format(artifact=binding.artifact, why=binding.refused))
         if binding.manual:
             await self._await_drop(dataset)
-        async with semaphore:
+        async with slots.take([]):
             dataset.status = "staging"
             if not binding.staged:  # else the registry holds this binding's pyramid from an earlier round: reuse it
                 workspace = await self._act(
@@ -1367,7 +1405,7 @@ class MiaBuffer:
             dataset.jobs,
         )
 
-    async def _source_cached(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
+    async def _source_cached(self, dataset: DatasetStatus, slots: StageSlots) -> None:
         """`c-cache`: binding → (drop) → the record's raw-cache lock → quota wait → stage → register → release.
         The lock is held until the volumes are registered, so a second buffer of the same record waits and then
         reuses the pyramid the first one staged. The stage job is online with the raw cache read-write: its readers
@@ -1387,7 +1425,7 @@ class MiaBuffer:
             await self._await_drop(dataset, mark=True)
             self._set(dataset, "pending")  # no longer waiting on a human: not dropped at the timeout, nor abandoned
         if binding.staged and not dataset.rebuilds:  # the registry holds this binding's pyramid: reuse it, no lock
-            return await self._reuse(dataset, semaphore, " The pyramid was staged earlier for this binding and reused.")
+            return await self._reuse(dataset, slots, " The pyramid was staged earlier for this binding and reused.")
         owner = f"mia-buffers {round_id} {record}"
         lock = ["raw", record, owner]
         # ponytail: between a take and the next await_job poll the lock is not heartbeated (prepare + submit retries
@@ -1397,15 +1435,13 @@ class MiaBuffer:
         try:
             while True:
                 try:
-                    return await self._source_locked(dataset, semaphore, owner, holder)
+                    return await self._source_locked(dataset, slots, owner, holder)
                 except LockChanged as changed:  # another owner had the cache meanwhile: look at it again
                     holder = changed.holder
         finally:
             await self._release(lock)
 
-    async def _source_locked(
-        self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, owner: str, holder: str
-    ) -> None:
+    async def _source_locked(self, dataset: DatasetStatus, slots: StageSlots, owner: str, holder: str) -> None:
         """Under the record's lock: re-read the binding (`holder` may have staged it meanwhile), wait while the raw
         cache is over its quota (holding no stage slot), take a stage slot, stage, register. After a wait for the
         slot the quota is asked again (other jobs ran meanwhile; over: back to waiting, without the slot).
@@ -1417,13 +1453,13 @@ class MiaBuffer:
         if binding.staged and not dataset.rebuilds:  # the lock's previous holder staged it while we waited
             built = f" The pyramid was staged by {holder} while this buffer waited and reused." if holder else ""
             return await self._reuse(
-                dataset, semaphore, built or " The pyramid was staged earlier for this binding and reused."
+                dataset, slots, built or " The pyramid was staged earlier for this binding and reused."
             )
         if dataset.rebuilds:  # d-lifecycle: another buffer of this artifact may have rebuilt it while we waited
             missing = await self._act("missing_records", state.buffer_id, seconds=300, result_type=list[str])
             if record not in missing:
                 again = f" The pyramid was rebuilt by {holder} while this buffer waited and reused." if holder else ""
-                return await self._reuse(dataset, semaphore, again or " The pyramid is back on disk and reused.")
+                return await self._reuse(dataset, slots, again or " The pyramid is back on disk and reused.")
         online = not binding.manual  # files a person dropped are read from the cache alone, and add nothing to it
         if not online and dataset.rebuilds:  # they exist nowhere else: gone from the cache, they cannot be staged
             if not await self._act("raw_ready", round_id, record, seconds=300, result_type=bool):
@@ -1431,8 +1467,9 @@ class MiaBuffer:
         while True:
             if online and not await self._quota(dataset, owner):
                 return  # dropped
-            waited = semaphore.locked()
-            async with semaphore:
+            sources = binding.sources if online else []  # a job that reads the cache alone crowds no source
+            waited = slots.busy(sources)
+            async with slots.take(sources):
                 await self._retake(dataset, owner)  # refreshed after the wait for a stage slot
                 if online and waited:
                     quota = await self._act("check_quota", round_id, record, result_type=QuotaCheck)
@@ -1463,10 +1500,10 @@ class MiaBuffer:
             break
         await self._register(dataset, staged, "")
 
-    async def _reuse(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore, reused: str) -> None:
+    async def _reuse(self, dataset: DatasetStatus, slots: StageSlots, reused: str) -> None:
         """A pyramid staged from this very binding is on disk: re-read its report and register it, no job."""
         assert self.state.round_id
-        async with semaphore:
+        async with slots.take([]):
             self._set(dataset, "staging")
             staged = await self._act(
                 "read_stage",

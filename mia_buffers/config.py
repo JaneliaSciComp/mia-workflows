@@ -148,7 +148,8 @@ class PathsCfg(mia_data_config.PathsCfg):
 
 
 class SourcingCfg(BaseModel):
-    parallel: int = Field(default=4, ge=1)  # stage jobs in flight per buffer
+    parallel: int = Field(default=20, ge=1)  # stage jobs in flight per buffer
+    per_source: int = Field(default=1, ge=1)  # of those, on any one host a dataset's files are on
     tensorizer: str = "muvit-2d"  # must exist under <harness.dir>/tensorizers/
 
 

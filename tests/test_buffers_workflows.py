@@ -974,6 +974,7 @@ LIFECYCLE_HISTORY = HISTORY.with_name("buffer_history_d.json")
 REBUILD_HISTORY = HISTORY.with_name("buffer_history_d_rebuild.json")
 GATE_HISTORY = HISTORY.with_name("buffer_history_k.json")
 RESULTS_HISTORY = HISTORY.with_name("buffer_history_r.json")
+SOURCES_HISTORY = HISTORY.with_name("buffer_history_m.json")
 PREP_RESULTS_HISTORY = HISTORY.with_name("prep_history_r.json")
 
 
@@ -1045,6 +1046,35 @@ async def test_replay_buffer_history_r(env):
             await idle(h, m, "staged")
             RESULTS_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
     history = WorkflowHistory.from_json("buffers-stage-results", RESULTS_HISTORY.read_text())
+    await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
+
+
+def two_sources() -> Mocks:
+    """Three datasets, two of them on one host, one job per source: the jobs of the two wait at the gate."""
+    three = [DatasetPlan(name, "TEM", weight, False) for name, weight in (("z1", 0.5), ("z2", 0.3), ("fig", 0.2))]
+    on = lambda host: BindingInfo(True, "/s/x.yaml", "bh", [host], sources=[host])  # noqa: E731
+    return Mocks(
+        plan=PlanResult(True, [], three, 1, levels=[1], patch=64),
+        bindings={"z1": on("zenodo.org"), "z2": on("zenodo.org"), "fig": on("figshare.com")},
+        limits=SourcingLimits(20, 120, "http://svc:8765", per_source=1),
+        gate=asyncio.Event(),
+        gate_on="stage-z",  # whichever zenodo dataset got its source first holds it here
+    )
+
+
+async def test_replay_buffer_history_m(env):
+    """A run under the `m-sources` patch (stage slots by source): two datasets of one host are staged one after
+    the other beside a third of another host. Re-record this one alone, so the older fixtures keep their paths:
+    MIA_BUFFERS_RECORD_HISTORY=1 pixi run pytest tests/test_buffers_workflows.py -k replay_buffer_history_m"""
+    if os.environ.get("MIA_BUFFERS_RECORD_HISTORY"):
+        m = two_sources()
+        async with started(env, m) as h:
+            await approve(h, m)
+            await until(lambda: len(m.of("submit")) == 2, m=m)
+            m.gate.set()
+            await ready(h, m)
+            SOURCES_HISTORY.write_text(json.dumps(_scrub((await h.fetch_history()).to_json_dict()), indent=1) + "\n")
+    history = WorkflowHistory.from_json("buffers-sources", SOURCES_HISTORY.read_text())
     await Replayer(workflows=[MiaBuffer]).replay_workflow(history)
 
 
@@ -1295,6 +1325,22 @@ async def test_a_dataset_that_waited_for_a_stage_slot_is_checked_again_and_waits
         "take_lock",  # the slot is free this time: no third check
         "release_lock",
     ]
+
+
+async def test_one_stage_job_per_source_and_the_other_sources_go_on(env):
+    """With one job per source, the second dataset of a host waits for the first one's job while a dataset of
+    another host is staged beside it, though the total would let all three run."""
+    m = two_sources()
+    submitted = lambda: [args[1].record for args in m.of("submit")]  # noqa: E731
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: len(submitted()) == 2, m=m)
+        await asyncio.sleep(0.5)  # real time: a third job, were it allowed, is submitted with the other two
+        first = submitted()
+        assert "fig" in first and len(first) == 2  # one zenodo dataset and the other source; no third job
+        m.gate.set()
+        await ready(h, m)
+    assert sorted(submitted()) == ["fig", "z1", "z2"]
 
 
 async def test_dropped_files_mark_the_raw_row_and_stage_offline_without_a_quota_wait(env):

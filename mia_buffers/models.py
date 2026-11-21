@@ -93,6 +93,7 @@ class BindingInfo:
     hosts: list[str] = field(default_factory=list)
     manual: list[list[str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)  # the hosts its files are on: a round limits its jobs by these
     staged: bool = False  # buffer-api's registry knows a pyramid staged from this very binding, still on disk
     artifact: str = ""  # the staged pyramid's artifact id (jobspec.artifact_id), set whenever the binding is found
     refused: str = ""  # the newest assessment of a staged artifact is a reject: "<by> at <time>: <summary>"
@@ -181,6 +182,7 @@ class SourcingLimits:
     poll_minutes: int = 2
     lock_ttl_s: int = 900  # a job lock lapses this long after its last heartbeat (await_job beats every poll)
     max_tick_minutes: int = 30  # the round's shared ticker backs off from poll_minutes up to this (d-tick)
+    per_source: int = 1  # stage jobs in flight on one host of a dataset's files (`parallel`: in all)
 
 
 @dataclass
