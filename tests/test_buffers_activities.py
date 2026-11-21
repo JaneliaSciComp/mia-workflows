@@ -766,6 +766,19 @@ async def test_set_stage_writes_the_subjects_stage_and_one_entry(acts):
     assert acts.registry.timeline("buffer", 7)["subject"]["stage"] == "ready" and len(posted(acts)) == 1
 
 
+async def test_a_datasets_entry_links_the_records_of_its_jobs(acts):
+    """`**Jobs:**` under a dataset's servable or failed entry: the record of each job it ran, none for a job that
+    left no record."""
+    root = acts.cfg.paths.work_root
+    staged = root / "issue-7" / ROUND / "stage-u937"
+    write_submitted(root, staged, service="mia-buffers", key="k", job_id="5", request={})
+    await acts.comment(7, "`u937` failed: stage job 5 exited with code 1", "dataset r u937 failed", [str(staged)])
+    await acts.comment(7, "`bcss` is servable", "dataset r bcss servable")
+    failed, servable = posted(acts)
+    assert f"**Jobs:** [stage-u937]({acts.cfg.service.url.rstrip('/')}/#job/issue-7/{ROUND}/stage-u937)\n" in failed
+    assert "**Jobs:**" not in servable
+
+
 async def test_a_stage_pass_of_a_buffer_writes_its_start_and_its_result(acts):
     """spec job-records §3.6: a stage a round works or waits at starts a pass; the write of the next stage first
     writes the open pass's result, with a link to the record of each job it ran; a stage the buffer spec rests at

@@ -9,7 +9,7 @@ request, and merges it after a human approves. Design: [agentic-dev-infrastructu
 |---|---|
 | add `autodev:go` to an issue (needs write access) | runs an agent round, opens PR `autodev/issue-N`, labels the issue `autodev:review` |
 | review with *Request changes*, or comment `/revise <what>` (write access) | runs another round on the same branch (up to `max_revisions`) |
-| approve the PR (or comment `/approve <sha>` under a personal token, after the latest round's summary) | squash-merges that exact commit, closes the issue (a change request you made earlier on the same head is withdrawn by your approval; anyone else's still blocks) |
+| approve the PR (or comment `/approve <sha>` under a personal token) | squash-merges that exact commit, closes the issue (a change request you made earlier on the same head is withdrawn by your approval; anyone else's still blocks) |
 | close the PR | stops; re-add `autodev:go` to start over (closing the *issue* does not stop a running workflow) |
 | sees `autodev:needs-human` after a failure | read the failure comment, fix, re-add `autodev:go` (an open PR is resumed) |
 | sees `autodev:needs-human` after "Needs a human: …" on the PR (the revision limit, an approval with failing checks or with someone else's change request) or "Approved, but merging failed: …" (conflicts: the merge is tried again at every poll; a merge GitHub refuses only because the base branch moved at that moment is tried again within seconds and never reported) | autodev still watches the PR: approve it, or close it and re-add `autodev:go` to start over; no further round runs by itself |
@@ -70,8 +70,8 @@ After the first `mia up`, fill the registry:
 `mia exec mia-buffers datasets sync` (the prepared rows, from `storage_root`).
 
 Under a personal token you are both the bot and the reviewer, so GitHub won't let you *approve* your own PR:
-comment `/approve <first 7+ chars of the head sha>` instead. Only `/approve` comments posted after the bot's latest
-round summary count, so a short prefix approved earlier cannot approve a later head.
+comment `/approve <first 7+ chars of the head sha>` instead. Only `/approve` comments posted after the head commit
+was made count, so a short prefix approved earlier cannot approve a later head.
 
 ## Run it as the group service
 

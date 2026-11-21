@@ -637,9 +637,14 @@ class Activities:
 
     def _shown(self, state: BufferState | PrepState) -> str:
         """What goes under the result of the pass open in `state`: a link to the record of each job the pass
-        submitted (a job that left none is not listed)."""
+        submitted."""
+        return self._jobs_line(state.pass_jobs)
+
+    def _jobs_line(self, workspaces: list[str]) -> str:
+        """`**Jobs:**` with a link to the record of each job run in `workspaces` (a job that left none is not
+        listed); empty when there is none."""
         links = {}
-        for workspace in state.pass_jobs:
+        for workspace in workspaces:
             where = address(self.cfg.paths.work_root, workspace)
             if where and record_path(self.cfg.paths.work_root, where).is_file():
                 links[Path(workspace).name] = job_link(self.cfg.service.url, where)
@@ -666,11 +671,12 @@ class Activities:
 
     @activity.defn(name="comment")
     @mia_permanent_errors
-    async def comment(self, issue: int, body: str, marker: str) -> str | None:
-        """Add an entry to the buffer spec's timeline, once per marker. Returns None; the return type is
-        recorded in histories."""
+    async def comment(self, issue: int, body: str, marker: str, jobs: list[str] | None = None) -> str | None:
+        """Add an entry to the buffer spec's timeline, once per marker, linking the records of the jobs run in
+        `jobs` (a dataset's own). Returns None; the return type is recorded in histories."""
         full_marker = self.cfg.marker(marker)
-        await self._post("buffer", issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
+        text = "\n\n".join(part for part in (self._clean(body), self._jobs_line(jobs or [])) if part)
+        await self._post("buffer", issue, f"{text}\n\n{full_marker}", full_marker)
         return None
 
     @activity.defn(name="comment_plan")

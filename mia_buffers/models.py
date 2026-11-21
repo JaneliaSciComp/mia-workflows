@@ -215,6 +215,7 @@ class DatasetStatus:
     weight: float = 0.0  # the plan's weight, so the heaviest datasets are staged first
     rebuilds: int = 0  # times a degraded (missing) pyramid was staged again
     artifact: str = ""  # the staged artifact the dataset's volumes live in, from the binding
+    jobs: list[str] = field(default_factory=list)  # workspaces of the jobs this dataset ran: its entries link them
 
 
 @dataclass

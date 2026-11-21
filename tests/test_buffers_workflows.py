@@ -167,8 +167,8 @@ class Mocks:
             rec("result", state.pass_stage, state.result, None, list(state.pass_jobs))
 
         @activity.defn(name="comment")
-        async def comment(issue: int, body: str, marker: str) -> str | None:
-            rec("comment", body, marker)
+        async def comment(issue: int, body: str, marker: str, jobs: list[str] | None = None) -> str | None:
+            rec("comment", body, marker, *([jobs] if jobs else []))
             return None
 
         @activity.defn(name="comment_plan")
@@ -1209,6 +1209,8 @@ async def test_a_round_stages_online_with_no_fetch(env):
     assert key == job_key(7, "i7-e11", "u937") and stage.hosts == ["zenodo.org"] and stage.cache_writable is True
     assert [a[2] for a in m.of("await")] == [["raw", "u937", OWNER]]  # the stage job's wait keeps the lock alive
     assert m.board == [("u937", "pending"), ("u937", "staging"), ("u937", "servable")]
+    (servable,) = [c for c in m.of("comment") if c[1].endswith("u937 servable")]
+    assert servable[2] == ["/w/i7-e11/stage-u937"]  # the dataset's entry links its job
     assert order(m, "take_lock", "check_quota", "submit", "register_dataset", "release_lock") == [
         "take_lock",
         "check_quota",  # room: on to the stage slot
@@ -1228,6 +1230,8 @@ async def test_a_stage_over_its_byte_cap_fails_the_dataset_with_the_harness_mess
         state = await h.query(MiaBuffer.status)
     assert dataset(state, "u937").status == "failed" and over in dataset(state, "u937").reason
     assert len(m.of("submit")) == 1 and m.of("release_lock") == [("raw", "u937", OWNER)]
+    (failed,) = [c for c in m.of("comment") if c[1].endswith("u937 failed")]
+    assert failed[2] == ["/w/i7-e11/stage-u937"]  # the entry that reports the job links it
 
 
 async def test_blocked_waits_for_quota_then_stages(env):

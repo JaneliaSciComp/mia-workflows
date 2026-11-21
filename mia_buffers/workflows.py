@@ -482,12 +482,16 @@ class MiaBuffer:
         if _results():
             self.state.result = text
 
-    def _ran(self, workspace: str) -> None:
-        """A job was submitted in `workspace`: the open pass's result links its record. A job submitted while the
-        buffer rests (a straggler or a rebuild at `ready`) belongs to no pass."""
+    def _ran(self, workspace: str, record: str) -> None:
+        """A job was submitted in `workspace` for `record`: the open pass's result and the dataset's own entries
+        link its record. A job submitted while the buffer rests (a straggler or a rebuild at `ready`) belongs to no
+        pass."""
         state = self.state
         if _results() and state.pass_stage and workspace not in state.pass_jobs:
             state.pass_jobs.append(workspace)
+        for dataset in state.datasets:
+            if dataset.record == record and workspace not in dataset.jobs:
+                dataset.jobs.append(workspace)
 
     async def _flush(self) -> None:
         """Write the open pass's result now, where no stage write follows that would carry it. A result that
@@ -600,8 +604,10 @@ class MiaBuffer:
             workflow.logger.warning("issue #%d: %s", self.state.issue, error_message(error))
         return True
 
-    async def _comment(self, body: str, marker: str) -> None:
-        await self._act("comment", self.state.issue, body, marker)
+    async def _comment(self, body: str, marker: str, jobs: list[str] | None = None) -> None:
+        """Add an entry, once per marker; `jobs` are the workspaces whose records it links (a fourth argument only
+        when there are any)."""
+        await self._act("comment", self.state.issue, body, marker, *([jobs] if jobs else []))
 
     # --- the round -------------------------------------------------------------------------
 
@@ -1358,6 +1364,7 @@ class MiaBuffer:
         await self._comment(
             f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.{reused}",
             f"dataset {round_id} {record} servable",
+            dataset.jobs,
         )
 
     async def _source_cached(self, dataset: DatasetStatus, semaphore: asyncio.Semaphore) -> None:
@@ -1492,6 +1499,7 @@ class MiaBuffer:
         await self._comment(
             f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.{reused}",
             f"dataset {round_id} {record} servable",
+            dataset.jobs,
         )
 
     async def _lock(self, dataset: DatasetStatus, owner: str) -> str:
@@ -1631,7 +1639,9 @@ class MiaBuffer:
         self._set(dataset, "failed", reason)
         try:
             await self._comment(
-                f"`{dataset.record}` failed: {reason}", f"dataset {state.round_id} {dataset.record} failed"
+                f"`{dataset.record}` failed: {reason}",
+                f"dataset {state.round_id} {dataset.record} failed",
+                dataset.jobs,
             )
         except ActivityError as error:  # best effort: the status carries the reason either way
             workflow.logger.warning(
@@ -1673,7 +1683,7 @@ class MiaBuffer:
         staged: StageResult | None = None
         try:
             job_id = await self._act("submit", key, args, seconds=600, result_type=str, beats=True)
-            self._ran(workspace)
+            self._ran(workspace, record)
             done = await self._await_job(job_id, workspace, (await self._limits()).walltime_min, lock)
             if report and done.state in ("DONE", "EXIT"):
                 staged = await self._act(

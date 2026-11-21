@@ -4,7 +4,7 @@ import respx
 from autodev_helpers import API, R
 
 from autodev.github import GitHub
-from autodev.review import Reviewers, approved, combine_checks, feedback, handled_ids, latest_round_at
+from autodev.review import Reviewers, approved, combine_checks, feedback, handled_ids
 
 MP = "<!-- autodev:"
 HEAD = "abc1234def5678"
@@ -56,17 +56,6 @@ def test_approve_comment_must_follow_latest_round():
     assert not ok(comments=[cm(1, "alice", "/approve abc1234", at=since)], since=since)
     assert ok(comments=[cm(1, "alice", "/approve abc1234", at="2026-10-10T02:00:01Z")], since=since)
     assert ok([rv(1, "alice", "APPROVED", at="2026-10-10T01:00:00Z")], since=since)  # reviews pin the full sha
-
-
-def test_latest_round_at_is_the_bots_latest_round_marker():
-    comments = [
-        cm(1, "bot", f"r1 {MP} round k-1 -->", at="2026-10-10T01:00:00Z"),
-        cm(2, "bot", f"r2 {MP} round k-2 -->", at="2026-10-10T03:00:00Z"),
-        cm(3, "mallory", f"{MP} round k-3 -->", at="2026-10-10T04:00:00Z"),
-        cm(4, "bot", f"{MP} started k-3 -->", at="2026-10-10T05:00:00Z"),
-    ]
-    assert latest_round_at(comments, BOT) == "2026-10-10T03:00:00Z"
-    assert latest_round_at([], BOT) is None
 
 
 def test_feedback_from_reviews_and_revise_comments_oldest_first():

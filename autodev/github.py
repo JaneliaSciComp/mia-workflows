@@ -333,6 +333,11 @@ class GitHub:
             comment async for comment in self._paged(f"/repos/{self.repo}/pulls/{number}/comments", conditional=True)
         ]
 
+    async def commit_date(self, sha: str) -> str:
+        """When `sha` was made (its committer date, ISO-8601 UTC): a lower bound on when it could be approved."""
+        commit = (await self.request("GET", f"/repos/{self.repo}/commits/{sha}", conditional=True)).json()
+        return commit["commit"]["committer"]["date"]
+
     async def check_state(self, sha: str, required: Sequence[str] = ()) -> str:
         """Overall CI state of a commit (success | pending | failure | none), combining check runs and statuses."""
         runs = (
