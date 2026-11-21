@@ -1,6 +1,24 @@
 // A buffer's page: its name and state, the strip of its six steps, the step being shown, and its timeline.
 import { editable, STEP_TITLES, STEPS, stepOf, stepToShow, stripOf } from "./steps.js";
-import { $, bufferLink, card, el, ghIcon, num, pill, stagePill, statePill, SUBJECT_HASH, when } from "./dom.js";
+import {
+  $,
+  bufferLink,
+  card,
+  datasetLink,
+  el,
+  fmtBytes,
+  folderLink,
+  ghIcon,
+  num,
+  pill,
+  plural,
+  stageHelp,
+  stagePill,
+  statePill,
+  SUBJECT_HASH,
+  tipOn,
+  when,
+} from "./dom.js";
 import { api, banner, JSON_HEADERS, load, newKey, S } from "./api.js";
 import { pagedTable, pageOf } from "./table.js";
 import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
@@ -98,13 +116,20 @@ function menu(subject, redraw, skip) {
 }
 
 // ---- the heading: the name, where it stands, its links, and what can be asked of it that is not a step
+// Where a saved buffer stands, on whatever step is shown: one that is being served says so, in those words.
+const standing = subject =>
+  stepOf(subject.stage) === "serve"
+    ? pill(subject.stage === "idle" ? "serving, idle" : "serving", "pool", [
+        { b: subject.stage, t: stageHelp(subject.stage) },
+      ])
+    : stagePill(subject.stage);
 function head(subject, redraw, skip) {
   const name = subject ? subject.name || subject.key : "New buffer";
   const parts = [
     el(
       "div",
       { class: "viewhead" },
-      el("h2", {}, name, " ", subject ? stagePill(subject.stage) : pill("not saved", "")),
+      el("h2", {}, name, " ", subject ? standing(subject) : pill("not saved", "")),
       subject
         ? el("details", { class: "more" }, el("summary", { class: "btn" }, "Actions…"), menu(subject, redraw, skip))
         : null,
@@ -169,8 +194,14 @@ function notes(subject, entries, run, actions, redraw) {
 }
 
 // ---- the newest version of a buffer (its newest round's buffer) and that version's datasets
+const versionOf = async subject => ((await load(`/buffers?limit=1&spec=${subject.number}`))?.buffers || [])[0] || null;
+// the folder of a version's staged pyramids (jobspec.levels_key), or null when its config does not say
+const levelsKeyOf = version => {
+  const cfg = version?.config || {};
+  return cfg.patch && cfg.levels?.length ? `p${cfg.patch}-l${cfg.levels.join("-")}` : null;
+};
 async function newestVersion(subject) {
-  const version = ((await load(`/buffers?limit=1&spec=${subject.number}`))?.buffers || [])[0] || null;
+  const version = await versionOf(subject);
   const board = version
     ? (await load(`/buffers/${encodeURIComponent(version.id)}/datasets`, true))?.datasets || []
     : [];
@@ -204,43 +235,102 @@ const droppedNotices = (subject, board, redraw) =>
             ),
           ),
         );
-function revokeCard(subject, board, redraw) {
-  const records = board.filter(d => d.status === "servable").map(d => d.record);
-  const ticks = el(
-    "div",
-    { class: "ticks" },
-    ...records.map(r => el("label", { class: "inline" }, el("input", { type: "checkbox", value: r }), " " + r)),
+// ---- step 6's datasets: what the version serves and what a person took out of it. The checked can be revoked:
+// the box of what can be done with them shows only while something is checked.
+const picked = { key: null, chosen: new Set() }; // the checks of the version shown: they outlast the page's redraws
+function includedCard(subject, version, redraw) {
+  if (picked.key !== version.id) Object.assign(picked, { key: version.id, chosen: new Set() });
+  const chosen = picked.chosen,
+    levelsKey = levelsKeyOf(version),
+    count = el("b");
+  const revoke = el(
+    "button",
+    {
+      type: "button",
+      class: "btn danger",
+      title: BUTTON_HELP.revokeTicked,
+      disabled: !!subject.asked,
+      onclick: e => {
+        if (
+          !confirm(
+            `Revoke the ${plural(chosen.size, "checked dataset")}? Their volumes leave this version and their staged pyramids are quarantined; nothing is deleted.`,
+          )
+        )
+          return;
+        e.target.disabled = true;
+        const records = [...chosen];
+        chosen.clear();
+        sendAction(subject, { action: "revoke", records, key: newKey() }, redraw);
+      },
+    },
+    "Revoke",
   );
+  const box = el("span", { class: "chosen", hidden: true }, count, revoke);
+  const show = () => {
+    box.hidden = !chosen.size;
+    count.textContent = `${plural(chosen.size, "dataset")} selected`;
+  };
+  show();
   return card(
-    "Revoke datasets",
-    "The checked datasets leave this version: their volumes are unregistered and their staged pyramids quarantined.",
-    records.length ? ticks : el("div", { class: "empty" }, "No dataset is being served."),
-    el(
-      "div",
-      { class: "actions" },
-      el(
-        "button",
+    "Included datasets",
+    "The datasets this version serves, and those a person revoked from it. Check any that are included to revoke them: their volumes are unregistered and their staged pyramids quarantined.",
+    el("div", { class: "actions" }, box),
+    pagedTable("buffer-included:" + version.id, {
+      source: pageOf(`/buffers/${encodeURIComponent(version.id)}/datasets`, "datasets", () => ({ included: 1 })),
+      sort: "dataset",
+      empty: "No dataset is being served.",
+      select: subject.actions.includes("revoke")
+        ? { chosen, id: x => x.record, onchange: show, can: x => x.status === "servable" }
+        : null,
+      cols: [
+        { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) },
         {
-          type: "button",
-          class: "btn danger",
-          title: BUTTON_HELP.revokeTicked,
-          disabled: !!subject.asked,
-          onclick: e => {
-            const chosen = [...ticks.querySelectorAll("input:checked")].map(i => i.value);
-            if (!chosen.length) return banner("Check the datasets to revoke first.");
-            if (
-              !confirm(
-                "Revoke the checked datasets? Their volumes leave this version and their staged pyramids are quarantined; nothing is deleted.",
-              )
-            )
-              return;
-            e.target.disabled = true;
-            sendAction(subject, { action: "revoke", records: chosen, key: newKey() }, redraw);
-          },
+          key: "status",
+          label: "state",
+          cell: x =>
+            x.revoked
+              ? tipOn(el("span", { class: "pill warn" }, "revoked"), [{ t: x.reason || "revoked from this version" }])
+              : x.status === "servable"
+                ? pill("included", "pool")
+                : statePill(x.status),
         },
-        "Revoke the checked",
-      ),
-    ),
+        {
+          label: "stage dir",
+          title: "the staged pyramids this version draws from",
+          cell: x => folderLink(S.meta.roots?.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)),
+        },
+        {
+          key: "bytes",
+          label: "size",
+          num: true,
+          title: "its size upstream",
+          cell: x => (x.bytes ? fmtBytes(x.bytes) : ""),
+        },
+        {
+          key: "raw",
+          label: "raw cache",
+          num: true,
+          title: "what its raw cache holds now",
+          cell: x => (x.raw_bytes ? fmtBytes(x.raw_bytes) : ""),
+        },
+        {
+          key: "staged",
+          label: "staged",
+          num: true,
+          title: "the size of its staged pyramids",
+          cell: x => (x.staged_bytes ? fmtBytes(x.staged_bytes) : ""),
+        },
+        {
+          label: "splits",
+          title: "the crops the plan gave it, per split",
+          cell: x =>
+            Object.entries(x.splits || {})
+              .map(([split, crops]) => `${split} ${num(crops)}`)
+              .join(" / "),
+        },
+        { label: "notes", wrap: true, cell: x => (x.notes || []).join("; ") },
+      ],
+    }),
   );
 }
 // every version of the buffer, the newest first: each round that reached its plan made one, under its own id
@@ -561,7 +651,6 @@ async function sourceStep(pane, subject, redraw, wanted) {
     onDisk = count("servable"),
     staging = count("staging"),
     queued = count("pending"), // the two statuses with a job running or still to run: sourcing lasts while any is left
-    cfg = version?.config || {},
     bar = el("i"),
     buttons = el("div", { class: "stepfoot above" }); // above the datasets, where a long table cannot hide them
   bar.style.width = `${board.length ? (100 * onDisk) / board.length : 0}%`;
@@ -583,7 +672,7 @@ async function sourceStep(pane, subject, redraw, wanted) {
       ? card(
           "The datasets of this version",
           "One row per dataset of the plan: on disk (servable), staging with its job, blocked by quota, waiting for its files, or failed with the reason.",
-          poolTable(version.id, cfg.patch && cfg.levels?.length ? `p${cfg.patch}-l${cfg.levels.join("-")}` : null),
+          poolTable(version.id, levelsKeyOf(version)),
         )
       : el("div", { class: "empty" }, "Sourcing has not started."),
   );
@@ -615,10 +704,12 @@ async function sourceStep(pane, subject, redraw, wanted) {
 }
 // ---- step 6: the version being served, by the id a training run names
 async function serveStep(pane, subject, redraw, wanted) {
-  const { version, board } = await newestVersion(subject);
+  const version = await versionOf(subject);
   if (!wanted()) return;
-  const url = S.meta.service_url || location.origin;
+  const url = S.meta.service_url || location.origin,
+    buttons = el("div", { class: "stepfoot above" }); // above the cards, where a long table cannot hide them
   const parts = [
+    buttons,
     subject.stage === "idle"
       ? el(
           "div",
@@ -649,7 +740,7 @@ async function serveStep(pane, subject, redraw, wanted) {
           ),
         )
       : null,
-    subject.actions.includes("revoke") ? revokeCard(subject, board, redraw) : null,
+    version ? includedCard(subject, version, redraw) : null,
   ];
   pane.replaceChildren(...parts.filter(Boolean));
   foot(
@@ -672,6 +763,7 @@ async function serveStep(pane, subject, redraw, wanted) {
           "Plan a new version",
         )
       : null,
+    buttons,
   );
 }
 const STEP_VIEWS = {
@@ -682,6 +774,21 @@ const STEP_VIEWS = {
   source: sourceStep,
   serve: serveStep,
 };
+
+// ---- the timeline of a buffer says what each round did and how many datasets it concerned, never which: the step
+// above lists them. So an entry about one dataset is left out, the plan and the staged board lose their table, and
+// a result its fold of jobs and its list of what is servable. An entry's kind is the first word of its marker.
+const entryKind = entry => /^<!-- \S+ (\S+)/.exec(entry.marker || "")?.[1];
+const DATASET_ROWS = {
+  plan: new Set(["table"]),
+  stage: new Set(["table"]),
+  result: new Set(["table", "fold", "list"]),
+};
+export const bufferTimeline = entries =>
+  timelineCard(
+    entries.filter(entry => entryKind(entry) !== "dataset"),
+    entry => DATASET_ROWS[entryKind(entry)],
+  );
 
 function draw(subject, step, entries, run, actions, redraw) {
   head(subject, redraw, ["go", "revoke", "approve"]); // each has its own button on a step
@@ -700,7 +807,7 @@ function draw(subject, step, entries, run, actions, redraw) {
     entries,
   );
   // under every step: the buffer's versions (also when it rests after a round that failed) and its timeline
-  $("bufferTimeline").replaceChildren(...(subject ? [versionsCard(subject), timelineCard(entries)] : []));
+  $("bufferTimeline").replaceChildren(...(subject ? [versionsCard(subject), bufferTimeline(entries)] : []));
 }
 
 // `key`: the buffer's, or null for one that is not saved yet. `asked`: the step the address names, if any.

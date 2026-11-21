@@ -66,7 +66,7 @@ ready:
 <p>The round resolves the definition against the catalog and the prepared datasets and stops at its plan: the datasets in this version, one row each, with weights and crops. Nothing has been read from a source. <b>Run: stage</b> accepts the plan; before it starts, the page lists any host the stage jobs need that jobs may not reach yet, to approve with the start. <b>Change the buffer</b>, the way back, cancels the round, and the buffer rests at step 3 where it can be changed and planned again.</p>
 
 <h2>Step 5. Source</h2>
-<p>The datasets of the plan are staged, several at a time: each stage job reads from the source what the planned crops touch. Nothing is downloaded ahead, so a dataset's size at its source does not matter: a reader takes byte ranges, and a whole file only where it cannot read by range, which then lands in the shared raw cache. A dataset whose crops need more than one job may transfer (<code>limits.job_bytes</code>) fails and says so. The step shows each one: on disk, staging, blocked by quota, waiting, or failed with the reason. Sourcing runs until no dataset has a job left; the buffer is then <code>staged</code>, and its timeline gets the board: each dataset's outcome, each weighting group's servable share against <code>ready.min_fraction</code>, volumes per split, and bytes on disk.</p>
+<p>The datasets of the plan are staged, several at a time: each stage job reads from the source what the planned crops touch. Nothing is downloaded ahead, so a dataset's size at its source does not matter: a reader takes byte ranges, and a whole file only where it cannot read by range, which then lands in the shared raw cache. A dataset whose crops need more than one job may transfer (<code>limits.job_bytes</code>) fails and says so. The step shows each one: on disk, staging, blocked by quota, waiting, or failed with the reason. Sourcing runs until no dataset has a job left; the buffer is then <code>staged</code>, and its timeline says how many datasets are servable, each weighting group's servable share against <code>ready.min_fraction</code>, volumes per split, and bytes on disk. Which datasets is in the step's table, not in the timeline.</p>
 <p><b>Approve and serve</b> serves the version as the step shows it. A dataset that failed stays out; one that is waiting keeps its place and joins when it lands. The share each group has at the approve becomes the floor it is judged against afterwards, so a partial buffer accepted on purpose is not later reported as degraded. The way back cancels the round, as on step 4. Converted pyramids stay in the shared cache, so a later round over the same datasets skips the conversion.</p>
 <ul>
   <li><b>Waiting on a drop.</b> Some datasets sit on hosts no job may reach. The timeline lists the files to place by hand in the dataset's <code>incoming/</code> directory. Once the copy has finished, press <i>Files are in place</i> on this step, and the worker takes them into the cache. The button is refused while the directory is empty or a file in it changed in the last minute.</li>
@@ -76,8 +76,8 @@ ready:
 </ul>
 
 <h2>Step 6. Serve</h2>
-<p>The step names the <b>version</b> being served by its id, with the line a training script pastes. Every round that reaches its plan makes a version with an id of its own, and a training run names that id, never the buffer's name. The step lists the buffer's versions, each opening a page with its events, datasets, volumes, consumers and usage.</p>
-<p>A serving buffer's definition is fixed. <b>Plan a new version</b> plans it again over the datasets that are prepared now; the version being served keeps serving the runs connected to it until the new one is approved. <i>Revoke the checked</i> withdraws single datasets from the serving version, and <i>Retire</i>, under <i>Actions…</i>, releases all of it.</p>
+<p>The buffer's heading says <i>serving</i>, on every step. The step names the <b>version</b> being served by its id, with the line a training script pastes, and lists its <b>included datasets</b>: each with its staged folder, its sizes, its crops per split and the plan's notes, and whether it is included or was revoked. Every round that reaches its plan makes a version with an id of its own, and a training run names that id, never the buffer's name. The step lists the buffer's versions, each opening a page with its events, datasets, volumes, consumers and usage.</p>
+<p>A serving buffer's definition is fixed. <b>Plan a new version</b> plans it again over the datasets that are prepared now; the version being served keeps serving the runs connected to it until the new one is approved. Under <i>Included datasets</i>, checking datasets and pressing <i>Revoke</i> withdraws them from the serving version, and <i>Retire</i>, under <i>Actions…</i>, releases all of it.</p>
 
 <h2>Buttons and stages</h2>
 <div class="tw"><table>
@@ -90,7 +90,7 @@ ready:
 <tr><td><i>Change the buffer</i></td><td>steps 4 and 5</td><td>Cancels the round: its cluster jobs are killed and its version is retired. The buffer rests at step 3.</td></tr>
 <tr><td><i>Files are in place</i></td><td>step 5</td><td>For a dataset waiting on files placed by hand: tells the round they are in its <code>incoming/</code> directory.</td></tr>
 <tr><td><i>Plan a new version</i></td><td>step 6</td><td>A new round of the same definition, over the datasets prepared now.</td></tr>
-<tr><td><i>Revoke the checked</i></td><td>step 6</td><td>Withdraws the checked datasets from the serving version. Their volumes leave it and their artifacts are quarantined; the version serves on at its floor or asks for a person.</td></tr>
+<tr><td><i>Revoke</i></td><td>step 6, <i>Included datasets</i></td><td>Withdraws the checked datasets from the serving version. Their volumes leave it and their artifacts are quarantined; the version serves on at its floor or asks for a person.</td></tr>
 <tr><td><i>Keep</i></td><td><i>Actions…</i>, <code>idle</code></td><td>An idle buffer stays; back to ready.</td></tr>
 <tr><td><i>Retire</i></td><td><i>Actions…</i>, <code>ready</code>, <code>idle</code></td><td>Releases the version's staged data.</td></tr>
 <tr><td><i>Cancel the round</i></td><td><i>Actions…</i>, a round before <code>ready</code></td><td>The same cancel as the way back from steps 4 and 5.</td></tr>
@@ -105,8 +105,8 @@ ready:
 <tr><th>stage</th><th>step</th><th>the buffer is</th></tr>
 <tr><td><code>new</code></td><td>3</td><td>saved; nothing has run.</td></tr>
 <tr><td><code>planning</code> → <code>plan-review</code></td><td>4</td><td>resolving the definition; then the plan is shown and the round waits for <i>Run</i>.</td></tr>
-<tr><td><code>sourcing</code></td><td>5</td><td>staging, several datasets at a time. One timeline entry per dataset as it lands or fails.</td></tr>
-<tr><td><code>staged</code></td><td>5</td><td>no job left to run; the board is in the timeline. Waiting for <i>Approve and serve</i>.</td></tr>
+<tr><td><code>sourcing</code></td><td>5</td><td>staging, several datasets at a time. The step's table shows each dataset as it lands or fails.</td></tr>
+<tr><td><code>staged</code></td><td>5</td><td>no job left to run; the timeline says how many datasets are servable. Waiting for <i>Approve and serve</i>.</td></tr>
 <tr><td><code>ready</code></td><td>6</td><td>serving.</td></tr>
 <tr><td><code>idle</code></td><td>6</td><td>serving, and nobody drew from it for a while (default 72 hours).</td></tr>
 <tr><td><code>retired</code></td><td>3</td><td>its version's data is released. It can be changed and planned again.</td></tr>
@@ -137,7 +137,7 @@ model = MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)
 <ul>
   <li><b>Degraded.</b> When a group's servable share falls under the floor set at the approve (a pyramid was evicted or lost), the timeline says so and the worker stages the missing datasets again from the cache.</li>
   <li><b>Idle.</b> No consumer for <code>idle.hours</code> (default 72) moves the buffer to <code>idle</code>; <i>Keep</i> returns it to ready. After <code>retire_after_days</code> (default 14) more days without a draw the keeper retires the version and its space is reclaimed.</li>
-  <li><b>Revoked.</b> <i>Revoke the checked</i> removes single datasets from the serving version; <i>Retire</i> releases all of it.</li>
+  <li><b>Revoked.</b> <i>Revoke</i>, on the datasets checked under <i>Included datasets</i>, removes single datasets from the serving version; <i>Retire</i> releases all of it.</li>
   <li><b>A new version.</b> <i>Plan a new version</i> builds one with a new id, reusing what is in the cache. A training run that should use it is given the new id.</li>
 </ul>
 

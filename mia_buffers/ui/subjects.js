@@ -268,8 +268,9 @@ export async function viewSubject(kind, key, refresh) {
   parts.push(log);
   root.replaceChildren(...parts);
 }
-// A subject's timeline as a card: what was asked and what each round did, the newest entry first.
-export function timelineCard(entries) {
+// A subject's timeline as a card: what was asked and what each round did, the newest entry first. `skips(entry)`
+// (optional): the blocks of that entry to leave out, as `markdown` takes them.
+export function timelineCard(entries, skips) {
   const log = el(
     "div",
     { class: "card" },
@@ -294,7 +295,7 @@ export function timelineCard(entries) {
         e.round ? ` · ${e.round}` : "",
         e.mirrored_at ? "" : " · not on GitHub yet",
       ),
-      el("div", { class: "md" }, ...markdown(e.body, cropsOf(e.body, crops))),
+      el("div", { class: "md" }, ...markdown(e.body, cropsOf(e.body, crops), skips?.(e))),
     ),
   );
   log.append(...shown.reverse());

@@ -189,7 +189,7 @@ const STAGE_HELP = {
   "plan-review": "The plan is in the timeline and waits for an approval; no job has run yet.",
   "idle": "No consumer has drawn for a while: Keep returns it to ready, otherwise the keeper retires it.",
   "needs-human": "The round stopped; the newest entry of the timeline says why.",
-  "staged": "No job is left to run and the board is in the timeline; the round waits for Approve.",
+  "staged": "No job is left to run and the step lists what is on disk; the round waits for Approve.",
   "requested": "The request's datasets are handed to the preparation pipeline; it follows them until each has settled.",
   "cancelled": "A person cancelled the round.",
   "failed":

@@ -115,7 +115,6 @@ dialog.ask label{display:block;margin:4px 0}
 dialog.ask .mono{overflow-wrap:anywhere;margin-bottom:8px}
 dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0 0;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .specbox{width:100%;max-width:100ch;min-height:16em;font-family:var(--mono);font-size:12.5px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
-.ticks{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0;font-size:13px}
 /* a lifecycle: a kind's stages as boxes joined by arrows, the current one filled; a stage off the line (needs-human,
    cancelled) hangs under the step its round stopped at, or stands apart when no step is known */
 .flow{list-style:none;display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 0;padding:0;margin:2px 0 12px;font-size:12.5px}

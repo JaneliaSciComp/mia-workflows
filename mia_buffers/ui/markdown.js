@@ -85,7 +85,9 @@ export function gist(body, limit = 220) {
 }
 // paragraphs, headings, fenced code, pipe tables, lists, quotes and a <details> fold; comments (markers) are dropped.
 // A fold is built closed: whoever shows the nodes says which one is open. `crops` (see cropsOf) is optional.
-export function markdown(text, crops) {
+// `skip` (optional): a Set of the blocks to leave out, "table", "fold" or "list"; a list left out leaves its length
+// on the line before it ("Servable now: 116").
+export function markdown(text, crops, skip) {
   // ponytail: a nested list is flattened into its parent and `---` is a paragraph; a real parser when a round writes more
   const lines = text.replace(/<!--[\s\S]*?-->/g, "").split("\n"),
     out = [];
@@ -129,10 +131,12 @@ export function markdown(text, crops) {
       const folded = [];
       for (i++; i < lines.length && lines[i].trim() !== "</details>"; i++) folded.push(lines[i]);
       i++;
-      out.push(el("details", {}, el("summary", {}, ...mdInline(m[1])), ...markdown(folded.join("\n"), crops)));
+      if (!skip?.has("fold"))
+        out.push(el("details", {}, el("summary", {}, ...mdInline(m[1])), ...markdown(folded.join("\n"), crops)));
     } else if (tableAt(i)) {
       const rows = [];
       for (i += 2; i < lines.length && lines[i].includes("|"); i++) rows.push(lines[i]);
+      if (skip?.has("table")) continue;
       // a judge's findings: folded like a crops table, each finding with the overlay of the crop it names
       const judged = texts(line).join("|") === "item|severity|note",
         at = row => crops?.[texts(row)[0]],
@@ -183,7 +187,8 @@ export function markdown(text, crops) {
         else break;
       }
       list.append(...items.map(rows => el("li", {}, ...broken(rows))));
-      out.push(list);
+      if (skip?.has("list")) out.at(-1)?.append(` ${items.length}`);
+      else out.push(list);
     } else {
       const rows = [line];
       for (i++; i < lines.length && !starts(i); i++) rows.push(lines[i]);

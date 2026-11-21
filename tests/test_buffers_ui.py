@@ -134,7 +134,7 @@ def test_page_holds_no_token_and_calls_only_known_hosts() -> None:
 
 
 def test_page_names_the_revoked_states_and_the_pause() -> None:
-    for needle in ('"revoked":', '"quarantined":', "Revoke the checked", "paused by the operator"):
+    for needle in ('"revoked":', '"quarantined":', "Included datasets", "paused by the operator"):
         assert has(needle), needle
 
 
@@ -347,6 +347,7 @@ class FakeNode {
   get children() { return this.kids.filter(kid => kid instanceof FakeNode); }
   get firstChild() { return this.kids[0]; }
   querySelector(selector) { return walk(this).slice(1).find(node => (node.attrs.class || "").split(" ").includes(selector.slice(1))) || null; }
+  querySelectorAll(tag) { return walk(this).slice(1).filter(node => node.tag === tag); }
   showModal() {}
   close(value) { this.returnValue = value; this.fire("close"); }
 }
@@ -430,6 +431,43 @@ def test_every_file_the_page_loads_is_one_of_its_own() -> None:
 def rendered(*bodies: str) -> list[str]:
     """What the page's `markdown()` builds for each timeline body, as HTML text (a string child is a text node)."""
     return run_js("print(input.map(body => markdown(body).map(html).join('')));", {"markdown.js": "markdown"}, bodies)
+
+
+def test_a_buffers_timeline_says_how_many_datasets_never_which() -> None:
+    """The step above the timeline lists the datasets. An entry about one dataset is left out; a plan and a staged
+    board lose their table, a result its fold of jobs and its list of what is servable, whose length stays."""
+    marker = "<!-- mia-buffers: {} -->"
+    entries = [
+        {"marker": marker.format("plan r"), "body": "2 in the pool.\n\n| id | weight |\n|---|---|\n| `a` | 1 |"},
+        {"marker": marker.format("dataset r a servable"), "body": "`a` is servable"},
+        {
+            "marker": marker.format("result r sourcing 1"),
+            "body": "Datasets of the pool: 2 servable.\n\n<details><summary>5 jobs</summary>\n\n**Jobs:** x\n\n</details>",
+        },
+        {"marker": marker.format("result r staged 1"), "body": "Servable now:\n- `a`\n- `b`\n\nthe end"},
+        {"marker": "<!-- mia: action 1 -->", "body": "**Action:** `go`\n\n- kept"},
+    ]
+    shown = run_js(
+        "print(walk(bufferTimeline(input)).filter(n => n.attrs.class === 'md').map(n => n.kids.map(html).join('')));",
+        {"flow.js": "bufferTimeline"},
+        entries,
+    )
+    assert shown == [  # newest first
+        "<p><strong>Action:</strong> <code>go</code></p><ul><li>kept</li></ul>",
+        "<p>Servable now: 2</p><p>the end</p>",
+        "<p>Datasets of the pool: 2 servable.</p>",
+        "<p>2 in the pool.</p>",
+    ]
+
+
+def test_a_buffer_that_is_served_says_so_on_every_step() -> None:
+    flow = squeezed(FILES["flow.js"])
+    assert has('stepOf(subject.stage) === "serve" ? pill(subject.stage === "idle" ? "serving, idle" : "serving"', flow)
+    assert has("subject ? standing(subject) : pill(", flow)  # the heading, which every step shows
+    serve = flow[flow.index("asyncfunctionserveStep(") : flow.index("constSTEP_VIEWS")]
+    assert serve.index("buttons,") < serve.index('"Theversionbeingserved"')  # the step's buttons are above its cards
+    assert has("version ? includedCard(subject, version, redraw) : null", serve)
+    assert has('can: x => x.status === "servable"', flow) and has("() => ({ included: 1 })", flow)
 
 
 def test_a_bare_url_ends_before_the_punctuation_that_follows_it() -> None:
@@ -603,7 +641,7 @@ def test_a_judges_findings_show_the_crops_they_name_behind_a_fold() -> None:
     # a finding about something that is no crop has no picture, and a timeline with no crops table adds no column
     assert '<tr><td></td><td>binding</td><td><span class="sev-suspect">suspect</span></td>' in pictured
     assert "<img" not in plain and "<details><summary>3 findings</summary>" in plain and "<th>overlay</th>" not in plain
-    assert has("markdown(e.body, cropsOf(e.body, crops))") and has("log.append(...shown.reverse())")
+    assert has("markdown(e.body, cropsOf(e.body, crops), skips?.(e))") and has("log.append(...shown.reverse())")
     assert has('log.querySelectorAll("details").forEach((fold, n) => { fold.open = n === 0; });')
 
 
@@ -1323,7 +1361,7 @@ def test_a_buffer_is_one_page_and_the_tabs_name_no_spec_and_no_preparation() -> 
     assert has("stripOf(subject?.stage, step)", flow) and has("stepToShow(subject.stage, asked)", flow)
     assert has('el("summary", { class: "btn" }, "Actions…")', flow) and has("actionBar(subject, redraw, ", flow)
     assert has("bar.prepend(", flow) and has('document.querySelectorAll("details.more[open]")')  # Clone first; closes
-    assert has("timelineCard(entries)", flow) and has("shelvedNotice(subject.shelved)", flow)
+    assert has("bufferTimeline(entries)", flow) and has("shelvedNotice(subject.shelved)", flow)
     # the stream redraws the buffer's page, not a subject's
     assert has("if (onScreen.redraw) onScreen.redraw();") and has("onScreen.redraw = null;")
 
@@ -1518,7 +1556,7 @@ def test_prepare_plans_what_is_stored_and_the_versions_are_under_every_step() ->
     prepare = flow[flow.index("functionprepareStep(") : flow.index("//----step4")]
     assert has("JSON.stringify({ spec: subject.data.spec, page })", prepare) and "definition()" not in prepare
     assert "ensureDefinition" not in prepare
-    assert has("[versionsCard(subject), timelineCard(entries)]", flow) and count("versionsCard(subject)", flow) == 1
+    assert has("[versionsCard(subject), bufferTimeline(entries)]", flow) and count("versionsCard(subject)", flow) == 1
 
 
 def test_the_page_says_buffer_and_definition_and_explains_nothing_by_its_past() -> None:

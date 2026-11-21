@@ -20,7 +20,7 @@ export const pageOf = (path, rowsKey, extra, quiet404) => async state => {
 };
 export const reloadTables = root => root.querySelectorAll(".paged").forEach(box => box.reload()); // a refresh that rebuilds nothing
 // cols: {key (the server's sort name; none: not sortable), label, num, wrap, title, cell}. `select`: {chosen (a Set), id, onchange}
-// adds a check per row. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
+// adds a check per row, or per row `select.can(row)` allows. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
 export function pagedTable(
   id,
   { source, cols, empty, sort = null, dir = "asc", search = true, rowAttrs, tools = [], select, onPage },
@@ -49,16 +49,18 @@ export function pagedTable(
     });
     return input;
   };
+  const canTick = row => !select.can || select.can(row);
   const tickPage = page => {
-    // the header's check: every row of this page, on or off
+    // the header's check: every row of this page that has a check, on or off
+    const rows = page.rows.filter(canTick);
     const input = el("input", {
       type: "checkbox",
       "aria-label": "select every row of this page",
       title: "check or uncheck every row of this page",
     });
-    input.checked = page.rows.length > 0 && page.rows.every(r => select.chosen.has(select.id(r)));
+    input.checked = rows.length > 0 && rows.every(r => select.chosen.has(select.id(r)));
     input.addEventListener("change", () => {
-      for (const r of page.rows) {
+      for (const r of rows) {
         if (input.checked) select.chosen.add(select.id(r));
         else select.chosen.delete(select.id(r));
         select.onchange(r, input.checked);
@@ -97,7 +99,7 @@ export function pagedTable(
       el(
         "tr",
         rowAttrs ? rowAttrs(r) : {},
-        select ? el("td", {}, tick(r)) : null,
+        select ? el("td", {}, canTick(r) ? tick(r) : null) : null,
         ...cols.map(c => {
           const v = c.cell(r);
           return el("td", { class: c.num ? "num" : c.wrap ? "wrap" : "" }, v == null ? "" : v);

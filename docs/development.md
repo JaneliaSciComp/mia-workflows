@@ -269,8 +269,8 @@ prepared again. The save repairs by recipe: a quarantined artifact that was stag
 wrote (the asset's `binding_hash`) gets a `policy:repair` approve and its quarantine mark cleared; an artifact
 of any other binding was read by the recipe that was rejected, stays quarantined, and the record is staged
 anew. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
-page's *Revoke the checked*; records not in the buffer are ignored), rejects and quarantines those records'
-artifacts and takes the keeper's `revoked` path at once.
+page's *Revoke* on the datasets checked under *Included datasets*; records not in the buffer are ignored),
+rejects and quarantines those records' artifacts and takes the keeper's `revoked` path at once.
 
 **A stage pass writes its start and its result.** A round is a series of stage passes: every stage whose word in
 its stage table is `working` or `waiting` (`mia_data.config.round_open`, `mia_buffers.config.stage_pass`). A
@@ -1158,8 +1158,15 @@ Each tab is one kind of thing, and each thing has one page:
     requests. Its way
     forward is the one `go` a buffer gets from the page (`planRound`).
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the
-    version's page) and *Files are in place*; *Serve* the version's id, the line a training script pastes, the
-    revoke card and the buffer's versions. The way back from Plan and Source is a `cancel`.
+    version's page) and *Files are in place*; *Serve* its buttons, then the version's id, the line a training
+    script pastes and the version's included datasets (`includedCard`: `/buffers/<id>/datasets?included=1`, the
+    rows that are servable or that a `revoke` of the buffer named, each with its plan row's size, splits and
+    notes and the bytes of its raw cache and its pyramid; the box of the checked holds *Revoke*). The way back
+    from Plan and Source is a `cancel`.
+  - The heading says `serving` for a buffer at `ready` or `idle`, whatever step is shown. The timeline under
+    the steps (`bufferTimeline`) says how many datasets an entry concerns, never which: an entry about one
+    dataset is left out, and the plan, the staged board and a result are shown without their table, their fold
+    of jobs and their list of datasets. The registry and the issue on GitHub hold the entries whole.
 - **A version's page** (`#buffers/<id>`: one round's buffer) reads `/buffers/<id>/status`, `/events`,
   `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
 - **A lifecycle** tops the page of a dataset, a request and a version: the kind's stages as boxes and arrows
