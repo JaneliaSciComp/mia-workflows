@@ -95,7 +95,7 @@ The Temporal UI is at `http://localhost:8233`. From your laptop use
 
 autodev opens PR `autodev-<you>/issue-N` and labels the issue `autodev-<you>:review`. Because you are both the bot
 and the reviewer, GitHub won't let you approve your own PR. Comment `/approve <first 7+ chars of the head sha>`
-instead. Only `/approve` comments posted after the bot's latest round summary count. Use `/revise <what>` or a
+instead. Only `/approve` comments posted after the head commit was made count. Use `/revise <what>` or a
 *Request changes* review to run another round.
 
 ## Day to day

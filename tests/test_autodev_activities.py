@@ -108,6 +108,15 @@ async def test_untrusted_bot_label_is_ignored(tmp_path, gh):
     assert not temporal.started
 
 
+COMMITTED = "2026-10-10T02:00:00Z"  # when the observed head was made
+
+
+def _committed(head):
+    respx.get(f"{API}{R}/commits/{head}").mock(
+        return_value=httpx.Response(200, json={"commit": {"committer": {"date": COMMITTED}}})
+    )
+
+
 async def _observe_required(tmp_path, gh, runs, statuses):
     head = "abc1234def"
     respx.get(f"{API}{R}/pulls/5").mock(
@@ -128,6 +137,7 @@ async def _observe_required(tmp_path, gh, runs, statuses):
     )
     respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": runs}))
     respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": statuses}))
+    _committed(head)
     return await acts(tmp_path, gh, required_checks=["mia-data/crops"]).observe_pr(ObserveInput(5))
 
 
@@ -243,14 +253,25 @@ async def test_observe_skips_handled_feedback(tmp_path, gh):
         )
     respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": []}))
     respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
+    _committed(head)
     snap = await acts(tmp_path, gh).observe_pr(ObserveInput(5))
     assert [(item.id, item.text) for item in snap.feedback] == [("comment-10", "also docs")]
     assert (snap.state, snap.head_sha, snap.approved, snap.checks) == ("open", head, False, "none")
 
 
 @respx.mock
-@pytest.mark.parametrize("approve_at,want", [("2026-10-10T01:00:00Z", False), ("2026-10-10T03:00:00Z", True)])
-async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path, gh, approve_at, want):
+@pytest.mark.parametrize(
+    "approve_at,round_at,want",
+    [
+        ("2026-10-10T01:00:00Z", "2026-10-10T01:30:00Z", False),  # approved before this head existed: another head
+        ("2026-10-10T03:00:00Z", "2026-10-10T02:30:00Z", True),
+        # snippets #242: approved while a round that made no commits was still running; its summary came later
+        ("2026-10-10T03:00:00Z", "2026-10-10T03:30:00Z", True),
+    ],
+)
+async def test_observe_counts_approve_comments_only_after_the_head_was_committed(
+    tmp_path, gh, approve_at, round_at, want
+):
     head = "abc1234def"
     respx.get(f"{API}{R}/pulls/5").mock(
         return_value=httpx.Response(200, json={"state": "open", "merged": False, "head": {"sha": head}})
@@ -266,7 +287,7 @@ async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path,
                         "id": 9,
                         "user": {"login": "bot"},
                         "body": f"round 2\n<!-- autodev: round {K}-2 -->",
-                        "created_at": "2026-10-10T02:00:00Z",
+                        "created_at": round_at,
                     },
                     {"id": 10, "user": {"login": "alice"}, "body": "/approve abc1234", "created_at": approve_at},
                 ],
@@ -280,6 +301,7 @@ async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path,
         )
     respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": []}))
     respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
+    _committed(head)
     observe = acts(tmp_path, gh).observe_pr(ObserveInput(5))
     if want:
         assert (await observe).approved
@@ -508,6 +530,7 @@ async def test_observe_unchanged_pr_sends_etags_and_reuses_cache(tmp_path, gh):
         f"{R}/issues/5/comments": [],
         f"{R}/commits/{head}/check-runs": {"check_runs": []},
         f"{R}/commits/{head}/status": {"statuses": []},
+        f"{R}/commits/{head}": {"commit": {"committer": {"date": COMMITTED}}},
     }
     routes = {
         path: respx.get(f"{API}{path}").mock(

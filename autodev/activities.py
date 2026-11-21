@@ -71,7 +71,7 @@ from .models import (
     Workspace,
     check_key,
 )
-from .review import WRITE_PERMISSIONS, Reviewers, approved, feedback, handled_ids, latest_round_at
+from .review import WRITE_PERMISSIONS, Reviewers, approved, feedback, handled_ids
 from .workflows import IssueWorkflow
 
 if TYPE_CHECKING:
@@ -527,7 +527,8 @@ class Activities:
         pending = [
             item for item in feedback(reviews, inline_comments, comments, reviewers, head_sha) if item.id not in handled
         ]
-        is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))
+        # an `/approve` older than the head itself is about some other head whose sha it happens to prefix
+        is_approved = approved(head_sha, reviews, comments, reviewers, await self.gh.commit_date(head_sha))
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
         return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)
 
