@@ -160,7 +160,11 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     spec = fake.submitted[0]
     assert spec["agent"] == "claude" and spec["shell"] is True and spec["cwd"] == ws.dir
     assert spec["mounts"] == [{"path": ws.dir, "mode": "rw"}, {"path": "/tools", "mode": "ro"}]
-    assert spec["allow_hosts"] == ["pypi.org"] and spec["name"] == "autodev-7-r1" and "env" not in spec
+    assert (
+        spec["allow_hosts"] == ["pypi.org"]
+        and spec["name"] == "autodev-7-r1"
+        and set(spec["env"]) == {"MIA_HARNESS_TRANSFERS_DIR"}
+    )
 
 
 async def test_an_agent_job_reads_the_evidence_folder_of_its_own_issue_and_no_other(tmp_path):
@@ -327,7 +331,7 @@ async def test_api_key_mode_passes_key_in_job_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SVC_KEY", "sk-1")
     fake = FakeCsub()
     await _jobs(tmp_path, fake, api_key_env="SVC_KEY").submit(7, K, 1, Workspace(str(tmp_path / "round"), "a", "b"))
-    assert fake.submitted[0]["env"] == {"ANTHROPIC_API_KEY": "sk-1"}
+    assert fake.submitted[0]["env"]["ANTHROPIC_API_KEY"] == "sk-1"
 
 
 async def test_wait_heartbeats_until_terminal(tmp_path):

@@ -14,10 +14,12 @@ import logging
 import os
 import re
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .transfers import collect
 from .untrusted import SECRET_RE, read_untrusted, write_atomic
 
 log = logging.getLogger(__name__)
@@ -157,14 +159,15 @@ def write_submitted(
         log.warning("job record of %s (submit) was not written", workspace, exc_info=True)
 
 
-def write_finished(work_root: Path | None, workspace: str | Path, *, job_id: str, outcome: dict) -> None:
+def write_finished(work_root: Path | None, workspace: str | Path, *, job_id: str, outcome: dict) -> list[dict]:
     """The second half, when the wait saw the job end: how it ended, what LSF says it used, the ends of its
     stdout and stderr, and for an agent its prompt and reduced conversation. Without a first half (its
-    write failed) it writes what it has."""
+    write failed) it writes what it has. It also keeps the job's transfer rows (`mia_core.transfers.collect`) and
+    returns the rows the stored record holds: none when it holds none or was not stored."""
     try:
         where = address(work_root, workspace) if work_root else None
         if where is None or work_root is None:
-            return
+            return []
         path, job_dir = record_path(work_root, where), Path(workspace)
         record = _load(path) or {"schema": SCHEMA, "job_id": str(job_id), "workspace": where}
         record["finished_at"], record["outcome"] = _now(), outcome
@@ -181,9 +184,14 @@ def write_finished(work_root: Path | None, workspace: str | Path, *, job_id: str
             prompt = record.get("prompt_file")
             agent["prompt"] = (read_untrusted(job_dir, str(prompt), PROMPT_BYTES) or "") if prompt else ""
             record["agent"] = agent
+        request = record.get("request")
+        hosts = request.get("allow_hosts") if isinstance(request, dict) else None
+        record.update(collect(job_dir, hosts, time.time()))
         _store(path, record)
+        return record.get("transfers", [])
     except Exception:  # best effort: a record never fails a wait
         log.warning("job record of %s (end) was not written", workspace, exc_info=True)
+        return []
 
 
 def _cut(value: Any, depth: int = 0) -> Any:

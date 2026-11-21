@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import os
 import re
 from collections.abc import Awaitable, Callable
@@ -17,14 +18,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mia_core.jobrecord import RECORDS_DIR, write_finished, write_submitted
+from mia_core.jobrecord import RECORDS_DIR, address, write_finished, write_submitted
 from mia_core.locks import LockLost
+from mia_core.transfers import TRANSFERS_DIR, TRANSFERS_ENV
 from mia_core.untrusted import read_untrusted as read_untrusted
 
 from .models import JobOutcome
 
 if TYPE_CHECKING:
     import csub
+
+log = logging.getLogger(__name__)
 
 JOB_KEY_RE = re.compile(r"[A-Za-z0-9._-]{1,120}")
 
@@ -74,6 +78,8 @@ class CsubJobs:
         self._factory = client_factory or (lambda: csub_client(session))
         self._client = None
         self._sleep, self._poll_s = sleep, poll_s
+        # Given a record's address, the rows of the transfers its job made and the service; a worker sets it.
+        self.transfers_sink: Callable[[str, list[dict], str], Any] | None = None
 
     @property
     def client(self) -> Any:
@@ -121,8 +127,7 @@ class CsubJobs:
                 *({"path": mount, "mode": "ro"} for mount in spec.ro_mounts),
             ],
         }
-        if spec.env:
-            request["env"] = dict(spec.env)
+        request["env"] = {**spec.env, TRANSFERS_ENV: f"{spec.workspace}/{TRANSFERS_DIR}"}
         answer = None
         if running:  # same workspace (unique per job): submitted, then the worker died before writing the id file
             job_id = running[0].job_id
@@ -190,5 +195,11 @@ class CsubJobs:
             "exec_host": getattr(status, "exec_host", None),
             "queue": getattr(status, "queue", None),
         }
-        await asyncio.to_thread(write_finished, self.work_root, workspace, job_id=job_id, outcome=ended)
+        rows = await asyncio.to_thread(write_finished, self.work_root, workspace, job_id=job_id, outcome=ended)
+        where = address(self.work_root, workspace) if self.work_root else None
+        if rows and where and self.transfers_sink:
+            try:
+                await asyncio.to_thread(self.transfers_sink, where, rows, self.session)
+            except Exception:  # best effort: a delivery never fails a wait
+                log.warning("transfers of %s were not delivered", where, exc_info=True)
         return JobOutcome(job_id, state, exit_code)

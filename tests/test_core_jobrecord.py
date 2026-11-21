@@ -1,6 +1,7 @@
 import gzip
 import json
 import subprocess
+import time
 
 import pytest
 
@@ -152,3 +153,14 @@ def test_keep_result_copies_the_last_line_and_keeps_the_exit_status(tmp_path):
     subprocess.run(["bash", "-c", script], cwd=tmp_path, check=True)
     assert (tmp_path / "exit_code").read_text().strip() == "7"
     assert json.loads((tmp_path / "claude.json").read_text()) == {"result": 1}
+
+
+def test_the_end_without_a_first_half_keeps_no_transfers(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobrecord, "lsf_usage", lambda job_id: None)
+    root, ws = tmp_path / "work", tmp_path / "work" / "r1" / "job-1"
+    (ws / "transfers").mkdir(parents=True)
+    line = {"minute": int(time.time() // 60), "host": "a.org", "requests": 1, "bytes": 5}
+    (ws / "transfers" / "5-1.jsonl").write_text(json.dumps(line))
+    assert jobrecord.write_finished(root, ws, job_id="9", outcome={"state": "DONE"}) == []
+    record = json.loads(gzip.decompress((root / "_jobs" / "r1" / "job-1.json.gz").read_bytes()))
+    assert "transfers_refused" in record and "transfers" not in record
