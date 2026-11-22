@@ -7,6 +7,7 @@ only name its split.
 
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import logging
@@ -64,9 +65,11 @@ from .explore import (
 from .hosts import HostCheck, Needed
 from .jobspec import levels_key
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger, head_of
+from .peek import Peeker, PeekFailed
 from .plan import build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
+from .specmap import facts
 from .stream import Changes
 from .sync import scan_assets, scan_storage
 from .throughput import by_level, by_minute, summary
@@ -76,6 +79,7 @@ DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
 # no row = unprepared; `revoked`: withdrawn (spec autonomous-gates §6)
 DATASET_STATES = ("in-progress", "prepared", "needs-human", "revoked")
+PEEK_SPLITS = ("train", "val", "test")  # what `GET /buffers/<id>/peek` may be asked for
 CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
 # a job's gzipped record is kilobytes, an agent's with a long conversation a few megabytes; a larger file is not sent
 JOB_RECORD_LIMIT = 16 << 20
@@ -591,6 +595,7 @@ ROUTES = [
     ("GET", re.compile(r"^/buffers/([^/]+)/next$"), "next", "consumer"),
     ("GET", re.compile(r"^/buffers/([^/]+)/split/([^/]+)$"), "split", "consumer"),
     ("GET", re.compile(r"^/buffers/([^/]+)/status$"), "status", "consumer"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/peek$"), "peek", "read"),  # a crop to look at; the buffer keeps no trace
     ("GET", re.compile(r"^/buffers$"), "list_buffers", "read"),
     ("PUT", re.compile(r"^/buffers/([^/]+)/datasets/([^/]+)$"), "put_board", "worker"),
     ("GET", re.compile(r"^/buffers/([^/]+)/datasets$"), "board", "read"),
@@ -694,8 +699,11 @@ class BufferService:
         ui_dir: Path | None = None,
         dispatcher: Any = None,
         hosts: HostCheck | None = None,
+        peeker: Any = None,
     ):
         self.ledger = ledger
+        self.peeker = peeker  # draws a peek's crop (`peek.Peeker`, or a test's stand-in); None: no harness, no peek
+        self._peek_lock = threading.Lock()  # one harness process at a time, however many pages ask
         self.hosts = hosts  # which hosts a run needs that the csub policy lacks; None cannot say
         # the way to Temporal (`dispatch.Dispatcher`, or a test's stand-in); None reaches no workflow
         self.dispatcher = dispatcher
@@ -2551,6 +2559,75 @@ class BufferService:
                 frozen += fresh
         return 200, {"descriptors": frozen[start:end], "size": size, "exhausted": exhausted}, {}
 
+    def _peek(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        """One crop of a split as the tensorizer returns it, for the page to show: the descriptor a consumer would
+        have been handed, the pictures of every level and label layer, and the dataset's facts. The buffer keeps
+        no trace of it: the draw has a generator of its own, no consumer is registered, nothing is recorded or
+        counted, and a `val` or `test` crop is one of the split's candidates, not a row of its frozen list."""
+        config = self._serving(buffer)
+        split = query.get("split", "train")
+        if split not in PEEK_SPLITS:
+            raise HttpError(422, f"split must be train, val or test, got {split!r}")
+        if self.peeker is None:
+            raise HttpError(503, "no harness configured")
+        volumes = self.ledger.live_volumes(buffer)
+        descriptor = draw(
+            random.Random(), volumes, split, patch=config.patch, levels=config.levels, channels=config.channels
+        )
+        if descriptor is None:
+            return 204, None, {}
+        volume = next(volume for volume in volumes if volume.id == descriptor["volume"])
+        # what `BufferDataset._tensorize` hands the tensorizer
+        params = {**config.tensorizer_params, "channels": descriptor["channels"], "stats": descriptor["normalize"]}
+        try:
+            with self._peek_lock:
+                pictures = self.peeker.render(volume.path, descriptor, config.tensorizer, params, sorted(volume.labels))
+        except PeekFailed as error:
+            raise HttpError(502, str(error)) from None
+        pixel_nm = {level.factor: level.scale_nm["x"] for level in volume.levels}
+        return (
+            200,
+            {
+                "split": split,
+                "descriptor": descriptor,
+                "dataset": self._peek_dataset(volume.record),
+                "samples": len(volume.samples[split]) if volume.samples else None,
+                "levels": [
+                    {"factor": factor, "pixel_nm": pixel_nm.get(factor), "img": base64.b64encode(picture).decode()}
+                    for factor, picture in zip(descriptor["levels"], pictures["img"], strict=True)
+                ],
+                "labels": [
+                    {
+                        "key": key,
+                        "type": volume.labels[key],
+                        "levels": [base64.b64encode(picture).decode() for picture in layer],
+                    }
+                    for key, layer in pictures["labels"].items()
+                ],
+            },
+            {"Cache-Control": "no-store"},
+        )
+
+    def _peek_dataset(self, record_id: str) -> dict:
+        """What a peek says about its crop's dataset, from the newest catalog's record; the id alone when the
+        record is in no synced catalog or cannot be read."""
+        ref = self.ledger.latest_catalog()
+        found = self.ledger.record(ref, record_id) if ref else None
+        if found is None:
+            return {"id": record_id}
+        try:
+            known = facts(*found)
+        except (TypeError, ValueError, AttributeError):
+            return {"id": record_id}
+        return {
+            "id": record_id,
+            "title": str(found[1].get("title") or ""),
+            "modality": known.modality_group,
+            "dims": known.dims,
+            "organisms": known.organisms,
+            "annotation_types": known.annotation_types,
+        }
+
     def _no_content(self, buffer: str) -> Response:
         """A 204 (nothing servable yet), counted for the buffer's usage: the day's row and the last hour's window."""
         now = time.time()
@@ -2791,6 +2868,7 @@ def serve(cfg: Config) -> None:
         ui_dir=Path(__file__).parent / "ui",
         dispatcher=dispatcher_for(cfg),
         hosts=check,
+        peeker=Peeker.from_config(cfg),
     )
     service.kick_unmirrored()  # what a crash, or Temporal being away, left unposted
     # a request whose datasets settled with nobody telling it; beside the start, which Temporal being away must not hold
