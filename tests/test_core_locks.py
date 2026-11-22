@@ -120,6 +120,19 @@ def test_two_takers_of_one_stale_lock_do_not_both_win(tmp_path, monkeypatch):
     assert [p.name for p in (tmp_path / "raw").iterdir() if p.name.startswith("rec.stale-")] == ["rec.stale-3000"]
 
 
+def test_a_release_by_another_owner_never_touches_the_lock_file(tmp_path, monkeypatch):
+    """A lapsed owner's release sees the new owner's lock and returns without a rename: the new owner's heartbeat
+    never finds the file gone."""
+    now, tick = clock()
+    locks = LockDir(tmp_path, now)
+    locks.take("raw", "rec", "old", 900)
+    tick(1000)
+    assert locks.take("raw", "rec", "new", 900)
+    monkeypatch.setattr("mia_core.locks.os.replace", lambda src, dst: pytest.fail("renamed another owner's lock"))
+    assert not locks.release("raw", "rec", "old") and locks.holder("raw", "rec").owner == "new"
+    assert not locks.release("raw", "rec", "nobody")  # nor does a stranger's
+
+
 def test_a_late_release_leaves_the_new_owners_lock(tmp_path, monkeypatch):
     t = {"v": 1000.0}
     old, new = LockDir(tmp_path, lambda: t["v"]), LockDir(tmp_path, lambda: t["v"])

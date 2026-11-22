@@ -133,8 +133,14 @@ class LockDir:
         return True
 
     def release(self, kind: str, key: str, owner: str) -> bool:
-        """Remove the lock file; False when the lock is gone or someone else holds it (it is put back)."""
+        """Remove the lock file; False when the lock is gone or someone else holds it. Another owner's lock is
+        looked at first and left alone: a release after the lock was lost must not take the new owner's out of play
+        for even a moment (its heartbeat would find it gone). One that changes hands between the look and the rename
+        is put back."""
         path = self.path(kind, key)
+        holder = self.holder(kind, key)
+        if holder is None or holder.owner != owner:
+            return False
         claimed = self._unique(path, "rel")
         try:
             os.replace(path, claimed)  # takes the file out of play before looking at whose it is
