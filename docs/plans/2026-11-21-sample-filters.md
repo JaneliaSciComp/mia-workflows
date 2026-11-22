@@ -27,7 +27,7 @@ tested under node from pytest.
 - `labelled`: `min_fraction` required, `0 < min_fraction <= 1`; a volume with no paired label passes unread.
 - Both filters measure the full-resolution box: `patch` × `patch` at `starts["1"]` on the sample's plane.
 - No workflow issues a new command; `RegisterResult` gains a defaulted field only.
-- No `/nrs/` or user name in a tracked file. Line length 120. No `noqa` or `type: ignore` without a reason.
+- No real path, host or user name in a tracked file. Line length 120. No `noqa` or `type: ignore` without a reason.
 - Harness tests: in the harness worktree, `PYTHONPATH=$PWD/src <dev checkout>/harness/.pixi/envs/default/bin/python
   -m pytest tests/<file> -q`. Workflows tests: `PYTHONPATH=$PWD pixi run python -m pytest tests/<file> -q`. Run the
   files a task touches, not the full suite, until the last task.
