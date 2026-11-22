@@ -134,8 +134,10 @@ def publish(
     they go to shapes.json with the sha256 of the binding.yaml they were read with.
 
     `verified` is [{"crop_id", "files": {rel: sha256}}] from read_verify; only those files are copied, and
-    they must still hash the same. Temp directories older than `tmp_max_age_s` are left by dead attempts and
-    are cleaned up. Returns {"published": [ids], "already": [ids], "total": count in the dataset}."""
+    they must still hash the same. The binding lands last (shapes.json after it), so a Conflict leaves the folder as
+    the earlier publication left it (a manifest naming the earlier binding, or none) and `prepared_row` says it is
+    not prepared for the new one. Temp directories older than `tmp_max_age_s` are left by dead attempts and are
+    cleaned up. Returns {"published": [ids], "already": [ids], "total": count in the dataset}."""
     for crop in verified:
         check_crop_id(crop["crop_id"])
         if bad := [
@@ -147,15 +149,6 @@ def publish(
         if not {"crop.json", "raw.png"} <= set(crop["files"]):
             raise ValueError(f"{crop['crop_id']}: crop.json and raw.png must be verified")
     dataset_dir.mkdir(parents=True, exist_ok=True)
-    if binding is not None:
-        tmp = dataset_dir / f".tmp-binding-{uuid.uuid4().hex}"
-        shutil.copyfile(binding, tmp)
-        os.replace(tmp, dataset_dir / "binding.yaml")
-    if shapes and (dataset_dir / "binding.yaml").is_file():
-        read_with = hashlib.sha256((dataset_dir / "binding.yaml").read_bytes()).hexdigest()
-        tmp = dataset_dir / f".tmp-shapes-{uuid.uuid4().hex}"
-        tmp.write_text(json.dumps({"binding": read_with, "raw": shapes}))
-        os.replace(tmp, dataset_dir / SHAPES_FILE)
     now = time.time()
     for stale in dataset_dir.glob(".tmp-*"):  # younger ones may belong to a live attempt
         try:
@@ -195,7 +188,16 @@ def publish(
         for crop_dir in dataset_dir.iterdir():  # crops of earlier rounds too, when a preview dir has theirs
             if crop_dir.is_dir() and not crop_dir.name.startswith("."):
                 _place_preview(crop_dir, crop_dir.name, previews)
-    finally:  # a Conflict leaves the manifest matching what is published
+        if binding is not None:  # after the set: the manifest below names this binding only once every crop is in
+            tmp = dataset_dir / f".tmp-binding-{uuid.uuid4().hex}"
+            shutil.copyfile(binding, tmp)
+            os.replace(tmp, dataset_dir / "binding.yaml")
+        if shapes and (dataset_dir / "binding.yaml").is_file():  # named after the binding they were read with
+            read_with = hashlib.sha256((dataset_dir / "binding.yaml").read_bytes()).hexdigest()
+            tmp = dataset_dir / f".tmp-shapes-{uuid.uuid4().hex}"
+            tmp.write_text(json.dumps({"binding": read_with, "raw": shapes}))
+            os.replace(tmp, dataset_dir / SHAPES_FILE)
+    finally:  # a Conflict leaves the manifest matching what is published, under the binding published before
         total = reindex(dataset_dir, withdrawn)
     return {"published": published, "already": already, "total": total}
 

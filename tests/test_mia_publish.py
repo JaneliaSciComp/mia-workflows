@@ -171,6 +171,23 @@ def test_publish_writes_binding_and_manifest_sha(tmp_path):
     assert not list(ds.glob(".tmp-*"))
 
 
+def test_a_conflict_does_not_publish_the_new_binding(tmp_path):
+    """A set that fails its checksum leaves the folder prepared for the earlier binding, or for none."""
+    src, verified = _src(tmp_path)
+    ds, old, new = tmp_path / "ds", tmp_path / "old.yaml", tmp_path / "new.yaml"
+    old.write_text("record: r\n")
+    new.write_text("record: r\nraw: [x]\n")
+    (src / "c2" / "raw.png").write_bytes(b"changed after verify")
+    with pytest.raises(Conflict):
+        publish(ds, src, verified, {}, tmp_max_age_s=AGE, binding=new)  # a fresh folder: no binding at all
+    assert not (ds / "binding.yaml").exists() and prepared_row(ds) is None
+    publish(ds, src, verified[:1], {}, tmp_max_age_s=AGE, binding=old)
+    with pytest.raises(Conflict):
+        publish(ds, src, verified, {}, tmp_max_age_s=AGE, binding=new)
+    assert (ds / "binding.yaml").read_text() == "record: r\n"  # the earlier publication stands
+    assert prepared_row(ds) is not None and json.loads((ds / "manifest.json").read_text())["count"] == 1
+
+
 def test_manifest_without_binding_says_null(tmp_path):
     src, verified = _src(tmp_path)
     publish(tmp_path / "ds", src, verified, {}, tmp_max_age_s=AGE)
