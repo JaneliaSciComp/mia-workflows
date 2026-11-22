@@ -624,7 +624,12 @@ the round ends `blocked` saying which host to approve (`NoReachableFiles`).
    catalog at `catalog.ref` under `work_root/_catalog/<ref>/` and builds the plan from the catalog's records and
    the registry's prepared datasets, so the plan, the page and the worker agree on "prepared" (one row per record
    selection admitted, the rest as a count per rule under `excluded`; a record that fits but is not prepared is
-   out with the rule `not prepared`). When the registry has never seen the round's catalog ref, the activity
+   out with the rule `not prepared`). A record is fitted twice: its largest raw array must hold the coarsest
+   footprint, and so must one of the arrays its binding reads, which may be smaller ones (a prepared
+   dataset's row carries them as `raw_shapes`: what the crop job measured, saved as `shapes.json` beside
+   `manifest.json` with the sha256 of the binding they were read with, `mia_data.publish.prepared_row`). A row
+   without `raw_shapes` is fitted on the record alone. When the registry has never seen the round's catalog ref,
+   the activity
    syncs it first. `plan.md` and `plan.json` land in the round directory and in the browsable
    `work_root/issue-<n>/<round>/`. Everything sourcing needs is checked here: a record mia-data could not place
    (no modality family, the rule behind `<dataset folder>`; a record without one organism is filed under

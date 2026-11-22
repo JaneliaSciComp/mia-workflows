@@ -225,6 +225,14 @@ async def test_plan_writes_files_and_summarises(acts):
     assert (workspace / "plan.md").read_text() == (round_dir / "plan.md").read_text()
 
 
+async def test_plan_leaves_out_a_dataset_whose_bound_arrays_are_under_the_footprint(acts):
+    """Buffer 28161271: four datasets were planned on the record's largest array, while their bindings read
+    smaller ones, and each stage job ended `no samples planned`."""
+    acts.registry.put_dataset(U937, raw_shapes=[{"z": 4941, "c": 3, "y": 224, "x": 224}])
+    result = await acts.plan(7, ROUND, await admitted(acts))
+    assert [d.record for d in result.pool] == [BCSS]
+
+
 async def test_plan_warns_of_datasets_over_the_stage_cap(acts):
     acts.cfg.limits.stage_bytes = 1
     await acts.plan(7, ROUND, await admitted(acts))

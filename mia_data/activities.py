@@ -1403,7 +1403,8 @@ class Activities:
         beside them for mia-buffers to read (spec §6.1). Each crop's overlay.png goes beside its files for the web
         UI's preview: the one drawn for these crops, by the verify job of their crop set (`verify-<tag>-<attempt>`
         beside `crop-<tag>-<attempt>`, the newest attempt first). A round that tested several snippet heads has a
-        verify job per head, each with an overlay per crop id. Returns {"published", "already", "total"}."""
+        verify job per head, each with an overlay per crop id. What the crop job measured of each array the binding
+        reads (its report's `source_shapes`) is saved with them. Returns {"published", "already", "total"}."""
         crop_dir = self._job_workspace(issue, round_id, crop_workspace)
         crops_dir = self._crops_dir(crop_dir)
         verify_kind = "verify" + crop_dir.name.rpartition("-")[0].removeprefix("crop")
@@ -1426,6 +1427,7 @@ class Activities:
             tmp_max_age_s=2 * (timeout.total_seconds() if timeout else 3600),
             binding=Path(binding) if binding else None,
             previews=previews,
+            shapes=crop_publish.raw_shapes(_job_json(crop_dir, "crops/report.json")),
         )
         if revoked:  # a new publication repairs a revocation (spec autonomous-gates §6.5)
             (dataset_dir / REVOKED_FILE).unlink(missing_ok=True)

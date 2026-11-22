@@ -93,7 +93,7 @@ from .models import (
     StageResult,
     job_key,
 )
-from .plan import MANUAL_DROP_NOTE, UNREADABLE, Row, _group_key, build_plan, load_records, plan_hash
+from .plan import MANUAL_DROP_NOTE, UNREADABLE, Row, _group_key, bound_shapes, build_plan, load_records, plan_hash
 from .register import buffer_config, recipe_for, shortfall, volume_bodies
 from .select import decide_all
 from .spec import SpecError, load_prep_text, load_spec
@@ -532,9 +532,10 @@ class Activities:
         if ref not in {catalog["ref"] for catalog in await asyncio.to_thread(registry.catalogs)}:
             await catalog_sync(self.cfg, self.gh_catalog, registry, ref)
         records = await asyncio.to_thread(registry.records, ref)
-        prepared = {row["id"] for row in await asyncio.to_thread(registry.datasets, "prepared")}
+        rows = await asyncio.to_thread(registry.datasets, "prepared")
+        prepared, bound = {row["id"] for row in rows}, bound_shapes(rows)
         stage_bytes = self.cfg.limits.stage_bytes or self.cfg.limits.job_bytes
-        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared, stage_bytes)
+        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared, stage_bytes, bound)
         tensorizer = self.cfg.sourcing.tensorizer
         if not (self.cfg.harness.dir / "tensorizers" / tensorizer / "tensorizer.yaml").is_file():
             plan.errors.append(f"no tensorizer {tensorizer} in the harness checkout")

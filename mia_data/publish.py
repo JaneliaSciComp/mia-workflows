@@ -44,6 +44,40 @@ PREVIEW_FILE = "overlay.png"  # beside a crop's verified files, outside its chec
 MAX_PREVIEWS = 8  # crop ids a prepared row lists for the page's thumbnail
 
 
+SHAPES_FILE = "shapes.json"  # beside manifest.json: the shape of each array the binding reads, for the planner's fit
+MAX_AXIS = 1 << 48  # an extent a crop job reports along one axis
+
+
+def _shapes(value: Any) -> list[dict[str, int]] | None:
+    """`value` when it is one shape per array, each a non-empty axis -> extent of whole numbers above 0."""
+    if not (isinstance(value, list) and value):
+        return None
+    for shape in value:
+        if not (isinstance(shape, dict) and shape):
+            return None
+        if not all(
+            isinstance(axis, str) and type(extent) is int and 0 < extent < MAX_AXIS for axis, extent in shape.items()
+        ):
+            return None
+    return value
+
+
+def raw_shapes(report: Any) -> list[dict[str, int]] | None:
+    """The shape of every array the binding reads as axis -> extent, in the binding's order, from a crop job's
+    report.json (`source_shapes`: raw index -> {"axes", "shape"}); None unless it gives one for each index."""
+    measured = report.get("source_shapes") if isinstance(report, dict) else None
+    if not isinstance(measured, dict):
+        return None
+    shapes = []
+    for index in range(len(measured)):
+        entry = measured.get(str(index))
+        axes, shape = (entry.get("axes"), entry.get("shape")) if isinstance(entry, dict) else (None, None)
+        if not (isinstance(axes, str) and isinstance(shape, list) and len(set(axes)) == len(axes) == len(shape)):
+            return None
+        shapes.append(dict(zip(axes, shape, strict=True)))
+    return _shapes(shapes)
+
+
 def _hashes(directory: Path) -> dict[str, str]:
     """relative path -> sha256 of every verified file under `directory` (not the preview, not a temp file)."""
     return {
@@ -91,10 +125,13 @@ def publish(
     tmp_max_age_s: float,
     binding: Path | None = None,
     previews: Sequence[Path] = (),
+    shapes: list[dict[str, int]] | None = None,
 ) -> dict:
     """Copy the verified files of each crop from `src_dir` (a crop job's crops/) into `dataset_dir`, and
     `binding` (the approved binding YAML), when given, to `dataset_dir/binding.yaml`. `previews` are verify jobs'
     preview/ dirs: a crop's overlay.png found there goes beside its files (also for crops published earlier).
+    `shapes` (`raw_shapes` of the crop job's report) are what the job measured of each array the binding reads:
+    they go to shapes.json with the sha256 of the binding.yaml they were read with.
 
     `verified` is [{"crop_id", "files": {rel: sha256}}] from read_verify; only those files are copied, and
     they must still hash the same. Temp directories older than `tmp_max_age_s` are left by dead attempts and
@@ -114,6 +151,11 @@ def publish(
         tmp = dataset_dir / f".tmp-binding-{uuid.uuid4().hex}"
         shutil.copyfile(binding, tmp)
         os.replace(tmp, dataset_dir / "binding.yaml")
+    if shapes and (dataset_dir / "binding.yaml").is_file():
+        read_with = hashlib.sha256((dataset_dir / "binding.yaml").read_bytes()).hexdigest()
+        tmp = dataset_dir / f".tmp-shapes-{uuid.uuid4().hex}"
+        tmp.write_text(json.dumps({"binding": read_with, "raw": shapes}))
+        os.replace(tmp, dataset_dir / SHAPES_FILE)
     now = time.time()
     for stale in dataset_dir.glob(".tmp-*"):  # younger ones may belong to a live attempt
         try:
@@ -193,9 +235,21 @@ def reindex(dataset_dir: Path, withdrawn: dict[str, str]) -> int:
 REVOKED_FILE = "revoked.json"  # written by data:revoke beside manifest.json; the folder is not prepared while it exists
 
 
+def _bound_shapes(dataset_dir: Path, binding_hash: str, binding: dict) -> list[dict[str, int]] | None:
+    """What shapes.json says of the arrays this binding reads: None when it is of another binding, unreadable, or
+    not one shape per raw the binding lists."""
+    saved = loads(read_untrusted(dataset_dir, SHAPES_FILE, MAX_INDEX_FILE))
+    if not isinstance(saved, dict) or saved.get("binding") != binding_hash:
+        return None
+    shapes, bound = _shapes(saved.get("raw")), binding.get("raw")
+    return shapes if shapes and isinstance(bound, list) and len(shapes) == len(bound) else None
+
+
 def prepared_row(dataset_dir: Path) -> dict | None:
     """The registry row of a prepared dataset folder, or None: prepared means a binding.yaml naming its record and
-    a manifest.json whose binding sha256 is that file's (a newer binding with crops not yet re-verified is not)."""
+    a manifest.json whose binding sha256 is that file's (a newer binding with crops not yet re-verified is not).
+    `raw_shapes` is always in the row, None when the folder does not say them for this binding, so a row never
+    keeps the shapes of an earlier one."""
     if (
         dataset_dir / REVOKED_FILE
     ).is_file():  # revoked (spec autonomous-gates §6): never prepared, whatever is on disk
@@ -231,4 +285,5 @@ def prepared_row(dataset_dir: Path) -> dict | None:
         "crops": count if isinstance(count := manifest.get("count"), int) else 0,  # one odd folder must not stop a scan
         "previews": previews,
         "published_at": published.isoformat(),
+        "raw_shapes": _bound_shapes(dataset_dir, binding_hash, binding),
     }

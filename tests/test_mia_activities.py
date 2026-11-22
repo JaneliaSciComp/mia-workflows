@@ -975,11 +975,18 @@ async def test_publish_crops_publishes_the_binding(tmp_path):
     binding.write_text("record: rec-1\n")
     cw = Path(await t.a.prepare_job(1, ROUND, "crop", 1, None))
     v = _crop(cw, "c1", 0)
+    report = {"source_shapes": {"0": {"axes": "zcyx", "shape": [4941, 3, 224, 224]}}}
+    (cw / "crops" / "report.json").write_text(json.dumps(report))
     await t.a.publish_crops(1, ROUND, str(cw), [v], SNIP_SHA, str(binding))
     ds = t.cfg.paths.storage_root / "lm-human-rec-1"
     assert (ds / "binding.yaml").read_text() == "record: rec-1\n"
     digest = hashlib.sha256(b"record: rec-1\n").hexdigest()
     assert json.loads((ds / "manifest.json").read_text())["binding"] == {"sha256": digest}
+    # what the crop job measured of each bound array goes with the binding, for the planner's fit
+    assert json.loads((ds / "shapes.json").read_text()) == {
+        "binding": digest,
+        "raw": [{"z": 4941, "c": 3, "y": 224, "x": 224}],
+    }
 
 
 async def test_publish_crops_refuses_a_binding_outside_the_round(tmp_path):

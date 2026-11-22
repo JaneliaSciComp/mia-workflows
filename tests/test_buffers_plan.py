@@ -10,6 +10,7 @@ from mia_buffers.plan import (
     UNKNOWN_SHAPE_NOTE,
     Fit,
     Plan,
+    bound_shapes,
     build_plan,
     crops_for,
     fit,
@@ -76,6 +77,24 @@ def test_fit_rules(spec):
     assert fit(F[DUP], spec).reason == "no array shape"
     assert fit(F[U937], spec).reason == "fits"
     assert fit(F[HEMIBRAIN], spec).reason == "fits"
+
+
+def test_fit_is_refused_when_no_bound_array_holds_the_footprint(spec, spec_2d):
+    """The record lists a large array, but the binding reads smaller ones: no crop can be drawn from them."""
+    small = [{"z": 27, "y": 355, "x": 389}, {"z": 73, "y": 817, "x": 686}]
+    assert fit(F[U937], spec, small).reason == "footprint 1024×1024 exceeds every bound array (largest 817×686)"
+    assert fit(F[U937], spec, [*small, {"c": 3, "y": 1024, "x": 2000}]).reason == "fits"  # one array is enough
+    assert fit(F[U937], spec, [{"y": 2000, "x": 1023}]).ok is False
+    assert fit(F[MITOLAB], spec, [{"y": 4096, "x": 4096}]).reason == "footprint 1024×1024 exceeds 224×224"
+    plan = build_plan(spec_2d, "h", None, records(), prepared={U937, BCSS}, bound={U937: small})
+    rows = plan.rows_by_id
+    assert not rows[U937].in_pool and rows[U937].fit.reason.endswith("(largest 817×686)")
+    assert rows[BCSS].in_pool and rows[BCSS].weight == 1.0  # no shapes on its row: the record's array decides
+
+
+def test_bound_shapes_takes_the_rows_that_have_them():
+    rows = [{"id": "a", "raw_shapes": [{"y": 8, "x": 8}]}, {"id": "b", "raw_shapes": None}, {"id": "c"}]
+    assert bound_shapes(rows) == {"a": [{"y": 8, "x": 8}]}
 
 
 def test_positions_and_weights(spec_2d):
