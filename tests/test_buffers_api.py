@@ -2950,7 +2950,15 @@ def test_a_buffers_events_pool_volumes_and_consumers_paged(tmp_path):
 def test_a_versions_included_datasets_carry_the_plans_row_their_sizes_and_what_a_person_revoked(tmp_path, _home):
     s = _checking(tmp_path)
     plan = [
-        {"id": "rec-a", "admitted": True, "fit": {"ok": True}, "bytes": 7, "splits": {"train": 3}, "notes": ["n"]},
+        {
+            "id": "rec-a",
+            "admitted": True,
+            "fit": {"ok": True},
+            "bytes": 7,
+            "splits": {"train": 1},
+            "planned": {"train": 3},
+            "notes": ["n"],
+        },
         {"id": "rec-b", "admitted": True, "fit": {"ok": True}},
     ]
     (tmp_path / "rounds" / "b").mkdir(parents=True)
@@ -2964,7 +2972,7 @@ def test_a_versions_included_datasets_carry_the_plans_row_their_sizes_and_what_a
     s.ledger.add_ref("b", "staged", "art")
     s.ledger.add_action("buffer", 3, "revoke", "page", payload={"records": ["rec-b"]})
     out = call(s, "GET", "/buffers/b/datasets", {"limit": "5", "included": "1", "sort": "staged", "dir": "desc"})[1]
-    named = ("record", "revoked", "bytes", "raw_bytes", "staged", "staged_bytes", "splits", "notes")
+    named = ("record", "revoked", "bytes", "raw_bytes", "staged", "staged_bytes", "planned", "notes")
     assert [tuple(row[name] for name in named) for row in out["datasets"]] == [
         ("rec-a", False, 7, 10, "p1-l1/rec-a/art", 5, {"train": 3}, ["n"]),
         ("rec-b", True, None, None, None, None, {}, []),  # named by a revoke; rec-c failed for a reason of its own

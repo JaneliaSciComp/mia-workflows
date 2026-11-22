@@ -242,7 +242,7 @@ export function forgetNew() {
 // ---- the plan's table: the datasets the definition's selection admits, one page at a time (POST /plan with `page`).
 // The server joins each row with the registry and says why it is in the pool or not (mia_buffers.explore).
 const splitText = x =>
-  Object.entries(x.splits || {})
+  Object.entries(x.planned || {})
     .map(([k, v]) => `${k} ${num(v)}`)
     .join(" · ");
 const PLAN_COLS = [

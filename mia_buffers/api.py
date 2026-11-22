@@ -2414,7 +2414,9 @@ class BufferService:
             row["staged"] = f"{pyramid['data']['levels_key']}/{record}/{pyramid['key']}" if pyramid else None
             row["staged_bytes"] = pyramid["data"].get("bytes") if pyramid else None
             row["raw_bytes"] = (raw.get(record) or {}).get("bytes")
-            row.update(bytes=planned.get("bytes"), splits=planned.get("splits") or {}, notes=planned.get("notes") or [])
+            row.update(
+                bytes=planned.get("bytes"), planned=planned.get("planned") or {}, notes=planned.get("notes") or []
+            )
             row["revoked"] = row["status"] != "servable" and record in revoked
         if query.get("included"):  # what the version serves, and what a person took out of it
             board = [row for row in board if row["status"] == "servable" or row["revoked"]]

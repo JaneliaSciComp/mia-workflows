@@ -330,7 +330,7 @@ function includedCard(subject, version, redraw) {
           label: "splits",
           title: "The crops the plan gave it, per split.",
           cell: x =>
-            Object.entries(x.splits || {})
+            Object.entries(x.planned || {})
               .map(([split, crops]) => `${split} ${num(crops)}`)
               .join(" / "),
         },
