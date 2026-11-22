@@ -811,10 +811,25 @@ its coverage (its crops over the crops it holds side by side: above 1× they ove
 candidates the frozen lists are drawn from: a list is as long as `sampling.crops` of its split, or holds every
 candidate when there are fewer.
 
+**Filters.** A definition's `sampling.filters` names what a crop must hold: `{name: content}` (not blank, not one
+value: the crop job's test) and `{name: labelled, min_fraction: 0.05}` (at least that share of the crop's pixels
+annotated in a label paired with its raw; a raw without labels passes). The list is kept in name order and enters
+the plan rule only when it is not empty, so a definition without filters keeps its plan digests. Only the stage
+job can apply them: it tests each draw's full-resolution box, the label's before the raw's, and draws again until
+the split's count is kept or 2000 draws in a row were rejected (`plan.GIVE_UP` in the harness; a repeated
+position is one). So with filters a dataset's planned crops are the most it can stage, and the plan says `up to`.
+Rejected draws are read within `limits.job_bytes` like every other read of the job. `stage.json` gives each
+volume's `selection` (per split: wanted, staged, draws, rejected by reason) and lists a raw that kept nothing
+under `unstaged`; it is not written. A record that kept nothing at all fails its stage job, naming the filters.
+Registration multiplies a volume's weight by staged / wanted (`register.staged_share`), so a crop of a short
+volume is served about as often as any other, and the timeline line that says a record is servable names what
+came up short (`register.shortfall`). Nothing is handed to another volume or record.
+
 **An artifact id is a recipe hash** (`jobspec.artifact_id`): binding hash, levels key, voxel size, harness commit,
 env digest and plan digest. A pyramid on disk is reused only when all of them match. Changing how the harness
 derives samples changes plan digests, so every volume restages; a buffer that re-registers a volume under a new
-artifact loses its frozen eval lists by design. The plan digest holds the record's crop count, which follows its
+artifact loses its frozen eval lists by design. A definition's filters are part of the plan rule, so setting,
+changing or dropping one does the same. The plan digest holds the record's crop count, which follows its
 weight: the rounding to a power of two keeps it still while the pool changes a little, and a record whose share
 crosses a doubling restages.
 

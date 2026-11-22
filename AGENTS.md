@@ -147,7 +147,7 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   raw quota is where staging waits and the keeper evicts, not a ceiling (one record's path and the caps:
   `docs/development.md`, Sourcing on demand). A raw cache on disk is `ready` whatever it holds (`raw_asset`): the
   record's lock, not the row, says a job is writing. Anything new that transfers data is sized by what the planned
-  crops touch.
+  crops touch; the one read beyond them is a filter's test of a draw it rejects, within the same cap.
 - **Only the keeper deletes.** The buffers worker's `MiaCacheKeeper` is the only code that removes anything under
   `raw_root` or `staged_root` (and takes the record's lock first); buffer-api never deletes.
 - **A staged artifact is saved by the worker's rename and never written again.** Stage jobs write
@@ -156,7 +156,14 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   Changing how the harness derives samples (`plan.py`) changes plan digests, so every volume restages; a buffer that
   re-registers a volume under a new artifact loses its frozen eval lists by design. The plan digest holds the
   record's crop count, its weight's share of `sampling.crops` rounded up to a power of two (`plan.crops_for`):
-  change that rounding and every pool change restages every record.
+  change that rounding and every pool change restages every record. A definition's `sampling.filters` are in
+  the rule only when it has some: never write an empty `filters` key, or every buffer restages.
+- **Only the stage job knows what a filter keeps.** `sampling.filters` (`content`, `labelled`) are tested by the
+  stage job on each draw's full-resolution box, labels before raw; a rejected draw is drawn again until the
+  count or 2000 rejections in a row. The plan's crops are then an upper bound (`up to`), stage.json's
+  `selection` says what was kept, registration scales a short volume's weight by staged / wanted, and the
+  record's servable line names the shortfall. A new filter is a function in the harness's `filters.py` and an
+  entry of the grammar (`mia_buffers/spec.py`); it adds no planner estimate and hands no share to another volume.
 - **A buffer never asks mia-data for a dataset; a preparation request does.** `MiaBuffer` fails an unprepared
   record; `MiaPrep` sends each dataset a `go` through buffer-api (worker token, the request's root, a key per
   round and record) and follows it through the registry. Nothing opens or labels an issue in the datasets repo.
