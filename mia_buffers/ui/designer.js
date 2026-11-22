@@ -88,6 +88,9 @@ const defaults = () => ({
   cropsVal: 2000,
   cropsTest: 2000,
   maxCrops: 1024,
+  filterContent: false, // skip blank crops
+  filterLabelled: false, // a crop must be annotated on at least labelledPercent of its pixels
+  labelledPercent: 5,
   holdout: "",
   exclude: new Set(), // the datasets unchecked on step 2
   preparedOnly: false,
@@ -404,7 +407,8 @@ export function bindControls() {
   };
   const text = v => v,
     int = v => +v,
-    count = v => Math.max(1, Math.floor(+v) || 1);
+    count = v => Math.max(1, Math.floor(+v) || 1),
+    percent = v => Math.min(100, Math.max(0.01, Math.round(+v * 100) / 100 || 5));
   bind("specName", "name", text, touched);
   bind("paths", "paths", text, touched);
   bind("allowUnknown", "allowUnknown", null, touched);
@@ -422,6 +426,9 @@ export function bindControls() {
     ["maxCrops", "maxCrops"],
   ])
     bind(id, key, count, touched);
+  bind("filterContent", "filterContent", null, touched);
+  bind("filterLabelled", "filterLabelled", null, touched);
+  bind("labelledPercent", "labelledPercent", percent, touched);
   bind("holdout", "holdout", text, touched);
   // what the registry knows narrows the table: the same definition, fewer rows
   for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, () => schedulePlan(0));

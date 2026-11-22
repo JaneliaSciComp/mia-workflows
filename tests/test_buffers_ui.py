@@ -11,6 +11,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from mia_buffers.api import ROUTES
 
 # every file the browser is given, by name, and all of them as one text: what the page is, for a rule about it
@@ -1363,7 +1365,7 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
         "allowUnknown": True, "annRequired": True, "sources": ["manual", "proofread"], "minVox": 1000000,
         "patch": 128, "level": 8, "patchZ": 16, "dedup": False, "T": 0.25,
         "cropsTrain": 5000, "cropsVal": 300, "cropsTest": 200, "maxCrops": 64, "holdout": "u937 bcss",
-        "exclude": ["bcss", "u937"],
+        "exclude": ["bcss", "u937"], "filterContent": True, "filterLabelled": True, "labelledPercent": 7,
     }  # fmt: skip
     sets = (
         "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources),"
@@ -1387,7 +1389,16 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
         {"written": parsed(written), "rewritten": parsed(written), "hand": parsed(by_hand)},
     )
     assert back == controls and same == []
+    assert [entry.model_dump() for entry in load_spec_text(written).sampling.filters] == [
+        {"name": "content"},
+        {"name": "labelled", "min_fraction": 0.07},
+    ]
     hand_controls, hand_text = lost
+    assert (hand_controls["filterContent"], hand_controls["filterLabelled"], hand_controls["labelledPercent"]) == (
+        False,
+        False,
+        5,
+    )
     assert hand_controls["name"] == "microscopy-foundation-pretrain" and hand_controls["level"] == 4
     assert load_spec_text(written).select.exclude.ids == ["bcss", "u937"]  # an unchecked dataset is an exclusion
     differs = run_js(
@@ -1901,3 +1912,56 @@ def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() 
     assert '<a href="#datasets/ds%20a">ds a</a>' in found["html"] and "spec-a" not in found["text"]
     assert missing["text"] == "match-1No record for this job."
     assert (request, cleaner) == ({"kind": "prep", "number": 12}, None)
+
+
+def test_the_filters_are_written_only_when_set_and_an_odd_fraction_locks_the_controls() -> None:
+    """A definition's `sampling.filters` from the two controls: no line when neither is set, each alone, and a
+    percentage with decimals. A fraction the percentage cannot show comes back different, so specDiff names it and
+    the page keeps the text."""
+    from mia_buffers.spec import load_spec_text
+
+    def parsed(text: str) -> dict:
+        return load_spec_text(text).model_dump(mode="json", by_alias=True, exclude={"warnings"})
+
+    by_hand = (Path(__file__).parent / "fixtures" / "buffers" / "spec.yaml").read_text()
+    write = (
+        "const base = fromSpec(input.hand);\n"
+        "print(input.cases.map(c => toSpecYaml({ ...base, ...c }, 'a'.repeat(40), 'o/catalog')));"
+    )
+    cases = [
+        {},
+        {"filterContent": True},
+        {"filterLabelled": True, "labelledPercent": 12.5},
+        {"filterContent": True, "filterLabelled": True, "labelledPercent": 100},
+    ]
+    none, content, labelled, both = run_js(
+        write, {"spec.js": "toSpecYaml, fromSpec"}, {"hand": parsed(by_hand), "cases": cases}
+    )
+    assert "filters" not in none and load_spec_text(none).sampling.filters == []
+    assert "  filters: [{name: content}]\n" in content
+    assert "  filters: [{name: labelled, min_fraction: 0.125}]\n" in labelled
+    assert "  filters: [{name: content}, {name: labelled, min_fraction: 1}]\n" in both
+    assert load_spec_text(both).sampling.filters[1].min_fraction == 1
+    odd = yaml.safe_load(by_hand)
+    odd["sampling"]["filters"] = [{"name": "labelled", "min_fraction": 0.123456}]
+    odd = parsed(yaml.safe_dump(odd))
+    percent, rewritten = run_js(
+        "const c = fromSpec(input.odd);\n"
+        "print([c.labelledPercent, toSpecYaml(c, input.odd.catalog.ref, input.odd.catalog.repo)]);",
+        {"spec.js": "toSpecYaml, fromSpec"},
+        {"odd": odd},
+    )
+    assert percent == 12.35
+    differs = run_js(
+        "print(specDiff(input.odd, input.rewritten));",
+        {"spec.js": "specDiff"},
+        {"odd": odd, "rewritten": parsed(rewritten)},
+    )
+    assert "sampling.filters" in differs
+
+
+def test_the_designer_has_the_filter_controls() -> None:
+    ui = Path(__file__).parent.parent / "mia_buffers" / "ui"
+    index, designer = (ui / "index.html").read_text(), (ui / "designer.js").read_text()
+    for name in ("filterContent", "filterLabelled", "labelledPercent"):
+        assert f'id="{name}"' in index and f'bind("{name}", "{name}"' in designer
