@@ -2201,6 +2201,21 @@ async def test_prep_is_done_when_each_dataset_is_prepared_or_shelved(env):
     assert m.of("result") == [("requested", "1 of 3 requested datasets are prepared, 2 shelved.", "done")]
 
 
+async def test_prep_looks_at_every_dataset_once_more_before_it_rests(env):
+    """c stopped at once and a person shelved it while b was still preparing: the request polled b alone, so it
+    asks about every record once more before resting and finds nothing left for a human."""
+    m = PrepMocks(
+        outcomes={"c": PrepOutcome("c", "needs-human", 6)},
+        statuses={"a": "prepared", "b": ["in-progress", "prepared"], "c": "shelved"},
+    )
+    async with prep_started(env, m) as h:
+        await polled(env, m, 2)
+        await prep_settled(h, m, "done")
+        state = await h.query(workflows.MiaPrep.status)
+    assert m.of("prep_status") == [(["a", "b"],), (["b"],), (["a", "b", "c"],)]
+    assert m.stages == ["requested", "done"] and state.settled == {"a": "prepared", "b": "prepared", "c": "shelved"}
+
+
 async def test_prep_at_needs_human_moves_to_done_when_told_its_datasets_settled(env):
     """A request whose round ended `needs-human` is told (`recheck`) when one of its datasets is shelved or becomes
     prepared: it stays while any is neither, and is done once each is."""
@@ -2255,7 +2270,8 @@ async def test_prep_a_failed_nudge_settles_that_record_alone(env):
         state = await h.query(workflows.MiaPrep.status)
     ((_, outcomes),) = m.of("comment_prep")
     assert [(o.record, o.outcome) for o in outcomes] == [("a", "nudged"), ("b", "unknown"), ("c", "done-unpublished")]
-    assert "unclear modality" in outcomes[1].note and m.of("prep_status") == [(["a"],)]
+    assert "unclear modality" in outcomes[1].note
+    assert m.of("prep_status") == [(["a"],), (["a", "b", "c"],)]  # the poll, then the last look at every record
     detail = m.of("set_prep_stage")[-1][1]
     assert "`b`, `c`" in detail and "unclear modality" not in detail  # the outcomes table has each one's reason
     assert "`a`" not in detail and state.settled == {"a": "prepared", "b": "needs-human", "c": "needs-human"}

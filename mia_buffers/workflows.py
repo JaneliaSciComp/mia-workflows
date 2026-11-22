@@ -2070,6 +2070,16 @@ class MiaPrep:
             last = await self._act("prep_status", unsettled, result_type=dict[str, str])
             state.settled |= {record: value for record, value in last.items() if value in (*PREP_SETTLED, *legacy)}
         stuck = [record for record in pins.records if state.settled.get(record) not in (*PREP_DONE, *legacy)]
+        if stuck and workflow.patched("prep-stuck-look"):  # one that settled early may be shelved or prepared since
+            try:
+                last = await self._act("prep_status", pins.records, result_type=dict[str, str])
+            except ActivityError as error:  # best effort: the request rests, and a recheck asks again
+                if isinstance(error.cause, CancelledError):
+                    raise
+                workflow.logger.warning("issue #%d: last look failed: %s", state.issue, error_message(error))
+            else:
+                state.settled |= {record: value for record, value in last.items() if value in PREP_DONE}
+                stuck = [record for record in pins.records if state.settled.get(record) not in (*PREP_DONE, *legacy)]
         self._found(_prep_count(pins.records, state.settled))
         if not stuck:
             return await self._stage("done", _prep_done(pins.records, state.settled))
