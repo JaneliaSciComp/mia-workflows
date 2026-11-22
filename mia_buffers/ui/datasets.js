@@ -27,7 +27,7 @@ import {
   when,
 } from "./dom.js";
 import { S } from "./api.js";
-import { pagedTable, pageOf, TABLE_STATE } from "./table.js";
+import { COLUMN_HELP, pagedTable, pageOf, TABLE_STATE } from "./table.js";
 import { BUTTON_HELP, prepareButton } from "./actions.js";
 import { specFromDatasets } from "./designer.js";
 import { stageOf } from "./buffers.js";
@@ -457,7 +457,8 @@ export function datasetCards(d) {
         cols: [
           {
             key: "artifact",
-            label: "artifact",
+            label: "staged artifact",
+            title: COLUMN_HELP.artifact,
             cell: a => el("code", { title: a.key }, short(a.key.split("/").pop(), 16)),
           },
           {
