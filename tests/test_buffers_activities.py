@@ -1388,6 +1388,18 @@ async def test_read_stage_leaves_a_failed_build_for_the_keeper(acts, server):
     assert json.loads((aside / "stage.json").read_text())["ok"] is False
 
 
+async def test_read_stage_leaves_an_unchecked_build_unpublished(acts, server):
+    """`harness stage` wrote `ok: true`, the job ended before `harness check-stage` recorded its check: no pyramid
+    is published for later rounds to reuse; the build stays for the `.building-*` sweep."""
+    await planned_and_bound(acts)
+    await acts.prepare_stage(7, ROUND, U937)
+    building = acts._building_dir(ROUND, U937)
+    staged_into(building, staged_dir(acts, U937).name, verification=None)
+    result = await acts.read_stage(ROUND, U937)
+    assert not result.ok and result.errors[0].startswith("stage.json says ok but records no check")
+    assert (building / "stage.json").is_file() and not staged_dir(acts, U937).exists()
+
+
 async def test_read_stage_of_a_failed_stage_leaves_the_raw_row_ready_with_its_bytes(acts, server):
     """A stage that failed after its reader took a file whole: the raw cache is recorded as it is on disk, at rest,
     so its bytes count toward the quota and the keeper can evict it."""

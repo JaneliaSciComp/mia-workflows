@@ -46,7 +46,7 @@ def write_stage_json(staged, *, planes=25, extent=2048, labels=None, channels=3,
         "labels": labels or {},
         "levels": levels,
     }
-    report: dict = {"ok": True, "volumes": [volume], "errors": []}
+    report: dict = {"ok": True, "volumes": [volume], "errors": [], "verification": {"ok": True}}
     if artifact_id is not None:
         report["artifact"] = {
             "id": artifact_id,
