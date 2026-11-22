@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from mia_buffers.api import ROUTES
+from mia_buffers.spec import load_spec_text
 
 # every file the browser is given, by name, and all of them as one text: what the page is, for a rule about it
 UI_DIR = Path(str(resources.files("mia_buffers") / "ui")).resolve()
@@ -148,6 +149,25 @@ def test_the_docs_describe_the_system_as_it_is() -> None:
     assert not re.search(r"\b(no longer|any more|anymore|used to|as before|previously|read-only log)\b", docs, re.I)
     for needle in ("Needs human", "Overview", "Cancel the round", "Files are in place", "MiaMirror", "/stream"):
         assert needle in docs, needle
+    assert "shadow only" not in docs
+    assert "Symptoms and their causes" not in docs
+    assert not re.search(r"\byou(?:r|rs)?\b", docs, re.I)
+    assert not re.search(r"(?<!&lt)(?<!&gt);", docs)
+    for name in ("guide", "architecture"):
+        guide = FILES[f"{name}.html"]
+        chapters = re.findall(rf'<h2 id="chapter-{name}-(\d+)">', guide)
+        assert chapters and chapters == re.findall(rf'href="#docs/{name}/(\d+)"', guide)
+        for figure in re.findall(r"<figure.*?</figure>", guide, re.S):
+            assert 'role="img" aria-label=' in figure and "<figcaption>" in figure
+
+
+def test_user_guide_sampling_example_is_a_valid_definition_fragment() -> None:
+    """The worked example must load with the header that the buffer editor supplies."""
+    fragment = re.search(r'<pre data-example="buffer-rules">(.*?)</pre>', FILES["guide.html"], re.S)
+    assert fragment
+    header = {"schema_version": 1, "name": "example", "catalog": {"repo": "example/catalog", "ref": "a" * 40}}
+    spec = load_spec_text(yaml.safe_dump(header) + fragment[1])
+    assert spec.sampling.patch.two_d.x * max(spec.sampling.levels) == 1024
 
 
 LOCAL_STORAGE = """

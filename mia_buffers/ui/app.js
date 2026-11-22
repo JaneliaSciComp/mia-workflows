@@ -17,9 +17,11 @@ import { viewFlow } from "./flow.js";
 // Static: show one of the two documents and mark its sub-tab. A document is a file of the page (guide.html,
 // architecture.html), read when it is first shown. It is this package's own HTML, so it is parsed into nodes;
 // nothing a job or a record wrote is ever shown this way.
-const DOCS_SHOWN = new Set();
+const docsLoads = new Map();
 async function viewDocs(arg) {
-  const doc = arg === "architecture" ? "architecture" : "guide";
+  const [name, chapter] = arg.split("/");
+  const doc = name === "architecture" ? "architecture" : "guide";
+  const routeHash = location.hash;
   document.querySelectorAll("[data-doc]").forEach(a => {
     a.hidden = a.dataset.doc !== doc;
   });
@@ -27,9 +29,16 @@ async function viewDocs(arg) {
     if (a.dataset.docTab === doc) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-  if (DOCS_SHOWN.has(doc)) return;
-  DOCS_SHOWN.add(doc);
   const article = document.querySelector(`[data-doc="${doc}"]`);
+  if (!docsLoads.has(doc)) docsLoads.set(doc, loadDoc(doc, article));
+  await docsLoads.get(doc);
+  if (location.hash === routeHash) {
+    const target = chapter && document.getElementById(`chapter-${doc}-${chapter}`);
+    if (target) target.scrollIntoView();
+    else window.scrollTo(0, 0);
+  }
+}
+async function loadDoc(doc, article) {
   article.replaceChildren(el("div", { class: "empty" }, "loading…"));
   try {
     const [res, text] = await send(`/ui/${doc}.html`);
@@ -37,7 +46,7 @@ async function viewDocs(arg) {
     article.replaceChildren(...new DOMParser().parseFromString(text, "text/html").body.childNodes);
   } catch (e) {
     // the next visit asks again
-    DOCS_SHOWN.delete(doc);
+    docsLoads.delete(doc);
     article.replaceChildren(
       el("div", { class: "empty" }, `The document did not load (${e.status || "network error"}): ${e.message}`),
     );

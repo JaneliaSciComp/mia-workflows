@@ -324,9 +324,9 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 .docs h2{font-size:19px;font-weight:600;margin:34px 0 6px;text-wrap:balance}
 .docs p{margin:0 0 10px}
 .docs code{font-family:var(--mono);font-size:.92em}
-.docs figure{margin:14px 0 0;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 14px 10px;overflow-x:auto}
-.docs figure svg{display:block;max-width:100%;height:auto;min-width:640px;color:var(--fg);font-family:var(--sans)}
-.docs figcaption{font-size:13.5px;color:var(--muted);margin-top:10px}
+.docs figure{margin:18px 0;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 14px 10px;overflow-x:auto}
+.docs figure > svg{display:block;width:100%;height:auto;min-width:530px;color:var(--fg);font-family:var(--sans)}
+.docs figcaption{font-size:13.5px;color:var(--fg2);margin-top:10px}
 .docs figcaption b{color:var(--fg);font-weight:600}
 .docs pre{font-family:var(--mono);font-size:12.5px;line-height:1.5;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px;overflow-x:auto;margin:14px 0 0}
 .docs pre .c{color:var(--muted)}
@@ -336,29 +336,29 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 .docs table{border-collapse:collapse;font-size:13.5px;margin:14px 0 0;max-width:100%}
 .docs th, .docs td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 .docs th{font-weight:600;font-size:12.5px;color:var(--muted)}
-.docs td code{white-space:nowrap}
-.docs .tw{overflow-x:auto}
+.docs td code{overflow-wrap:anywhere}
 /* SVG vocabulary */
 .docs .b{fill:var(--panel);stroke:var(--fg);stroke-opacity:.55;stroke-width:1.2}
 .docs .bs{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
-.docs .un{fill:var(--warn-soft);stroke:var(--warn);stroke-width:1.2}
-.docs .band{fill:var(--accent-soft);fill-opacity:.32;stroke:var(--line);stroke-dasharray:4 3}
-.docs .note{fill:var(--bg);stroke:var(--line)}
-.docs .t{font-size:12px;font-weight:500;fill:currentColor;font-family:var(--mono)}
-.docs .ts{font-size:12px;font-weight:600;fill:currentColor}
-.docs .s{font-size:10.5px;fill:var(--muted)}
-.docs .l{font-size:11px;fill:var(--muted)}
-.docs .lm{font-size:11px;fill:currentColor;font-family:var(--mono)}
-.docs .hd{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;fill:var(--muted)}
 .docs .e{stroke:currentColor;stroke-width:1.2;fill:none}
-.docs .ea{stroke:var(--accent);stroke-width:1.6;fill:none}
 .docs .ed{stroke:currentColor;stroke-width:1.1;fill:none;stroke-dasharray:5 4}
-.docs .em{stroke:var(--muted);stroke-width:.9;fill:none}
-.docs .ll{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 4}
 .docs .sq{fill:none;stroke:currentColor;stroke-width:1.2}
 .docs .sqa{fill:none;stroke:var(--accent);stroke-width:1.8}
 .docs .fa{fill:var(--accent)}
 .docs p{max-width:none}
 .docs table{width:auto}
 .docs th,.docs td{white-space:normal}
+.docs .buffer-steps tr > :first-child{white-space:nowrap}
 .docs th{position:static;cursor:default;user-select:auto}
+.docs h3{font-size:16px;font-weight:600;margin:20px 0 6px}
+.docs article{max-width:84ch;margin:0 auto;font-size:16px;line-height:1.58}
+.docs article h2{scroll-margin-top:calc(var(--topbar-h,60px) + 18px);border-top:1px solid var(--line);padding-top:14px}
+.docs .contents{border-left:3px solid var(--accent);padding:6px 18px;background:var(--panel)}
+.docs .contents ol{columns:2;column-width:225px;padding-left:20px;margin:4px 0}
+.docs .contents li{break-inside:avoid}
+.docs .plate-title{font-weight:600;margin-bottom:10px}
+.docs .plate .tissue{fill:var(--accent-soft);stroke:var(--axis);stroke-width:.8}
+.docs .plate .landmark{fill:var(--warn);stroke:var(--fg2);stroke-width:.6}
+.docs .plate .label{fill:var(--fg);font-size:15px;font-weight:500}
+.docs .plate .small{fill:var(--fg2);font-size:13px}
+.docs table{margin-bottom:16px}
