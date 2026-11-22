@@ -2099,3 +2099,16 @@ def test_the_lists_of_a_buffers_datasets_are_narrowed_by_their_preparation() -> 
     for value in ("unprepared", "in-progress", "prepared"):  # the values the service takes (PlanPage)
         assert has(f'["{value}", "', flow), value
     assert has('"aria-pressed": String(value === preparation)', flow) and has("table.reload(true)", flow)
+
+
+def test_the_bar_at_the_windows_lower_edge_brings_up_no_tooltip() -> None:
+    """A tooltip over the sticky bar of a step's buttons would cover them: there a button's help is its
+    description, which a screen reader still reads. The bar a step shows above its tables keeps its tooltips."""
+    assert has(
+        """if (bar.classList.contains("above")) return;
+        for (const node of bar.querySelectorAll("[title]")) {
+          node.setAttribute("aria-description", node.title);
+          node.removeAttribute("title");
+        }""",
+        squeezed(re.sub(r"//[^\n]*", "", FILES["flow.js"])),  # the code without its comments
+    )

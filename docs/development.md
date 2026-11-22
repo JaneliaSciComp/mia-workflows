@@ -1226,7 +1226,8 @@ Each tab is one kind of thing, and each thing has one page:
     (`chosenBox`), whose *Prepare* files the request with `buffer` and `again`. Toggle buttons narrow the list
     to the unprepared, those being prepared or the prepared (`page.preparation`, rows only: the numbers above
     stay the plan's). It also lists the buffer's requests. Its way
-    forward is the one `go` a buffer gets from the page (`planRound`).
+    forward is the one `go` a buffer gets from the page (`planRound`). The bar of a step's buttons at the
+    window's lower edge brings up no tooltip (`foot`): a button there keeps its help as `aria-description`.
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the
     version's page) and *Files are in place*; *Serve* its buttons, then the version's id, the line a training
     script pastes and the version's included datasets (`includedCard`: `/buffers/<id>/datasets?included=1`, the

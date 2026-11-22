@@ -394,6 +394,13 @@ function foot(back, hint, forward, bar = $("bufferFoot")) {
     back || el("span"),
     el("div", { class: "right" }, hint ? el("span", { class: "small" }, hint) : null, forward),
   );
+  if (bar.classList.contains("above")) return;
+  // the bar at the window's lower edge brings up no tooltip: one would lie over its buttons. What a button does
+  // stays its description for a screen reader
+  for (const node of bar.querySelectorAll("[title]")) {
+    node.setAttribute("aria-description", node.title);
+    node.removeAttribute("title");
+  }
 }
 const savedHint = subject =>
   lockReason(subject) ||
