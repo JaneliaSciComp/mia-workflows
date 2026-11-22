@@ -135,6 +135,11 @@ def _volume_from(data: dict) -> Volume:
     return Volume(**data)
 
 
+def _staged_key(artifact: str | None, path: str) -> str:
+    """What a buffer's staged reference names: the volume's artifact, else the directory of its pyramid."""
+    return artifact or str(PurePosixPath(path).parent)
+
+
 class Ledger:
     """All reads and writes go through one connection guarded by a lock; writes are single transactions."""
 
@@ -180,14 +185,41 @@ class Ledger:
                 raise
 
     def put_volume(self, buffer: str, volume: Volume, refs: Iterable[tuple[str, str]] = ()) -> None:
-        """Upsert the volume and add its (kind, key) references in one transaction."""
+        """Upsert the volume and add its (kind, key) references in one transaction; a volume that moves to another
+        staged artifact takes the buffer's reference to the old one with it when no other volume still uses it."""
         with self._transaction() as db:
+            previous = self._staged_of(db, buffer, volume.id)
             db.execute(
                 "INSERT OR REPLACE INTO volumes VALUES (?, ?, ?)",
                 (buffer, volume.id, json.dumps(dataclasses.asdict(volume))),
             )
             db.executemany("INSERT OR IGNORE INTO refs VALUES (?, ?, ?)", [(buffer, kind, key) for kind, key in refs])
+            if previous is not None and previous != _staged_key(volume.artifact, volume.path):
+                self._drop_unused_staged_ref(db, buffer, previous)
             self._volumes.pop(buffer, None)
+
+    @staticmethod
+    def _staged_of(db: sqlite3.Connection, buffer: str, volume_id: str) -> str | None:
+        """The staged key (artifact, else the pyramid's directory) of the buffer's volume; None without the volume."""
+        found = db.execute(
+            "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes "
+            "WHERE buffer = ? AND id = ?",
+            (buffer, volume_id),
+        ).fetchone()
+        return _staged_key(*found) if found else None
+
+    @staticmethod
+    def _drop_unused_staged_ref(db: sqlite3.Connection, buffer: str, staged: str) -> None:
+        """Drop the buffer's reference to `staged` unless one of its volumes still lives there."""
+        still = {
+            _staged_key(known_artifact, known_path)
+            for known_artifact, known_path in db.execute(
+                "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes WHERE buffer = ?",
+                (buffer,),
+            )
+        }
+        if staged not in still:
+            db.execute("DELETE FROM refs WHERE buffer = ? AND kind = 'staged' AND key = ?", (buffer, staged))
 
     def clear_frozen(self, buffer: str) -> int:
         """Drop the buffer's frozen eval lists (every split); returns the rows removed. Called when a volume's
@@ -1100,26 +1132,12 @@ class Ledger:
         """Drop the volume, its frozen rows and the staged reference no other volume of the buffer still needs;
         False when the buffer has no such volume. The raw reference stays (a retire drops it)."""
         with self._transaction() as db:
-            found = db.execute(
-                "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes "
-                "WHERE buffer = ? AND id = ?",
-                (buffer, volume_id),
-            ).fetchone()
-            if found is None:
+            staged = self._staged_of(db, buffer, volume_id)
+            if staged is None:
                 return False
-            artifact, path = found
             db.execute("DELETE FROM volumes WHERE buffer = ? AND id = ?", (buffer, volume_id))
             self._drop_frozen_of(db, buffer, volume_id)
-            staged = artifact or str(PurePosixPath(path).parent)
-            still = {
-                known_artifact or str(PurePosixPath(known_path).parent)
-                for known_artifact, known_path in db.execute(
-                    "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes WHERE buffer = ?",
-                    (buffer,),
-                )
-            }
-            if staged not in still:
-                db.execute("DELETE FROM refs WHERE buffer = ? AND kind = 'staged' AND key = ?", (buffer, staged))
+            self._drop_unused_staged_ref(db, buffer, staged)
             self._volumes.pop(buffer, None)
         return True
 

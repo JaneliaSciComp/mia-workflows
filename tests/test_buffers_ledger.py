@@ -34,12 +34,16 @@ def test_volumes_are_parsed_once_per_write(tmp_path):
     first = led.volumes("b")
     second = led.volumes("b")
     assert first == second == [vol("a")] and first is not second  # a copy: a caller may replace entries
-    assert sum("FROM volumes" in statement for statement in statements) == 1  # the second read never hit SQLite
+
+    def reads() -> int:  # the reads of `volumes`; a put reads the row it replaces too
+        return sum("SELECT data FROM volumes" in statement for statement in statements)
+
+    assert reads() == 1  # the second read never hit SQLite
     led.put_volume("b", vol("c"))
     assert [v.id for v in led.volumes("b")] == ["a", "c"]
     led.set_volume_missing("b", "c", True, vol("c").path)
     assert [v.missing for v in led.volumes("b")] == [False, True]
-    assert sum("FROM volumes" in statement for statement in statements) == 3
+    assert reads() == 3
 
 
 def test_consumers_and_staleness(tmp_path):
@@ -156,6 +160,19 @@ def test_put_volume_with_refs_is_atomic(tmp_path):
     with pytest.raises((sqlite3.InterfaceError, sqlite3.ProgrammingError)):
         led.put_volume("b", vol("c"), refs=[("staged", object())])  # unbindable on purpose
     assert [v.id for v in led.volumes("b")] == ["a"]
+
+
+def test_a_volume_moved_to_another_artifact_takes_the_stale_staged_ref_with_it(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {})
+    led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art1"), refs=[("staged", "art1"), ("raw", "rec")])
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art1"), refs=[("staged", "art1")])
+    led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art2"), refs=[("staged", "art2"), ("raw", "rec")])
+    assert led.refs("staged", "art1") == ["b"]  # rec/b still lives in art1
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art2"), refs=[("staged", "art2")])
+    assert led.refs("staged", "art1") == [] and led.refs("staged", "art2") == ["b"] and led.refs("raw", "rec") == ["b"]
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art2", weight=0.5), refs=[("staged", "art2")])
+    assert led.refs("staged", "art2") == ["b"]  # the same artifact again: nothing dropped
 
 
 def test_backup_is_a_consistent_copy(tmp_path):
