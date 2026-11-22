@@ -1,8 +1,8 @@
 # MIA: sample filters — Spec
 
-**Status:** v0.1 · 2026-11-21 · not approved. The direction (§4, approach A: one filter list, and a threshold
-for the annotated share of a crop) is the user's decision. Everything marked *call* is the author's and the
-user's to change. Rests on the training-buffers spec, the sparse OME-Zarr staging spec, the random-crops plan
+**Status:** v0.1 · 2026-11-21 · approved 2026-11-21 as written, §9 decided as §5.5 has it. The direction (§4,
+approach A: one filter list, and a threshold for the annotated share of a crop) is the user's decision. What is
+marked *call* is the author's, approved with the rest. Plan: `docs/plans/2026-11-21-sample-filters.md`. Rests on the training-buffers spec, the sparse OME-Zarr staging spec, the random-crops plan
 and the stage-on-demand spec.
 
 ## 1. Intent
@@ -156,16 +156,16 @@ and split. What changes is how many draws are taken and which are kept.
 - **The volume itself** gains nothing: the rule, filters included, is already recorded as the staging step's
   parameters in its provenance.
 - **`check-stage`** is unchanged: it checks coverage and geometry of the samples that were staged.
-- **A short volume weighs less in training.** *Call, open (§9.1).* When the rule has filters, registration
-  multiplies a volume's weight by staged / wanted for the split's crops (`register.volume_bodies`, from the
+- **A short volume weighs less in training.** *Call, decided (§9.1).* When the rule has filters, registration
+  multiplies a volume's weight by staged / wanted, summed over its splits (`register.volume_bodies`, from the
   counts in stage.json). Without that, `sampler.draw` picks a volume by its unchanged weight and then one of
   its samples: a volume that kept 3 of 128 `train` crops would serve each about forty times as often. With
   it, a crop of a short volume is served about as often as any other, and the record's part of training
   shrinks with what it holds. `val` and `test` need nothing: their frozen lists run out (`draw_frozen`,
   `capacity`), so a pool that holds fewer samples than `sampling.crops` asks for gets a shorter list.
-- **The timeline says who came up short.** *Call, open (§9.2).* The result entry of the staging pass lists
-  each record that staged fewer crops than its rule asked for, with staged / wanted per split and the
-  rejections by filter. The counts reach the worker in stage.json, which it already reads; a field an
+- **The timeline says who came up short.** *Call, decided (§9.2).* The timeline line that says a record is
+  servable names each of its volumes that staged fewer crops than its rule asked for, with staged / wanted per
+  split and the rejections by filter. The counts reach the worker in stage.json, which it already reads; a field an
   activity result needs for them is added with a default. No new column on the page.
 
 ### 5.6 Planning is an upper bound
@@ -227,7 +227,7 @@ kept, as the crop job does); the exact wording on the page and in the timeline e
   incident's dataset and its stage.json is read: four `val` samples on tissue, and no `train` sample under
   5 % annotated.
 
-## 9. Open decisions
+## 9. Decisions (both as §5.5 has them, 2026-11-21)
 
 1. **Does a short volume weigh less in training?** §5.5 says yes, by staged / wanted, only when the rule has
    filters. The other answer is to leave weights alone and accept that a short volume's crops repeat.
