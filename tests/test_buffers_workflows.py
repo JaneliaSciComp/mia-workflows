@@ -114,9 +114,11 @@ class Mocks:
         submit_error=None,
         submit_gate=None,
         retire_gate=None,
+        short=None,
     ):
         self.submit_gate = submit_gate  # an asyncio.Event: every submit waits for it, as a slow bsub would
         self.retire_gate = retire_gate  # an asyncio.Event: retire_buffer waits for it, as a large archive would
+        self.short = short or {}  # record → what register_dataset says came up short of the plan
         self.calls: list[tuple[str, tuple]] = []
         self.plan, self.bindings, self.stage = plan, bindings or {}, stage or {}
         self.drops, self.states, self.refuse = drops or {}, states or {}, refuse or {}
@@ -237,7 +239,7 @@ class Mocks:
                 raise ApplicationError("boom: buffer-api answered 502 with an HTML page", non_retryable=True)
             if record in self.refuse:
                 return RegisterResult(refused={f"{record}/v0.zarr": self.refuse[record]})
-            return RegisterResult([f"{record}/v0.zarr"])
+            return RegisterResult([f"{record}/v0.zarr"], short=self.short.get(record, ""))
 
         @activity.defn(name="assess_board")
         async def assess_board(issue: int, round_id: str, buffer_id: str, verdict: str, by: str) -> BoardAssessed:
@@ -2700,3 +2702,13 @@ async def test_replay_prep_history_cancel(env):
             PREP_CANCEL_HISTORY.write_text(json.dumps(_scrub(history), indent=1) + "\n")
     history = WorkflowHistory.from_json("prep-cancelled", PREP_CANCEL_HISTORY.read_text())
     await Replayer(workflows=[workflows.MiaPrep]).replay_workflow(history)
+
+
+async def test_the_servable_line_says_what_came_up_short(env):
+    short = " Short of its plan: v0.zarr train 2 of 8 (labelled 2000)."
+    m = Mocks(short={"u937": short})
+    async with started(env, m) as h:
+        await approve(h, m)
+        await until(lambda: any("`u937` is servable" in a[0] for a in m.of("comment")), m=m)
+    line = next(a[0] for a in m.of("comment") if "`u937` is servable" in a[0])
+    assert short in line

@@ -1400,7 +1400,8 @@ class MiaBuffer:
         dataset.status, dataset.volumes, dataset.reason = "servable", len(registered.registered), ""
         reused = " The pyramid was staged earlier for this binding and reused." if binding.staged else ""
         await self._comment(
-            f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.{reused}",
+            f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`."
+            f"{reused}{registered.short}",
             f"dataset {round_id} {record} servable",
             dataset.jobs,
         )
@@ -1534,7 +1535,8 @@ class MiaBuffer:
         dataset.volumes = len(registered.registered)
         self._set(dataset, "servable")
         await self._comment(
-            f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`.{reused}",
+            f"`{record}` is servable: {dataset.volumes} volume(s) registered with buffer `{state.buffer_id}`."
+            f"{reused}{registered.short}",
             f"dataset {round_id} {record} servable",
             dataset.jobs,
         )

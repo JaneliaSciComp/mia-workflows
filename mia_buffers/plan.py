@@ -163,7 +163,8 @@ class Plan:
             total_bytes = _human_bytes(sum(row.planned_bytes for row in pool))
             lines += [
                 "",
-                f"planned {planned} of requested {requested} crops; ~{total_bytes} uncompressed "
+                f"planned {_up_to(pool[0].plan_rule)}{planned} of requested {requested} crops; "
+                f"~{total_bytes} uncompressed "
                 "(planned is an expectation over each record's items)",
             ]
         if self.excluded:
@@ -194,10 +195,15 @@ def _voxel_cell(row: Row) -> str:
 
 
 def _planned_cell(row: Row) -> str:
-    """`train 4096 · val 64 · …`: the crops the record is expected to stage per split."""
+    """`train 4096 · val 64 · …`: the crops the record is expected to stage per split; `up to` those when the rule
+    has filters, which only the stage job can apply."""
     if not row.in_pool or row.plan_rule is None:
         return ""
-    return " · ".join(f"{name} {row.planned.get(name, 0)}" for name in row.plan_rule["samples"])
+    return _up_to(row.plan_rule) + " · ".join(f"{name} {row.planned.get(name, 0)}" for name in row.plan_rule["samples"])
+
+
+def _up_to(rule: dict | None) -> str:
+    return "up to " if rule and rule.get("filters") else ""
 
 
 def _coverage_cell(row: Row) -> str:
@@ -340,9 +346,11 @@ def crops_for(weight: float, total: int, cap: int) -> int:
 
 def plan_rule(row: Row, spec: Spec) -> dict:
     """The rule the harness's `PlanRule` mirrors, same keys and value types: `samples` is the record's crops per
-    split, its weight's share of the buffer's (`crops_for`)."""
+    split, its weight's share of the buffer's (`crops_for`). `filters` is there only when the definition has some,
+    so a definition without them keeps its digests."""
     patch = spec.patch_for("2D") or {}  # as the levels key and the served config.patch: the square 2D crop
     sampling = spec.sampling
+    filters = {"filters": [entry.model_dump() for entry in sampling.filters]} if sampling.filters else {}
     return {
         "seed": sampling.seed,
         "patch": int(patch.get("y", 0)),
@@ -352,6 +360,7 @@ def plan_rule(row: Row, spec: Spec) -> dict:
         },
         "split": row.split,
         "channel_recipe": row.channel_recipe,
+        **filters,
     }
 
 

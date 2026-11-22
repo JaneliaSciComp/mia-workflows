@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import (
@@ -176,12 +176,30 @@ class SamplePlan(_Strict):
     samples: dict[str, PositiveInt] = {}
 
 
+class ContentFilter(_Strict):
+    """A crop must hold an image: not blank, not one value (the crop job's content test)."""
+
+    name: Literal["content"]
+
+
+class LabelledFilter(_Strict):
+    """At least `min_fraction` of a crop's pixels must be annotated; a dataset without labels passes."""
+
+    name: Literal["labelled"]
+    min_fraction: float = Field(gt=0, le=1)
+
+
+SampleFilter = Annotated[ContentFilter | LabelledFilter, Field(discriminator="name")]
+
+
 class Sampling(_Strict):
     patch: Patch
     # distinct crops in the whole buffer per split; a dataset stages its weight's share (mia_buffers.plan.crops_for)
     # and the val and test numbers are the lengths of the frozen lists
     crops: dict[str, PositiveInt] = {"train": 100000, "val": 2000, "test": 2000}
     max_crops_per_dataset: PositiveInt = 1024  # in one split; one artifact must stay under limits.stage_bytes
+    # what a crop must hold to be staged, tested by the stage job on its full-resolution box; kept in name order
+    filters: list[SampleFilter] = []
     plan: SamplePlan | None = None  # ignored, see Spec.warnings
     levels: list[int] = [1]
     assume_voxel_size: bool = True  # fill missing voxel sizes from mia_buffers.assume (spec v0.5 §2)
@@ -194,6 +212,14 @@ class Sampling(_Strict):
     dtype: Literal["uint8", "uint16", "bfloat16", "float16", "float32"] = "float32"
     normalize: Normalize = Normalize()
     seed: int = 0
+
+    @field_validator("filters")
+    @classmethod
+    def _filters_named_once_in_name_order(cls, value: list[SampleFilter]) -> list[SampleFilter]:
+        names = [entry.name for entry in value]
+        if repeated := sorted({name for name in names if names.count(name) > 1}):
+            raise ValueError(f"a filter is named once: {', '.join(repeated)}")
+        return sorted(value, key=lambda entry: entry.name)
 
     @field_validator("levels")
     @classmethod

@@ -436,3 +436,37 @@ def test_a_dataset_estimated_over_the_stage_cap_is_a_plan_warning(spec_2d, plan_
     assert tight.valid  # a warning: the stage job measures the real bytes
     roomy = build_plan(spec_2d, "h", None, records(), stage_bytes=1e15)
     assert not any("limits.stage_bytes" in warning for warning in roomy.warnings)
+
+
+FILTERS = [{"name": "content"}, {"name": "labelled", "min_fraction": 0.05}]
+
+
+def test_plan_digest_with_filters_golden():
+    """The cross-repo pin: the harness's PlanRule.digest() of the same rule with these filters gives this hex."""
+    rule = {
+        "seed": 0,
+        "patch": 256,
+        "levels": [1, 2, 4],
+        "samples": {"train": 1000, "val": 20, "test": 20},
+        "split": {"policy": "fractions", "fractions": {"train": 0.8, "val": 0.1, "test": 0.1}, "seed": 0},
+        "channel_recipe": None,
+        "filters": FILTERS,
+    }
+    assert plan_digest(rule) == "38da38f37fee0b1dc5f08cd3b544eab367376ece8c262b1aed2e2b8b2b016ce8"
+
+
+def test_a_rule_has_filters_only_when_the_definition_does(spec_2d):
+    plain = build_plan(spec_2d, "h", None, records()).rows_by_id[U937]
+    assert "filters" not in plain.plan_rule
+    filtered = build_plan(spec_with(spec_2d, **{"sampling.filters": FILTERS[::-1]}), "h", None, records())
+    row = filtered.rows_by_id[U937]
+    assert row.plan_rule["filters"] == FILTERS  # name order, whatever the definition's
+    assert {**row.plan_rule, "filters": None} == {**plain.plan_rule, "filters": None}
+    assert row.plan_digest != plain.plan_digest and row.planned == plain.planned
+
+
+def test_planned_reads_up_to_with_filters(spec_2d):
+    plain = build_plan(spec_2d, "h", None, records()).render_markdown()
+    assert "up to" not in plain
+    text = build_plan(spec_with(spec_2d, **{"sampling.filters": FILTERS}), "h", None, records()).render_markdown()
+    assert "| up to train " in text and "\nplanned up to " in text

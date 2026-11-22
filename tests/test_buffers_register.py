@@ -15,6 +15,8 @@ from mia_buffers.register import (
     normalize_bounds,
     recipe_for,
     register,
+    shortfall,
+    staged_share,
     volume_bodies,
 )
 from mia_core.registry import RegistryError
@@ -414,3 +416,63 @@ def test_buffer_config_carries_recipe_plan_hash_and_lifecycle(spec_2d):  # noqa:
     strict = spec_with(spec_2d, **{"health.max_empty_fraction": 0.2})
     again = buffer_config(plan, strict, tensorizer="muvit-2d", recipe=recipe, plan_hash="ph")
     assert again["max_empty_fraction"] == 0.2
+
+
+def selection(wanted: int, staged: int, **rejected: int) -> dict:
+    return {"wanted": wanted, "staged": staged, "draws": staged + sum(rejected.values()), "rejected": rejected}
+
+
+def test_a_short_volume_weighs_less(tmp_path, spec_2d):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    report = json.loads((staged / "stage.json").read_text())
+    assert staged_share(report["volumes"][0]) == 1.0  # a rule without filters: no selection
+    report["volumes"][0]["selection"] = {"train": selection(120, 30, labelled=2000), "val": selection(8, 2)}
+    assert staged_share(report["volumes"][0]) == 0.25
+    [(_, vb)] = volume_bodies(ROW, staged, spec_2d, report)
+    assert vb["weight"] == 0.5 * 0.25
+    report["volumes"][0]["selection"] = {"train": selection(120, 120), "val": selection(0, 0)}
+    assert volume_bodies(ROW, staged, spec_2d, report)[0][1]["weight"] == 0.5
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "all",
+        {"train": "most"},
+        {"train": {"wanted": 4}},
+        {"train": {"wanted": 4, "staged": 9, "rejected": {}}},
+        {"train": {"wanted": -4, "staged": -1, "rejected": {}}},
+        {"train": {"wanted": True, "staged": True, "rejected": {}}},
+        {"train": {"wanted": 4, "staged": 1, "rejected": {"labelled": "many"}}},
+        {"train": {"wanted": 0, "staged": 0, "rejected": {}}},
+    ],
+)
+def test_a_malformed_selection_scales_nothing(tmp_path, spec_2d, bad):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")
+    report = json.loads((staged / "stage.json").read_text())
+    report["volumes"][0]["selection"] = bad
+    assert volume_bodies(ROW, staged, spec_2d, report)[0][1]["weight"] == 0.5
+    assert shortfall({**report, "unstaged": [{"volume": "v1.zarr", "selection": bad}, "v2", {"volume": 3}]}) == ""
+
+
+def test_shortfall_names_short_and_unstaged_volumes():
+    full = {"path": "v2.zarr", "selection": {"train": selection(8, 8, repeat=1)}}
+    assert shortfall({"volumes": [full]}) == "" and shortfall({"volumes": [{"path": "v0.zarr"}]}) == ""
+    assert shortfall({}) == "" and shortfall({"volumes": "none", "unstaged": 3}) == ""
+    report = {
+        "volumes": [
+            full,
+            {
+                "path": "v1.zarr",
+                "selection": {"train": selection(128, 96, labelled=1490, content=3), "val": selection(0, 0)},
+            },
+        ],
+        "unstaged": [{"volume": "v0.zarr", "selection": {"val": selection(4, 0, labelled=2000)}}],
+    }
+    assert shortfall(report) == (
+        " Short of its plan: v0.zarr val 0 of 4 (labelled 2000); v1.zarr train 96 of 128 (labelled 1490, content 3)."
+    )
+    again = {"path": "v1.zarr", "selection": {"val": selection(4, 1, content=9)}}  # one name, said twice
+    assert shortfall({"volumes": [again, report["volumes"][1]]}).count("v1.zarr") == 2
+    hostile = {"path": "v1.zarr](http://x)", "selection": {"<b>": selection(4, 1, **{"[x](y)": 3})}}
+    assert shortfall({"volumes": [hostile]}) == ""  # names that are not a volume, a split and a reason say nothing

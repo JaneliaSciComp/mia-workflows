@@ -94,7 +94,7 @@ from .models import (
     job_key,
 )
 from .plan import MANUAL_DROP_NOTE, UNREADABLE, Row, _group_key, build_plan, load_records, plan_hash
-from .register import buffer_config, recipe_for, volume_bodies
+from .register import buffer_config, recipe_for, shortfall, volume_bodies
 from .select import decide_all
 from .spec import SpecError, load_prep_text, load_spec
 from .specmap import facts
@@ -1380,7 +1380,7 @@ class Activities:
         report = _stage_json(staged)
         if not isinstance(report, dict):
             return RegisterResult(refused={record: "stage.json is missing, unreadable or not a JSON object"})
-        result = RegisterResult()
+        result = RegisterResult(short=shortfall(report))
         bodies = volume_bodies(
             self._row(round_id, record),
             staged,

@@ -2070,3 +2070,17 @@ def test_the_job_runner_is_given_the_registry_as_the_transfers_sink(tmp_path):
     runner = SimpleNamespace(transfers_sink=None)
     a = Activities(make_cfg(tmp_path), None, None, None, runner, bot="bot")
     assert runner.transfers_sink == a.registry.put_transfers
+
+
+async def test_register_dataset_says_what_came_up_short(acts, server):
+    await planned_and_bound(acts)
+    staged = write_stage_json(staged_dir(acts, U937))
+    report = json.loads((staged / "stage.json").read_text())
+    report["volumes"][0]["selection"] = {
+        "train": {"wanted": 8, "staged": 2, "draws": 2002, "rejected": {"labelled": 2000}}
+    }
+    (staged / "stage.json").write_text(json.dumps(report))
+    await acts.create_buffer(ROUND, ROUND)
+    result = await acts.register_dataset(ROUND, U937, ROUND)
+    assert result.registered == [f"{U937}/v0.zarr"]
+    assert result.short == " Short of its plan: v0.zarr train 2 of 8 (labelled 2000)."

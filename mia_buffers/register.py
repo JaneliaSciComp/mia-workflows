@@ -121,6 +121,55 @@ def check_sample(value: object, channels: int) -> str | None:
     return None
 
 
+NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")  # a split, or why a draw was rejected: "repeat" or a filter's name
+
+
+def _selection(entry: object, key: str) -> tuple[str, dict[str, tuple[int, int, dict[str, int]]]] | None:
+    """A stage.json entry's volume directory (under `key`) and its `selection` as {split: (wanted, staged,
+    {reason: rejected draws})}, or None when the entry has no selection or any of it is not what the harness
+    writes. It is a job's file: the names become timeline text and the counts a weight."""
+    name = entry.get(key) if isinstance(entry, dict) else None
+    selection = entry.get("selection") if isinstance(entry, dict) else None
+    if not (isinstance(name, str) and VOLUME_PATH_RE.fullmatch(name) and isinstance(selection, dict)):
+        return None
+    counts: dict[str, tuple[int, int, dict[str, int]]] = {}
+    for split, found in selection.items():
+        if not (isinstance(split, str) and NAME_RE.fullmatch(split) and isinstance(found, dict)):
+            return None
+        wanted, staged, rejected = found.get("wanted"), found.get("staged"), found.get("rejected")
+        if not (type(wanted) is int and type(staged) is int and 0 <= staged <= wanted and isinstance(rejected, dict)):
+            return None
+        if not all(isinstance(why, str) and NAME_RE.fullmatch(why) and type(n) is int for why, n in rejected.items()):
+            return None
+        counts[split] = (wanted, staged, dict(rejected))
+    return name, counts
+
+
+def staged_share(volume: object) -> float:
+    """The part of its planned crops a volume staged, over its splits together: 1.0 for a volume whose rule had no
+    filters (no `selection`), and for a selection that cannot be read."""
+    found = _selection(volume, "path")
+    wanted = sum(counts[0] for counts in found[1].values()) if found else 0
+    return sum(counts[1] for counts in found[1].values()) / wanted if found and wanted else 1.0
+
+
+def shortfall(report: dict) -> str:
+    """` Short of its plan: v0.zarr val 0 of 4 (labelled 2000); …`, to follow the line that says a record is
+    servable: each volume and split of the record's stage.json that staged fewer crops than its rule asked for,
+    the volumes that kept none (`unstaged`) included, with the rejected draws by reason. "" when none is short."""
+    found = []
+    for key, name in (("volume", "unstaged"), ("path", "volumes")):
+        listed = report.get(name)
+        found += [_selection(entry, key) for entry in (listed if isinstance(listed, list) else [])]
+    short = []
+    for volume, counts in sorted((entry for entry in found if entry), key=lambda entry: entry[0]):
+        for split, (wanted, staged, rejected) in counts.items():
+            if staged < wanted:
+                why = ", ".join(f"{reason} {count}" for reason, count in rejected.items())
+                short.append(f"{volume} {split} {staged} of {wanted}" + (f" ({why})" if why else ""))
+    return f" Short of its plan: {'; '.join(short[:20])}." if short else ""
+
+
 def check_volume(volume: object) -> str | None:
     """Why a stage.json volume entry cannot be registered, or None. The stage job is reviewed code, but its output
     is still a job's file: the path must stay inside the staged directory and the keys the body needs must exist."""
@@ -251,7 +300,8 @@ def volume_bodies(
                     ],
                     "split_planes": _split_planes(volume_id, planes, split),
                     "labels": dict(volume.get("labels") or {}),
-                    "weight": float(row["weight"]) * planes / total_planes,
+                    # a volume whose filters kept fewer crops than planned serves each about as often as any
+                    "weight": float(row["weight"]) * planes / total_planes * staged_share(volume),
                     "channels_stored": _channels(volume),
                     "recipe": row.get("channel_recipe"),
                     "voxel_size_nm": {k: v for k, v in (volume.get("voxel_size_nm") or {}).items() if v is not None},

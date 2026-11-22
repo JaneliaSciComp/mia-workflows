@@ -167,3 +167,41 @@ def test_a_prep_request_says_restart_and_a_stored_one_that_says_again_reads_the_
     assert load_prep_text(yaml.safe_dump({**base, "restart": True})).restart is True
     assert load_prep_text(yaml.safe_dump({**base, "again": True})).restart is True
     assert load_prep_text(yaml.safe_dump({**base, "restart": True})).again is True  # what the round's pins carry
+
+
+BOTH_FILTERS = [{"name": "labelled", "min_fraction": 0.05}, {"name": "content"}]
+
+
+def _with_filters(filters) -> str:
+    data = yaml.safe_load((FIXTURES / "spec.yaml").read_text())
+    data["sampling"]["filters"] = filters
+    return yaml.safe_dump(data)
+
+
+def test_filters_default_to_none_and_are_kept_in_name_order():
+    assert load_spec(FIXTURES / "spec.yaml").sampling.filters == []
+    filters = load_spec_text(_with_filters(BOTH_FILTERS)).sampling.filters
+    assert [entry.model_dump() for entry in filters] == [
+        {"name": "content"},
+        {"name": "labelled", "min_fraction": 0.05},
+    ]
+    assert (
+        load_spec_text(_with_filters([{"name": "labelled", "min_fraction": 1}])).sampling.filters[0].min_fraction == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "filters,needle",
+    [
+        ([{"name": "sharp"}], "sharp"),
+        ([{"name": "content"}, {"name": "content"}], "a filter is named once: content"),
+        ([{"name": "labelled"}], "min_fraction"),
+        ([{"name": "labelled", "min_fraction": 0}], "min_fraction"),
+        ([{"name": "labelled", "min_fraction": 1.5}], "min_fraction"),
+        ([{"name": "content", "min_fraction": 0.5}], "min_fraction"),
+        (["content"], "filters"),
+    ],
+)
+def test_filters_refused(filters, needle):
+    with pytest.raises(SpecError, match=needle):
+        load_spec_text(_with_filters(filters))

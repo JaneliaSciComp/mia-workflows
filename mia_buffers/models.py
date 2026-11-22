@@ -170,6 +170,7 @@ class DropResult:
 class RegisterResult:
     registered: list[str] = field(default_factory=list)
     refused: dict[str, str] = field(default_factory=dict)
+    short: str = ""  # what staged fewer crops than planned (register.shortfall), to follow the servable line
 
 
 @dataclass
