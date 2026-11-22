@@ -2599,7 +2599,6 @@ class BufferService:
                 "labels": [
                     {
                         "key": key,
-                        "type": volume.labels[key],
                         "levels": [base64.b64encode(picture).decode() for picture in layer],
                     }
                     for key, layer in pictures["labels"].items()

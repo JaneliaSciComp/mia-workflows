@@ -1126,6 +1126,19 @@ config), and `muvit-2d` then scales by those bounds instead of the patch's own p
 (`meta.normalize_scope` says which). A staged directory without a sample has its volumes refused at registration
 under a non-`patch` scope, with a reason that says to re-stage.
 
+**A peek.** `GET /buffers/<id>/peek?split=train|val|test` (a read route) answers one crop for a person to look
+at: the descriptor a consumer would have been handed (without `seq`), the tensorizer's `img` and each label
+layer as one PNG per level (base64), each level's pixel size and the dataset's facts from the newest catalog.
+buffer-api reads no array itself: `mia_buffers.peek.Peeker` runs the `harness.dir` checkout's
+`harness tensorize --png` with the harness environment's python, the parameters `BufferDataset` passes, one BLAS
+thread, a 60 s limit and one process at a time, and reads the pictures back with `read_untrusted`. A harness that
+fails is a `502` with the end of its stderr; a service started without a harness (a test) answers `503`. The
+buffer keeps no trace of a peek: the draw has a generator of its own, no consumer is registered, no draw or
+empty answer is counted, the idle clock does not move, and a `val` or `test` crop is one of the split's
+candidates, not a row of its frozen list (`tests/test_buffers_peek.py`). It runs the checkout as it stands, not
+the snapshot the buffer's round pinned. The page shows it on the serve step, under the two lines a training run
+writes: a split, **Next crop**, and nothing asked until the button is pressed.
+
 ## The page
 
 buffer-api serves one page at `/` on `service.url` (static files under `/ui/`). It holds no token: it fetches
@@ -1148,6 +1161,7 @@ above it in this table, never in a circle:
 | `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
 | `job.js` | a job's record, every value of it inserted as text |
 | `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views; `designer.js` is steps 1 and 2 of a buffer (its definition and that definition's plan) |
+| `peek.js` | the serve step's peek: one crop as the tensorizer returns it, its levels side by side; imports `dom.js` and `api.js` only |
 | `overview.js` | Overview, the landing page: the system, the counts by status, what needs a human, what is in repair, what is working, the week's repairs and what is shelved, each a section that folds |
 | `flow.js` | a buffer's page: its heading, the strip of steps, the step shown with its way back and forward, steps 3 to 6, the timeline |
 | `app.js` | the Docs view, health, the stream, hash routing and boot |

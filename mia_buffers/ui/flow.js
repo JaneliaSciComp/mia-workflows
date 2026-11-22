@@ -25,6 +25,7 @@ import { cropsOf, gist, markdown, mdInline } from "./markdown.js";
 import { actionBar, askHosts, BUTTON_HELP, onScreen, sendAction, undelivered } from "./actions.js";
 import { poolTable, servableText, stageOf } from "./buffers.js";
 import { chosenBox, datasetCols } from "./datasets.js";
+import { peekPanel } from "./peek.js";
 import {
   baseRevision,
   changed,
@@ -780,6 +781,7 @@ async function serveStep(pane, subject, redraw, wanted) {
             { class: "snippet" },
             `from mia_buffers.client import BufferDataset\ntrain = BufferDataset("${url}", buffer="${version.id}", split="train")`,
           ),
+          peekPanel(version.id),
         )
       : null,
     version ? includedCard(subject, version, redraw) : null,

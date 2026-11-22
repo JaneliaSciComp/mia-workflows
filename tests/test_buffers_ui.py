@@ -1965,3 +1965,104 @@ def test_the_designer_has_the_filter_controls() -> None:
     index, designer = (ui / "index.html").read_text(), (ui / "designer.js").read_text()
     for name in ("filterContent", "filterLabelled", "labelledPercent"):
         assert f'id="{name}"' in index and f'bind("{name}", "{name}"' in designer
+
+
+PEEK = {
+    "split": "train",
+    "descriptor": {
+        "volume": "rec/v0.zarr",
+        "patch": 256,
+        "plane": {"z": 4},
+        "centre_nm": [6148000.0, 8402000.0],
+        "candidate": 2,
+    },
+    "dataset": {
+        "id": "rec",
+        "title": "A dataset",
+        "modality": "brightfield",
+        "dims": "2D",
+        "organisms": ["human"],
+        "annotation_types": ["semantic"],
+    },
+    "samples": 128,
+    "levels": [{"factor": f, "pixel_nm": 250.0 * f, "img": f"aW1n{f}"} for f in (1, 2, 4, 8)],
+    "labels": [{"key": "gt-semantic", "levels": [f"bGFi{f}" for f in (1, 2, 4, 8)]}],
+}
+
+
+def test_a_peek_shows_every_level_side_by_side_with_its_size() -> None:
+    """The serve step's peek: the image's levels in one row, each named by its factor, pixel size and width, a row
+    per label layer under its name, then the dataset's facts and where the crop is. What the service sent is an
+    image's data or text, never markup."""
+    out = run_js(
+        "const view = peekView(input); const rows = walk(view).filter(n => n.attrs.class === 'levels');"
+        "print({ rows: rows.map(row => walk(row).filter(n => n.tag === 'img').map(n => n.attrs.src)),"
+        " captions: walk(rows[0]).filter(n => n.tag === 'figcaption').map(textOf),"
+        " layer: textOf(walk(view).find(n => n.attrs.class === 'layer')),"
+        " facts: walk(view).filter(n => n.attrs.class === 'facts').map(textOf),"
+        " links: walk(view).filter(n => n.tag === 'a').map(n => n.attrs.href) });",
+        {"peek.js": "peekView"},
+        PEEK,
+    )
+    assert out["rows"] == [
+        [f"data:image/png;base64,aW1n{f}" for f in (1, 2, 4, 8)],
+        [f"data:image/png;base64,bGFi{f}" for f in (1, 2, 4, 8)],
+    ]
+    assert out["captions"] == [
+        "×1",
+        "250 nm/px · 64 µm across",
+        "×2",
+        "500 nm/px · 128 µm across",
+        "×4",
+        "1 µm/px · 256 µm across",
+        "×8",
+        "2 µm/px · 512 µm across",
+    ]
+    assert out["layer"] == "labels gt-semantic" and out["links"] == ["#datasets/rec"]
+    assert out["facts"] == [
+        "dataset rec · A dataset · brightfield · 2D · human · semantic",
+        "volume v0.zarr · sample 3 of 128 · plane z 4 · centre 6.15 mm, 8.4 mm (y, x) · train split",
+    ]
+    bare = {**PEEK, "labels": [], "samples": None, "dataset": {"id": "rec"}}
+    bare["descriptor"] = {"volume": "rec/v0.zarr", "patch": 256, "plane": {}, "centre_nm": [10.0, 20.0]}
+    bare["levels"] = [{"factor": 1, "pixel_nm": None, "img": "aW1n"}]
+    out = run_js(
+        "const view = peekView(input); print([textOf(view), walk(view).filter(n => n.tag === 'img').length]);",
+        {"peek.js": "peekView"},
+        bare,
+    )
+    assert out == ["×1256 px acrossdataset recvolume v0.zarr · centre 10 nm, 20 nm (y, x) · train split", 1]
+
+
+def test_lengths_read_in_the_unit_that_fits() -> None:
+    out = run_js("print(input.map(length))", {"peek.js": "length"}, [250, 1000, 64000, 512000, 1250000, 0.5])
+    assert out == ["250 nm", "1 µm", "64 µm", "512 µm", "1.25 mm", "0.5 nm"]
+
+
+def test_next_crop_asks_for_a_peek_of_the_chosen_split_and_draws_it() -> None:
+    """Nothing is asked until Next crop is pressed (a peek costs the service a process); the panel of a buffer is
+    one node, so the crop stays while the page redraws the step; a failure is said in the panel."""
+    out = run_js(
+        "const asked = []; let status = 200;"
+        "globalThis.fetch = async path => { asked.push(path); return { ok: status < 400, status, statusText: '',"
+        " text: async () => status === 204 ? '' : JSON.stringify(status < 400 ? input : { error: 'harness tensorize exited 2' }) }; };"
+        "const settle = () => new Promise(done => setTimeout(done, 5));"
+        "const panel = peekPanel('b/1'), before = asked.length, texts = [];"
+        "const press = async () => { byText(panel, 'Next crop').fire('click'); const during = textOf(walk(panel).find(n => n.tag === 'button'));"
+        " await settle(); texts.push(textOf(panel)); return during; };"
+        "const during = await press(); const pictures = walk(panel).filter(n => n.tag === 'img').length;"
+        "walk(panel).find(n => n.tag === 'select').value = 'val'; await press();"
+        "status = 502; await press(); status = 204; await press();"
+        "print({ before, asked, during, pictures, texts, same: peekPanel('b/1') === panel, other: peekPanel('c') !== panel,"
+        " enabled: !byText(panel, 'Next crop').disabled });",
+        {"peek.js": "peekPanel"},
+        PEEK,
+    )
+    assert out["before"] == 0 and out["during"] == "Reading…" and out["pictures"] == 8 and out["enabled"]
+    assert out["asked"] == ["/buffers/b%2F1/peek?split=train"] + ["/buffers/b%2F1/peek?split=val"] * 3
+    assert all("nothing is counted as drawn" in text for text in out["texts"])
+    assert "No crop: harness tensorize exited 2" in out["texts"][2]
+    assert "Nothing is servable in val yet." in out["texts"][3]
+    assert out["same"] and out["other"]
+    serve = squeezed(FILES["flow.js"])
+    assert has("peekPanel(version.id)", serve) and resolve("GET", "/buffers/x/peek") == "read"

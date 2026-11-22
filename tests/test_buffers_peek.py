@@ -55,9 +55,7 @@ def test_a_peek_answers_the_tensorizers_pictures_with_the_datasets_facts(tmp_pat
     assert [level["factor"] for level in out["levels"]] == [1, 2, 4]
     assert [level["pixel_nm"] for level in out["levels"]] == [10.0, 20.0, 40.0]
     assert [base64.b64decode(level["img"]) for level in out["levels"]] == PICTURES["img"]
-    assert out["labels"] == [
-        {"key": "gt", "type": "instance", "levels": [base64.b64encode(p).decode() for p in PICTURES["labels"]["gt"]]}
-    ]
+    assert out["labels"] == [{"key": "gt", "levels": [base64.b64encode(p).decode() for p in PICTURES["labels"]["gt"]]}]
     assert out["descriptor"]["path"] == "/staged/a/v0.zarr" and "seq" not in out["descriptor"]
     assert out["samples"] is None  # a volume staged whole has no list of candidates
     assert out["dataset"] == {

@@ -96,6 +96,19 @@ fieldset.lock:disabled{opacity:.6}
 .progress{height:8px;border-radius:4px;background:var(--grid);overflow:hidden;margin:6px 0 14px;max-width:520px}
 .progress i{display:block;height:100%;width:0;background:var(--s3)}
 pre.snippet{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--axis);border-radius:6px;background:var(--bg)}
+/* a peek under the snippet: the levels of one crop in a row, each picture drawn pixel for pixel */
+.peek{margin-top:10px}
+.peekbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;font-size:13px}
+.peekbar select{border:1px solid var(--axis);border-radius:6px;padding:3px 6px;background:var(--surface)}
+.peekrows{margin-top:10px;overflow-x:auto}
+.peekrows .levels{display:flex;gap:10px;width:max-content}
+.peekrows figure{margin:0}
+.peekrows figcaption{font-size:12.5px;font-variant-numeric:tabular-nums}
+.peek .sub{margin:0}
+.peekrows figcaption.sub{margin-top:3px}
+.peekrows img{display:block;width:192px;height:192px;image-rendering:pixelated;border:1px solid var(--axis);background:#000}
+.peekrows .layer{font-size:12.5px;color:var(--fg2);margin:8px 0 3px}
+.peekrows .facts{font-size:13px;margin:8px 0 0}
 .more{position:relative}
 .more summary{list-style:none}
 .more summary::-webkit-details-marker{display:none}

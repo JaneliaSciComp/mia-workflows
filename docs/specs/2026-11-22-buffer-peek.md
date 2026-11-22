@@ -74,10 +74,10 @@ A read route. `split` is `train`, `val` or `test` and defaults to `train`.
 ```
 {"split": "train",
  "descriptor": {…},                        the one a consumer would have been handed, without `seq`
- "dataset": {"id", "name", "modality", "dims", "organisms", "annotation_types"},
+ "dataset": {"id", "title", "modality", "dims", "organisms", "annotation_types"},
  "samples": 128,                            the volume's candidates in this split; null for a 0.5 artifact
  "levels": [{"factor": 1, "pixel_nm": 250.0, "img": "<base64 png>"}, …],
- "labels": [{"key": "…", "type": "semantic", "levels": ["<base64 png>", …]}]}
+ "labels": [{"key": "…", "levels": ["<base64 png>", …]}]}
 ```
 
 - *Call:* the peek runs the `harness.dir` checkout as it stands, not the snapshot the buffer's round pinned:
@@ -97,7 +97,8 @@ split [train ▾]  [Next crop]
 [img]       [img]       [img]       [img]
 250 nm/px   500 nm/px   1 µm/px     2 µm/px
 64 µm       128 µm      256 µm      512 µm
-[label]     [label]     [label]     [label]      manual_gt-brain_structure · semantic
+labels manual_gt-brain_structure-semantic
+[label]     [label]     [label]     [label]
 dataset <link> · brightfield · 2D · human · semantic
 volume v0.zarr · sample 3 of 128 · centre 6148, 8402 µm
 A peek: no consumer is registered and nothing is counted as drawn.
