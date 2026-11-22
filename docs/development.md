@@ -1114,7 +1114,7 @@ The `MiaBuffer` workflow runs these steps for a round; each can also be run by h
    `MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)` takes it as it is; the `DataLoader`
    takes `collate_fn=BufferDataset.collate`, because a buffer mixes datasets whose label layers differ and
    torch's default collate needs identical samples (the batch keeps the keys every sample has, `meta` as a list).
-   Train is a stream of crops (`idx` is ignored, `len` is `n_samples`); val and test replay a frozen list that is
+   Train is a stream of crops (`idx` only has to be under `len`, which is `n_samples`); val and test replay a frozen list that is
    identical every epoch. Each DataLoader worker registers its own consumer. `GET /buffers/<id>/status` shows
    servable volumes per split, draws per volume and consumers.
 
