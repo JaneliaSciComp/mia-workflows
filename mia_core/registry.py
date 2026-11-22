@@ -182,6 +182,10 @@ class Registry:
         found = self._lookup(f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}")
         return None if found is None else found["data"]
 
+    def asset_row(self, kind: str, key: str) -> dict | None:
+        """{kind, key, data, refs}: the row with the buffers that reference it; None when the registry has neither."""
+        return self._lookup(f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}")
+
     def assets(self, kind: str, state: str | None = None, record: str | None = None) -> dict:
         """{kind, assets: [{key, data, refs}], bytes}, filtered on the rows' state and record when given."""
         params = {name: value for name, value in (("state", state), ("record", record)) if value is not None}

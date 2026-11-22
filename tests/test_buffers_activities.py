@@ -1208,6 +1208,34 @@ async def test_keep_evicts_a_free_staged_asset_under_quota(acts, keeper_server, 
     assert (await acts.keep()).evicted == []  # under quota now
 
 
+async def test_keep_spares_an_artifact_a_buffer_registered_since_the_plan(acts, keeper_server, monkeypatch):
+    """A buffer reuses a pyramid (registers it, taking no lock) between the keeper's plan and its eviction: the
+    keeper reads the row again under the lock and leaves the artifact."""
+    import time
+
+    from mia_buffers import cli
+    from mia_core.fs import dir_bytes
+
+    registry = keeper_server
+    monkeypatch.setattr(cli, "catalog_snapshot", lambda cfg_, ref, tokens: CATALOG)
+    acts.gh_catalog.refs["main"] = REF
+    free, held = staged_artifact(acts, "free", 1000), staged_artifact(acts, "held", 10)
+    referenced(registry, "held")
+    for key in ("free", "held"):
+        registry.put_asset("staged", key, {"last_used": time.time() - 49 * 3600})
+    acts.cfg.quota.staged_bytes, acts.cfg.quota.headroom_bytes = dir_bytes(held) + 100, 0
+    real_take = acts_module.take_or_holder
+
+    def register_then_take(*args):
+        referenced(registry, "free")  # the buffer's registration lands after the plan, before the lock
+        return real_take(*args)
+
+    monkeypatch.setattr(acts_module, "take_or_holder", register_then_take)
+    report = await acts.keep()
+    assert report.evicted == [] and free.is_dir() and registry.asset("staged", "free")["state"] == "ready"
+    assert report.locked == ["staged free (referenced since the plan)"]
+
+
 async def test_keep_reports_a_held_set_over_quota_and_writes_nothing_to_github(acts, keeper_server, caplog):
     from mia_core.fs import dir_bytes
 

@@ -1737,6 +1737,10 @@ class Activities:
                     spare(row, owner)
                     continue
                 try:
+                    current = await asyncio.to_thread(self.registry.asset_row, kind, row["key"])
+                    if current is None or not free_assets([current], **rules):  # referenced or used since the plan
+                        report.locked.append(f"{kind} {row['key']} (referenced since the plan)")
+                        continue
                     removed = await self._keeper_remove(report, kind, row, roots, now)
                 finally:
                     await asyncio.to_thread(release_or_log, locks, "raw", lock_key(row), KEEPER)
