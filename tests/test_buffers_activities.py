@@ -607,6 +607,23 @@ async def test_verify_drop_moves_files_and_writes_manifest(acts, server):
     assert (await acts.verify_drop(ROUND, BCSS)).ok  # idempotent: the manifest already has it
 
 
+async def test_verify_drop_takes_a_file_whose_entry_holds_no_bytes(acts, server):
+    """files.json lists the URL from a HEAD (validators, no file under its key): the dropped file is still taken."""
+    from mia_buffers.drop import merge_manifest
+
+    await acts.plan(7, ROUND, await admitted(acts))
+    write_binding(acts, BCSS, ["manual://x/b.zip::m.png"], snippet="png-pairs")
+    await acts.read_binding(ROUND, BCSS)
+    cache = acts.cfg.paths.raw_root / BCSS
+    merge_manifest(cache, {"manual://x/b.zip": {"validators": {"size": 8}, "source": "head"}})
+    (cache / "incoming").mkdir(parents=True)
+    (cache / "incoming" / "b.zip").write_bytes(b"zipbytes")
+    result = await acts.verify_drop(ROUND, BCSS)
+    assert result.ok and result.placed == ["b.zip"]
+    entry = read_manifest(cache)["manual://x/b.zip"]
+    assert entry["source"] == "manual" and (cache / cache_key("manual://x/b.zip", entry["validators"])).is_file()
+
+
 async def test_verify_drop_rejects_symlink_and_empty_file(acts):
     await acts.plan(7, ROUND, await admitted(acts))
     write_binding(acts, BCSS, ["manual://x/a.zip", "manual://x/b.zip", "manual://x/c.zip"], snippet="png-pairs")

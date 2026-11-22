@@ -1322,14 +1322,17 @@ class Activities:
     @mia_permanent_errors
     async def verify_drop(self, round_id: str, record: str) -> DropResult:
         """Move the files a human placed under raw_root/<record>/incoming/ into the cache under the harness's
-        key and list them in files.json. A listed file that is missing, empty or a symlink stays missing. When none
-        is, the raw row becomes `ready` and just used (best effort): these files exist nowhere else, and the
-        keeper's hold rule spares them while the record waits for its stage slot."""
+        key and list them in files.json. A file the cache holds already (`cache_missing`: its entry and its bytes,
+        not an entry alone, which a HEAD leaves) is skipped. A listed file that is missing, empty or a symlink stays
+        missing. When none is, the raw row becomes `ready` and just used (best effort): these files exist nowhere
+        else, and the keeper's hold rule spares them while the record waits for its stage slot."""
         urls = self._binding_urls(round_id, record)
         cache, known = self._cache_dir(record), read_manifest(self._cache_dir(record))
+        wanted = drop_names(urls)
+        _, uncached = cache_missing(cache, known, [url for url, _name in wanted])
         placed, missing, entries = [], [], {}
-        for url, name in drop_names(urls):
-            if url in known:
+        for url, name in wanted:
+            if url not in uncached:
                 continue
             path = cache / "incoming" / name
             try:
