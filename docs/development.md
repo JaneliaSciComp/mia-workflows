@@ -1131,7 +1131,9 @@ at: the descriptor a consumer would have been handed (without `seq`), the tensor
 layer as one PNG per level (base64), each level's pixel size and the dataset's facts from the newest catalog.
 buffer-api reads no array itself: `mia_buffers.peek.Peeker` runs the `harness.dir` checkout's
 `harness tensorize --png` with the harness environment's python, the parameters `BufferDataset` passes, one BLAS
-thread, a 60 s limit and one process at a time, and reads the pictures back with `read_untrusted`. A harness that
+thread, a 60 s limit and one process at a time, and reads the pictures back with `read_untrusted`. The process
+gets `PATH`, `HOME`, `TMPDIR` and `LANG` of the service's environment and nothing else, so no token. A peek waits
+5 s for the one before it and is then refused (`503`), so no queue of processes builds up. A harness that
 fails is a `502` with the end of its stderr; a service started without a harness (a test) answers `503`. The
 buffer keeps no trace of a peek: the draw has a generator of its own, no consumer is registered, no draw or
 empty answer is counted, the idle clock does not move, and a `val` or `test` crop is one of the split's

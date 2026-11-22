@@ -67,7 +67,9 @@ A read route. `split` is `train`, `val` or `test` and defaults to `train`.
 - The harness runs as `harness_env -P -c … tensorize <volume path> --tensorizers <harness.dir> --name
   <config.tensorizer> --descriptor … --params … --out <tmp>/sample.npz --png <tmp>`, with the params
   `BufferDataset._tensorize` builds, in a temporary directory, with one BLAS thread, a 60 s timeout, one peek
-  at a time. A failure is a 502 with the last of its stderr; a service with no harness configured answers 503.
+  at a time, and of the service's environment only `PATH`, `HOME`, `TMPDIR` and `LANG` (no token). A peek waits
+  5 s for the one before it and is then a 503, so an open route cannot queue processes. A failure is a 502 with
+  the last of its stderr; a service with no harness configured answers 503.
 - The PNGs are read with `read_untrusted` (the staged volume is a job's output) and returned inline as base64.
 - The answer:
 

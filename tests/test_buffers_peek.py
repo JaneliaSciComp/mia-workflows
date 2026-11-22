@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from mia_buffers import api as api_module
 from mia_buffers.api import BufferService
 from mia_buffers.ledger import Ledger
 from mia_buffers.peek import Peeker, PeekFailed
@@ -118,6 +119,28 @@ def test_a_peek_refuses_what_a_consumer_is_refused(tmp_path):
     assert status == 502 and out["error"].endswith("unrecognized arguments: --png")
 
 
+def test_a_split_only_zero_weight_volumes_serve_is_a_204(tmp_path):
+    """A volume whose filters kept nothing weighs 0: there is no crop to draw, for a peek or for a consumer."""
+    service = serving(tmp_path, peeker=StandIn(), volume=False)
+    weightless = {**body(), "weight": 0.0}
+    assert call(service, "PUT", "/buffers/b/volumes/a", payload=weightless)[0] == 200
+    assert call(service, "GET", "/buffers/b/peek")[0] == 204
+    consumer = call(service, "POST", "/buffers/b/consumers", payload=CONSUMER)[1]["consumer_id"]
+    assert call(service, "GET", "/buffers/b/next", {"n": "1", "consumer": consumer})[0] == 204
+
+
+def test_a_peek_does_not_queue_behind_another(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "PEEK_WAIT_S", 0.01)
+    peeker = StandIn()
+    service = serving(tmp_path, peeker=peeker)
+    with service._peek_lock:  # a peek is being drawn
+        status, out, _ = call(service, "GET", "/buffers/b/peek")
+    assert status == 503 and "another peek" in out["error"] and not peeker.asked
+    assert call(service, "GET", "/buffers/b/peek")[0] == 200
+    failing = serving(tmp_path, "failing", StandIn(PeekFailed("no")))
+    assert call(failing, "GET", "/buffers/b/peek")[0] == 502 and not failing._peek_lock.locked()
+
+
 def harness(tmp_path: Path, script: str) -> Peeker:
     """A peeker whose "python" is `script` (python source run with what the harness would be run with)."""
     stand_in = tmp_path / "python"
@@ -131,18 +154,20 @@ out = Path(sys.argv[sys.argv.index("--png") + 1])
 out.mkdir()
 for name in {names!r}:
     (out / name).write_bytes(name.encode())
-Path({seen!r}).write_text(json.dumps([sys.argv[1:], os.environ.get("OMP_NUM_THREADS")]))
+Path({seen!r}).write_text(json.dumps([sys.argv[1:], os.environ.get("OMP_NUM_THREADS"), sorted(os.environ)]))
 """
 
 
-def test_the_peeker_runs_the_harness_and_reads_its_pictures(tmp_path):
+def test_the_peeker_runs_the_harness_and_reads_its_pictures(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "secret")  # the service's environment holds tokens: the harness gets none
     seen = tmp_path / "seen.json"
     names = ["img-0.png", "img-1.png", "label-gt-0.png"]  # the label layer lacks level 1
     peeker = harness(tmp_path, WRITES.format(names=names, seen=str(seen)))
     descriptor = {"levels": [1, 2], "patch": 64}
     out = peeker.render("/staged/a/v0.zarr", descriptor, "muvit-2d", {"clip": True}, ["gt", "other"])
     assert out == {"img": [b"img-0.png", b"img-1.png"], "labels": {}}
-    arguments, threads = json.loads(seen.read_text())
+    arguments, threads, environment = json.loads(seen.read_text())
+    assert "GITHUB_TOKEN" not in environment and "PATH" in environment
     assert threads == "1" and arguments[:2] == ["-P", "-c"] and arguments[3:5] == ["tensorize", "/staged/a/v0.zarr"]
     named = dict(zip(arguments[5::2], arguments[6::2], strict=True))
     assert named["--tensorizers"] == str(tmp_path / "snippets") and named["--name"] == "muvit-2d"

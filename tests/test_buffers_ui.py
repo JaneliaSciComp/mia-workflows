@@ -2035,8 +2035,8 @@ def test_a_peek_shows_every_level_side_by_side_with_its_size() -> None:
 
 
 def test_lengths_read_in_the_unit_that_fits() -> None:
-    out = run_js("print(input.map(length))", {"peek.js": "length"}, [250, 1000, 64000, 512000, 1250000, 0.5])
-    assert out == ["250 nm", "1 µm", "64 µm", "512 µm", "1.25 mm", "0.5 nm"]
+    out = run_js("print(input.map(length))", {"peek.js": "length"}, [250, 1000, 64000, 512000, 1250000, 0.5, -5e6])
+    assert out == ["250 nm", "1 µm", "64 µm", "512 µm", "1.25 mm", "0.5 nm", "-5 mm"]
 
 
 def test_next_crop_asks_for_a_peek_of_the_chosen_split_and_draws_it() -> None:

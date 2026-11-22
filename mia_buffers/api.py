@@ -80,6 +80,7 @@ MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
 # no row = unprepared; `revoked`: withdrawn (spec autonomous-gates §6)
 DATASET_STATES = ("in-progress", "prepared", "needs-human", "revoked")
 PEEK_SPLITS = ("train", "val", "test")  # what `GET /buffers/<id>/peek` may be asked for
+PEEK_WAIT_S = 5.0  # how long a peek waits for the one before it; past that it is refused, so no queue builds up
 CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
 # a job's gzipped record is kilobytes, an agent's with a long conversation a few megabytes; a larger file is not sent
 JOB_RECORD_LIMIT = 16 << 20
@@ -2579,11 +2580,14 @@ class BufferService:
         volume = next(volume for volume in volumes if volume.id == descriptor["volume"])
         # what `BufferDataset._tensorize` hands the tensorizer
         params = {**config.tensorizer_params, "channels": descriptor["channels"], "stats": descriptor["normalize"]}
+        if not self._peek_lock.acquire(timeout=PEEK_WAIT_S):
+            raise HttpError(503, "another peek is being drawn; try again")
         try:
-            with self._peek_lock:
-                pictures = self.peeker.render(volume.path, descriptor, config.tensorizer, params, sorted(volume.labels))
+            pictures = self.peeker.render(volume.path, descriptor, config.tensorizer, params, sorted(volume.labels))
         except PeekFailed as error:
             raise HttpError(502, str(error)) from None
+        finally:
+            self._peek_lock.release()
         pixel_nm = {level.factor: level.scale_nm["x"] for level in volume.levels}
         return (
             200,

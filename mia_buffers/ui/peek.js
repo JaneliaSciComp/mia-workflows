@@ -7,7 +7,8 @@ const SPLITS = ["train", "val", "test"];
 
 // a length given in nm, in the largest unit that keeps the number at 1 or more, three digits at most
 export const length = nm => {
-  const [size, unit] = nm >= 1e6 ? [nm / 1e6, "mm"] : nm >= 1e3 ? [nm / 1e3, "µm"] : [nm, "nm"];
+  const far = Math.abs(nm),
+    [size, unit] = far >= 1e6 ? [nm / 1e6, "mm"] : far >= 1e3 ? [nm / 1e3, "µm"] : [nm, "nm"];
   return `${Number(size.toPrecision(3))} ${unit}`;
 };
 

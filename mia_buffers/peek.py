@@ -22,6 +22,7 @@ HARNESS_MAIN = "import sys; from mia_harness.cli import main; sys.exit(main())"
 PEEK_TIMEOUT_S = 60  # a crop takes about a second; this bounds a pyramid on a disk that does not answer
 PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards the service's memory
 ONE_THREAD = {name: "1" for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")}
+INHERITED = ("PATH", "HOME", "TMPDIR", "LANG")  # all of the service's environment the harness is given: no token
 
 
 class PeekFailed(RuntimeError):
@@ -58,7 +59,7 @@ class Peeker:
                     text=True,
                     timeout=PEEK_TIMEOUT_S,
                     cwd=work,
-                    env={**os.environ, **ONE_THREAD},
+                    env={**{name: os.environ[name] for name in INHERITED if name in os.environ}, **ONE_THREAD},
                 )
             except subprocess.TimeoutExpired:
                 raise PeekFailed(f"the harness did not answer in {PEEK_TIMEOUT_S} s") from None
