@@ -480,9 +480,14 @@ def test_delete_volume_drops_its_frozen_rows_and_an_orphaned_ref(tmp_path):
     led.put_buffer("b", {})
     led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art1"), refs=[("staged", "art1"), ("raw", "rec")])
     led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art1"), refs=[("staged", "art1")])
-    led.extend_frozen("b", "val", [{"volume": "rec/a", "i": 0}, {"volume": "rec/b", "i": 1}])
+    led.extend_frozen("b", "val", [{"volume": "rec/a", "seq": 0}, {"volume": "rec/b", "seq": 1}])
+    led.extend_frozen("b", "test", [{"volume": "rec/b", "seq": 0}, {"volume": "rec/a", "seq": 1}])
     assert led.delete_volume("b", "rec/a") and not led.delete_volume("b", "rec/a")
-    assert [v.id for v in led.volumes("b")] == ["rec/b"] and led.frozen("b", "val") == [{"volume": "rec/b", "i": 1}]
+    assert [v.id for v in led.volumes("b")] == ["rec/b"]
+    assert led.frozen("b", "val") == [{"volume": "rec/b", "seq": 0}]  # the list closed up: its index and seq moved
+    assert led.frozen("b", "test") == [{"volume": "rec/b", "seq": 0}]
+    led.extend_frozen("b", "val", [{"volume": "rec/b", "seq": 1}])  # appends at the count: no hole, no collision
+    assert [d["seq"] for d in led.frozen("b", "val")] == [0, 1]
     assert led.refs("staged", "art1") == ["b"]  # rec/b still lives in art1
     assert led.delete_volume("b", "rec/b") and led.refs("staged", "art1") == []
     assert led.volume_rows("b") == []

@@ -1109,9 +1109,7 @@ class Ledger:
                 return False
             artifact, path = found
             db.execute("DELETE FROM volumes WHERE buffer = ? AND id = ?", (buffer, volume_id))
-            db.execute(
-                "DELETE FROM frozen WHERE buffer = ? AND json_extract(descriptor, '$.volume') = ?", (buffer, volume_id)
-            )
+            self._drop_frozen_of(db, buffer, volume_id)
             staged = artifact or str(PurePosixPath(path).parent)
             still = {
                 known_artifact or str(PurePosixPath(known_path).parent)
@@ -1124,6 +1122,26 @@ class Ledger:
                 db.execute("DELETE FROM refs WHERE buffer = ? AND kind = 'staged' AND key = ?", (buffer, staged))
             self._volumes.pop(buffer, None)
         return True
+
+    @staticmethod
+    def _drop_frozen_of(db: sqlite3.Connection, buffer: str, volume_id: str) -> None:
+        """Take the volume's rows out of every frozen list of the buffer and close the lists up: a list's indices
+        stay 0..n-1 (`extend_frozen` appends at its count, `_split` replays it by position) and each row's `seq` is
+        its index."""
+        rows = db.execute(
+            "SELECT split, idx, descriptor FROM frozen WHERE buffer = ? ORDER BY split, idx", (buffer,)
+        ).fetchall()
+        kept: dict[str, list[dict]] = {}
+        for split, _idx, descriptor in rows:
+            parsed = json.loads(descriptor)
+            if parsed.get("volume") != volume_id:
+                kept.setdefault(split, []).append(parsed)
+        for split in {split for split, _idx, _descriptor in rows}:
+            db.execute("DELETE FROM frozen WHERE buffer = ? AND split = ?", (buffer, split))
+            db.executemany(
+                "INSERT INTO frozen VALUES (?, ?, ?, ?)",
+                [(buffer, split, i, json.dumps({**d, "seq": i})) for i, d in enumerate(kept.get(split, []))],
+            )
 
     def volume_rows(self, buffer: str) -> list[dict]:
         """One small row per volume: {id, artifact, record, missing}; the record is the id up to its first '/'."""
