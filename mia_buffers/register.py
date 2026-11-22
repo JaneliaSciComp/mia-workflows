@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from mia_core.registry import Registry, RegistryError
+from mia_core.untrusted import text
 
 from .plan import split_counts
 from .spec import Spec
@@ -121,6 +122,8 @@ def check_sample(value: object, channels: int) -> str | None:
     return None
 
 
+SELECTION_NAMES = 8  # the most splits a selection, and reasons a split, may name
+SHORT_SHOWN = 20  # the most volume splits `shortfall` names; the rest are counted
 NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")  # a split, or why a draw was rejected: "repeat" or a filter's name
 
 
@@ -130,7 +133,9 @@ def _selection(entry: object, key: str) -> tuple[str, dict[str, tuple[int, int, 
     writes. It is a job's file: the names become timeline text and the counts a weight."""
     name = entry.get(key) if isinstance(entry, dict) else None
     selection = entry.get("selection") if isinstance(entry, dict) else None
-    if not (isinstance(name, str) and VOLUME_PATH_RE.fullmatch(name) and isinstance(selection, dict)):
+    if not (isinstance(name, str) and len(name) <= 64 and VOLUME_PATH_RE.fullmatch(name)):
+        return None
+    if not (isinstance(selection, dict) and len(selection) <= SELECTION_NAMES):
         return None
     counts: dict[str, tuple[int, int, dict[str, int]]] = {}
     for split, found in selection.items():
@@ -139,7 +144,9 @@ def _selection(entry: object, key: str) -> tuple[str, dict[str, tuple[int, int, 
         wanted, staged, rejected = found.get("wanted"), found.get("staged"), found.get("rejected")
         if not (type(wanted) is int and type(staged) is int and 0 <= staged <= wanted and isinstance(rejected, dict)):
             return None
-        if not all(isinstance(why, str) and NAME_RE.fullmatch(why) and type(n) is int for why, n in rejected.items()):
+        if len(rejected) > SELECTION_NAMES or not all(
+            isinstance(why, str) and NAME_RE.fullmatch(why) and type(n) is int and n >= 0 for why, n in rejected.items()
+        ):
             return None
         counts[split] = (wanted, staged, dict(rejected))
     return name, counts
@@ -167,7 +174,8 @@ def shortfall(report: dict) -> str:
             if staged < wanted:
                 why = ", ".join(f"{reason} {count}" for reason, count in rejected.items())
                 short.append(f"{volume} {split} {staged} of {wanted}" + (f" ({why})" if why else ""))
-    return f" Short of its plan: {'; '.join(short[:20])}." if short else ""
+    more = [f"and {len(short) - SHORT_SHOWN} more"] if len(short) > SHORT_SHOWN else []
+    return text(f" Short of its plan: {'; '.join(short[:SHORT_SHOWN] + more)}.", 2000) if short else ""
 
 
 def check_volume(volume: object) -> str | None:
@@ -270,7 +278,15 @@ def volume_bodies(
             )
         else:
             volumes.append(volume)
-    total_planes = sum(_planes(volume) for volume in volumes) or 1
+    # a raw whose filters kept nothing is not written, and its planes still count: its part of the record's
+    # weight goes to no other volume
+    unstaged = report.get("unstaged")
+    kept_nothing = sum(
+        entry["planes"]
+        for entry in (unstaged if isinstance(unstaged, list) else [])
+        if isinstance(entry, dict) and type(entry.get("planes")) is int and entry["planes"] > 0
+    )
+    total_planes = sum(_planes(volume) for volume in volumes) + kept_nothing or 1
     bounds: dict | None = None
     if scope == "dataset" and volumes:
         # ponytail: dataset bounds pool each volume's sample with equal weight, not by plane count; weight by

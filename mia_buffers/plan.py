@@ -203,6 +203,7 @@ def _planned_cell(row: Row) -> str:
 
 
 def _up_to(rule: dict | None) -> str:
+    """`up to ` before a count of planned crops when the rule has filters, else nothing."""
     return "up to " if rule and rule.get("filters") else ""
 
 

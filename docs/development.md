@@ -820,7 +820,8 @@ the split's count is kept or 2000 draws in a row were rejected (`plan.GIVE_UP` i
 position is one). So with filters a dataset's planned crops are the most it can stage, and the plan says `up to`.
 Rejected draws are read within `limits.job_bytes` like every other read of the job. `stage.json` gives each
 volume's `selection` (per split: wanted, staged, draws, rejected by reason) and lists a raw that kept nothing
-under `unstaged`; it is not written. A record that kept nothing at all fails its stage job, naming the filters.
+under `unstaged`, with its planes; it is not written, and its planes still count when registration shares the
+record's weight among its volumes. A record that kept nothing at all fails its stage job, naming the filters.
 Registration multiplies a volume's weight by staged / wanted (`register.staged_share`), so a crop of a short
 volume is served about as often as any other, and the timeline line that says a record is servable names what
 came up short (`register.shortfall`). Nothing is handed to another volume or record.

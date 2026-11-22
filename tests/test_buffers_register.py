@@ -476,3 +476,27 @@ def test_shortfall_names_short_and_unstaged_volumes():
     assert shortfall({"volumes": [again, report["volumes"][1]]}).count("v1.zarr") == 2
     hostile = {"path": "v1.zarr](http://x)", "selection": {"<b>": selection(4, 1, **{"[x](y)": 3})}}
     assert shortfall({"volumes": [hostile]}) == ""  # names that are not a volume, a split and a reason say nothing
+
+
+def test_a_volume_that_kept_nothing_hands_its_weight_to_no_other(tmp_path, spec_2d):  # noqa: F811
+    staged = write_stage_json(tmp_path / "u937")  # one written volume of 25 planes
+    report = json.loads((staged / "stage.json").read_text())
+    kept_nothing = {"volume": "v1.zarr", "planes": 75, "selection": {"train": selection(8, 0, content=2000)}}
+    report["unstaged"] = [kept_nothing]
+    assert volume_bodies(ROW, staged, spec_2d, report)[0][1]["weight"] == 0.5 * 25 / 100
+    for planes in (None, "75", 0, -5, True, 7.5):  # not a plane count: the entry adds nothing
+        report["unstaged"] = [{**kept_nothing, "planes": planes}, "v2.zarr"]
+        assert volume_bodies(ROW, staged, spec_2d, report)[0][1]["weight"] == 0.5
+    report["unstaged"] = "all of them"
+    assert volume_bodies(ROW, staged, spec_2d, report)[0][1]["weight"] == 0.5
+
+
+def test_shortfall_is_bounded_whatever_the_report_says():
+    wide = {"path": "v" + "9" * 100000 + ".zarr", "selection": {"train": selection(4, 1, content=9)}}
+    many_reasons = {f"r{n}": 1 for n in range(20000)}
+    noisy = {"path": "v0.zarr", "selection": {"train": {"wanted": 4, "staged": 1, "rejected": many_reasons}}}
+    negative = {"path": "v1.zarr", "selection": {"train": selection(4, 1, content=-9)}}
+    assert shortfall({"volumes": [wide, noisy, negative]}) == ""  # none is what the harness writes
+    crowd = [{"path": f"v{n}.zarr", "selection": {"train": selection(4, 1, content=9)}} for n in range(60)]
+    text = shortfall({"volumes": crowd})
+    assert text.count("train 1 of 4") == 20 and text.endswith("; and 40 more.") and len(text) < 2000
