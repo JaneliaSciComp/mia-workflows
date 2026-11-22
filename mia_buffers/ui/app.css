@@ -250,6 +250,7 @@ dl.kv dd{margin:0;overflow-wrap:anywhere;min-width:0}
 .health.ok{color:var(--s3)} .health.bad{color:var(--warn)}
 .links{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin:4px 0 12px}
 .toggles{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+.tablebar .toggles{margin:0}
 .toggles .btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);font-weight:600}
 .links a[aria-current="page"]{color:var(--fg);font-weight:600;text-decoration:none}
 

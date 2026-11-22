@@ -2086,3 +2086,16 @@ def test_next_crop_asks_for_a_peek_of_the_chosen_split_and_draws_it() -> None:
     assert out["same"] and out["other"]
     serve = squeezed(FILES["flow.js"])
     assert has("peekPanel(version.id)", serve) and resolve("GET", "/buffers/x/peek") == "read"
+
+
+def test_the_lists_of_a_buffers_datasets_are_narrowed_by_their_preparation() -> None:
+    """Step 2 can leave out the datasets that stopped, beside its other registry toggles. Step 3 lists all that
+    fit, or the unprepared, those being prepared or the prepared: toggle buttons, and the server narrows."""
+    index, designer, flow = FILES["index.html"], squeezed(FILES["designer.js"]), squeezed(FILES["flow.js"])
+    assert 'id="noNeedsHuman"> hide needs-human' in index
+    assert has('for (const id of ["preparedOnly", "noNeedsHuman", "rawCached", "stagedGeom"])', designer)
+    assert has("...(C.noNeedsHuman ? { no_needs_human: true } : {})", designer)
+    assert has("fit_only: true, ...(preparation ? { preparation } : {})", flow) and not has('"select"', flow)
+    for value in ("unprepared", "in-progress", "prepared"):  # the values the service takes (PlanPage)
+        assert has(f'["{value}", "', flow), value
+    assert has('"aria-pressed": String(value === preparation)', flow) and has("table.reload(true)", flow)

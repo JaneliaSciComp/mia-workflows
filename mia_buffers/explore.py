@@ -327,6 +327,15 @@ def _shares(rows: Iterable[dict], value_of: Callable[[dict], float]) -> list[dic
     return [{"label": label, "value": value} for label, value in ordered]
 
 
+PREPARATIONS = ("unprepared", "in-progress", "prepared")  # what a Prepare step narrows its list to
+
+
+def preparation_of(row: dict) -> str:
+    """Where a plan row's dataset stands for a Prepare step: `prepared`, `in-progress`, else `unprepared`,
+    whatever its state is otherwise (stopped, shelved, revoked). The summary counts the same three."""
+    return row["prepared"] if row.get("prepared") in ("prepared", "in-progress") else "unprepared"
+
+
 def plan_view(
     plan: dict,
     datasets: Mapping[str, dict],
@@ -337,10 +346,13 @@ def plan_view(
     prepared_only: bool = False,
     raw_cached: bool = False,
     staged_geom: bool = False,
+    no_needs_human: bool = False,
+    preparation: str | None = None,
 ) -> dict:
     """{rows, total, summary} of a plan (`Plan.to_dict` with states). `datasets` maps a record to its dataset_row.
-    The three registry toggles narrow the rows and the summary's numbers; the funnel is the plan's own and
-    ignores them. `fit_only` and the page's search narrow only the rows.
+    The four registry toggles narrow the rows and the summary's numbers; the funnel is the plan's own and
+    ignores them. `fit_only`, `preparation` (one of `PREPARATIONS`: only the rows that stand there) and the page's
+    search narrow only the rows.
     A row whose record lacks what a plan needs (`RECORD_LACKS_GROUPS`) is counted (`record_lacks`) and never listed."""
     rows = []
     for row in sorted(plan["rows"], key=lambda row: row["path"]):
@@ -367,6 +379,8 @@ def plan_view(
         if raw_cached and (joined["raw"] or {}).get("state") != "ready":
             continue
         if staged_geom and not joined["staged_here"]:
+            continue
+        if no_needs_human and row.get("prepared") == "needs-human":
             continue
         rows.append(joined)
     fitting = [row for row in rows if row["fits"]]
@@ -414,6 +428,6 @@ def plan_view(
     }
     listed = [row for row in rows if row["decision"]["group"] not in RECORD_LACKS_GROUPS]
     summary["record_lacks"] = len(rows) - len(listed)
-    shown = [row for row in listed if row["fits"]] if fit_only else listed
+    shown = [row for row in listed if (row["fits"] or not fit_only) and preparation in (None, preparation_of(row))]
     found, matched = paged(shown, page, PLAN_SORTS, _plan_haystack)
     return {"rows": found, "total": matched, "summary": summary}

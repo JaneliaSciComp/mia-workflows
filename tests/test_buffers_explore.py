@@ -63,7 +63,7 @@ def test_mixed_types_in_a_column_do_not_break_the_sort() -> None:
 
 # --- a plan as the designer shows it: one page of its rows and the numbers over all of them
 
-from mia_buffers.explore import decision_of, plan_view  # noqa: E402
+from mia_buffers.explore import PREPARATIONS, decision_of, plan_view  # noqa: E402
 
 
 def plan_row(record: str, **fields) -> dict:
@@ -221,6 +221,26 @@ def test_the_registry_toggles_narrow_the_rows_and_the_numbers_but_not_the_funnel
     assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", ALL, raw_cached=True)["rows"]] == ["a"]
     assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", ALL, staged_geom=True)["rows"]] == ["a"]
     assert plan_view(PLAN, DATASETS, "p512-l1", ALL, staged_geom=True)["rows"] == []
+    stopped = {**PLAN, "rows": [dict(row, prepared="needs-human") if row["id"] == "c" else row for row in PLAN["rows"]]}
+    assert plan_view(stopped, DATASETS, "p256-l1-2", ALL)["summary"]["needs_human"] == 1
+    hidden = plan_view(stopped, DATASETS, "p256-l1-2", ALL, no_needs_human=True)
+    assert [row["id"] for row in hidden["rows"]] == ["a", "b"] and hidden["summary"]["fitting"] == 2
+
+
+def test_a_prepare_step_lists_the_datasets_at_one_point_of_their_preparation() -> None:
+    """The three choices share out every row (a stopped, shelved or revoked dataset is unprepared), as the
+    summary's three counts do; the choice narrows the rows and leaves the numbers alone."""
+    states = {"a": "prepared", "b": "in-progress", "c": "needs-human", "d": "shelved"}
+    plan = {**PLAN, "rows": [dict(row, prepared=states.get(row["id"], "unprepared")) for row in PLAN["rows"]]}
+    listed = {
+        choice: [row["id"] for row in plan_view(plan, DATASETS, "p256-l1-2", ALL, preparation=choice)["rows"]]
+        for choice in PREPARATIONS
+    }
+    assert listed == {"unprepared": ["c", "d"], "in-progress": ["b"], "prepared": ["a"]}
+    narrowed = plan_view(plan, DATASETS, "p256-l1-2", ALL, fit_only=True, preparation="unprepared")
+    assert [row["id"] for row in narrowed["rows"]] == ["c"] and narrowed["total"] == 1
+    summary = narrowed["summary"]
+    assert (summary["fitting"], summary["prepared"], summary["in_progress"], summary["unprepared"]) == (3, 1, 1, 1)
 
 
 def test_the_plan_sorts_by_where_each_dataset_stands() -> None:

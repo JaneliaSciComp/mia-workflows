@@ -210,6 +210,8 @@ class PlanPage(_Strict):
     prepared_only: bool = False
     raw_cached: bool = False
     staged_geom: bool = False
+    no_needs_human: bool = False
+    preparation: Literal["unprepared", "in-progress", "prepared"] | None = None
 
 
 class PlanBody(_Strict):
@@ -2345,6 +2347,8 @@ class BufferService:
             prepared_only=asked.prepared_only,
             raw_cached=asked.raw_cached,
             staged_geom=asked.staged_geom,
+            no_needs_human=asked.no_needs_human,
+            preparation=asked.preparation,
         )
         return 200, {**plan, **view}, {}
 

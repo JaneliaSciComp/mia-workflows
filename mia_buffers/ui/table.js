@@ -57,6 +57,7 @@ export const COLUMN_HELP = {
 };
 // cols: {key (the server's sort name; none: not sortable), label, num, wrap, title (else COLUMN_HELP's), cell}. `select`: {chosen (a Set), id, onchange}
 // adds a check per row, or per row `select.can(row)` allows. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
+// `empty`: what a table with no row says, or a function that gives it.
 export function pagedTable(
   id,
   { source, cols, empty, sort = null, dir = "asc", search = true, rowAttrs, tools = [], select, onPage },
@@ -149,7 +150,11 @@ export function pagedTable(
             { class: "tablewrap" },
             el("table", { class: "plain" }, el("thead", {}, head), el("tbody", {}, ...rows)),
           )
-        : el("div", { class: "empty" }, state.q ? "Nothing matches the search." : empty),
+        : el(
+            "div",
+            { class: "empty" },
+            state.q ? "Nothing matches the search." : typeof empty === "function" ? empty() : empty,
+          ),
     );
     const last = state.offset + page.rows.length;
     pager.replaceChildren(

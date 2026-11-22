@@ -548,6 +548,19 @@ function prepareFoot(subject, plan, redraw) {
       : nextLink(subject),
   );
 }
+// What step 3 lists of the datasets that fit: all of them, or those at one point of their preparation. The choice
+// lasts the session.
+const PREPARATIONS = [
+  ["", "All", "List every dataset that fits."],
+  [
+    "unprepared",
+    "Unprepared",
+    "List only the datasets that are neither prepared nor being prepared: never started, stopped, shelved or revoked.",
+  ],
+  ["in-progress", "Being prepared", "List only the datasets whose preparation is under way."],
+  ["prepared", "Prepared", "List only the prepared datasets."],
+];
+let preparation = "";
 function prepareStep(pane, subject, redraw, wanted) {
   if (ticked.key !== subject.key) Object.assign(ticked, { key: subject.key, chosen: new Set() });
   const chosen = ticked.chosen;
@@ -565,6 +578,7 @@ function prepareStep(pane, subject, redraw, wanted) {
       q: state.q,
       ...(state.sort ? { sort: state.sort } : {}),
       fit_only: true,
+      ...(preparation ? { preparation } : {}),
     };
     try {
       out = await api("/plan", {
@@ -589,12 +603,36 @@ function prepareStep(pane, subject, redraw, wanted) {
     show();
     if (wanted() && page.out) prepareFoot(subject, page.out, redraw);
   };
+  const toggles = el(
+    "div",
+    { class: "toggles", role: "group", "aria-label": "Show" },
+    ...PREPARATIONS.map(([value, word, title]) =>
+      el(
+        "button",
+        {
+          type: "button",
+          class: "btn",
+          "aria-pressed": String(value === preparation),
+          "data-value": value,
+          title,
+          onclick: () => {
+            preparation = value;
+            for (const button of toggles.children)
+              button.setAttribute("aria-pressed", String(button.dataset.value === value));
+            table.reload(true);
+          },
+        },
+        word,
+      ),
+    ),
+  );
   const table = pagedTable("to-prepare:" + subject.key, {
     source: fitting,
     onPage: seen,
     sort: "state",
     search: "search id, title, modality, licence",
-    empty: "No dataset fits this definition.",
+    tools: [toggles],
+    empty: () => (preparation ? "No dataset that fits stands there." : "No dataset fits this definition."),
     select: { chosen, id: x => x.id, onchange: show },
     cols: datasetCols(),
   });

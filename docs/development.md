@@ -1223,8 +1223,9 @@ Each tab is one kind of thing, and each thing has one page:
     someone is changing (`ensureDefinition`).
   - *Prepare* lists the plan's rows that fit (`page.fit_only`) as the Datasets list lists datasets: the same
     columns (`datasetCols`; `plan_view` gives a row those fields), a check per row, and the box of the checked
-    (`chosenBox`), whose *Prepare* files the request with `buffer` and `again`. It also lists the buffer's
-    requests. Its way
+    (`chosenBox`), whose *Prepare* files the request with `buffer` and `again`. Toggle buttons narrow the list
+    to the unprepared, those being prepared or the prepared (`page.preparation`, rows only: the numbers above
+    stay the plan's). It also lists the buffer's requests. Its way
     forward is the one `go` a buffer gets from the page (`planRound`).
   - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the
     version's page) and *Files are in place*; *Serve* its buttons, then the version's id, the line a training

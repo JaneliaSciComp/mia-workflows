@@ -94,6 +94,7 @@ const defaults = () => ({
   holdout: "",
   exclude: new Set(), // the datasets unchecked on step 2
   preparedOnly: false,
+  noNeedsHuman: false,
   rawCached: false,
   stagedGeom: false,
 });
@@ -360,6 +361,7 @@ async function planPage(state) {
     ...(state.sort ? { sort: state.sort } : {}),
     fit_only: fitOnly,
     prepared_only: C.preparedOnly,
+    ...(C.noNeedsHuman ? { no_needs_human: true } : {}),
     raw_cached: C.rawCached,
     staged_geom: C.stagedGeom,
   };
@@ -431,7 +433,8 @@ export function bindControls() {
   bind("labelledPercent", "labelledPercent", percent, touched);
   bind("holdout", "holdout", text, touched);
   // what the registry knows narrows the table: the same definition, fewer rows
-  for (const id of ["preparedOnly", "rawCached", "stagedGeom"]) bind(id, id, null, () => schedulePlan(0));
+  for (const id of ["preparedOnly", "noNeedsHuman", "rawCached", "stagedGeom"])
+    bind(id, id, null, () => schedulePlan(0));
   // the two tabs of the definition
   const tabs = { tabControls: "paneControls", tabYaml: "paneYaml" };
   for (const [tab, pane] of Object.entries(tabs))
