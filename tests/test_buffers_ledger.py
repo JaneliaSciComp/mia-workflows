@@ -35,8 +35,8 @@ def test_volumes_are_parsed_once_per_write(tmp_path):
     second = led.volumes("b")
     assert first == second == [vol("a")] and first is not second  # a copy: a caller may replace entries
 
-    def reads() -> int:  # the reads of `volumes`; a put reads the row it replaces too
-        return sum("SELECT data FROM volumes" in statement for statement in statements)
+    def reads() -> int:  # the reads of `volumes` (a put reads the one row it replaces, not the list)
+        return sum("SELECT data FROM volumes" in s and "ORDER BY id" in s for s in statements)
 
     assert reads() == 1  # the second read never hit SQLite
     led.put_volume("b", vol("c"))
@@ -173,6 +173,23 @@ def test_a_volume_moved_to_another_artifact_takes_the_stale_staged_ref_with_it(t
     assert led.refs("staged", "art1") == [] and led.refs("staged", "art2") == ["b"] and led.refs("raw", "rec") == ["b"]
     led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art2", weight=0.5), refs=[("staged", "art2")])
     assert led.refs("staged", "art2") == ["b"]  # the same artifact again: nothing dropped
+
+
+def test_a_volume_re_registered_with_other_candidates_clears_the_frozen_lists_in_the_same_write(tmp_path):
+    """The frozen rows index the candidates of the volume they were drawn from: a re-put that changes them (a
+    rebuild under another artifact, another sample list) removes every split's rows as part of the volume write,
+    so no stop between the two can leave the new volume with the old rows, and a same-candidates re-put keeps them."""
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {})
+    planned = dataclasses.replace(vol("a"), artifact="art1", samples={"val": ({"plane": 0},)})
+    assert led.put_volume("b", planned) == 0
+    led.extend_frozen("b", "val", [{"volume": "a", "candidate": 0, "seq": 0}])
+    led.extend_frozen("b", "test", [{"volume": "a", "candidate": 0, "seq": 0}])
+    assert led.put_volume("b", dataclasses.replace(planned, weight=0.5)) == 0 and len(led.frozen("b", "val")) == 1
+    assert led.put_volume("b", dataclasses.replace(planned, artifact="art2")) == 2
+    assert led.frozen("b", "val") == [] and led.frozen("b", "test") == []
+    led.extend_frozen("b", "val", [{"volume": "a", "candidate": 0, "seq": 0}])
+    assert led.put_volume("b", dataclasses.replace(planned, artifact="art2", samples={"val": ({"plane": 1},)})) == 1
 
 
 def test_backup_is_a_consistent_copy(tmp_path):

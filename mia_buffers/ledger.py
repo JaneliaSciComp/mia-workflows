@@ -184,29 +184,33 @@ class Ledger:
                 self._db.execute("ROLLBACK")
                 raise
 
-    def put_volume(self, buffer: str, volume: Volume, refs: Iterable[tuple[str, str]] = ()) -> None:
-        """Upsert the volume and add its (kind, key) references in one transaction; a volume that moves to another
-        staged artifact takes the buffer's reference to the old one with it when no other volume still uses it."""
+    def put_volume(self, buffer: str, volume: Volume, refs: Iterable[tuple[str, str]] = ()) -> int:
+        """Upsert the volume and add its (kind, key) references in one transaction. A volume re-registered under
+        another artifact or with other candidates takes the buffer's frozen eval lists with it (every split: a
+        frozen row names a candidate by index into the volume it was drawn from), and the buffer's reference to the
+        old artifact when no other volume still uses it. Returns the frozen rows removed."""
+        cleared = 0
         with self._transaction() as db:
-            previous = self._staged_of(db, buffer, volume.id)
+            previous = self._volume_of(db, buffer, volume.id)
             db.execute(
                 "INSERT OR REPLACE INTO volumes VALUES (?, ?, ?)",
                 (buffer, volume.id, json.dumps(dataclasses.asdict(volume))),
             )
             db.executemany("INSERT OR IGNORE INTO refs VALUES (?, ?, ?)", [(buffer, kind, key) for kind, key in refs])
-            if previous is not None and previous != _staged_key(volume.artifact, volume.path):
-                self._drop_unused_staged_ref(db, buffer, previous)
+            if previous is not None and (previous.artifact, previous.samples) != (volume.artifact, volume.samples):
+                cleared = int(db.execute("DELETE FROM frozen WHERE buffer = ?", (buffer,)).rowcount)
+            if previous is not None and (staged := _staged_key(previous.artifact, previous.path)) != _staged_key(
+                volume.artifact, volume.path
+            ):
+                self._drop_unused_staged_ref(db, buffer, staged)
             self._volumes.pop(buffer, None)
+        return cleared
 
     @staticmethod
-    def _staged_of(db: sqlite3.Connection, buffer: str, volume_id: str) -> str | None:
-        """The staged key (artifact, else the pyramid's directory) of the buffer's volume; None without the volume."""
-        found = db.execute(
-            "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes "
-            "WHERE buffer = ? AND id = ?",
-            (buffer, volume_id),
-        ).fetchone()
-        return _staged_key(*found) if found else None
+    def _volume_of(db: sqlite3.Connection, buffer: str, volume_id: str) -> Volume | None:
+        """The buffer's volume as stored; None without it."""
+        found = db.execute("SELECT data FROM volumes WHERE buffer = ? AND id = ?", (buffer, volume_id)).fetchone()
+        return _volume_from(json.loads(found[0])) if found else None
 
     @staticmethod
     def _drop_unused_staged_ref(db: sqlite3.Connection, buffer: str, staged: str) -> None:
@@ -220,12 +224,6 @@ class Ledger:
         }
         if staged not in still:
             db.execute("DELETE FROM refs WHERE buffer = ? AND kind = 'staged' AND key = ?", (buffer, staged))
-
-    def clear_frozen(self, buffer: str) -> int:
-        """Drop the buffer's frozen eval lists (every split); returns the rows removed. Called when a volume's
-        candidates change, since a frozen row names a candidate by index into the volume it was drawn from."""
-        with self._transaction() as db:
-            return int(db.execute("DELETE FROM frozen WHERE buffer = ?", (buffer,)).rowcount)
 
     def volumes(self, buffer: str) -> list[Volume]:
         """The buffer's volumes by id, parsed once per write (every `next` and `split` request reads them); a new list
@@ -1132,12 +1130,12 @@ class Ledger:
         """Drop the volume, its frozen rows and the staged reference no other volume of the buffer still needs;
         False when the buffer has no such volume. The raw reference stays (a retire drops it)."""
         with self._transaction() as db:
-            staged = self._staged_of(db, buffer, volume_id)
-            if staged is None:
+            previous = self._volume_of(db, buffer, volume_id)
+            if previous is None:
                 return False
             db.execute("DELETE FROM volumes WHERE buffer = ? AND id = ?", (buffer, volume_id))
             self._drop_frozen_of(db, buffer, volume_id)
-            self._drop_unused_staged_ref(db, buffer, staged)
+            self._drop_unused_staged_ref(db, buffer, _staged_key(previous.artifact, previous.path))
             self._volumes.pop(buffer, None)
         return True
 
