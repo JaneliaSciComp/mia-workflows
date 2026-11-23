@@ -20,6 +20,18 @@ def test_moved_helpers_behave_as_before(tmp_path):
     assert read_untrusted(tmp_path / "job", "link", 100) is None
 
 
+def test_write_atomic_never_writes_through_a_link_a_job_left(tmp_path):
+    outside = tmp_path / "outside"
+    outside.write_text("mine")
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / ".stage.json.tmp").symlink_to(outside)  # the temp name a job could once predict
+    (job / "stage.json").symlink_to(outside)
+    write_atomic(job / "stage.json", "theirs")
+    assert outside.read_text() == "mine"
+    assert (job / "stage.json").read_text() == "theirs" and not (job / "stage.json").is_symlink()
+
+
 def test_old_import_sites_still_work():
     import mia_core.untrusted as core
     from autodev.activities import neutralize as a

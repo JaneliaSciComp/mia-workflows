@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import stat
 from pathlib import Path
 from typing import Any, Literal, overload
@@ -59,11 +60,20 @@ def neutralize(text: str, token: str | None = None) -> str:
 
 
 def write_atomic(path: Path, data: str | bytes) -> None:
-    """Write via a temp file and rename, so a crash never leaves a half-written file."""
+    """Write via a temp file and rename, so a crash never leaves a half-written file.
+
+    The temp file has a name nobody can predict and is created exclusively, so a link a sandboxed job left in the
+    directory is never written through; the rename replaces a link at `path` itself, never its target."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(data.encode() if isinstance(data, str) else data)
-    os.replace(tmp, path)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data.encode() if isinstance(data, str) else data)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def text(value: Any, limit: int = 2000) -> str:
