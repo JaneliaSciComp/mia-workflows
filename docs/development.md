@@ -817,8 +817,9 @@ candidates the frozen lists are drawn from: a list is as long as `sampling.crops
 candidate when there are fewer.
 
 **Filters.** A definition's `sampling.filters` names what a crop must hold: `{name: content}` (not blank, not one
-value: the crop job's test) and `{name: labelled, min_fraction: 0.05}` (at least that share of the crop's pixels
-annotated in a label paired with its raw; a raw without labels passes). The list is kept in name order and enters
+value: the crop job's test) and `{name: labelled}` (a nonzero pixel, a single point being enough, in a label
+paired with its raw; a raw without labels fails every draw, so a record with no label array stages nothing). A
+`min_fraction` on `labelled` is read and ignored with a warning. The list is kept in name order and enters
 the plan rule only when it is not empty, so a definition without filters keeps its plan digests. Only the stage
 job can apply them: it tests each draw's full-resolution box, the label's before the raw's, and draws again until
 the split's count is kept or 2000 draws in a row were rejected (`plan.GIVE_UP` in the harness; a repeated

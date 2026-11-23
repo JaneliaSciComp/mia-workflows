@@ -457,7 +457,7 @@ def test_a_dataset_estimated_over_the_stage_cap_is_a_plan_warning(spec_2d, plan_
     assert not any("limits.stage_bytes" in warning for warning in roomy.warnings)
 
 
-FILTERS = [{"name": "content"}, {"name": "labelled", "min_fraction": 0.05}]
+FILTERS = [{"name": "content"}, {"name": "labelled"}]
 
 
 def test_plan_digest_with_filters_golden():
@@ -471,7 +471,7 @@ def test_plan_digest_with_filters_golden():
         "channel_recipe": None,
         "filters": FILTERS,
     }
-    assert plan_digest(rule) == "38da38f37fee0b1dc5f08cd3b544eab367376ece8c262b1aed2e2b8b2b016ce8"
+    assert plan_digest(rule) == "543be40667f56b2ed78ee2da2472d6bf56a12649a3711589d3db493e1d5dbc5d"
 
 
 def test_a_rule_has_filters_only_when_the_definition_does(spec_2d):

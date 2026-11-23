@@ -169,7 +169,7 @@ def test_a_prep_request_says_restart_and_a_stored_one_that_says_again_reads_the_
     assert load_prep_text(yaml.safe_dump({**base, "restart": True})).again is True  # what the round's pins carry
 
 
-BOTH_FILTERS = [{"name": "labelled", "min_fraction": 0.05}, {"name": "content"}]
+BOTH_FILTERS = [{"name": "labelled"}, {"name": "content"}]
 
 
 def _with_filters(filters) -> str:
@@ -181,13 +181,17 @@ def _with_filters(filters) -> str:
 def test_filters_default_to_none_and_are_kept_in_name_order():
     assert load_spec(FIXTURES / "spec.yaml").sampling.filters == []
     filters = load_spec_text(_with_filters(BOTH_FILTERS)).sampling.filters
-    assert [entry.model_dump() for entry in filters] == [
-        {"name": "content"},
-        {"name": "labelled", "min_fraction": 0.05},
-    ]
-    assert (
-        load_spec_text(_with_filters([{"name": "labelled", "min_fraction": 1}])).sampling.filters[0].min_fraction == 1
-    )
+    assert [entry.model_dump() for entry in filters] == [{"name": "content"}, {"name": "labelled"}]
+
+
+def test_a_min_fraction_on_labelled_is_read_and_ignored():
+    """A definition written for a share of annotated pixels still loads (a round may be pinned to one): the
+    filter it gets is the one every definition gets, and the spec says so."""
+    spec = load_spec_text(_with_filters([{"name": "labelled", "min_fraction": 0.05}]))
+    assert [entry.model_dump() for entry in spec.sampling.filters] == [{"name": "labelled"}]
+    assert "min_fraction" not in str(spec.model_dump(mode="json", by_alias=True)["sampling"]["filters"])
+    assert "sampling.filters: labelled's min_fraction is ignored: any annotation in a crop passes" in spec.warnings
+    assert not any("min_fraction" in warning for warning in load_spec_text(_with_filters(BOTH_FILTERS)).warnings)
 
 
 @pytest.mark.parametrize(
@@ -195,10 +199,9 @@ def test_filters_default_to_none_and_are_kept_in_name_order():
     [
         ([{"name": "sharp"}], "sharp"),
         ([{"name": "content"}, {"name": "content"}], "a filter is named once: content"),
-        ([{"name": "labelled"}], "min_fraction"),
-        ([{"name": "labelled", "min_fraction": 0}], "min_fraction"),
-        ([{"name": "labelled", "min_fraction": 1.5}], "min_fraction"),
         ([{"name": "content", "min_fraction": 0.5}], "min_fraction"),
+        ([{"name": "labelled", "min_fraction": "some"}], "min_fraction"),
+        ([{"name": "labelled", "share": 0.5}], "share"),
         (["content"], "filters"),
     ],
 )

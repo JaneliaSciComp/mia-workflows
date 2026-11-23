@@ -1385,7 +1385,7 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
         "allowUnknown": True, "annRequired": True, "sources": ["manual", "proofread"], "minVox": 1000000,
         "patch": 128, "level": 8, "patchZ": 16, "dedup": False, "T": 0.25,
         "cropsTrain": 5000, "cropsVal": 300, "cropsTest": 200, "maxCrops": 64, "holdout": "u937 bcss",
-        "exclude": ["bcss", "u937"], "filterContent": True, "filterLabelled": True, "labelledPercent": 7,
+        "exclude": ["bcss", "u937"], "filterContent": True, "filterLabelled": True,
     }  # fmt: skip
     sets = (
         "const filled = c => ({ ...c, dims: new Set(c.dims), lic: new Set(c.lic), sources: new Set(c.sources),"
@@ -1411,14 +1411,10 @@ def test_the_controls_are_filled_from_a_spec_and_say_what_they_cannot_hold() -> 
     assert back == controls and same == []
     assert [entry.model_dump() for entry in load_spec_text(written).sampling.filters] == [
         {"name": "content"},
-        {"name": "labelled", "min_fraction": 0.07},
+        {"name": "labelled"},
     ]
     hand_controls, hand_text = lost
-    assert (hand_controls["filterContent"], hand_controls["filterLabelled"], hand_controls["labelledPercent"]) == (
-        False,
-        False,
-        5,
-    )
+    assert (hand_controls["filterContent"], hand_controls["filterLabelled"]) == (False, False)
     assert hand_controls["name"] == "microscopy-foundation-pretrain" and hand_controls["level"] == 4
     assert load_spec_text(written).select.exclude.ids == ["bcss", "u937"]  # an unchecked dataset is an exclusion
     differs = run_js(
@@ -1934,10 +1930,8 @@ def test_a_jobs_record_is_read_from_its_address_and_a_job_without_one_says_so() 
     assert (request, cleaner) == ({"kind": "prep", "number": 12}, None)
 
 
-def test_the_filters_are_written_only_when_set_and_an_odd_fraction_locks_the_controls() -> None:
-    """A definition's `sampling.filters` from the two controls: no line when neither is set, each alone, and a
-    percentage with decimals. A fraction the percentage cannot show comes back different, so specDiff names it and
-    the page keeps the text."""
+def test_the_filters_are_written_only_when_set() -> None:
+    """A definition's `sampling.filters` from the two checkboxes: no line when neither is set, each alone, both."""
     from mia_buffers.spec import load_spec_text
 
     def parsed(text: str) -> dict:
@@ -1948,43 +1942,39 @@ def test_the_filters_are_written_only_when_set_and_an_odd_fraction_locks_the_con
         "const base = fromSpec(input.hand);\n"
         "print(input.cases.map(c => toSpecYaml({ ...base, ...c }, 'a'.repeat(40), 'o/catalog')));"
     )
-    cases = [
-        {},
-        {"filterContent": True},
-        {"filterLabelled": True, "labelledPercent": 12.5},
-        {"filterContent": True, "filterLabelled": True, "labelledPercent": 100},
-    ]
+    cases = [{}, {"filterContent": True}, {"filterLabelled": True}, {"filterContent": True, "filterLabelled": True}]
     none, content, labelled, both = run_js(
         write, {"spec.js": "toSpecYaml, fromSpec"}, {"hand": parsed(by_hand), "cases": cases}
     )
     assert "filters" not in none and load_spec_text(none).sampling.filters == []
     assert "  filters: [{name: content}]\n" in content
-    assert "  filters: [{name: labelled, min_fraction: 0.125}]\n" in labelled
-    assert "  filters: [{name: content}, {name: labelled, min_fraction: 1}]\n" in both
-    assert load_spec_text(both).sampling.filters[1].min_fraction == 1
-    odd = yaml.safe_load(by_hand)
-    odd["sampling"]["filters"] = [{"name": "labelled", "min_fraction": 0.123456}]
-    odd = parsed(yaml.safe_dump(odd))
-    percent, rewritten = run_js(
-        "const c = fromSpec(input.odd);\n"
-        "print([c.labelledPercent, toSpecYaml(c, input.odd.catalog.ref, input.odd.catalog.repo)]);",
+    assert "  filters: [{name: labelled}]\n" in labelled
+    assert "  filters: [{name: content}, {name: labelled}]\n" in both
+    # a definition that names a share of annotated pixels is read as the filter the controls write: nothing is lost
+    older = yaml.safe_load(by_hand)
+    older["sampling"]["filters"] = [{"name": "labelled", "min_fraction": 0.123456}]
+    older = parsed(yaml.safe_dump(older))
+    checked, rewritten = run_js(
+        "const c = fromSpec(input.older);\n"
+        "print([c.filterLabelled, toSpecYaml(c, input.older.catalog.ref, input.older.catalog.repo)]);",
         {"spec.js": "toSpecYaml, fromSpec"},
-        {"odd": odd},
+        {"older": older},
     )
-    assert percent == 12.35
+    assert checked is True and "  filters: [{name: labelled}]\n" in rewritten
     differs = run_js(
-        "print(specDiff(input.odd, input.rewritten));",
+        "print(specDiff(input.older, input.rewritten));",
         {"spec.js": "specDiff"},
-        {"odd": odd, "rewritten": parsed(rewritten)},
+        {"older": older, "rewritten": parsed(rewritten)},
     )
-    assert "sampling.filters" in differs
+    assert "sampling.filters" not in differs
 
 
 def test_the_designer_has_the_filter_controls() -> None:
     ui = Path(__file__).parent.parent / "mia_buffers" / "ui"
     index, designer = (ui / "index.html").read_text(), (ui / "designer.js").read_text()
-    for name in ("filterContent", "filterLabelled", "labelledPercent"):
+    for name in ("filterContent", "filterLabelled"):
         assert f'id="{name}"' in index and f'bind("{name}", "{name}"' in designer
+    assert "labelledPercent" not in index + designer  # the annotation filter is a checkbox: it takes no number
 
 
 PEEK = {

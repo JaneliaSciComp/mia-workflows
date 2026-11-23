@@ -41,11 +41,8 @@ export function toSpecYaml(c, ref, repo) {
   const p = c.patch,
     z = c.patchZ,
     sources = SRC.filter(s => c.sources.has(s)),
-    // in name order, as the service keeps them; a percentage is a fraction of four places at most
-    filters = [
-      ...(c.filterContent ? ["{name: content}"] : []),
-      ...(c.filterLabelled ? [`{name: labelled, min_fraction: ${+(c.labelledPercent / 100).toFixed(4)}}`] : []),
-    ];
+    // in name order, as the service keeps them
+    filters = [...(c.filterContent ? ["{name: content}"] : []), ...(c.filterLabelled ? ["{name: labelled}"] : [])];
   return [
     "schema_version: 1",
     `name: ${yq(c.name.trim() || "buffer")}`,
@@ -112,8 +109,7 @@ export function fromSpec(s) {
   const where = s.select.where,
     patch = s.sampling.patch,
     crops = s.sampling.crops,
-    filters = s.sampling.filters || [],
-    labelled = filters.find(f => f.name === "labelled");
+    filters = s.sampling.filters || [];
   return {
     name: s.name,
     paths: s.select.paths.join(" "),
@@ -133,8 +129,7 @@ export function fromSpec(s) {
     cropsTest: crops.test,
     maxCrops: s.sampling.max_crops_per_dataset,
     filterContent: filters.some(f => f.name === "content"),
-    filterLabelled: !!labelled,
-    labelledPercent: labelled ? Math.round(labelled.min_fraction * 1e4) / 100 : 5,
+    filterLabelled: filters.some(f => f.name === "labelled"),
     holdout: s.splits.holdout_ids.join(" "),
     exclude: new Set(s.select.exclude.ids),
   };

@@ -183,10 +183,11 @@ class ContentFilter(_Strict):
 
 
 class LabelledFilter(_Strict):
-    """At least `min_fraction` of a crop's pixels must be annotated; a dataset without labels passes."""
+    """A crop must hold annotation: a nonzero pixel, a single point being enough, in a label paired with its raw.
+    A raw without a paired label holds none, so a dataset without labels stages nothing."""
 
     name: Literal["labelled"]
-    min_fraction: float = Field(gt=0, le=1)
+    min_fraction: float | None = Field(default=None, exclude=True)  # accepted and ignored, see Spec.warnings
 
 
 SampleFilter = Annotated[ContentFilter | LabelledFilter, Field(discriminator="name")]
@@ -305,6 +306,10 @@ class Spec(_Strict):
             self.warnings.append("sampling.label_axis is ignored: labels are a separate tensor (spec v0.4 §8.5)")
         if self.sampling.plan is not None:
             self.warnings.append("sampling.plan is ignored: sampling.crops sets the buffer's size")
+        if any(isinstance(entry, LabelledFilter) and entry.min_fraction is not None for entry in self.sampling.filters):
+            self.warnings.append(
+                "sampling.filters: labelled's min_fraction is ignored: any annotation in a crop passes"
+            )
         return self
 
     @model_validator(mode="after")

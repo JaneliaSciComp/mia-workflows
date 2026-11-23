@@ -70,8 +70,8 @@
       <div class="small">shared among the datasets by weight · val and test are also the lengths of their lists</div></fieldset>
     <fieldset><legend>Crop filters</legend>
       <label class="inline"><input type="checkbox" id="filterContent"> skip blank crops</label>
-      <label class="inline"><input type="checkbox" id="filterLabelled"> at least <input type="number" id="labelledPercent" min="0.01" max="100" step="any" aria-label="percent of a crop that must be annotated"> % annotated</label>
-      <div class="small">tested when a dataset is staged, so it may stage fewer crops than planned · a dataset without labels is not tested for annotation</div></fieldset>
+      <label class="inline"><input type="checkbox" id="filterLabelled"> skip crops without annotation</label>
+      <div class="small">tested when a dataset is staged, so it may stage fewer crops than planned · one annotated pixel is enough, and a dataset with no label stages nothing</div></fieldset>
     <fieldset><legend>Held out for test (dataset ids)</legend><input type="text" id="holdout" size="22" aria-label="dataset ids held out for test"></fieldset>
   </section>
   </fieldset>
