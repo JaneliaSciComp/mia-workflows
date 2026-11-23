@@ -577,7 +577,10 @@ class Activities:
     async def poll_issues(self) -> list[int]:
         """Start (or keep) a workflow for every open issue labelled `go` by someone with write access.
 
-        A `go` from anyone else is removed with an explanatory comment."""
+        A `go` from anyone else is removed with an explanatory comment. While the operator has paused, nothing is
+        started and every `go` keeps its label: the poll after `mia resume` starts it."""
+        if await asyncio.to_thread(autonomy.paused, manifest_path()):
+            return []
         go_label = self.cfg.label("go")
         started = []
         for issue in await self.gh.list_issues(labels=go_label, state="open"):
