@@ -1,4 +1,5 @@
-// The Buffers view: the specs, the buffers, and a buffer's own page.
+// The Buffers view: the list of buffers, and the page of one version of a buffer (a round's buffer, by its id).
+import { STEP_TITLES, STEPS, statusWord, stepOf } from "./steps.js";
 import {
   $,
   ago,
@@ -18,10 +19,8 @@ import {
   num,
   pct,
   pill,
-  PILL_HELP,
   plural,
   short,
-  stagePill,
   statePill,
   SUBJECT_HASH,
   svgEl,
@@ -30,11 +29,12 @@ import {
 } from "./dom.js";
 import { load, S } from "./api.js";
 import { pagedTable, pageOf, reloadTables } from "./table.js";
-import { actionWord } from "./actions.js";
 
 // ---- buffers
+const SPLIT_ORDER = ["train", "val", "test"]; // a split of another name follows them
 export function servableText(servable) {
-  const e = Object.entries(servable || {});
+  const at = ([split]) => SPLIT_ORDER.indexOf(split) + 1 || SPLIT_ORDER.length + 1;
+  const e = Object.entries(servable || {}).sort((a, b) => at(a) - at(b));
   return e.length ? e.map(([k, v]) => `${k} ${num(v)}`).join(" · ") : "none";
 }
 const issueOf = id => (/^i(\d+)-/.exec(id) || [])[1];
@@ -57,101 +57,108 @@ export function viewBuffers(id, refresh) {
   if (id) return viewBuffer(root, id, refresh);
   if (refresh) return reloadTables(root);
   root.replaceChildren(
-    card(
-      "Buffer specs",
-      "A spec is what you run; each run builds a buffer. Open one to run its plan, approve, plan again, revoke, retire or cancel.",
-      el("p", {}, el("a", { class: "btn", href: "#buffers/new" }, "New buffer")),
-      pagedTable("specs", {
-        source: pageOf("/subjects/buffer", "subjects"),
-        sort: "updated",
-        dir: "desc",
-        empty: "No spec yet: start with New buffer.",
-        cols: [
-          { key: "key", label: "spec", cell: x => el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.name || x.key) },
-          { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
-          { key: "status", label: "stage", cell: x => stagePill(x.stage) },
-          {
-            label: "waits for",
-            cell: x =>
-              x.status === "waiting" || x.status === "stuck"
-                ? x.actions
-                    .filter(a => a !== "stop" && a !== "cancel")
-                    .map(a => actionWord(x, a))
-                    .join(", ")
-                : "",
-          },
-          { key: "updated", label: "updated", cell: x => when(x.updated) },
-        ],
-      }),
+    el(
+      "div",
+      { class: "viewhead" },
+      el("h2", {}, "Buffers"),
+      el(
+        "a",
+        {
+          class: "btn primary",
+          href: "#buffers/new",
+          title: "Define a new buffer. Nothing is saved until its second step.",
+        },
+        "New buffer",
+      ),
     ),
-    card(
-      "Buffers",
-      "One row per buffer a run built, the newest spec first and its newest round first; an older round is superseded by the newest. Open one for its events, pool, volumes, consumers and usage.",
-      pagedTable("buffers", {
-        source: pageOf("/buffers", "buffers"),
-        empty: "No buffer yet: start with New buffer.",
-        rowAttrs: b => ({
-          class: "click" + (b.superseded_by ? " superseded" : ""),
-          title: b.superseded_by ? `superseded by ${b.superseded_by}, its spec's newest round` : "",
-          onclick: e => {
-            if (!e.target.closest("a")) location.hash = "#buffers/" + encodeURIComponent(b.id);
-          },
-        }),
-        cols: [
-          { key: "buffer", label: "buffer", cell: b => bufferLink(b.id) },
-          {
-            key: "spec",
-            label: "spec",
-            cell: b => (b.spec ? el("a", { href: SUBJECT_HASH.buffer(b.spec) }, b.spec) : b.config?.spec_name || ""),
-          },
-          {
-            key: "updated",
-            label: "state",
-            cell: b =>
-              el(
-                "span",
-                {},
-                ...(b.superseded_by ? [pill("superseded", ""), " "] : []),
-                ...(b.latest_event
-                  ? [statePill(stageOf(b.latest_event)), " ", when(b.latest_event.at)]
-                  : [
-                      el(
-                        "span",
-                        { class: "small", title: "registered before buffers recorded lifecycle events" },
-                        "no events",
-                      ),
-                    ]),
-              ),
-          },
-          { key: "volumes", label: "volumes", num: true, cell: b => num(b.volumes) },
-          {
-            key: "missing",
-            label: "missing",
-            num: true,
-            cell: b =>
-              b.missing
-                ? pill(num(b.missing), "warn", [
-                    {
-                      b: "missing",
-                      t:
-                        PILL_HELP.missing +
-                        " These are volumes registered to the buffer whose pyramid the last scan did not find.",
-                    },
-                  ])
-                : "0",
-          },
-          { label: "servable", cell: b => servableText(b.servable) },
-          {
-            key: "consumers_seen",
-            label: "consumer last seen",
-            cell: b => (b.consumers_seen ? when(b.consumers_seen) : "never"),
-          },
-          { key: "draws_today", label: "draws today", num: true, cell: b => num(b.draws_today) },
-        ],
-      }),
+    el(
+      "p",
+      { class: "small" },
+      "A buffer is defined, its datasets are prepared, and it is planned, sourced and served: six steps, and a row opens the buffer at the one it is on.",
     ),
+    pagedTable("buffers", {
+      source: pageOf("/subjects/buffer", "subjects"),
+      sort: "updated",
+      dir: "desc",
+      empty: "No buffer yet: start with New buffer.",
+      rowAttrs: x => ({
+        class: "click",
+        onclick: e => {
+          if (!e.target.closest("a")) location.hash = SUBJECT_HASH.buffer(x.key);
+        },
+      }),
+      cols: [
+        {
+          key: "key",
+          label: "buffer",
+          title: "The buffer's name and its key. A name may repeat; the key tells two apart.",
+          // a name is a label and may repeat: the key beside it tells two apart
+          cell: x =>
+            el(
+              "span",
+              {},
+              el("a", { href: SUBJECT_HASH.buffer(x.key) }, x.name || x.key),
+              x.name && x.name !== x.key ? el("span", { class: "small mono" }, " " + x.key) : "",
+            ),
+        },
+        { label: "issue", cell: x => ghIcon(S.meta.buffers_repo, x.issue) },
+        {
+          key: "stage",
+          label: "step",
+          title: "Which of its six steps the buffer is on.",
+          cell: x => `${STEPS.indexOf(stepOf(x.stage)) + 1} · ${STEP_TITLES[stepOf(x.stage)]}`,
+        },
+        {
+          key: "status",
+          label: "status",
+          title: "What the buffer is doing, or that it waits for a person. Hover a status for its stage.",
+          cell: x => {
+            const word = statusWord(x);
+            return pill(word, word === "needs human" ? "warn" : "", [{ b: x.stage, t: " is its stage" }]);
+          },
+        },
+        {
+          label: "serving",
+          title: "The id of the version being served: what a training run names.",
+          cell: x => (x.serving ? bufferLink(x.serving) : ""),
+        },
+        { key: "updated", label: "changed", cell: x => when(x.updated) },
+      ],
+    }),
   );
 }
+// A version's datasets, one row each: on disk (`servable`), staging with its job, blocked by quota,
+// waiting for its files, failed with the reason. `levelsKey`: the folder of its staged pyramids (jobspec.levels_key).
+export const poolTable = (id, levelsKey) =>
+  pagedTable("buffer-pool:" + id, {
+    source: pageOf(`/buffers/${encodeURIComponent(id)}/datasets`, "datasets"),
+    sort: "dataset",
+    empty: "No dataset in the pool yet.",
+    cols: [
+      { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) },
+      { label: "issue", cell: x => ghIcon(S.meta.datasets_repo, x.issue) },
+      {
+        label: "files",
+        title: "Opens the dataset's saved crops.",
+        cell: x => folderLink(S.meta.roots?.storage_root, x.folder),
+      },
+      {
+        label: "staged",
+        title: "Opens the staged artifact this buffer draws from.",
+        cell: x => folderLink(S.meta.roots?.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)),
+      },
+      { label: "preview", cell: x => thumb(x) },
+      {
+        key: "status",
+        label: "status",
+        title: "Where the dataset stands in this version's sourcing. Hover a status for what it means.",
+        cell: x => statePill(x.status),
+      },
+      { label: "reason", wrap: true, cell: x => x.reason || "" },
+      { key: "job", label: "job", cell: x => (x.job ? el("code", {}, x.job) : "") },
+      { key: "updated", label: "updated", cell: x => when(x.updated_at) },
+    ],
+  });
 function sparkline(days) {
   if (!days.length) return el("div", { class: "empty" }, "No draw recorded yet.");
   const W = 560,
@@ -259,17 +266,17 @@ async function viewBuffer(root, id, refresh) {
       el("h2", {}, id),
       el(
         "div",
-        { class: "links" }, // its spec and the spec's issue, then this round's own folders
+        { class: "links" }, // its buffer and the buffer's issue, then this round's own folders
         spec
           ? el(
               "span",
               {},
-              "spec ",
+              "buffer ",
               el(
                 "a",
                 {
                   href: SUBJECT_HASH.buffer(spec.key),
-                  title: "the spec this buffer was built from: its buttons and its timeline",
+                  title: "the buffer this version belongs to: its steps and its timeline",
                 },
                 spec.name || spec.key,
               ),
@@ -298,7 +305,7 @@ async function viewBuffer(root, id, refresh) {
           meta.lines?.buffer.slice(1),
           stageOf(evs[0]),
           evs.map(stageOf),
-          spec?.status === "working" && spec.stage === stageOf(evs[0]),
+          spec?.phase === "working" && spec.stage === stageOf(evs[0]),
         ),
       ),
       retired
@@ -316,7 +323,7 @@ async function viewBuffer(root, id, refresh) {
             { class: "notice" },
             "Staged, waiting for ",
             el("b", {}, "Approve"),
-            " on its spec's page: the approve serves what the pool shows as servable, partial or not; consumers are refused until then.",
+            " on its buffer's page: the approve serves what the pool shows as servable, partial or not; consumers are refused until then.",
           )
         : null,
       !status && evs.length
@@ -325,7 +332,7 @@ async function viewBuffer(root, id, refresh) {
             { class: "notice" },
             "Not sourced yet: a buffer is registered when sourcing starts, after ",
             el("b", {}, "Run"),
-            " on its spec's page. Until then it has only its events.",
+            " on its buffer's page. Until then it has only its events.",
           )
         : null,
       !status && !evs.length ? el("div", { class: "notice" }, "No buffer with this id is registered.") : null,
@@ -344,10 +351,22 @@ async function viewBuffer(root, id, refresh) {
                 search: false,
                 empty: "No usage yet.",
                 cols: [
-                  { key: "day", label: "day", cell: d => d.day },
-                  { key: "draws", label: "draws", num: true, cell: d => num(d.draws) },
-                  { key: "consumers", label: "consumers", num: true, cell: d => num(d.consumers) },
-                  { key: "empty", label: "empty", num: true, cell: d => num(d.empty) },
+                  { key: "day", label: "day", title: "The day the numbers are for.", cell: d => d.day },
+                  { key: "draws", label: "draws", title: "Crops drawn that day.", num: true, cell: d => num(d.draws) },
+                  {
+                    key: "consumers",
+                    label: "consumers",
+                    title: "Training jobs that drew that day.",
+                    num: true,
+                    cell: d => num(d.consumers),
+                  },
+                  {
+                    key: "empty",
+                    label: "empty",
+                    title: "Requests answered with no crop that day.",
+                    num: true,
+                    cell: d => num(d.empty),
+                  },
                 ],
               })
             : null,
@@ -358,10 +377,10 @@ async function viewBuffer(root, id, refresh) {
           status
             ? kv([
                 [
-                  "spec",
+                  "buffer",
                   spec ? el("a", { href: SUBJECT_HASH.buffer(spec.key) }, spec.name || spec.key) : cfg.spec_name,
                 ],
-                ["spec hash", code(cfg.spec_hash, 12)],
+                ["definition hash", code(cfg.spec_hash, 12)],
                 ["catalog commit", code(cfg.catalog_ref, 12)],
                 ["pyramid levels", (cfg.levels || []).join(", ")],
                 ["patch size (px)", num(cfg.patch)],
@@ -399,41 +418,29 @@ async function viewBuffer(root, id, refresh) {
           source: pageOf(`/buffers/${e}/events`, "events"),
           empty: "No event yet.",
           cols: [
-            { key: "seq", label: "#", num: true, cell: x => num(x.seq) },
-            { key: "kind", label: "event", cell: x => statePill(x.kind) },
+            {
+              key: "seq",
+              label: "#",
+              title: "The event's number in this version's history.",
+              num: true,
+              cell: x => num(x.seq),
+            },
+            {
+              key: "kind",
+              label: "event",
+              title: "What happened. Hover an event for what it means.",
+              cell: x => statePill(x.kind),
+            },
             { key: "at", label: "when", cell: x => when(x.at) },
-            { label: "detail", wrap: true, cell: x => x.detail || "" },
+            { label: "detail", title: "What the event recorded.", wrap: true, cell: x => x.detail || "" },
           ],
         }),
       ),
       status
         ? card(
             "Dataset pool",
-            "One row per dataset of the plan's pool: servable, fetching with its job, staging, blocked by quota, waiting for a drop, failed with the reason.",
-            pagedTable("buffer-pool:" + id, {
-              source: pageOf(`/buffers/${e}/datasets`, "datasets"),
-              sort: "dataset",
-              empty: "No dataset in the pool yet.",
-              cols: [
-                { key: "dataset", label: "dataset", cell: x => datasetLink(x.record) },
-                { label: "issue", cell: x => ghIcon(meta.datasets_repo, x.issue) },
-                {
-                  label: "files",
-                  title: "the dataset's saved crops",
-                  cell: x => folderLink(roots.storage_root, x.folder),
-                },
-                {
-                  label: "staged",
-                  title: "the staged artifact this buffer draws from",
-                  cell: x => folderLink(roots.staged_root, x.staged || (levelsKey && `${levelsKey}/${x.record}`)),
-                },
-                { label: "preview", cell: x => thumb(x) },
-                { key: "status", label: "status", cell: x => statePill(x.status) },
-                { label: "reason", wrap: true, cell: x => x.reason || "" },
-                { key: "job", label: "job", cell: x => (x.job ? el("code", {}, x.job) : "") },
-                { key: "updated", label: "updated", cell: x => when(x.updated_at) },
-              ],
-            }),
+            "One row per dataset of the plan's pool: servable, staging with its job, blocked by quota, waiting for a drop, failed with the reason.",
+            poolTable(id, levelsKey),
           )
         : null,
       status
@@ -449,8 +456,13 @@ async function viewBuffer(root, id, refresh) {
                 dir: "desc",
                 empty: "No volume registered.",
                 cols: [
-                  { key: "volume", label: "volume", cell: v => el("code", {}, v.id) },
-                  { key: "draws", label: "draws", num: true, cell: v => num(v.draws) },
+                  {
+                    key: "volume",
+                    label: "volume",
+                    title: "The volume's id. It starts with its dataset.",
+                    cell: v => el("code", {}, v.id),
+                  },
+                  { key: "draws", label: "draws", title: "Crops drawn from it.", num: true, cell: v => num(v.draws) },
                   { key: "missing", label: "", cell: v => (v.missing ? pill("missing", "warn") : "") },
                 ],
               }),
@@ -465,12 +477,33 @@ async function viewBuffer(root, id, refresh) {
                 search: false,
                 empty: "No consumer has registered.",
                 cols: [
-                  { key: "name", label: "name", cell: c => c.name },
-                  { key: "host", label: "host", cell: c => c.host },
-                  { label: "pid", num: true, cell: c => String(c.pid ?? "") },
-                  { key: "rank", label: "rank", num: true, cell: c => (c.rank == null ? "" : String(c.rank)) },
-                  { key: "split", label: "split", cell: c => c.split },
-                  { key: "last_seen", label: "last seen", cell: c => when(c.last_seen) },
+                  {
+                    key: "name",
+                    label: "name",
+                    title: "The name the training job registered under.",
+                    cell: c => c.name,
+                  },
+                  { key: "host", label: "host", title: "The machine it runs on.", cell: c => c.host },
+                  { label: "pid", title: "Its process id on that machine.", num: true, cell: c => String(c.pid ?? "") },
+                  {
+                    key: "rank",
+                    label: "rank",
+                    title: "Its rank among the processes of a distributed run.",
+                    num: true,
+                    cell: c => (c.rank == null ? "" : String(c.rank)),
+                  },
+                  {
+                    key: "split",
+                    label: "split",
+                    title: "The split it draws from: train, val or test.",
+                    cell: c => c.split,
+                  },
+                  {
+                    key: "last_seen",
+                    label: "last seen",
+                    title: "When the service last heard from it.",
+                    cell: c => when(c.last_seen),
+                  },
                   { label: "", cell: c => (c.stale ? pill("stale", "warn") : "") },
                 ],
               }),

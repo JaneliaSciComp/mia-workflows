@@ -14,6 +14,7 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import time
@@ -27,19 +28,28 @@ import yaml
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from autodev.activities import PERMANENT_CSUB, permanent_errors
+from autodev.activities import NO_COMMITS, PERMANENT_CSUB, permanent_errors
 from autodev.agent import hosts_marker
 from autodev.jobs import JobSpec
 from mia_core import autonomy
 from mia_core.assets import raw_asset
 from mia_core.config import manifest_path
+from mia_core.hosts import missing_hosts
 from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge.evidence import build as build_evidence
 from mia_core.judge.evidence import evidence_digest, read_claude_json
 from mia_core.judge.policy import POLICY_VERSION, authorized, new_assessment
-from mia_core.judge.schema import Verdict, effective_verdict, parse_verdict, prompt_text, prompt_version
+from mia_core.judge.schema import (
+    Verdict,
+    effective_verdict,
+    parse_verdict,
+    prompt_text,
+    prompt_version,
+    worst_finding,
+)
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
+from mia_core.temporal import heartbeats
 from mia_core.untrusted import loads as _loads
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_core.untrusted import text as _text
@@ -48,13 +58,14 @@ from mia_core.untrusted import write_atomic as write_atomic
 
 from . import catalog
 from . import publish as crop_publish
-from .binding import check_binding, hosts, record_gaps, record_urls
+from .binding import check_binding, granted_hosts, hosts, network_hosts, record_gaps, record_urls
 from .config import HUMAN_LABELS, STAGE_SENTENCES, STAGES, dataset_state, round_open
 from .gallery import gallery_files, publish_gallery
 from .jobspec import (
     ADVICE_FILE,
     SHA_RE,
     HostsNotAllowed,
+    NoReachableFiles,
     PinMoved,
     check_hosts_allowed,
     crop_job,
@@ -69,6 +80,7 @@ from .jobspec import (
     smoke_job,
     snapshot,
     verify_job,
+    with_hosts,
 )
 from .models import (
     ADVISERS,
@@ -90,6 +102,7 @@ from .models import (
     RoundLimits,
     SmokeResult,
     VerifyResult,
+    sets_view,
 )
 from .poll import run_poll
 from .publish import CROP_ID_RE, REVOKED_FILE, Conflict
@@ -115,6 +128,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+
+def _refused_host(report: dict) -> object:
+    """The host a harness report says the job was refused (`host_not_allowed`: {host, chain}), or None."""
+    refused = report.get("host_not_allowed")
+    return refused.get("host") if isinstance(refused, dict) else None
+
+
 TEST_PR_RE = re.compile(r"i0-e(\d+)-[0-9a-f]{7}")  # `mia-data test-pr`'s round id: PR <n> at a head, no data issue
 ROUND_RE = re.compile(rf"i\d+-e\d+|{TEST_PR_RE.pattern}")
 # what a job leaves in its workspace that says how it went: copied for the debugging agent, each cut at this size
@@ -133,6 +153,15 @@ LOG_BYTES = 64 << 10  # the end of a job's stdout and stderr
 KIND_RE = re.compile(r"[a-z][a-z0-9-]{0,60}")  # a job kind, optionally with a suffix (crop-<sha>)
 HEX64 = re.compile(r"[0-9a-f]{64}")
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a snippet directory
+SNIPPET_BRANCH_RE = re.compile(r"snippets/issue-(\d+)")  # the branch of the pull request autodev makes for an issue
+# the heading of autodev's summary of a round that changed nothing (`autodev.activities.render_summary`)
+NO_COMMITS_RE = re.compile(rf"### \S+: round \d+ {NO_COMMITS}[^\n]*\n")
+MARKER_RE = re.compile(r"(?s)<!--.*?-->")
+HEADING_RE = re.compile(r"(?m)^#+\s*")  # a Markdown heading's hashes, which mean nothing inside a sentence
+# the line of a snippets issue that names the hosts its agent's job may reach (`open_snippet_issue`)
+REACH_RE = re.compile(r"The reader's job may reach [^\n]*?<!-- autodev: hosts[^>]*?-->")
+EVIDENCE_FILE_BYTES = 64 << 20  # the largest file of the judge's evidence that is shared with the developer
+NO_CHANGE_RE = re.compile(r"<!-- \S+: no-change (\S+) -->")  # autodev's marker on a validated "nothing to change"
 CROP_STATUS = {
     "pending": "test crops running",
     "success": "test crops passed",
@@ -141,6 +170,7 @@ CROP_STATUS = {
 }
 PERMANENT = (
     HostsNotAllowed,
+    NoReachableFiles,
     PinMoved,
     Conflict,
     ValueError,
@@ -267,6 +297,8 @@ class Activities:
         if cfg.service is None:
             raise ValueError("mia-data needs a `service` section: buffer-api holds its stages and timelines")
         self.registry = Registry.from_config(cfg.service)  # buffer-api: stages, timelines, actions, budgets
+        if jobs is not None:  # a job's transfer rows go to the ledger at its end
+            jobs.transfers_sink = self.registry.put_transfers
         self.page_url = cfg.service.url.rstrip("/")
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts))
         # ponytail: in memory, so a worker restart re-sends each PR once (the workflow dedupes by pr_state)
@@ -283,6 +315,8 @@ class Activities:
         """The main queue's activities; await_job runs on the -await queue."""
         return [
             self.admit,
+            self.resume_root,
+            self.ask_autodev,
             self.limits,
             self.poll,
             self.set_stage,
@@ -302,6 +336,8 @@ class Activities:
             self.publish_gallery,
             self.publish_crops,
             self.refuse_label,
+            self.close_snippet_issue,
+            self.share_evidence,
             self.read_feedback,
             self.open_snippet_issue,
             self.pr_state,
@@ -340,13 +376,28 @@ class Activities:
         return (await self._bot_comment(gh, number, marker) or await gh.comment(number, body)).get("html_url")
 
     async def _post(
-        self, issue: int, body: str, marker: str, *, round_id: str | None = None, stage: str | None = None
+        self,
+        issue: int,
+        body: str,
+        marker: str,
+        *,
+        round_id: str | None = None,
+        stage: str | None = None,
+        data: dict | None = None,
     ) -> None:
         """Write what a round has to say about its dataset: a stage, a text (once per marker), or both. It is the
         subject's stage and a timeline entry in the registry, a required write, and no GitHub call: the mirror
-        copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7)."""
+        copies it to the issue whenever GitHub answers (spec webapp-actions §6, §7). `data` rides with a stage:
+        the keys of the subject's data it replaces."""
         write = functools.partial(
-            self.registry.append_entry, "dataset", issue, body=body, marker=marker, round_id=round_id, stage=stage
+            self.registry.append_entry,
+            "dataset",
+            issue,
+            body=body,
+            marker=marker,
+            round_id=round_id,
+            stage=stage,
+            data=data,
         )
         await asyncio.to_thread(write)
 
@@ -372,6 +423,19 @@ class Activities:
 
     def _pins(self, round_id: str) -> Pins:
         return Pins(**json.loads((self._round_dir(round_id) / "pins.json").read_text()))
+
+    async def _note_refused(self, round_id: str, hosts: object) -> None:
+        """Tell the registry which hosts a job of a dataset round was refused, best effort: the dataset's next
+        start asks a person to approve them. `hosts` is what a job left: anything but host names is dropped."""
+        named = [host.lower() for host in (hosts if isinstance(hosts, list) else [hosts]) if isinstance(host, str)]
+        if not named:
+            return
+        try:
+            record = self._pins(round_id).record
+        except (OSError, ValueError, TypeError):
+            return  # ponytail: a PR head's test round lies elsewhere and tells nobody; its match round did
+        put = functools.partial(self.registry.add_refused_hosts, record, named[:20])
+        await asyncio.to_thread(best_effort, put, f"refused hosts of {record}", log)
 
     def _round_workspace(self, issue: int, round_id: str) -> Path:
         """work_root/issue-<n>/<round>, the parent of the round's job workspaces; a test-pr round's is
@@ -497,6 +561,16 @@ class Activities:
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the round admitted
         return pins
 
+    @activity.defn(name="resume_root")
+    @mia_permanent_errors
+    async def resume_root(self, issue: int, event_id: str) -> str:
+        """Who a resumed round is charged to: the root the resume's action carries, else the dataset itself, as
+        `admit` reads it for a go."""
+        action = await self._action(issue, event_id)
+        if action is None:
+            raise ValueError(f"event {event_id} is not an action: a round is resumed by one")
+        return action["payload"].get("root") or self.cfg.root_of(issue)
+
     @activity.defn(name="limits")
     async def limits(self) -> RoundLimits:
         """The config values the workflow needs but cannot read itself."""
@@ -513,6 +587,7 @@ class Activities:
             cfg.limits.debug_cycles,
             cfg.limits.debug_wait_min,
             cfg.limits.autodev_quiet_hours,
+            cfg.judge.crops.max_reworks,
         )
 
     # --- assessments: a human verdict on record, and the policy's answer (spec autonomous-gates §5) ---
@@ -610,8 +685,7 @@ class Activities:
             verdict = parse_verdict(text)
         except ValueError as error:
             verdict = Verdict("escalate", 0.0, (), f"unreadable verdict: {_text(str(error), 400)}")
-        max_suspect = self.cfg.judge.crops.max_suspect if gate == "crops" else None
-        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence, max_suspect)
+        effective, why = effective_verdict(verdict, self.cfg.judge.min_confidence, suspect_rejects=gate == "crops")
         findings = [
             {"item": self._clean(f.item), "severity": f.severity, "note": self._clean(f.note)} for f in verdict.findings
         ]
@@ -659,7 +733,16 @@ class Activities:
         if jobs := render_jobs(self._job_links([str(path)])):  # the entry that reports a job links its record
             comment += f"\n\n{jobs}"
         return JudgeResult(
-            verdict.verdict, effective, verdict.confidence, summary, assessment_id, cost, comment, findings, granted
+            verdict.verdict,
+            effective,
+            verdict.confidence,
+            summary,
+            assessment_id,
+            cost,
+            comment,
+            findings,
+            granted,
+            worst_finding(verdict.findings),
         )
 
     def _granted(self, row: dict, round_id: str) -> bool:
@@ -691,24 +774,27 @@ class Activities:
 
     @activity.defn(name="reserve")
     async def reserve(self, root: str, reservation_id: str, kind: str, usd: float) -> Reservation:
-        """Charge a job to its root before it launches; a refusal names the cap. Without a root there is no
-        budget to check."""
+        """Charge a job to its root before it launches; a refusal names the cap. `usd` is the most Claude Code
+        may count for the job, booked as what that costs here (`autonomy.price_factor`). Without a root there is
+        no budget to check."""
         if not root:
             return Reservation(True, "no budget")
-        caps = self.cfg.autonomy.caps()
-        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, usd, caps)
+        caps, paid = self.cfg.autonomy.caps(), usd * self.cfg.autonomy.price_factor
+        out = await asyncio.to_thread(self.registry.reserve, root, reservation_id, kind, paid, caps)
         ok = bool(out.get("ok"))
         return Reservation(ok, "" if ok else str(out.get("reason", "")), wait=bool(out.get("wait")) and not ok)
 
     @activity.defn(name="settle")
     async def settle(self, root: str, reservation_id: str, usd: float | None = None, fetched_bytes: int = 0) -> None:
-        """Close the job's reservation with what it cost and moved; an accounting write never fails a round."""
+        """Close the job's reservation with what it cost and moved: `usd` is Claude Code's count, booked as what
+        that costs here (`autonomy.price_factor`); with None the reservation stands as the cost. An accounting
+        write never fails a round."""
         if not root:
             return
-        registry = self.registry
+        registry, paid = self.registry, None if usd is None else usd * self.cfg.autonomy.price_factor
         await asyncio.to_thread(
             best_effort,
-            lambda: registry.settle(root, reservation_id, usd=usd, fetched_bytes=fetched_bytes),
+            lambda: registry.settle(root, reservation_id, usd=paid, fetched_bytes=fetched_bytes),
             f"settle {reservation_id}",
             log,
         )
@@ -760,9 +846,11 @@ class Activities:
             result=self._clean(state.result),
             shown=self._shown(state) if state.pass_stage else "",
         )
+        view = sets_view(state, stage)  # which sets a verdict may name now: the page reads it with the stage
         for body, marker_text, sets in entries:
             marker = self.cfg.marker(marker_text)
-            await self._post(issue, f"{body}\n{marker}", marker, round_id=round_id, stage=sets)
+            data = {"sets": view} if sets else None
+            await self._post(issue, f"{body}\n{marker}", marker, round_id=round_id, stage=sets, data=data)
 
     def _shown(self, state: DatasetState) -> str:
         """What goes under the result of the pass open in `state`: the round's binding when the result is about
@@ -812,6 +900,49 @@ class Activities:
             return await self._comment_once(self.gh_snippets, issue, f"{body}\n\n{full_marker}", full_marker)
         await self._post(issue, f"{body}\n\n{full_marker}", full_marker)
         return None
+
+    @activity.defn(name="share_evidence")
+    @mia_permanent_errors
+    async def share_evidence(self, issue: int, round_id: str, workspace: str, snippet_issue: int, name: str) -> None:
+        """Copy what the crop judge saw (`<workspace>/evidence/`: the crops as PNGs, the record, the binding, the
+        verify report) to `<work_root>/_evidence/issue-<snippet_issue>/<name>/`, where autodev's agent for that
+        snippets issue reads it (spec judge-decides §4.1). Regular files only, each read as a job's output is
+        read; a copy that exists is replaced."""
+        source = self._job_workspace(issue, round_id, workspace) / "evidence"
+        folder = self.cfg.paths.work_root / "_evidence" / f"issue-{int(snippet_issue)}"
+        target = folder / re.sub(r"[^A-Za-z0-9._-]", "-", name)
+
+        def copy() -> None:
+            staging = folder / f".{target.name}.tmp"
+            shutil.rmtree(staging, ignore_errors=True)
+            for path in sorted(source.rglob("*")):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                data = read_untrusted(source, str(path.relative_to(source)), EVIDENCE_FILE_BYTES, binary=True)
+                if data is None:
+                    continue
+                copied = staging / path.relative_to(source)
+                copied.parent.mkdir(parents=True, exist_ok=True)
+                copied.write_bytes(data)
+            staging.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(target, ignore_errors=True)
+            staging.rename(target)
+
+        await asyncio.to_thread(copy)
+
+    @activity.defn(name="close_snippet_issue")
+    @mia_permanent_errors
+    async def close_snippet_issue(self, snippet_issue: int, pr: int | None, why: str) -> None:
+        """Close a snippets issue, and its pull request when one is given, that no round waits for any more: the
+        crops it was opened for were accepted as they are, or autodev answered that nothing needs changing (spec
+        judge-decides §4.2, §5.1). One comment says why; what is closed already is left alone."""
+        gh = self.gh_snippets
+        for number in (int(snippet_issue), *([int(pr)] if pr else [])):
+            if (await gh.get_issue(number)).get("state") == "closed":
+                continue
+            marker = self.cfg.marker(f"closed {number}")
+            await self._comment_once(gh, number, f"{self._clean(why)}\n\n{marker}", marker)
+            await gh.update_issue(number, state="closed")
 
     @activity.defn(name="refuse_label")
     @mia_permanent_errors
@@ -874,7 +1005,9 @@ class Activities:
 
     @activity.defn(name="prepare_debug")
     @mia_permanent_errors
-    async def prepare_debug(self, issue: int, round_id: str, pins: Pins, failure: str, binding: str | None) -> str:
+    async def prepare_debug(
+        self, issue: int, round_id: str, pins: Pins, failure: str, binding: str | None, attempt: int = 1
+    ) -> str:
         """Make the debugging agent's workspace: what the match agent reads, `failure.md` (what stopped the round
         and the limits its jobs ran under), the round's checked binding when it got that far, and `round/<job>/`
         with what each job of the round left (ROUND_FILES and the end of its stdout and stderr), read as untrusted,
@@ -882,7 +1015,7 @@ class Activities:
 
         It takes exactly the arguments the workflow sends: Temporal converts an argument to its annotated type
         only when their number matches the parameters', and `pins` must arrive as `Pins`."""
-        workspace = self._make_workspace(issue, round_id, "debug", 1)
+        workspace = self._make_workspace(issue, round_id, "debug", attempt)
         await self._agent_inputs(workspace, round_id, pins)
         (workspace / "binding.yaml").unlink(missing_ok=True)
         if binding:
@@ -921,6 +1054,7 @@ class Activities:
         outcome = _job_json(self._job_workspace(issue, round_id, workspace), "outcome.json")
         if not isinstance(outcome, dict) or outcome.get("outcome") not in ("rerun", "blocked"):
             return DebugResult("failed", "the debugging agent left no readable outcome.json")
+        await self._note_refused(round_id, outcome.get("hosts"))
         return DebugResult(
             outcome["outcome"],
             self._clean(_text(outcome.get("diagnosis"), 6000)) or "(the debugging agent gave no diagnosis)",
@@ -986,18 +1120,21 @@ class Activities:
 
     @activity.defn(name="submit")
     @mia_permanent_errors
+    @heartbeats
     async def submit(self, key: str, kind: str, args: JobArgs) -> str:
-        """Build the job (the builders refuse a moved harness pin), refuse hosts a fresh `csub probe` doesn't
-        allow, and submit at most once per key. Returns the job id."""
+        """Build the job (the builders refuse a moved harness pin), let it reach what a person approved for its
+        dataset beside its URLs' hosts (`granted_hosts`), refuse hosts a fresh `csub probe` doesn't allow, and submit at most
+        once per key. Returns the job id."""
         from csub import CsubError  # pixi-only dependency, imported where used (as autodev does)
 
         patterns = await asyncio.to_thread(self.probe)
+        noted = await asyncio.to_thread(self.registry.dataset_hosts, args.pins.record)
         snapshot_dir = (
             await self._snapshot(args.sha or args.pins.snippets_commit) if kind in ("smoke", "crop") else None
         )
 
         def build() -> JobSpec:
-            spec = self._spec(kind, args, snapshot_dir)
+            spec = with_hosts(self._spec(kind, args, snapshot_dir), granted_hosts(noted, patterns))
             check_hosts_allowed(spec, patterns)
             return spec
 
@@ -1012,14 +1149,16 @@ class Activities:
     async def await_job(self, job_id: str, workspace: str, lock: list[str] | None = None) -> JobDone:
         """Wait for the job, heartbeating; with `lock` ([kind, key, owner]) each heartbeat also refreshes that lock.
         A lock found gone kills the job and fails the activity permanently (spec autonomous-gates §3). The answer
-        carries what a crop job downloaded, which its reservation is settled with."""
+        carries what a crop job downloaded and what an agent job cost, which its reservation is settled with."""
         heartbeat = heartbeat_through(lock_dir(self.cfg), lock, activity.heartbeat) if lock else activity.heartbeat
         try:
             outcome = await self.jobs.wait(job_id, workspace, heartbeat)
         except LockLost as error:  # the runner killed the job; the round fails for good rather than retrying the wait
             raise ApplicationError(str(error), type="LockLost", non_retryable=True) from error
         fetched = await asyncio.to_thread(_bytes_fetched, workspace)
-        return JobDone(outcome.job_id, outcome.state, outcome.exit_code, fetched)
+        cost = (await asyncio.to_thread(read_claude_json, Path(workspace)))[1]
+        known = cost is not None and math.isfinite(cost) and cost >= 0  # the job's own file: a real cost or nothing
+        return JobDone(outcome.job_id, outcome.state, outcome.exit_code, fetched, cost if known else None)
 
     @activity.defn(name="kill_job")
     async def kill_job(self, job_id: str) -> None:
@@ -1061,6 +1200,7 @@ class Activities:
         if not isinstance(outcome, dict):
             return MatchResult("failed", "outcome.json is missing, unreadable or not a JSON object")
         kind = outcome.get("outcome")
+        await self._note_refused(round_id, outcome.get("hosts"))
         if kind in ("blocked", "failed"):
             return MatchResult(kind, _text(outcome.get("reason")) or f"the match agent reported {kind}, with no reason")
         if kind == "needs_snippet":
@@ -1098,7 +1238,7 @@ class Activities:
             snapshot_dir = await self._snapshot(sha)
             names = set(usable_snippets(snapshot_dir) if tested else visible_snippets(snapshot_dir))
             errors = check_binding(binding, self._record(round_id), names, pins=pins)
-            if not errors:  # hosts() raises if a URL would grant a GitHub host
+            if not errors:  # a malformed URL raises in urlsplit
                 hosts(
                     [url for array in binding["raw"] + (binding.get("labels") or []) for url in array["urls"]], self.cfg
                 )
@@ -1112,25 +1252,12 @@ class Activities:
         write_atomic(path, data := yaml.safe_dump(binding, sort_keys=False).encode())
         return str(path), hashlib.sha256(data).hexdigest()
 
-    def _put_raw_asset(self, record: str, workspace: str) -> None:
-        """Report the record's raw cache (what `_spec` mounts) to the registry, best effort; its urls are those of
-        the binding.yaml in `workspace`, read as untrusted since the job could write there."""
+    def _put_raw_asset(self, record: str) -> None:
+        """Report the record's raw cache (what `_spec` mounts) to the registry as it is on disk, best effort."""
         if not ID_RE.fullmatch(record):
             raise ValueError(f"bad record id {record!r}")
         registry = self.registry
-        try:
-            binding = yaml.safe_load(read_untrusted(Path(workspace), "binding.yaml", 1 << 20) or "")
-        except yaml.YAMLError:
-            binding = None
-        arrays = [
-            array
-            for name in ("raw", "labels")
-            for array in ((binding.get(name) if isinstance(binding, dict) else None) or [])
-            if isinstance(array, dict) and isinstance(array.get("urls"), list)
-        ]
-        urls = [url for array in arrays for url in array["urls"] if isinstance(url, str)]
-        cache_dir = self.cfg.paths.work_root / "_cache" / record
-        row = {**raw_asset(cache_dir, urls), "last_used": time.time()}
+        row = {**raw_asset(self.cfg.paths.work_root / "_cache" / record), "last_used": time.time()}
         best_effort(lambda: registry.put_asset("raw", record, row), f"raw asset {record}", log)
 
     @activity.defn(name="read_smoke")
@@ -1139,11 +1266,12 @@ class Activities:
         """Read the smoke job's smoke.json into a SmokeResult, tolerating any shape. With `record` (the job held
         its raw-cache lock), the record's raw asset row is put to the registry first."""
         if record is not None:
-            await asyncio.to_thread(self._put_raw_asset, record, workspace)
+            await asyncio.to_thread(self._put_raw_asset, record)
         report = _job_json(workspace, "smoke.json")
         if not isinstance(report, dict):
             return SmokeResult(False, errors=["smoke.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")
+        await self._note_refused(Path(workspace).parent.name, _refused_host(report))
         return SmokeResult(
             report.get("ok") is True,
             report.get("eligible") is True,
@@ -1165,7 +1293,7 @@ class Activities:
         crop_errors and host_not_allowed come from the crop job's report.json. With `record` (a trusted crop job that held the raw-cache
         lock), the record's raw asset row is put to the registry first, with the urls of the crop job's binding."""
         if record is not None:
-            await asyncio.to_thread(self._put_raw_asset, record, crop_workspace or workspace)
+            await asyncio.to_thread(self._put_raw_asset, record)
         report = _job_json(workspace, "verify.json")
         if not isinstance(report, dict):
             return VerifyResult(0, 0, ["verify.json is missing, unreadable or not a JSON object"], [])
@@ -1200,6 +1328,7 @@ class Activities:
             verified = []
         crop_report = _job_json(crop_workspace, "crops/report.json") if crop_workspace else None
         crop_report = crop_report if isinstance(crop_report, dict) else {}
+        await self._note_refused(Path(workspace).parent.name, _refused_host(crop_report))
 
         def count(key: str) -> int | None:
             value = crop_report.get(key)
@@ -1271,11 +1400,16 @@ class Activities:
     ) -> dict:
         """Publish the verified crops into the dataset folder, marking crops of snippets withdrawn in
         mia-snippets at `sha`, and the approved binding (one of this round's, from state_dir) as binding.yaml
-        beside them for mia-buffers to read (spec §6.1). Each crop's overlay.png (drawn by the round's verify jobs
-        into their preview/ dir) goes beside its files for the web UI's preview. Returns {"published", "already",
-        "total"}."""
-        crops_dir = self._crops_dir(self._job_workspace(issue, round_id, crop_workspace))
-        previews = sorted(self._round_workspace(issue, round_id).glob("verify-*/preview"), reverse=True)
+        beside them for mia-buffers to read (spec §6.1). Each crop's overlay.png goes beside its files for the web
+        UI's preview: the one drawn for these crops, by the verify job of their crop set (`verify-<tag>-<attempt>`
+        beside `crop-<tag>-<attempt>`, the newest attempt first). A round that tested several snippet heads has a
+        verify job per head, each with an overlay per crop id. What the crop job measured of each array the binding
+        reads (its report's `source_shapes`) is saved with them. Returns {"published", "already", "total"}."""
+        crop_dir = self._job_workspace(issue, round_id, crop_workspace)
+        crops_dir = self._crops_dir(crop_dir)
+        verify_kind = "verify" + crop_dir.name.rpartition("-")[0].removeprefix("crop")
+        attempts = [path for path in crop_dir.parent.glob("verify-*") if path.name.rpartition("-")[0] == verify_kind]
+        previews = [path / "preview" for path in sorted(attempts, key=lambda path: (len(path.name), path.name))[::-1]]
         if binding and not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
             raise ValueError(f"binding {binding} is not one of round {round_id}'s")
         withdrawn = withdrawn_snippets(await self._snapshot(sha))
@@ -1293,21 +1427,27 @@ class Activities:
             tmp_max_age_s=2 * (timeout.total_seconds() if timeout else 3600),
             binding=Path(binding) if binding else None,
             previews=previews,
+            shapes=crop_publish.raw_shapes(_job_json(crop_dir, "crops/report.json")),
         )
         if revoked:  # a new publication repairs a revocation (spec autonomous-gates §6.5)
             (dataset_dir / REVOKED_FILE).unlink(missing_ok=True)
-            await self._release_revoked(round_id, pins.record)
+            saved = read_untrusted(dataset_dir, "binding.yaml", crop_publish.MAX_INDEX_FILE, binary=True)
+            await self._release_revoked(round_id, pins.record, hashlib.sha256(saved or b"").hexdigest())
         return published
 
-    async def _release_revoked(self, round_id: str, record: str) -> None:
-        """After a repair: every quarantined staged artifact of the record gets a `policy:repair` approve (the newest
-        assessment, so buffers may reuse it) and its quarantine mark cleared. Best effort: the publication stands."""
+    async def _release_revoked(self, round_id: str, record: str, binding_hash: str) -> None:
+        """After a repair: each quarantined staged artifact of the record that was staged from the binding this
+        save wrote (`binding_hash`: the sha256 a buffer puts into the asset) gets a `policy:repair` approve (the
+        newest assessment, so buffers may reuse it) and its quarantine mark cleared. An artifact of any other
+        binding, or of none on record, was read by the recipe that was rejected and is immutable: it stays
+        quarantined, and buffers stage the record anew (spec judge-decides §5.5). Best effort: the publication
+        stands."""
         registry = self.registry
         try:
             assets = (await asyncio.to_thread(registry.assets, "staged", None, record))["assets"]
             for asset in assets:
                 data = asset.get("data") or {}
-                if not data.get("quarantined"):
+                if not data.get("quarantined") or data.get("binding_hash") != binding_hash:
                     continue
                 key, now = str(asset["key"]), time.time()
                 approve = new_assessment(
@@ -1416,6 +1556,36 @@ class Activities:
         ]
         return self._clean("\n\n".join(notes))[:16000] or "(no details)"
 
+    async def _reach_line(self, round_id: str) -> str:
+        """The line of a snippets issue that says what the reader's job may reach: the hosts the dataset's files
+        are on, and what a person approved for this dataset since (`granted_hosts`: a host its own jobs were
+        refused, a redirect target mostly, and `raw.githubusercontent.com`). autodev grants its agent's job
+        these, of what the policy allows, and no other approved host.
+
+        NoReachableFiles when the policy allows none of them: the developer could read no file of the record,
+        so it is not asked."""
+        urls, network = record_urls(self._record(round_id)), self.cfg.network
+        patterns = await asyncio.to_thread(self.probe)
+        noted = await asyncio.to_thread(self.registry.dataset_hosts, self._pins(round_id).record)
+        reach = [
+            host
+            for host in dict.fromkeys([*hosts(urls, self.cfg), *granted_hosts(noted, patterns)])
+            if host not in network.package_hosts
+        ]
+        if len(missing_hosts(reach, patterns)) == len(reach):  # none, or none the policy allows
+            # what a person could approve, as buffer-api lists it at a start
+            wanted = network_hosts(urls, network, raw_github=True)
+            raise NoReachableFiles([host for host in wanted if host not in network.package_hosts])
+        return f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
+
+    async def _name_reach(self, existing: dict, reach_line: str) -> None:
+        """Write into an issue of an earlier round the hosts its next agent job may reach as they are now: one
+        approved since the issue was written is in its text from here on."""
+        body = existing.get("body") or ""
+        named = REACH_RE.sub(lambda _: reach_line, body, count=1)
+        if named != body:
+            await self.gh_snippets.update_issue(existing["number"], body=named)
+
     @activity.defn(name="open_snippet_issue")
     @mia_permanent_errors
     async def open_snippet_issue(
@@ -1425,29 +1595,38 @@ class Activities:
         remembers as `snippet_issue` from an earlier round, while it is still open, else by this round's
         first-line marker on a retry. Returns the issue number.
 
-        With `binding` (one of this round's, from state_dir), the request is to supersede the snippets that
+        With `binding` (one of this dataset's rounds', from state_dir: this round's, or the binding a saved set
+        was approved with when that set is rejected later), the request is to supersede the snippets that
         binding names: a reviewer rejected its crops and `draft["what_fails"]` is their comments (spec §14)."""
         gh, github_cfg, pins = self.gh_snippets, self.cfg.github, self._pins(round_id)
-        if binding and not Path(binding).resolve().is_relative_to(self._round_dir(round_id).resolve()):
-            raise ValueError(f"binding {binding} is not one of round {round_id}'s")
+        if binding:
+            rounds, given = self._round_dir(round_id).resolve().parent, Path(binding).resolve()
+            if not (given.is_relative_to(rounds) and given.relative_to(rounds).parts[0].startswith(f"i{int(issue)}-e")):
+                raise ValueError(f"binding {binding} is not one of this dataset's rounds'")
         marker = self.cfg.marker(f"issue={int(issue)} round={round_id}")
+        record = self._record(round_id)
+        urls = record_urls(record)
+        reach_line = await self._reach_line(round_id)
 
         def ours(existing: dict, prefix: str) -> bool:  # filter by author: an outsider can copy the marker
             return (existing.get("user") or {}).get("login") == self.bot and (existing.get("body") or "").startswith(
                 prefix
             )
 
+        async def found(existing: dict) -> int:
+            await self._name_reach(existing, reach_line)
+            return existing["number"]
+
         if snippet_issue:  # any round's marker for this data issue will do: the round id is new on a re-trigger
             remembered = await gh.get_issue(int(snippet_issue))
             any_round = self.cfg.marker(f"issue={int(issue)} round=").removesuffix(" -->")
             if remembered.get("state") != "closed" and ours(remembered, any_round):
-                return remembered["number"]
+                return await found(remembered)
         # ponytail: lists every issue; one call per round.
         for existing in await gh.list_issues(state="all"):
-            if ours(existing, marker):
-                return existing["number"]
-        record = self._record(round_id)
-        urls = record_urls(record)
+            # a closed one is done with (merged, or answered "nothing needs changing"): what is asked now is new
+            if existing.get("state") != "closed" and ours(existing, marker):
+                return await found(existing)
         data_format = _text(((record.get("data") or {}).get("formats") or ["unknown"])[0], 40)
         # ponytail: container guessed from the record's URLs; the agent's what_fails is the authority
         container = (
@@ -1465,9 +1644,8 @@ class Activities:
         # number (spec webapp-actions §4.1, §9)
         data_link = f"[{pins.record}]({self.page_url}/#datasets/{quote(pins.record, safe='')})"
         spec_link = f"[SPEC.md](https://github.com/{github_cfg.snippets_repo}/blob/main/SPEC.md)"
-        # the hosts the dataset's files are on: autodev grants its agent's job these and no other approved host
-        reach = [host for host in hosts(urls, self.cfg) if host not in self.cfg.network.package_hosts]
-        reach_line = f"The reader's job may reach {', '.join(f'`{host}`' for host in reach)}. {hosts_marker(reach)}"
+        # the number is this issue's own, which it gets when it is created: `adopt_pr_binding` holds the PR to it
+        naming = "Name the new snippet `<what-it-reads>-i<N>`, N being this issue's number (SPEC §1)."
         if binding:  # a reviewer rejected this binding's crops: supersede its snippets
             bound = yaml.safe_load(Path(binding).read_text()) or {}
             names = sorted(
@@ -1487,7 +1665,7 @@ class Activities:
                 _fenced(self._clean(_text(draft.get("what_fails"), 16000))),
                 f"Read {spec_link} first. A merged snippet is never edited: add a new one that **supersedes** the "
                 f"one at fault (`supersedes: <name>` in its `snippet.yaml`, SPEC §1), and add the binding you test, "
-                f"using the new snippet, as `examples/{pins.record}.yaml`.",
+                f"using the new snippet, as `examples/{pins.record}.yaml`. {naming}",
                 reach_line,
                 "**Record** (at `{pins.record_commit}`):".replace("{pins.record_commit}", pins.record_commit),
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
@@ -1499,7 +1677,7 @@ class Activities:
             parts = [
                 marker,
                 f"For {data_link}: dataset `{pins.record}` has no snippet that reads it.",
-                f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`.",
+                f"Read {spec_link} first, and add the binding you test as `examples/{pins.record}.yaml`. {naming}",
                 reach_line,
                 f"**Record** (at `{pins.record_commit}`):",
                 _fenced(self._clean(excerpt[:8000]), "yaml"),
@@ -1513,12 +1691,27 @@ class Activities:
             title = f"New snippet for {self._clean(data_format)}/{container}: {self._clean(pins.record)}"
         return (await gh.create_issue(title, "\n\n".join(parts), ["snippets:go"]))["number"]
 
+    @activity.defn(name="ask_autodev")
+    @mia_permanent_errors
+    async def ask_autodev(self, snippet_issue: int, marker: str, round_id: str | None = None) -> None:
+        """Ask autodev to try a snippets issue again, for a resumed round whose developer had stopped before a
+        pull request: one comment per `marker`, and the label autodev starts on. With `round_id` (the resumed
+        round) the issue first names what the reader's job may reach as it is now, and autodev is not asked
+        when that is nothing (`_reach_line`)."""
+        if round_id:
+            issue = await self.gh_snippets.get_issue(int(snippet_issue))
+            await self._name_reach(issue, await self._reach_line(round_id))
+        full_marker = self.cfg.marker(marker)
+        said = "mia-data asks autodev to try this issue again: its dataset's round was resumed."
+        await self._comment_once(self.gh_snippets, int(snippet_issue), f"{said}\n\n{full_marker}", full_marker)
+        await self.gh_snippets.add_labels(int(snippet_issue), ["snippets:go"])
+
     @activity.defn(name="pr_state")
     @mia_permanent_errors
     async def pr_state(self, pr: int) -> PrUpdate:
         """The PR's current head, state and merge SHA, read fresh, and whether its issue needs a human."""
         pr_data = await self.gh_snippets.get_pr(pr)
-        match = re.fullmatch(r"snippets/issue-(\d+)", pr_data["head"]["ref"])
+        match = SNIPPET_BRANCH_RE.fullmatch(pr_data["head"]["ref"])
         if not match or ((pr_data["head"].get("repo") or {}).get("full_name")) != self.gh_snippets.repo:
             raise ValueError(f"PR #{pr} is not on a snippets/issue-<K> branch of {self.gh_snippets.repo}")
         snippet_issue, merged = int(match.group(1)), bool(pr_data.get("merged"))
@@ -1538,7 +1731,8 @@ class Activities:
     async def autodev_look(self, snippet_issue: int, pr: int | None) -> AutodevLook:
         """What a round that waits for autodev finds when it looks itself, whatever the poller told it: the PR
         (`pr`, the one the round follows, else the open one on the issue's branch), whether an agent round is
-        running or autodev has stopped, and the last comment autodev left on the issue or the PR."""
+        running or autodev has stopped, the last comment autodev left on the issue or the PR, and the summary of
+        its newest round that changed nothing."""
         gh = self.gh_snippets
         issue = await gh.get_issue(int(snippet_issue))
         labels = {label["name"] for label in issue.get("labels", [])}
@@ -1553,11 +1747,22 @@ class Activities:
             if (comment.get("user") or {}).get("login") == self.bot and ours not in (comment.get("body") or "")
         ]
         last = max(said, key=lambda comment: comment.get("created_at") or "", default=None)
+        unchanged = [comment for comment in said if NO_COMMITS_RE.match(comment.get("body") or "")]
+        answer = max(unchanged, key=lambda comment: comment.get("created_at") or "", default=None)
+        validated = [comment for comment in unchanged if NO_CHANGE_RE.search(comment.get("body") or "")]
+        newest = max(validated, key=lambda comment: comment.get("created_at") or "", default=None)
         return AutodevLook(
             pr,
             "snippets:working" in labels,
             issue.get("state") == "closed" or "snippets:needs-human" in labels,
-            _text(self._clean(" ".join((last.get("body") or "").split())), 400) if last else "",
+            _text(self._clean(" ".join(HEADING_RE.sub("", MARKER_RE.sub("", last.get("body") or "")).split())), 400)
+            if last
+            else "",
+            _text(self._clean(NO_COMMITS_RE.sub("", MARKER_RE.sub("", answer["body"]), count=1).strip()), 3000)
+            if answer
+            else "",
+            str(answer.get("created_at") or "") if answer else "",
+            NO_CHANGE_RE.findall(newest["body"])[-1] if newest else "",
         )
 
     @activity.defn(name="set_crop_status")
@@ -1580,7 +1785,9 @@ class Activities:
     @mia_permanent_errors
     async def adopt_pr_binding(self, round_id: str, pr: int, sha: str) -> dict:
         """Take the PR's example binding, `snippets/<name>/examples/<record>.yaml` at `sha` (a head or the merge
-        commit), where <name> is the one snippet directory the PR adds.
+        commit), where <name> is the one snippet directory the PR adds. While the PR is open, <name> must end in
+        `-i<K>`, K being the mia-snippets issue the PR is for (its branch is `snippets/issue-<K>`): an issue has
+        one pull request, which adds one snippet, so no two pull requests can add the same name.
 
         It is checked like the match agent's binding (this record, its hosts, the schema; it may name a snippet
         superseded since it was written, never a withdrawn one) and must use <name>,
@@ -1594,6 +1801,17 @@ class Activities:
         )
         if len(names) != 1 or not NAME_RE.fullmatch(name := names[0]):
             return {"errors": [_text(f"the PR must add exactly one snippets/<name>/ directory, not {names}", 500)]}
+        pr_data = await gh.get_pr(pr)
+        asked = SNIPPET_BRANCH_RE.fullmatch(pr_data["head"]["ref"])
+        # a merged snippet keeps the name it has: nothing can change it any more
+        if asked and not pr_data.get("merged") and not re.fullmatch(rf".+-i{asked[1]}", name):
+            return {
+                "errors": [
+                    f"the snippet is named `{name}`, but a new snippet's name ends in its issue's number, like "
+                    f"`<what-it-reads>-i{asked[1]}` (SPEC §1): rename the directory, and write the new name in "
+                    "its snippet.yaml and in every `snippet:` of its example binding"
+                ]
+            }
         if not await gh.dir_sha(f"snippets/{name}", sha):
             return {"errors": [f"snippets/{name} is not in {sha}"]}
         rel = f"snippets/{name}/examples/{pins.record}.yaml"

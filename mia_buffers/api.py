@@ -7,9 +7,11 @@ only name its split.
 
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -22,52 +24,63 @@ from datetime import UTC, datetime
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from autodev.config import RAW_GITHUB
 from mia_core.assets import ASSET_STATES
 from mia_core.fs import require_local_dir
-from mia_core.hosts import PolicyError, generate_policy
+from mia_core.hosts import HOST_RE, PolicyError, generate_policy, is_ip_literal
 from mia_core.jobrecord import RECORDS_DIR
 from mia_core.judge.policy import GATES, SUBJECT_KINDS, VERDICTS
 from mia_core.locks import LockDir
 from mia_core.registry import read_token
+from mia_core.transfers import MAX_ROWS, reduce_row
 from mia_core.untrusted import neutralize, read_untrusted
 from mia_data import config as mia_data_config
-from mia_data.binding import record_gaps
 from mia_data.models import LabelEvent
 
 from .config import PREP_STAGE_ACTIONS, STAGE_ACTIONS, Config
 from .dispatch import DispatchError, dispatcher_for
 from .explore import (
+    ANYTHING,
     DATASET_FILTERS,
     DATASET_SORTS,
+    LACKS,
+    NOTHING,
     PLAN_SORTS,
     Page,
     dataset_haystack,
     dataset_row,
     facets,
+    lacks_filter,
     page_query,
     paged,
     plan_view,
     record_row,
+    start_gaps,
 )
 from .hosts import HostCheck, Needed
 from .jobspec import levels_key
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger, head_of
-from .plan import build_plan
+from .peek import Peeker, PeekFailed
+from .plan import bound_shapes, build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
+from .specmap import facts
 from .stream import Changes
 from .sync import scan_assets, scan_storage
+from .throughput import by_level, by_minute, summary
 
 RETRY_AFTER_S = 30
 DEFAULT_SPLIT_SIZE = 256
 MAX_N = 1024  # descriptors per request; consumers are untrusted (§7)
 # no row = unprepared; `revoked`: withdrawn (spec autonomous-gates §6)
 DATASET_STATES = ("in-progress", "prepared", "needs-human", "revoked")
+PEEK_SPLITS = ("train", "val", "test")  # what `GET /buffers/<id>/peek` may be asked for
+PEEK_WAIT_S = 5.0  # how long a peek waits for the one before it; past that it is refused, so no queue builds up
 CROP_PNG_LIMIT = 8 << 20  # a 256x256 PNG is kilobytes; the cap guards a tampered storage folder
 # a job's gzipped record is kilobytes, an agent's with a long conversation a few megabytes; a larger file is not sent
 JOB_RECORD_LIMIT = 16 << 20
@@ -86,18 +99,17 @@ JSON_NULL: tuple[bytes, dict[str, str]] = (b"null", {"Content-Type": "applicatio
 # a dict (or None) goes out as JSON; bytes go out as-is, with the Content-Type the handler put in the headers;
 # an iterator of bytes is streamed chunk by chunk until its reader leaves (`GET /stream`)
 Response = tuple[int, dict | bytes | Iterator[bytes] | None, dict[str, str]]
-# kind of subject -> its stage table: stage -> (status word, the actions it accepts) (spec webapp-actions §5.1)
+# kind of subject -> its stage table: stage -> (phase, the actions it accepts) (spec webapp-actions §5.1)
 SUBJECT_RULES = {"dataset": mia_data_config.STAGE_ACTIONS, "buffer": STAGE_ACTIONS, "prep": PREP_STAGE_ACTIONS}
 # where a round can go from any step: not steps of a lifecycle themselves
 OFF_LINE = ("debugging", "failed", "blocked", "needs-human", "cancelled")
 # kind of subject -> its lifecycle as the page draws it: the stages of its table, in the table's order
 LINES = {kind: [stage for stage in table if stage not in OFF_LINE] for kind, table in SUBJECT_RULES.items()}
-NEEDS_A_PERSON = ("waiting", "stuck")  # the status words `GET /needs` lists
 # Shelving (spec shelved-subjects): a person sets a subject aside with a reason. Its stage stays; its status reads
 # `shelved`, it takes `unshelve` alone, and a shelved dataset reads `shelved` to every plan and request. A subject
-# with one of these status words (no round open) also takes `shelve`; so does one whose round waits for a person's
+# in one of these phases (no round open) also takes `shelve`; so does one whose round waits for a person's
 # verdict (`waiting`, and its stage takes `cancel`), and that shelve cancels the round first.
-SHELVABLE = ("not started", "stuck", "done")
+SHELVABLE = ("not started", "stopped", "done")
 HOLD_ACTIONS = ("shelve", "unshelve")  # carried out by this service: the subject's workflow hears of neither
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/issues/(\d+)")
 RECORD_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,120}")  # a catalog record id (mia_data.seed.ID_RE)
@@ -198,6 +210,8 @@ class PlanPage(_Strict):
     prepared_only: bool = False
     raw_cached: bool = False
     staged_geom: bool = False
+    no_needs_human: bool = False
+    preparation: Literal["unprepared", "in-progress", "prepared"] | None = None
 
 
 class PlanBody(_Strict):
@@ -239,12 +253,14 @@ class AdoptBody(_Strict):
 
 
 class EntryBody(_Strict):
-    """One write of a round: a stage, a timeline entry (text with the marker that makes it once-only), or both."""
+    """One write of a round: a stage, a timeline entry (text with the marker that makes it once-only), or both.
+    `data` rides with either: keys of the subject's data that this write replaces (a dataset's `sets`)."""
 
     body: str = ""
     marker: str = ""
     round: str | None = None
     stage: str | None = None
+    data: dict | None = None
 
     @model_validator(mode="after")
     def _something_to_write(self) -> EntryBody:
@@ -284,6 +300,7 @@ class ActionBody(_Strict):
 
     action: Literal[
         "go",
+        "resume",
         "approve",
         "reject",
         "revoke",
@@ -295,19 +312,22 @@ class ActionBody(_Strict):
         "shelve",
         "unshelve",
         "recheck",
+        "edit",
     ]
     key: str | None = None  # the sender's own name for this request: a repeat is the same action
     # the subject's revision the sender was looking at: required of a verdict, checked on any action that has it
     revision: int | None = None
     run: str | None = None  # stop: the run to end; one that is over already is not replaced by a later run
+    set: str | None = None  # a dataset's verdict: the set of crops it is about (spec judge-decides §5.4)
     note: str = ""  # reject: the feedback for the agent; shelve: why it can wait
     root: str | None = None  # a worker's go: the root request this round is charged to
     actor: str | None = None  # a worker's name for itself (`prep:<number>`); needs the worker token
-    spec: str | None = None  # a buffer's or a request's go: the YAML text that runs (default: the stored one)
+    # a buffer's or a request's go: the YAML text that runs (default: the stored one); a buffer's edit: its new text
+    spec: str | None = None
     plan_first: bool = False  # a buffer's go: stop at the plan and wait for an approve before staging anything
     records: list[str] = []  # a buffer's revoke: the records that leave it
     record: str | None = None  # dropped: the dataset whose files are in place
-    approve_hosts: list[str] = []  # a start action: hosts the run needs that the person ticked (spec host-approval §5)
+    approve_hosts: list[str] = []  # a start action: hosts the run needs that the person checked (spec host-approval §5)
 
 
 class SpecBody(_Strict):
@@ -317,7 +337,8 @@ class SpecBody(_Strict):
     action: Literal["go"] | None = None
     plan_first: bool = False
     key: str | None = None
-    approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person ticked
+    approve_hosts: list[str] = []  # a preparation request: hosts the run needs that the person checked
+    buffer: int | None = None  # a preparation request: the number of the buffer whose Prepare step filed it
 
 
 class RefusalBody(_Strict):
@@ -329,9 +350,48 @@ class IssueBody(_Strict):
     issue: int
 
 
-CASE_STATES = ("open", "working", "waiting", "resolved", "needs-person", "dropped")
-CASES_OPEN = ("open", "working", "waiting", "needs-person")  # what `GET /cases` lists whatever its age
-CaseState = Literal["open", "working", "waiting", "resolved", "needs-person", "dropped"]
+# a case is in work (`open`, `working`, `waiting`) or has ended: `resolved`, `dropped` (somebody acted), or
+# `gave-up` (the repair agent could not repair it; the case says what it takes). Whether a human is needed is the
+# subject's status to say, never a case's (spec overview §4).
+CASE_STATES = ("open", "working", "waiting", "resolved", "gave-up", "dropped")
+# what `GET /cases` lists whatever its age: the sweep reads what it gave up on for as long as the case stands
+CASES_OPEN = ("open", "working", "waiting", "gave-up")
+CaseState = Literal["open", "working", "waiting", "resolved", "gave-up", "dropped"]
+
+
+STATUSES = ("shelved", "in repair", "needs human", "done", "not started", "working")  # what `status_of` gives
+
+
+def status_of(phase: str, shelved: bool, repair: dict | None, acting: bool) -> str:
+    """Who moves the subject next, the one word a person reads and the only one that says a human is needed
+    (spec overview §3.2): `shelved`, `in repair`, `needs human`, `done`, `not started` or `working`. `repair` is
+    the repair agent's case about the subject as it stands (`BufferService._repair_of`), `acting` whether the
+    agent carries its cases out. A case with steps left makes the subject `in repair` at any phase: a stage its
+    own step produced (`cancelled` before its resume) is part of the repair. One it gave up on needs a human
+    wherever it left the subject."""
+    if shelved:
+        return "shelved"
+    state = repair["state"] if repair else None
+    if acting and (
+        state == "working"
+        or (state == "open" and phase in ("working", "waiting", "stopped"))
+        or (state == "waiting" and phase in ("waiting", "stopped"))
+    ):
+        return "in repair"
+    if state == "gave-up":
+        return "needs human"
+    return phase if phase in ("done", "not started", "working") else "needs human"
+
+
+REPORT_STALE = 3  # a sweep's report is overdue once this many of its periods passed with none after it
+REPORT_EVERY_S = 600.0  # the period of a report that names none
+
+
+class Repairs(NamedTuple):
+    """What the repair agent has on the subjects, read once for many views."""
+
+    acting: bool  # its last sweep ran in `act` mode: a case in work is being carried out
+    cases: dict[tuple[str, int], dict]  # (kind, number) -> the subject's newest case in work or given up on
 
 
 class CaseBody(_Strict):
@@ -357,6 +417,10 @@ class TerminateBody(_Strict):
     id: str
     run_id: str
     reason: str
+
+
+class RefusedHostsBody(_Strict):
+    hosts: list[str] = Field(max_length=20)  # hosts a job of the dataset was refused (`host_not_allowed`)
 
 
 class WorkerBody(_Strict):
@@ -443,6 +507,9 @@ BOARD_SORTS = {
     "status": _field("status"),
     "job": _field("job"),
     "updated": _field("updated_at"),
+    "bytes": _field("bytes"),
+    "raw": _field("raw_bytes"),
+    "staged": _field("staged_bytes"),
 }
 EVENT_SORTS = {name: _field(name) for name in ("seq", "kind", "at")}
 VOLUME_SORTS = {"volume": _field("id"), "draws": _field("draws"), "missing": _field("missing")}
@@ -531,6 +598,7 @@ ROUTES = [
     ("GET", re.compile(r"^/buffers/([^/]+)/next$"), "next", "consumer"),
     ("GET", re.compile(r"^/buffers/([^/]+)/split/([^/]+)$"), "split", "consumer"),
     ("GET", re.compile(r"^/buffers/([^/]+)/status$"), "status", "consumer"),
+    ("GET", re.compile(r"^/buffers/([^/]+)/peek$"), "peek", "read"),  # a crop to look at; the buffer keeps no trace
     ("GET", re.compile(r"^/buffers$"), "list_buffers", "read"),
     ("PUT", re.compile(r"^/buffers/([^/]+)/datasets/([^/]+)$"), "put_board", "worker"),
     ("GET", re.compile(r"^/buffers/([^/]+)/datasets$"), "board", "read"),
@@ -541,6 +609,7 @@ ROUTES = [
     ("GET", re.compile(r"^/assets/([a-z]+)/(.+)$"), "get_asset", "read"),
     ("GET", re.compile(r"^/assets/([a-z]+)$"), "list_assets", "read"),
     ("PUT", re.compile(r"^/records/([^/]+)$"), "put_records", "worker"),
+    ("PUT", re.compile(r"^/transfers/(.+)$"), "put_transfers", "worker"),
     ("GET", re.compile(r"^/records$"), "records", "read"),
     ("GET", re.compile(r"^/catalogs$"), "catalogs", "read"),
     ("GET", re.compile(r"^/datasets$"), "list_datasets", "read"),
@@ -548,6 +617,8 @@ ROUTES = [
     ("GET", re.compile(r"^/catalog/datasets/([^/]+)$"), "catalog_dataset", "read"),
     ("PUT", re.compile(r"^/datasets/([^/]+)$"), "put_dataset", "worker"),
     ("GET", re.compile(r"^/datasets/([^/]+)$"), "get_dataset", "read"),
+    ("PUT", re.compile(r"^/datasets/([^/]+)/hosts$"), "put_refused_hosts", "worker"),
+    ("GET", re.compile(r"^/datasets/([^/]+)/hosts$"), "refused_hosts", "read"),
     ("GET", re.compile(r"^/crops/([^/]+)/([^/]+)/(raw|overlay)\.png$"), "crop_png", "read"),
     ("GET", re.compile(r"^/gallery/i(\d+)-e(\d+)/([0-9a-f]{40})/([^/]+)/(raw|overlay)\.png$"), "gallery_png", "read"),
     ("GET", re.compile(r"^/jobs/(.+)$"), "job_record", "read"),
@@ -576,7 +647,7 @@ ROUTES = [
     ("PUT", re.compile(r"^/subjects/([a-z]+)/(\d+)$"), "adopt_subject", "worker"),
     ("GET", re.compile(r"^/subjects/([a-z]+)$"), "list_subjects", "read"),
     ("GET", re.compile(r"^/subjects/([a-z]+)/(.+)$"), "get_subject", "read"),
-    ("GET", re.compile(r"^/needs$"), "needs", "read"),
+    ("GET", re.compile(r"^/subjects$"), "by_status", "read"),
     ("GET", re.compile(r"^/lookup$"), "lookup", "read"),
     ("GET", re.compile(r"^/stream$"), "stream", "read"),
     ("POST", re.compile(r"^/timeline/([a-z]+)/(\d+)$"), "append_entry", "worker"),
@@ -594,6 +665,9 @@ ROUTES = [
     ("GET", re.compile(r"^/health$"), "health", "read"),
     ("GET", re.compile(r"^/run/([a-z]+)/(\d+)$"), "run_status", "read"),
     ("POST", re.compile(r"^/hosts/missing$"), "hosts_missing", "read"),
+    ("GET", re.compile(r"^/hosts$"), "host_summaries", "read"),
+    ("GET", re.compile(r"^/hosts/([^/]+)/minutes$"), "host_minutes", "read"),
+    ("GET", re.compile(r"^/hosts/([^/]+)$"), "host_levels", "read"),
     ("POST", re.compile(r"^/cases$"), "open_case", "worker"),
     ("PUT", re.compile(r"^/cases/(\d+)$"), "update_case", "worker"),
     ("GET", re.compile(r"^/cases$"), "cases", "read"),
@@ -628,8 +702,11 @@ class BufferService:
         ui_dir: Path | None = None,
         dispatcher: Any = None,
         hosts: HostCheck | None = None,
+        peeker: Any = None,
     ):
         self.ledger = ledger
+        self.peeker = peeker  # draws a peek's crop (`peek.Peeker`, or a test's stand-in); None: no harness, no peek
+        self._peek_lock = threading.Lock()  # one harness process at a time, however many pages ask
         self.hosts = hosts  # which hosts a run needs that the csub policy lacks; None cannot say
         # the way to Temporal (`dispatch.Dispatcher`, or a test's stand-in); None reaches no workflow
         self.dispatcher = dispatcher
@@ -752,10 +829,7 @@ class BufferService:
             raise HttpError(422, reason)
         staged = parsed.artifact or str(PurePosixPath(parsed.path).parent)  # the artifact, else its directory
         # a rebuild under a new artifact (or new candidates) invalidates every frozen row: they index candidates
-        previous = next((known for known in self.ledger.volumes(buffer) if known.id == volume_id), None)
-        changed = previous is not None and (previous.artifact, previous.samples) != (volume.artifact, volume.samples)
-        self.ledger.put_volume(buffer, volume, refs=[("staged", staged), ("raw", parsed.record)])
-        cleared = self.ledger.clear_frozen(buffer) if changed else 0
+        cleared = self.ledger.put_volume(buffer, volume, refs=[("staged", staged), ("raw", parsed.record)])
         return 200, {"buffer": buffer, "volume": volume_id, "frozen_cleared": cleared}, {}
 
     # --- the registry: what exists on disk, and which buffers use it -----------------------------
@@ -824,6 +898,55 @@ class BufferService:
         rows, total = paged(locks, page, LOCK_SORTS, lambda row: (row["kind"], row["key"], row["owner"]))
         return 200, {"locks": rows, "total": total}, {}
 
+    # --- what each host gave: the transfer rows read per host, by load level and by minute -------
+
+    @staticmethod
+    def _number(query: dict[str, str], key: str, default: float) -> float:
+        try:
+            value = float(query.get(key, default))
+        except ValueError:
+            value = math.nan
+        if not math.isfinite(value):
+            raise HttpError(422, f"query {key} must be a finite number")
+        return value
+
+    def _window(self, query: dict[str, str]) -> tuple[float, int, int]:
+        """The `days` asked for (default 7) and the minutes it covers, ending with the current one."""
+        days = self._number(query, "days", 7)
+        if not 0 < days <= 366:
+            raise HttpError(422, f"query days must be over 0 and at most 366, got {days}")
+        until = int(time.time() // 60)
+        return days, until - int(days * 1440), until
+
+    def _host_summaries(self, *, query: dict[str, str], body: bytes) -> Response:
+        """Every host with rows in the window: its minutes added over jobs and read as one row, most bytes first."""
+        days, since, until = self._window(query)
+        minutes: dict[str, list[dict]] = {}
+        for minute in by_minute(self.ledger.transfers(since, until)):
+            minutes.setdefault(minute["host"], []).append(minute)
+        hosts = [{"host": host, **summary(rows)} for host, rows in minutes.items()]
+        return 200, {"days": days, "hosts": sorted(hosts, key=lambda row: (-row["bytes"], row["host"]))}, {}
+
+    def _host_levels(self, host: str, *, query: dict[str, str], body: bytes) -> Response:
+        """One host's window by load level; a host with no rows has no levels."""
+        days, since, until = self._window(query)
+        host = host.lower()
+        return (
+            200,
+            {"host": host, "days": days, "levels": by_level(by_minute(self.ledger.transfers(since, until, host)))},
+            {},
+        )
+
+    def _host_minutes(self, host: str, *, query: dict[str, str], body: bytes) -> Response:
+        """One host's minutes between `from` and `to` (unix seconds; `to` defaults to now, `from` to a day before)."""
+        end = self._number(query, "to", time.time())
+        start = self._number(query, "from", end - 86400)
+        if not 0 <= end - start <= 7 * 86400:
+            raise HttpError(422, "from is not after to, and they span at most 7 days")
+        host = host.lower()
+        rows = self.ledger.transfers(int(start // 60), int(end // 60), host)
+        return 200, {"host": host, "minutes": by_minute(rows)}, {}
+
     # --- records, datasets and the plan: what the catalog holds and which of it is prepared ------
 
     def _put_records(self, ref: str, *, query: dict[str, str], body: bytes) -> Response:
@@ -831,6 +954,26 @@ class BufferService:
             raise HttpError(422, f"ref {ref!r} is not a 40-hex commit")
         records = [(item.path, item.record) for item in _parse(RecordsBody, body).records]
         return 200, {"ref": ref, "count": self.ledger.put_records(ref, records)}, {}
+
+    def _put_transfers(self, job: str, *, query: dict[str, str], body: bytes) -> Response:
+        """Store one job's transfer rows (job: the record's address); one invalid row refuses them all."""
+        if not all(UI_NAME_RE.fullmatch(segment) for segment in job.split("/")):
+            raise HttpError(422, f"{job!r} is not a job address")
+        try:
+            data = json.loads(body)
+        except ValueError as error:
+            raise HttpError(422, f"invalid JSON: {error}") from None
+        if not (isinstance(data, dict) and isinstance(data.get("service"), str) and isinstance(data.get("rows"), list)):
+            raise HttpError(422, 'the body is {"service": str, "rows": [...]}')
+        if len(data["rows"]) > MAX_ROWS:
+            raise HttpError(422, f"at most {MAX_ROWS} rows")
+        rows = []
+        for item in data["rows"]:
+            row = reduce_row(item)
+            if row is None:
+                raise HttpError(422, "a row is not a transfer row")
+            rows.append(row)
+        return 200, {"job": job, "rows": self.ledger.put_transfers(job, data["service"], rows)}, {}
 
     def _records(self, *, query: dict[str, str], body: bytes) -> Response:
         ref = query.get("ref") or self.ledger.latest_catalog()
@@ -884,6 +1027,24 @@ class BufferService:
             raise HttpError(404, f"no dataset row for {record}")
         return 200, row, {}
 
+    def _refused_hosts(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        """What is held for the dataset alone: the hosts its jobs were refused, and those a person approved for it
+        and no other dataset (`_approve_for`)."""
+        refused = (self.ledger.kv("refused_hosts") or {}).get(record, [])
+        return 200, {"hosts": refused, "approved": (self.ledger.kv("dataset_hosts") or {}).get(record, [])}, {}
+
+    def _put_refused_hosts(self, record: str, *, query: dict[str, str], body: bytes) -> Response:
+        """A worker says which hosts a job of the dataset was refused (a redirect target, mostly). They join the
+        hosts the dataset's runs need, so its next start asks a person to approve them; a name that is no exact
+        hostname is dropped."""
+        parsed = _parse(RefusedHostsBody, body)
+        with self._lock:
+            refused = self.ledger.kv("refused_hosts") or {}
+            named = (host for host in parsed.hosts if HOST_RE.fullmatch(host) and not is_ip_literal(host))
+            refused[record] = sorted({*refused.get(record, []), *named})
+            self.ledger.put_kv("refused_hosts", refused)
+        return 200, {"hosts": refused[record]}, {}
+
     # --- datasets as the page shows them: a catalog record joined with what the registry knows ------
 
     def _dataset_rows(self) -> tuple[str, list[dict]]:
@@ -929,8 +1090,9 @@ class BufferService:
         return _prep_records(found[0])
 
     def _catalog_datasets(self, *, query: dict[str, str], body: bytes) -> Response:
-        """The Datasets list: one page of datasets, filtered by state, modality, dims, licence or a request's
-        records, with how many datasets have each filter value."""
+        """The Datasets list: one page of datasets, filtered by state, modality, dims, licence, what the record
+        lacks (`lacks`: one of `LACKS`, `anything` or `nothing`) or a request's records, with how many datasets have each
+        filter value."""
         page = self._page_of({"limit": "50", **query}, DATASET_SORTS)
         assert page is not None
         ref, rows = self._dataset_rows()
@@ -941,6 +1103,10 @@ class BufferService:
         for name in DATASET_FILTERS:
             if name in query:
                 rows = [row for row in rows if row[name] == query[name]]
+        if "lacks" in query:
+            if query["lacks"] not in (*LACKS, ANYTHING, NOTHING):
+                raise HttpError(422, f"lacks must be one of {[*LACKS, ANYTHING, NOTHING]}, got {query['lacks']!r}")
+            rows = lacks_filter(rows, query["lacks"])
         found, total = paged(rows, page, DATASET_SORTS, dataset_haystack)
         return 200, {"ref": ref, "rows": found, "total": total, "facets": counts}, {}
 
@@ -979,19 +1145,28 @@ class BufferService:
     # --- subjects: a dataset, a buffer spec or a preparation request, with what its stage accepts ------
 
     def _rules(self, row: dict, hold: dict | None, gaps: list[str]) -> tuple[str, frozenset[str]]:
-        """A subject's status word and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
+        """A subject's phase and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
         dataset whose record cannot be run (`gaps`: no Start until a synced catalog holds one that can), with
         `shelve` while no round is working and none was just asked for (a round that waits for a verdict is
-        cancelled by the shelve, `_hold`). A shelved subject (`hold`) is `shelved` and takes `unshelve` alone."""
+        cancelled by the shelve, `_hold`). A shelved subject (`hold`) keeps its phase and takes `unshelve` alone."""
+        phase, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
         if hold is not None:
-            return "shelved", frozenset({"unshelve"})
-        status, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
+            return phase, frozenset({"unshelve"})
         if gaps:
-            actions = actions - {"go"}
-        resting = status in SHELVABLE or (status == "waiting" and "cancel" in actions)
+            actions = actions - {"go", "resume"}
+        if row["kind"] == "dataset":
+            # at `done` a reject needs the saved set to be about (spec judge-decides §5.2)
+            sets = (row.get("data") or {}).get("sets") or {}
+            if row["stage"] == "done" and not sets.get("saved"):
+                actions = actions - {"reject"}
+            # a resume would save the revoked set again (spec resume-restart §4.3): the round says it was
+            # revoked, or the dataset's row does, which also holds for a round that carries no such mark
+            if sets.get("revoked") or (self.ledger.dataset(row["key"]) or {}).get("state") == "revoked":
+                actions = actions - {"resume"}
+        resting = phase in SHELVABLE or (phase == "waiting" and "cancel" in actions)
         if resting and self._asking(row["kind"], row.get("number")) is None:
             actions = actions | {"shelve"}
-        return status, actions
+        return phase, actions
 
     def _asking(self, kind: str, number: int | None) -> dict | None:
         """The action that was sent to the subject's workflow and that the workflow has not answered yet, while
@@ -1003,28 +1178,71 @@ class BufferService:
             return None
         return {"id": action["id"], "action": action["action"], "at": action["at"], "wait_s": round(wait_s, 1)}
 
-    def _subject_view(self, row: dict, holds: dict[tuple[str, int], dict] | None = None) -> dict:
-        """The row plus its name, its status word, the actions it accepts (`_rules`; sorted, for a stable page), its
-        hold when it is shelved, for a buffer spec whether it is `frozen` (it has built a buffer: its text no
-        longer changes), and `asked`: the action that was sent to its workflow and that the workflow has not
+    def _repairs(self) -> Repairs:
+        cases: dict[tuple[str, int], dict] = {}
+        for case in self.ledger.cases(CASES_OPEN):  # newest first
+            if case["number"] is not None:
+                cases.setdefault((case["kind"], case["number"]), case)
+        report = self.ledger.kv("cleaner") or {}
+        # the agent acts while its sweeps report in `act` mode: a report that is overdue (the schedule is off, the
+        # worker is away) repairs nothing, whatever mode it was in
+        fresh = time.time() - (report.get("at") or 0) <= REPORT_STALE * (report.get("every_s") or REPORT_EVERY_S)
+        return Repairs(report.get("mode") == "act" and fresh, cases)
+
+    @staticmethod
+    def _repair_of(row: dict, case: dict | None) -> dict | None:
+        """The repair result that holds for the subject as it stands: its newest case while that is in work, or
+        once the agent gave up on it for as long as the subject has not moved since. That is read from the
+        revision the case ended at; a case that ended with none holds until the subject is next written."""
+        if case is None:
+            return None
+        if case["state"] == "gave-up":
+            ended = case["data"].get("ended_revision")
+            holds = ended == row["revision"] if ended is not None else case["updated"] >= (row.get("updated") or 0)
+            if not holds:
+                return None
+        return {"id": case["id"], "rule": case["rule"], "state": case["state"], "needs": case["data"].get("needs")}
+
+    def _subject_view(
+        self, row: dict, holds: dict[tuple[str, int], dict] | None = None, repairs: Repairs | None = None
+    ) -> dict:
+        """The row plus its name, its phase (what its round does at its stage: what a worker decides by), its
+        status (what a person reads), the actions it accepts (`_rules`; sorted, for a stable page), its
+        hold when it is shelved, a dataset's `hosts` (`_unapproved`), and `asked`: the action that was sent to its workflow and that the workflow has not
         answered yet. Until it does the stage is still the old one, and the page must not offer that stage's
-        buttons as if nothing was clicked. `holds`: `Ledger.shelved()`, read once by a caller with many rows."""
+        buttons as if nothing was clicked. `repair` is the repair agent's result for the subject as it stands.
+        `holds` (`Ledger.shelved()`) and `repairs` (`_repairs`) are read once by a caller with many rows."""
         hold = (self.ledger.shelved() if holds is None else holds).get((row["kind"], row["number"]))
         gaps = self._gaps(row["key"]) if row["kind"] == "dataset" else []
-        status, actions = self._rules(row, hold, gaps)
+        phase, actions = self._rules(row, hold, gaps)
         asked = self._asking(row["kind"], row["number"])
-        view = {**row, "status": status, "actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
-        view["name"] = (row.get("data") or {}).get("name") or row["key"]  # a buffer spec's name is not its key
-        if row["kind"] == "buffer":
-            view["frozen"] = self.ledger.spec_has_buffer(row["number"])
+        repairs = self._repairs() if repairs is None else repairs
+        repair = self._repair_of(row, repairs.cases.get((row["kind"], row["number"])))
+        status = status_of(phase, hold is not None, repair, repairs.acting)
+        view = {**row, "phase": phase, "status": status, "repair": repair}
+        view |= {"actions": sorted(actions), "asked": asked, "gaps": gaps, "shelved": hold}
+        if row["kind"] == "dataset":
+            view["hosts"] = self._unapproved(row["key"])
+        view["name"] = (row.get("data") or {}).get("name") or row["key"]  # a buffer's name is not its key
         return view
 
+    def _unapproved(self, record: str) -> list[str]:
+        """The hosts the dataset's jobs were refused that the csub policy still lacks: its next start lists them
+        for a person to approve. All of them when the policy cannot be read."""
+        refused = (self.ledger.kv("refused_hosts") or {}).get(record, [])
+        if not refused or self.hosts is None:
+            return refused
+        try:
+            return sorted(self.hosts.missing(self.hosts.group({record: refused}), self.ledger.kv("dataset_hosts")))
+        except (OSError, ValueError):
+            return refused
+
     def _gaps(self, record: str) -> list[str]:
-        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for a round to run
-        (`record_gaps`); none for a record no synced catalog holds. Read from the catalog on every call, so a
-        record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
+        """What the dataset's record, as the newest synced catalog that holds it has it, lacks for the dataset to
+        be started (`start_gaps`); none for a record no synced catalog holds. Read from the catalog on every call,
+        so a record fixed there can be started after the next catalog sync and nothing has to be cleared here."""
         found = self._catalog_record(record)
-        return record_gaps(found) if found is not None else []
+        return start_gaps(found) if found is not None else []
 
     def _adopt_subject(self, kind: str, number: str, *, query: dict[str, str], body: bytes) -> Response:
         if kind not in SUBJECT_RULES:
@@ -1050,21 +1268,53 @@ class BufferService:
             raise HttpError(404, f"no subjects of kind {kind!r}")
         page = self._page_of(query, SUBJECT_SORTS)
         holds = self.ledger.shelved()
-        subjects = [self._subject_view(row, holds) for row in self.ledger.find_subjects(kind=kind)]
+        repairs = self._repairs()
+        subjects = [self._subject_view(row, holds, repairs) for row in self.ledger.find_subjects(kind=kind)]
+        if kind == "buffer":
+            serving = self._served_versions()
+            subjects = [{**view, "serving": serving.get(view["number"])} for view in subjects]
+        if (owner := query.get("buffer")) is not None:  # the requests a buffer's Prepare step filed
+            if not owner.isdecimal():
+                raise HttpError(422, f"buffer must be a buffer's number, got {owner!r}")
+            subjects = [view for view in subjects if (view.get("data") or {}).get("buffer") == int(owner)]
         if page is None:
             return 200, {"subjects": subjects}, {}
         rows, total = paged(subjects, page, SUBJECT_SORTS, _subject_haystack)
         return 200, {"subjects": rows, "total": total}, {}
 
-    def _needs(self, *, query: dict[str, str], body: bytes) -> Response:
-        """Everything that waits on a person: the subjects waiting or stuck, a buffer round whose dataset waits
-        for its files (`drops`: the round is working, but only a person can copy them), and the actions of the
-        last day that did not reach Temporal (each with its subject, for the Retry). A shelved subject is not
-        among them: `shelved` counts those, and `?shelved=1` lists them instead. `kind` narrows the list to
-        one kind of subject; `kinds` counts every kind's share of the whole list."""
-        holds = self.ledger.shelved()
-        views = [self._subject_view(row, holds) for row in self.ledger.find_subjects()]
+    def _served_versions(self) -> dict[int, str]:
+        """A buffer's number -> the id of the version consumers draw from now: its newest round's buffer whose
+        latest event is one of `SERVING`. That id is what a training run names."""
+        serving: dict[int, str] = {}
+        for buffer in sorted(self.ledger.buffers(), key=lambda row: _round_of(row["id"])):
+            number = _round_of(buffer["id"])[0]
+            if number and (buffer.get("latest_event") or {}).get("kind") in SERVING:
+                serving[number] = buffer["id"]
+        return serving
+
+    def _by_status(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The subjects of every kind with one status (`status`; `needs human` when none is named), which is
+        Overview's lists (spec overview §5). Under `needs human` also a buffer round whose dataset waits for
+        its files (`drops`: the round is working, but only a person can copy them). `kind` narrows the list to
+        one kind of subject; `kinds` counts every kind's share of the list, `counts` every kind's subjects by
+        status. `failed`: the actions of the last day that did not reach Temporal, each with its subject, for
+        the Retry."""
+        status = query.get("status", "needs human")
+        if status not in STATUSES:
+            raise HttpError(422, f"status must be one of {list(STATUSES)}, got {status!r}")
+        holds, repairs = self.ledger.shelved(), self._repairs()
+        waits = status == "needs human"
+        counts: dict[str, dict[str, int]] = {kind: {} for kind in SUBJECT_RULES}
+        views = []
         # ponytail: reads every subject; a status column and an index when there are tens of thousands
+        for row in self.ledger.find_subjects():
+            # the status needs no view: one is built only for a subject this list may hold
+            hold = holds.get((row["kind"], row["number"]))
+            repair = self._repair_of(row, repairs.cases.get((row["kind"], row["number"])))
+            is_now = status_of(SUBJECT_RULES[row["kind"]][row["stage"]][0], hold is not None, repair, repairs.acting)
+            counts[row["kind"]][is_now] = counts[row["kind"]].get(is_now, 0) + 1
+            if is_now == status or (waits and row["kind"] == "buffer"):  # a buffer may wait for files while working
+                views.append(self._subject_view(row, holds, repairs))
         for index, view in enumerate(views):
             if view["kind"] == "buffer" and "dropped" in view["actions"]:
                 # the round's buffer has the id of the go that started it
@@ -1072,29 +1322,22 @@ class BufferService:
                 board = self.ledger.buffer_datasets(f"i{view['number']}-e{gos[-1]['id']}") if gos else []
                 if drops := [row["record"] for row in board if row["status"] == "waiting-drop"]:
                     views[index] = {**view, "drops": drops}
-        # what the cleaner could not resolve, on the subject's row
-        for case in self.ledger.cases(("needs-person",)):
-            for index, view in enumerate(views):
-                if (view["kind"], view["number"]) == (case["kind"], case["number"]) and "cleaner" not in view:
-                    views[index] = {**view, "cleaner": case["data"].get("needs", "")}
         failed = []
         for action in self.ledger.undelivered(time.time() - 86400):
             found = self.ledger.find_subjects(kind=action["kind"], number=action["number"])
-            failed.append({**action, "subject": self._subject_view(found[0], holds) if found else None})
-        if query.get("shelved"):
-            needs = [view for view in views if view["shelved"]]
-        else:
-            needs = [view for view in views if view["status"] in NEEDS_A_PERSON or view.get("drops")]
+            failed.append({**action, "subject": self._subject_view(found[0], holds, repairs) if found else None})
+        needs = [view for view in views if view["status"] == status or (waits and view.get("drops"))]
         kinds = {kind: sum(1 for view in needs if view["kind"] == kind) for kind in SUBJECT_RULES}
         if (kind := query.get("kind")) is not None:
             if kind not in SUBJECT_RULES:
                 raise HttpError(422, f"kind must be one of {list(SUBJECT_RULES)}, got {kind!r}")
             needs = [view for view in needs if view["kind"] == kind]
         page = self._page_of(query, SUBJECT_SORTS)
+        out = {"failed": failed, "kinds": kinds, "counts": counts}
         if page is None:
-            return 200, {"needs": needs, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
+            return 200, {"subjects": needs, **out}, {}
         rows, total = paged(needs, page, SUBJECT_SORTS, _subject_haystack)
-        return 200, {"needs": rows, "total": total, "failed": failed, "kinds": kinds, "shelved": len(holds)}, {}
+        return 200, {"subjects": rows, "total": total, **out}, {}
 
     def _lookup(self, *, query: dict[str, str], body: bytes) -> Response:
         """From what a person has in hand to the subjects: an issue number (`234`, `#234`) or a subject's own
@@ -1147,7 +1390,13 @@ class BufferService:
         if parsed.stage is not None and parsed.stage not in SUBJECT_RULES[kind]:
             raise HttpError(422, f"stage must be one of {list(SUBJECT_RULES[kind])}, got {parsed.stage!r}")
         written = self.ledger.append_entry(
-            kind, int(number), body=parsed.body, marker=parsed.marker, round_id=parsed.round, stage=parsed.stage
+            kind,
+            int(number),
+            body=parsed.body,
+            marker=parsed.marker,
+            round_id=parsed.round,
+            stage=parsed.stage,
+            data=parsed.data,
         )
         assert written is not None  # the subject was just found, and nothing deletes one
         self._asked.pop((kind, int(number)), None)  # the workflow wrote: whatever was asked of it is answered
@@ -1202,7 +1451,8 @@ class BufferService:
         request: list[str] | None = None,
     ) -> Needed:
         """The hosts the named catalog records, a request's records (`request`, or the request numbered `prep`)
-        or a buffer's planned pool need (host -> the record ids that need it). A named record no synced catalog
+        or a buffer's planned pool need (host -> the record ids that need it). A dataset needs its record's hosts
+        and those its jobs were refused. A named record no synced catalog
         holds is a 404; a request's contributes nothing (the worker refuses it). A buffer's host is one its
         published binding names that its record's synced catalog entry also names: a binding lies under a root a
         job can mount read-write."""
@@ -1210,17 +1460,18 @@ class BufferService:
             raise HttpError(503, "this service has no csub policy to check hosts against")
         if prep is not None:
             request = self._request_records(str(prep))
+        refused = self.ledger.kv("refused_hosts") or {}
         if request is not None:
-            return self.hosts.for_records(self._catalog_records(request))
+            return self.hosts.for_records(self._catalog_records(request), refused)
         if records is not None:
             if missing := [record for record in records if self._catalog_record(record) is None]:
                 raise HttpError(404, f"{missing[0]!r} is not a record of a synced catalog")
-            return self.hosts.for_records(self._catalog_records(records))
+            return self.hosts.for_records(self._catalog_records(records), refused)
         if spec is None:
             raise HttpError(422, "give records, prep or spec")
         subject = self.ledger.subject("buffer", spec)
         if subject is None:
-            raise HttpError(404, f"no buffer spec {spec!r}")
+            raise HttpError(404, f"no buffer {spec!r}")
         rounds = [
             entry["round"]
             for entry in self.ledger.timeline("buffer", subject["number"])
@@ -1247,15 +1498,19 @@ class BufferService:
         needed = self._needed(**given)
         assert self.hosts is not None  # _needed answered 503 otherwise
         try:
-            absent = self.hosts.missing(needed)
+            absent = self.hosts.missing(needed, self.ledger.kv("dataset_hosts"))
         except (OSError, ValueError):  # a TOMLDecodeError is a ValueError
             raise HttpError(503, "the generated csub policy cannot be read: `mia up` regenerates it") from None
-        return 200, {"hosts": [{"host": host, "records": ids} for host, ids in sorted(absent.items())]}, {}
+        # `per_dataset`: approving it lets these datasets' jobs reach it and no other dataset's
+        scope = {RAW_GITHUB: {"per_dataset": True}}
+        rows = [{"host": host, "records": ids, **scope.get(host, {})} for host, ids in absent.items()]
+        return 200, {"hosts": rows}, {}
 
     def _dataset_action(self, record: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
         parsed = _parse(ActionBody, body)
         actor = self._actor(headers, parsed)
-        if parsed.action == "go" and (gaps := self._gaps(record)):  # before a subject is created for it
+        runs = parsed.action in ("go", "resume")  # the actions that run a round: a go from scratch, a resume on
+        if runs and (gaps := self._gaps(record)):  # before a subject is created for it
             raise HttpError(409, f"the record cannot be run: {'; '.join(gaps)}")
         subject = self.ledger.subject("dataset", record)
         if subject is None:
@@ -1274,8 +1529,11 @@ class BufferService:
         if subject["revision"] == 0 and stage in SUBJECT_RULES["dataset"] and stage != subject["stage"]:
             subject = self.ledger.adopt_subject("dataset", subject["number"], record, stage=stage, data=subject["data"])
             self.changes.announce("dataset", subject["number"])
-        payload = {name: value for name, value in (("note", parsed.note), ("root", parsed.root)) if value}
-        needed = (partial(self._needed, records=[record])) if parsed.action == "go" else None
+        fields = (("note", parsed.note), ("root", parsed.root), ("set", parsed.set))
+        payload = {name: value for name, value in fields if value}
+        # a reject of the saved set starts the rework's jobs, as a go starts a round's (spec judge-decides §5.2)
+        starts = runs or (parsed.action == "reject" and subject["stage"] == "done")
+        needed = (partial(self._needed, records=[record])) if starts else None
         return self._act_on(subject, parsed, actor, payload, needed)
 
     # --- buffer specs and preparation requests: created and run from the page (spec §4.4, §8.1) ---
@@ -1285,7 +1543,7 @@ class BufferService:
         try:
             return load_spec_text(text).name
         except SpecError as error:
-            raise HttpError(422, f"not a buffer spec: {error}") from None
+            raise HttpError(422, f"not a buffer's definition: {error}") from None
 
     def _new_spec(self, text: str) -> dict:
         """A new buffer subject holding this text. Its name is the spec's and need not be unique: the first
@@ -1330,22 +1588,25 @@ class BufferService:
         return self._buffer_action(name, _parse(ActionBody, body), headers)
 
     def _buffer_action(self, key: str, parsed: ActionBody, headers: dict[str, str]) -> Response:
-        """An action on the buffer spec with this key. A `go` runs the text the spec holds, or the `spec` sent
-        with it: a spec that has built no buffer takes the new text (and the name in it); one that has is frozen,
-        and a changed text is refused, since a change to it is a new spec."""
+        """An action on the buffer with this key. A `go` runs the text the buffer holds, or the `spec` sent with
+        it, which is stored (with the name in it) once the stage takes the go. A serving buffer (`ready`, `idle`)
+        is fixed: a go there runs the stored text and refuses another. An `edit` stores a new text and runs
+        nothing (`_edit`)."""
         actor = self._actor(headers, parsed)
         subject = self.ledger.subject("buffer", key)
         if subject is None:
-            raise HttpError(404, f"no buffer spec {key!r}")
+            raise HttpError(404, f"no buffer {key!r}")
+        if parsed.action == "edit":
+            return self._edit(subject, parsed, actor)
         payload: dict = {}
         if parsed.action == "go":
             stored = subject["data"].get("spec")
             text = parsed.spec if parsed.spec is not None else stored
             if not text:
-                raise HttpError(422, f"buffer spec {key!r} has no spec text to run: send one")
+                raise HttpError(422, f"buffer {key!r} has no definition to run: send one as `spec`")
             name = self._spec_name(text)
-            if text != stored and self.ledger.spec_has_buffer(subject["number"]):
-                raise HttpError(409, f"buffer spec {key!r} has built a buffer and no longer changes: clone it")
+            if text != stored and subject["stage"] in ("ready", "idle"):
+                raise HttpError(409, f"buffer {key!r} is serving and does not change: clone it")
             self._accepts(subject, parsed)
             self._check_hosts(parsed, None, "buffer", subject["number"])  # a go: no `needed`
             if text != stored:  # only once the stage takes a go: what is stored is what ran last
@@ -1367,6 +1628,30 @@ class BufferService:
         if parsed.action == "dropped":
             payload = {"record": self._dropped_record(subject, parsed)}
         return self._act_on(subject, parsed, actor, payload, needed)
+
+    def _edit(self, subject: dict, parsed: ActionBody, actor: str) -> Response:
+        """An `edit`: the buffer's definition becomes the `spec` sent with it, and its name the name in that text.
+        The stage table says where (a buffer that rests); the action is recorded and carried out here, with its
+        timeline entry, and no workflow hears of it. A key seen before is the same action again."""
+        number = subject["number"]
+        self._accepts(subject, parsed)
+        if parsed.spec is None:
+            raise HttpError(422, "an edit carries the buffer's new definition: `spec`")
+        name = self._spec_name(parsed.spec)  # 422 for what is not a buffer spec, before anything is recorded
+        self._check_hosts(parsed, None, "buffer", number)  # 422: nothing here starts a job
+        try:
+            action, _ = self.ledger.add_action(
+                "buffer", number, "edit", actor, key=parsed.key, payload={"spec": parsed.spec}
+            )
+        except ValueError as error:
+            raise HttpError(409, str(error)) from None
+        if action["state"] != "sent":
+            text = action["payload"]["spec"]
+            changed = {**subject["data"], "spec": text, "name": name}
+            self.ledger.set_subject_data("buffer", number, changed, revise=True)
+            action = self.ledger.settle_action(action["id"], "sent", entry=_action_entry(action)) or action
+            self._changed("buffer", number)
+        return 202, action, {}
 
     def _dropped_record(self, subject: dict, parsed: ActionBody) -> str:
         """The record of a `dropped`, once its files look complete. The workflow takes any non-empty file and
@@ -1392,6 +1677,8 @@ class BufferService:
             records = load_prep_text(parsed.spec).records
         except SpecError as error:
             raise HttpError(422, f"not a preparation request: {error}") from None
+        if parsed.buffer is not None and not self.ledger.find_subjects(kind="buffer", number=parsed.buffer):
+            raise HttpError(422, f"no buffer #{parsed.buffer} for this request to belong to")
         go = ActionBody(action="go", key=parsed.key, spec=parsed.spec, approve_hosts=parsed.approve_hosts)
         needed = partial(self._needed, request=records)
         repeat = self.ledger.action_by_key(parsed.key) if parsed.key else None
@@ -1399,7 +1686,8 @@ class BufferService:
             subject = self.ledger.find_subjects(kind="prep", number=repeat["number"])[0]
         else:
             self._check_hosts(go, needed, "prep", None)
-            subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec})
+            owner = {} if parsed.buffer is None else {"buffer": parsed.buffer}
+            subject = self.ledger.create_subject("prep", None, data={"spec": parsed.spec, **owner})
         return self._act_on(subject, go, self._actor(headers, go), {"spec": parsed.spec}, needed)
 
     def _prep_action(self, number: str, *, query: dict[str, str], body: bytes, headers: dict[str, str]) -> Response:
@@ -1407,7 +1695,7 @@ class BufferService:
         subject = self._numbered("prep", number)
         payload: dict = {}
         needed = None
-        if parsed.action == "go":
+        if parsed.action in ("go", "resume"):  # both run the request: its datasets from scratch, or resumed
             text = parsed.spec if parsed.spec is not None else subject["data"].get("spec")
             if not text:
                 raise HttpError(422, f"request {subject['key']} has no text to run: send one as `spec`")
@@ -1462,14 +1750,36 @@ class BufferService:
         kind, key, stage = subject["kind"], subject["key"], subject["stage"]
         number = subject.get("number")  # none yet for a buffer spec that its first go creates
         hold = self.ledger.shelved().get((kind, number)) if number is not None else None
-        status, accepted = self._rules(subject, hold, self._gaps(key) if kind == "dataset" else [])
+        phase, accepted = self._rules(subject, hold, self._gaps(key) if kind == "dataset" else [])
         if parsed.action not in accepted:
             takes = ", ".join(f"`{name}`" for name in sorted(accepted)) or "nothing"
-            raise HttpError(409, f"{kind} {key!r} is at `{stage}` ({status}): it takes {takes}, not `{parsed.action}`")
+            standing = "shelved" if hold else phase
+            raise HttpError(
+                409, f"{kind} {key!r} is at `{stage}` ({standing}): it takes {takes}, not `{parsed.action}`"
+            )
         if parsed.action in ("approve", "reject") and parsed.revision is None:
             raise HttpError(422, f"`{parsed.action}` must carry the revision of what was looked at")
         if parsed.revision is not None and parsed.revision != subject["revision"]:
             raise HttpError(409, f"{kind} {key!r} changed since it was shown (reload it): nothing was sent")
+        if kind == "dataset" and parsed.action in ("approve", "reject"):
+            self._names_its_set(subject, parsed)
+
+    @staticmethod
+    def _names_its_set(subject: dict, parsed: ActionBody) -> None:
+        """A dataset's verdict names the set it is about, and only the set the stage lets it be about (spec
+        judge-decides §5.4): at `review` the set under review, at `done` (a reject) the saved set. A subject
+        whose round wrote no sets (a run from before them) takes a verdict that names none."""
+        sets = (subject.get("data") or {}).get("sets")
+        if sets is None:
+            return
+        if not parsed.set:
+            raise HttpError(422, "a verdict names the set it is about: `set`")
+        if subject["stage"] == "review":
+            allowed, refusal = sets.get("review"), "that set is not the one under review"
+        else:
+            allowed, refusal = (sets.get("saved") or {}).get("set"), "that set is not the saved one"
+        if parsed.set != allowed:
+            raise HttpError(409, f"{refusal}: nothing was sent")
 
     def _check_hosts(
         self, parsed: ActionBody, needed: Callable[[], Needed] | None, kind: str, number: int | None
@@ -1494,6 +1804,20 @@ class BufferService:
         except ValueError as error:
             raise HttpError(422, str(error)) from None
         return True
+
+    def _approve_for(self, hosts: list[str], needed: Callable[[], Needed] | None) -> list[str]:
+        """Write down the approvals that hold for one dataset at a time: `raw.githubusercontent.com`, for each
+        record of the run that needs it. The policy allows that host to every job once it is approved anywhere;
+        a worker grants it only to jobs of a dataset named here. Returns the hosts newly approved for a record."""
+        if RAW_GITHUB not in hosts or needed is None:
+            return []
+        with self._lock:
+            approved = self.ledger.kv("dataset_hosts") or {}
+            new = [record for record in needed().get(RAW_GITHUB, []) if RAW_GITHUB not in approved.get(record, [])]
+            for record in new:
+                approved[record] = sorted({*approved.get(record, []), RAW_GITHUB})
+            self.ledger.put_kv("dataset_hosts", approved)
+        return [RAW_GITHUB] if new else []
 
     def _act_on(
         self,
@@ -1520,6 +1844,7 @@ class BufferService:
                 added = self.hosts.approve(parsed.approve_hosts, by=actor, kind=kind, number=number)
             except PolicyError as error:
                 raise HttpError(503, str(error)) from None
+            added = list(dict.fromkeys([*added, *self._approve_for(parsed.approve_hosts, needed)]))
             if added:
                 names = ", ".join(f"`{neutralize(host)}`" for host in added)
                 self.ledger.append_entry(
@@ -1537,7 +1862,7 @@ class BufferService:
         payload = action["payload"]
         # the workflow's signal: a buffer's `plan` is a go that waits at the plan too (its event's kind says so)
         signal = "plan" if payload.get("plan_first") else parsed.action
-        event = LabelEvent(signal, str(action["id"]), action["actor"], action["at"])
+        event = LabelEvent(signal, str(action["id"]), action["actor"], action["at"], payload.get("set") or "")
         running = True
         self._asked[(kind, number)] = (action, time.monotonic())  # before the send: the answer may beat this request
         try:
@@ -1560,8 +1885,12 @@ class BufferService:
                 if not self.dispatcher.signal_running(kind, number, "recheck"):
                     raise DispatchError("no workflow is running for it")
             else:
-                # a dataset's go is its workflow's `restart`: the round starts in a new run, on today's code
-                self.dispatcher.send(kind, number, "restart" if (kind, signal) == ("dataset", "go") else signal, event)
+                # a dataset's go and its resume are its workflow's `restart`: the round runs in a new run, on
+                # today's code, and the event's kind says which of the two it is
+                # a request's resume is its workflow's `go`: its round reads from the action how it runs
+                restarts = kind == "dataset" and signal in ("go", "resume")
+                name = "restart" if restarts else "go" if signal == "resume" else signal
+                self.dispatcher.send(kind, number, name, event)
         except DispatchError as error:
             self._asked.pop((kind, number), None)  # nothing was asked of any workflow
             failed = self.ledger.settle_action(action["id"], "failed", str(error))
@@ -1693,7 +2022,7 @@ class BufferService:
         return 200, case, {}
 
     def _case_changed(self, case: dict) -> None:
-        if case["kind"] in SUBJECT_RULES and case["number"] is not None:  # the subject's row in Needs you
+        if case["kind"] in SUBJECT_RULES and case["number"] is not None:  # the subject's status may have changed
             self.changes.announce(case["kind"], case["number"])
 
     def _cases(self, *, query: dict[str, str], body: bytes) -> Response:
@@ -1741,8 +2070,16 @@ class BufferService:
         return 200, self._put_report("cleaner", body), {}
 
     def _cleaner(self, *, query: dict[str, str], body: bytes) -> Response:
+        """The cleaner's last sweep, without what a restart since has settled: a worker that started on other
+        code after the sweep is not the one the sweep found on old code, so that finding is left out. Whether
+        the new one owes a restart too is the next sweep's to say."""
         report = self.ledger.kv("cleaner")
-        return (200, *JSON_NULL) if report is None else (200, report, {})
+        if report is None:
+            return 200, *JSON_NULL
+        swept, workers = report.get("at") or 0, self.ledger.kv("workers") or {}
+        restarted = {f"restart {service}" for service, row in workers.items() if (row.get("since") or 0) > swept}
+        findings = [finding for finding in report.get("findings") or [] if finding.get("id") not in restarted]
+        return 200, {**report, "findings": findings}, {}
 
     def _put_report(self, name: str, body: bytes) -> dict:
         """Store a scheduled pass's last report whole under `name` (`at` added when absent)."""
@@ -1978,17 +2315,20 @@ class BufferService:
         except SpecError as error:
             raise HttpError(422, str(error)) from None
         ref = spec.catalog.ref
-        states = {row["id"]: row.get("state", "unprepared") for row in self.ledger.datasets()}
+        rows = self.ledger.datasets()
+        states = {row["id"]: row.get("state", "unprepared") for row in rows}
+        bound = bound_shapes([row for row in rows if row.get("state") == "prepared"])
         # the designer asks for the same plan once per page turn and sort: keep the last one while nothing it
-        # depends on has changed (the spec's text, which names the ref, and every dataset's state)
-        key = (text, frozenset(states.items()))
+        # depends on has changed (the spec's text, which names the ref, every dataset's state and the shapes of
+        # the arrays the prepared ones' bindings read)
+        key = (text, frozenset(states.items()), json.dumps(bound, sort_keys=True))
         kept_for, plan = self._last_plan  # read once: another request may replace it meanwhile
         if kept_for != key:
             records = self.ledger.records(ref)
             if not records:
                 raise HttpError(409, f"catalog ref {ref} is not synced; run: mia-buffers catalog sync --ref {ref}")
             prepared = {record for record, state in states.items() if state == "prepared"}
-            plan = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared).to_dict(states)
+            plan = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared, bound=bound).to_dict(states)
             self._last_plan = (key, plan)
         if parsed.page is None:
             return 200, plan, {}
@@ -2007,6 +2347,8 @@ class BufferService:
             prepared_only=asked.prepared_only,
             raw_cached=asked.raw_cached,
             staged_geom=asked.staged_geom,
+            no_needs_human=asked.no_needs_human,
+            preparation=asked.preparation,
         )
         return 200, {**plan, **view}, {}
 
@@ -2066,25 +2408,59 @@ class BufferService:
         board = self.ledger.buffer_datasets(buffer)
         if page is None:
             return 200, {"buffer": buffer, "datasets": board}, {}
-        # the page's row names its dataset: its issue, its crops, and the staged artifact this buffer draws from
+        # the page's row names its dataset: its issue, its crops, the staged artifact this buffer draws from, what
+        # the plan gave it (size upstream, crops per split, notes), and what its raw cache and its pyramid hold
         datasets = {row["id"]: row for row in self.ledger.datasets()}
         staged = {
-            asset["data"].get(
-                "record"
-            ): f"{asset['data'].get('levels_key')}/{asset['data'].get('record')}/{asset['key']}"
+            asset["data"].get("record"): asset
             for asset in self.ledger.assets("staged")
             if asset["data"] and buffer in asset["refs"] and asset["data"].get("levels_key")
         }
+        raw = {asset["key"]: asset["data"] or {} for asset in self.ledger.assets("raw")}
         issues = self._dataset_issues()
+        plan, revoked = self._plan_rows(buffer), self._revoked(buffer)
         for row in board:
-            known = datasets.get(row["record"]) or {}
+            record = row["record"]
+            known, pyramid, planned = datasets.get(record) or {}, staged.get(record), plan.get(record) or {}
             row.update({name: known.get(name) for name in ("folder", "previews", "crops")})
-            row["issue"] = issues.get(row["record"])
-            row["staged"] = staged.get(row["record"])
+            row["issue"] = issues.get(record)
+            row["staged"] = f"{pyramid['data']['levels_key']}/{record}/{pyramid['key']}" if pyramid else None
+            row["staged_bytes"] = pyramid["data"].get("bytes") if pyramid else None
+            row["raw_bytes"] = (raw.get(record) or {}).get("bytes")
+            row.update(
+                bytes=planned.get("bytes"), planned=planned.get("planned") or {}, notes=planned.get("notes") or []
+            )
+            row["revoked"] = row["status"] != "servable" and record in revoked
+        if query.get("included"):  # what the version serves, and what a person took out of it
+            board = [row for row in board if row["status"] == "servable" or row["revoked"]]
         rows, total = paged(
             board, page, BOARD_SORTS, lambda row: (row["record"], row["status"], row["reason"], row["job"])
         )
         return 200, {"buffer": buffer, "datasets": rows, "total": total}, {}
+
+    def _plan_rows(self, buffer: str) -> dict[str, dict]:
+        """The plan's row of each dataset of the buffer's pool (a buffer's id is its round's); none when the plan
+        cannot be read."""
+        if self.hosts is None:
+            return {}
+        try:
+            return self.hosts.plan_rows(buffer)
+        except ValueError:
+            return {}
+
+    def _revoked(self, buffer: str) -> set[str]:
+        """The records a person's `revoke` named since this version was created."""
+        # ponytail: a revocation that reaches the buffer from a dataset's reject (the keeper's signal) names no
+        # record here and its row reads `failed`; a board status of its own is the upgrade
+        events = self.ledger.events(buffer)
+        if not events or events[0]["issue"] is None:
+            return set()
+        return {
+            str(record)
+            for action in self.ledger.actions("buffer", events[0]["issue"])
+            if action["action"] == "revoke" and datetime.fromisoformat(action["at"]).timestamp() >= events[0]["at"]
+            for record in action["payload"].get("records", [])
+        }
 
     def _add_event(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
         # no config check: `created` and `planned` precede the buffer's config (create_buffer runs at sourcing)
@@ -2165,6 +2541,8 @@ class BufferService:
         # diverged sequence, and a re-PUT that drops `samples` turns the volume legacy, so its new rows are uniform
         # centres over a staged box. Freeze the candidate lists per list if a re-planned record must be re-registered.
         with self._lock:
+            for revoked in self.ledger.quarantined_volumes(buffer):  # never served again: its frozen rows leave too
+                self.ledger.drop_frozen_of(buffer, revoked)
             frozen = self.ledger.frozen(buffer, split)
             # a frozen row stays addressable: a volume flagged missing drops its candidates from `capacity`, not rows
             size = max(size, len(frozen))
@@ -2187,6 +2565,77 @@ class BufferService:
                 self.ledger.extend_frozen(buffer, split, fresh)
                 frozen += fresh
         return 200, {"descriptors": frozen[start:end], "size": size, "exhausted": exhausted}, {}
+
+    def _peek(self, buffer: str, *, query: dict[str, str], body: bytes) -> Response:
+        """One crop of a split as the tensorizer returns it, for the page to show: the descriptor a consumer would
+        have been handed, the pictures of every level and label layer, and the dataset's facts. The buffer keeps
+        no trace of it: the draw has a generator of its own, no consumer is registered, nothing is recorded or
+        counted, and a `val` or `test` crop is one of the split's candidates, not a row of its frozen list."""
+        config = self._serving(buffer)
+        split = query.get("split", "train")
+        if split not in PEEK_SPLITS:
+            raise HttpError(422, f"split must be train, val or test, got {split!r}")
+        if self.peeker is None:
+            raise HttpError(503, "no harness configured")
+        volumes = self.ledger.live_volumes(buffer)
+        descriptor = draw(
+            random.Random(), volumes, split, patch=config.patch, levels=config.levels, channels=config.channels
+        )
+        if descriptor is None:
+            return 204, None, {}
+        volume = next(volume for volume in volumes if volume.id == descriptor["volume"])
+        # what `BufferDataset._tensorize` hands the tensorizer
+        params = {**config.tensorizer_params, "channels": descriptor["channels"], "stats": descriptor["normalize"]}
+        if not self._peek_lock.acquire(timeout=PEEK_WAIT_S):
+            raise HttpError(503, "another peek is being drawn; try again")
+        try:
+            pictures = self.peeker.render(volume.path, descriptor, config.tensorizer, params, sorted(volume.labels))
+        except PeekFailed as error:
+            raise HttpError(502, str(error)) from None
+        finally:
+            self._peek_lock.release()
+        pixel_nm = {level.factor: level.scale_nm["x"] for level in volume.levels}
+        return (
+            200,
+            {
+                "split": split,
+                "descriptor": descriptor,
+                "dataset": self._peek_dataset(volume.record),
+                "samples": len(volume.samples[split]) if volume.samples else None,
+                "levels": [
+                    {"factor": factor, "pixel_nm": pixel_nm.get(factor), "img": base64.b64encode(picture).decode()}
+                    for factor, picture in zip(descriptor["levels"], pictures["img"], strict=True)
+                ],
+                "labels": [
+                    {
+                        "key": key,
+                        "levels": [base64.b64encode(picture).decode() for picture in layer],
+                    }
+                    for key, layer in pictures["labels"].items()
+                ],
+            },
+            {"Cache-Control": "no-store"},
+        )
+
+    def _peek_dataset(self, record_id: str) -> dict:
+        """What a peek says about its crop's dataset, from the newest catalog's record; the id alone when the
+        record is in no synced catalog or cannot be read."""
+        ref = self.ledger.latest_catalog()
+        found = self.ledger.record(ref, record_id) if ref else None
+        if found is None:
+            return {"id": record_id}
+        try:
+            known = facts(*found)
+        except (TypeError, ValueError, AttributeError):
+            return {"id": record_id}
+        return {
+            "id": record_id,
+            "title": str(found[1].get("title") or ""),
+            "modality": known.modality_group,
+            "dims": known.dims,
+            "organisms": known.organisms,
+            "annotation_types": known.annotation_types,
+        }
 
     def _no_content(self, buffer: str) -> Response:
         """A 204 (nothing servable yet), counted for the buffer's usage: the day's row and the last hour's window."""
@@ -2428,6 +2877,7 @@ def serve(cfg: Config) -> None:
         ui_dir=Path(__file__).parent / "ui",
         dispatcher=dispatcher_for(cfg),
         hosts=check,
+        peeker=Peeker.from_config(cfg),
     )
     service.kick_unmirrored()  # what a crash, or Temporal being away, left unposted
     # a request whose datasets settled with nobody telling it; beside the start, which Temporal being away must not hold

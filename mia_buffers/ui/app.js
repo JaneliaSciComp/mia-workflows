@@ -1,23 +1,27 @@
 // The shell: the Docs view, health, the stream, hash routing, the top bar, the theme and boot.
 // The page holds no token. It reads with GETs (and with POST /plan and POST /hosts/missing, which write nothing)
 // and asks for things through the action routes, which take none. All hosts and repos come from GET /meta.
-import { $, el, hideTip, SUBJECT_TAB, SUBJECT_VIEWS, toEpoch } from "./dom.js";
-import { HttpError, load, S, send } from "./api.js";
+import { $, el, hideTip, SUBJECT_HASH, SUBJECT_TAB, SUBJECT_VIEWS, toEpoch } from "./dom.js";
+import { downLines, HttpError, load, S, send } from "./api.js";
 import { onScreen } from "./actions.js";
-import { bindControls, viewDesigner } from "./designer.js";
+import { bindControls } from "./designer.js";
 import { viewBuffers } from "./buffers.js";
 import { viewDatasetList } from "./datasets.js";
-import { viewCache, viewCleaner, viewDecisions, viewPreparation } from "./operations.js";
+import { viewCache, viewDecisions, viewPreparation } from "./operations.js";
 import { viewJob } from "./job.js";
-import { viewFind, viewNeeds, viewSubject } from "./subjects.js";
+import { viewFind, viewSubject } from "./subjects.js";
+import { viewOverview } from "./overview.js";
+import { viewFlow } from "./flow.js";
 
 // ---- the Docs view
 // Static: show one of the two documents and mark its sub-tab. A document is a file of the page (guide.html,
 // architecture.html), read when it is first shown. It is this package's own HTML, so it is parsed into nodes;
 // nothing a job or a record wrote is ever shown this way.
-const DOCS_SHOWN = new Set();
+const docsLoads = new Map();
 async function viewDocs(arg) {
-  const doc = arg === "architecture" ? "architecture" : "guide";
+  const [name, chapter] = arg.split("/");
+  const doc = name === "architecture" ? "architecture" : "guide";
+  const routeHash = location.hash;
   document.querySelectorAll("[data-doc]").forEach(a => {
     a.hidden = a.dataset.doc !== doc;
   });
@@ -25,9 +29,16 @@ async function viewDocs(arg) {
     if (a.dataset.docTab === doc) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-  if (DOCS_SHOWN.has(doc)) return;
-  DOCS_SHOWN.add(doc);
   const article = document.querySelector(`[data-doc="${doc}"]`);
+  if (!docsLoads.has(doc)) docsLoads.set(doc, loadDoc(doc, article));
+  await docsLoads.get(doc);
+  if (location.hash === routeHash) {
+    const target = chapter && document.getElementById(`chapter-${doc}-${chapter}`);
+    if (target) target.scrollIntoView();
+    else window.scrollTo(0, 0);
+  }
+}
+async function loadDoc(doc, article) {
   article.replaceChildren(el("div", { class: "empty" }, "loading…"));
   try {
     const [res, text] = await send(`/ui/${doc}.html`);
@@ -35,7 +46,7 @@ async function viewDocs(arg) {
     article.replaceChildren(...new DOMParser().parseFromString(text, "text/html").body.childNodes);
   } catch (e) {
     // the next visit asks again
-    DOCS_SHOWN.delete(doc);
+    docsLoads.delete(doc);
     article.replaceChildren(
       el("div", { class: "empty" }, `The document did not load (${e.status || "network error"}): ${e.message}`),
     );
@@ -44,24 +55,14 @@ async function viewDocs(arg) {
 
 // ---- health and the stream
 const HEALTH_MS = 60000; // how often the page asks whether Temporal and every worker are still there
-export function downLines(health, findings) {
-  // what is away, in words; a service's task queue carries its name. `findings`: what the cleaner's last sweep
-  // found wrong with the installation, less what the health check says itself
-  const away = Object.keys(health.queues || {}).filter(queue => !health.queues[queue]);
-  return [
-    !health.temporal && "Temporal does not answer: nothing can be started or cancelled from this page right now.",
-    away.length &&
-      `No worker is running for ${away.join(", ")}: nothing that waits on ${away.length > 1 ? "them" : "it"} is moving. On the host: pixi run mia restart ${away.join(" ")}`,
-    ...(Array.isArray(findings) ? findings : [])
-      .filter(finding => finding.id !== "temporal" && !finding.id.startsWith("worker "))
-      .map(finding => finding.text.replaceAll("`", "")),
-  ].filter(Boolean);
-}
 async function checkHealth() {
   // so that "working" is true: these lines stay until a later check finds everything back
-  const [health, cleaner] = await Promise.all([load("/health"), load("/cleaner", true)]);
-  if (health)
-    $("down").replaceChildren(...downLines(health, cleaner?.findings).map(line => el("div", {}, el("span", {}, line))));
+  const [health, sweep] = await Promise.all([load("/health"), load("/cleaner", true)]);
+  if (!health) return;
+  $("down").replaceChildren(...downLines(health, sweep?.findings).map(line => el("div", {}, el("span", {}, line))));
+  // a view that follows the stream also says what is away: a worker that is down writes nothing to the stream
+  onScreen.health = health;
+  onScreen.streams[onScreen.view]?.();
 }
 function followStream() {
   // told what changed, the page refetches it; a lost stream reconnects by itself
@@ -82,7 +83,7 @@ function followStream() {
     if (onScreen.subject) {
       if (change.kind !== onScreen.subject.kind) return;
       if (onScreen.subject.number != null && change.number !== onScreen.subject.number) return;
-    } else if (onScreen.view !== "needs") return;
+    } else if (!onScreen.streams[onScreen.view]) return;
     clearTimeout(timer);
     timer = setTimeout(refresh, 150);
   };
@@ -90,31 +91,36 @@ function followStream() {
 
 // ---- hash routing, the top bar, the theme and boot
 const VIEWS = {
-  needs: viewNeeds,
+  overview: viewOverview,
   datasets: viewDatasetList,
   buffers: viewBuffers,
   cache: viewCache,
-  cleaner: viewCleaner,
   preparation: viewPreparation,
   decisions: viewDecisions,
   docs: viewDocs,
   job: viewJob, // #job/<address>: a job's record; the address is everything after the first slash
 };
-const REFRESH_MS = 30000; // the buffer views poll
+const REFRESH_MS = 30000; // the Buffers list, a version's page and a buffer's page poll
 let refreshTimer = 0;
 function route() {
   const [path, filters] = location.hash.slice(1).split("?"); // #datasets?state=in-progress: a list with its filters set
   const [name, ...rest] = path.split("/");
-  let arg = rest.join("/");
-  try {
-    arg = decodeURIComponent(arg);
-  } catch {
-    /* a malformed escape: use the raw text */
-  }
-  const designer = name === "buffers" && arg === "new";
-  const kind = arg ? SUBJECT_VIEWS[name] : null; // #datasets/<record>, #specs/<name>, #requests/<key>: its own page
-  const view = designer ? "designer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "needs";
-  const tab = designer ? "buffers" : kind ? SUBJECT_TAB[name] : view;
+  const decoded = text => {
+    try {
+      return decodeURIComponent(text);
+    } catch {
+      return text; // a malformed escape: use the raw text
+    }
+  };
+  const arg = decoded(rest.join("/"));
+  // #specs/<key> is another address of a buffer's page
+  if (name === "specs" && rest.length) return location.replace(SUBJECT_HASH.buffer(arg));
+  // a buffer's page: #buffer/<key>[/<step>], and #buffers/new[/<step>] for one that is not saved yet
+  const fresh = name === "buffers" && rest[0] === "new",
+    flow = fresh || (name === "buffer" && !!rest[0]);
+  const kind = arg ? SUBJECT_VIEWS[name] : null; // #datasets/<record>, #requests/<key>: its own page
+  const view = flow ? "buffer" : kind || (name === "find" && arg) ? "subject" : VIEWS[name] ? name : "overview";
+  const tab = flow ? "buffers" : kind ? SUBJECT_TAB[name] : view === "preparation" ? "datasets" : view;
   document.querySelectorAll("[data-view]").forEach(s => {
     s.hidden = s.dataset.view !== view;
   });
@@ -125,10 +131,14 @@ function route() {
   hideTip();
   clearInterval(refreshTimer);
   onScreen.subject = null;
+  onScreen.redraw = null;
   onScreen.view = view;
+  if (flow) {
+    refreshTimer = setInterval(() => onScreen.redraw?.(), REFRESH_MS);
+    return viewFlow(fresh ? null : decoded(rest[0]), rest[1]);
+  }
   if (kind) return viewSubject(kind, arg);
   if (view === "subject") return viewFind(arg);
-  if (designer) return viewDesigner();
   if (view === "buffers")
     refreshTimer = setInterval(() => {
       hideTip();
@@ -136,22 +146,6 @@ function route() {
     }, REFRESH_MS);
   if (view === "datasets") return viewDatasetList(arg, new URLSearchParams(filters || ""));
   VIEWS[view](arg);
-}
-function setupFilterBox() {
-  // the fold is a per-viewer convenience, remembered in this browser
-  const box = $("filterBox");
-  try {
-    if (localStorage.getItem("mia-filters") === "closed") box.open = false;
-  } catch {
-    /* storage blocked: open */
-  }
-  box.addEventListener("toggle", () => {
-    try {
-      localStorage.setItem("mia-filters", box.open ? "open" : "closed");
-    } catch {
-      /* not remembered */
-    }
-  });
 }
 function setupTheme() {
   const root = document.documentElement;
@@ -178,7 +172,6 @@ function setupTheme() {
 }
 export async function boot() {
   setupTheme();
-  setupFilterBox();
   bindControls();
   const [meta, catalogs] = await Promise.all([load("/meta"), load("/catalogs")]);
   S.meta = meta || {};
@@ -187,13 +180,17 @@ export async function boot() {
     .sort((a, b) => (toEpoch(b.synced_at) || 0) - (toEpoch(a.synced_at) || 0));
   S.ref = S.catalogs[0]?.ref || null;
   window.addEventListener("hashchange", route);
+  // a click anywhere outside an open menu closes it
+  document.addEventListener("click", e => {
+    for (const menu of document.querySelectorAll("details.more[open]")) if (!menu.contains(e.target)) menu.open = false;
+  });
   // a click on the current tab changes no hash: reload the view by hand
   document.querySelectorAll("[data-tab]").forEach(a =>
     a.addEventListener("click", () => {
       if (a.getAttribute("href") === location.hash) route();
     }),
   );
-  for (const id of ["subjectBody", "needsBody"])
+  for (const id of ["subjectBody", "overviewBody"])
     $(id).addEventListener("input", () => {
       $(id).dataset.dirty = "1";
     });

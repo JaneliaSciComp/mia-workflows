@@ -44,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
 ROUND_DONE_LOG = "issue #%d round %d: job %s ended %s"
 MAX_POLLS_PER_EXECUTION = 500
 RETRY_MAX_INTERVAL = timedelta(minutes=5)
+CUT_OFF_WAIT = timedelta(minutes=5)  # before a round whose agent was cut off runs again: a service comes back
 QUEUE_SLACK = timedelta(hours=12)  # ponytail: covers LSF pending time; use schedule-to-start metrics if it bites
 
 
@@ -112,6 +113,12 @@ class IssueWorkflow:
             if state.pr is None:
                 await self._act("set_stage", StageInput(state.issue, "working"))
                 result = await self._run_round(None)
+                if result.pr is None and result.no_change:
+                    # the agent looked into the request and found nothing to change (spec judge-decides §4.2):
+                    # an answer, not a stop; whoever asked reads it from the round's comment
+                    await self._act("set_stage", StageInput(state.issue, "answered"))
+                    await self._settle_judge()
+                    return "answered"
                 if result.pr is None:
                     raise RoundFailed("the agent made no commits; its summary is above")
                 state.pr = result.pr
@@ -127,10 +134,12 @@ class IssueWorkflow:
             await self._settle_judge()
             return "failed"
 
-    async def _run_round(self, feedback: Feedback | None) -> PrRef:
+    async def _run_round(self, feedback: Feedback | None, again: bool = True) -> PrRef:
         """One agent round: prepare a workspace, submit the agent job, wait for it, publish its commits.
 
-        With `feedback`, the round is a revision of the existing PR; otherwise it is the first attempt."""
+        With `feedback`, the round is a revision of the existing PR; otherwise it is the first attempt. An agent
+        whose session Claude Code ended (a login that lapsed, an API error) did not fail at its work: the round
+        is run once more (`again`) after CUT_OFF_WAIT, as a round of its own."""
         state = self.state
         state.round += 1
         self.phase, self.job_id = "PREPARING", None
@@ -162,11 +171,37 @@ class IssueWorkflow:
         )
         workflow.logger.info(ROUND_DONE_LOG, state.issue, state.round, outcome.job_id, outcome.state)
         if outcome.state != "DONE" or outcome.exit_code not in (0, None):
-            raise RoundFailed(f"agent job {outcome.job_id} ended {outcome.state} (exit {outcome.exit_code})")
+            ended = f"agent job {outcome.job_id} ended {outcome.state} (exit {outcome.exit_code})"
+            if not outcome.cut_off:
+                raise RoundFailed(ended)
+            ended += f': Claude Code ended the agent\'s session with "{outcome.cut_off}"'
+            if not again:
+                raise RoundFailed(ended)
+            minutes = CUT_OFF_WAIT.total_seconds() / 60
+            await self._comment(
+                state.pr or state.issue,
+                f"Round {state.round}: {ended}. The agent did not fail at its work: the round runs once more in "
+                f"{minutes:g} minutes.",
+                f"cut-off {state.key}-{state.round}",
+            )
+            await workflow.sleep(CUT_OFF_WAIT)
+            return await self._run_round(feedback, again=False)
+        if state.pr is not None and workflow.patched("judge-decides") and not workflow.patched("no-accept"):
+            # ponytail: only a history without the `no-accept` patch asks this, and the answer is always "";
+            # delete the call and the activity once no such run is open
+            await self._act("accepted_head", state.pr, result_type=str)
         self.phase = "PUBLISHING"
         result = await self._act(
             "publish_round",
-            PublishInput(state.issue, state.key, state.round, workspace, state.pr, feedback.id if feedback else None),
+            PublishInput(
+                state.issue,
+                state.key,
+                state.round,
+                workspace,
+                state.pr,
+                feedback.id if feedback else None,
+                feedback.text if feedback else "",
+            ),
             seconds=300,
             result_type=PrRef,
         )

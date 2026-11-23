@@ -240,13 +240,13 @@ class BufferDataset(Base):
 
     def _descriptor(self, idx: int) -> dict:
         consumer = self._consumer_id()
+        if idx < 0 or idx >= len(self):  # train too: a plain `for` over the dataset ends at `len`, as a sampler does
+            raise IndexError(f"{idx} is outside the {self.split} list of {len(self)}")
         try:
             if self.split == "train":
                 if not self._queue:
                     self._queue.extend(self.client.next(consumer, self.prefetch))
                 return self._queue.popleft()
-            if idx < 0 or idx >= len(self):
-                raise IndexError(f"{idx} is outside the {self.split} list of {len(self)}")
             if idx not in self._page:
                 start = idx - idx % self.prefetch
                 descriptors, _ = self.client.split(consumer, self.split, start, self.prefetch)

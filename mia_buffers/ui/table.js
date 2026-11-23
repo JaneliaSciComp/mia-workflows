@@ -1,4 +1,4 @@
-// A table paged by the server, and its page fetcher.
+// A table paged by the server, its page fetcher, and what the column names shared by the tables mean.
 import { el, num } from "./dom.js";
 import { load } from "./api.js";
 
@@ -19,8 +19,45 @@ export const pageOf = (path, rowsKey, extra, quiet404) => async state => {
   return out && { rows: out[rowsKey] || [], total: out.total ?? (out[rowsKey] || []).length, out };
 };
 export const reloadTables = root => root.querySelectorAll(".paged").forEach(box => box.reload()); // a refresh that rebuilds nothing
-// cols: {key (the server's sort name; none: not sortable), label, num, wrap, title, cell}. `select`: {chosen (a Set), id, onchange}
-// adds a tick per row. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
+// What a column holds, said on its header's hover, for the names that mean the same in every table. A column whose
+// meaning is its table's own says it in its `title`.
+export const COLUMN_HELP = {
+  "dataset": "The dataset's id in the catalog. It opens the dataset's page.",
+  "issue": "The GitHub issue that holds a read-only copy of its timeline.",
+  "preview": "The overlay of its first saved crop. Hover enlarges it, a click opens it.",
+  "dims": "Its dimensionality: 2D, 2D+t, 3D or 3D+t.",
+  "modality": "Its imaging modality, from the catalog record.",
+  "licence": "The SPDX licence its catalog record names.",
+  "size": "Its size upstream, as the catalog record gives it.",
+  "raw cache": "What its raw cache holds on disk now: the files a reader took whole.",
+  "buffers": "How many buffer versions hold it.",
+  "stage": "The stage its workflow is at.",
+  "reason": "Why it stands as it does, in the words of the step that left it there.",
+  "updated": "When it last changed.",
+  "changed": "When it last changed.",
+  "when": "When it happened.",
+  "request": "The preparation request. It opens the request's page.",
+  "job": "The cluster job that is working on it now, if one is.",
+  "files": "Opens its directory in the file browser.",
+  // a cached asset
+  "artifact":
+    "The staged artifact's id, a hash of its recipe: binding, levels key, voxel size, harness, environment and plan. Hover it for the whole key.",
+  "bytes": "Its size on disk.",
+  "last used": "When a round last staged it or took it for a buffer. The keeper evicts the longest unused first.",
+  "levels key": "The pyramid geometry it was staged for: the levels and the voxel size a definition asks for.",
+  "binding": "The hash of the binding it was staged with: the reader and how it is called.",
+  "harness": "The harness commit it was staged with.",
+  // a decision
+  "gate": "The gate the decision was made at.",
+  "about": "What was judged: the kind of thing and its reference.",
+  "verdict": "approve, reject, or escalate (handed to a person).",
+  "by": "Who decided: a person, the judge or a policy.",
+  "confidence": "How sure the judge was, from 0 to 1. A person gives none.",
+  "summary": "The note given with the verdict, or the judge's summary.",
+};
+// cols: {key (the server's sort name; none: not sortable), label, num, wrap, title (else COLUMN_HELP's), cell}. `select`: {chosen (a Set), id, onchange}
+// adds a check per row, or per row `select.can(row)` allows. `onPage(page)` sees each answer (its `out` is the whole response). The box has reload(reset).
+// `empty`: what a table with no row says, or a function that gives it.
 export function pagedTable(
   id,
   { source, cols, empty, sort = null, dir = "asc", search = true, rowAttrs, tools = [], select, onPage },
@@ -36,8 +73,8 @@ export function pagedTable(
     state.offset = Math.max(0, offset);
     draw();
   };
-  const step = (text, off, to) =>
-    el("button", { type: "button", class: "btn", disabled: off, onclick: () => go(to) }, text);
+  const step = (text, title, off, to) =>
+    el("button", { type: "button", class: "btn", title, disabled: off, onclick: () => go(to) }, text);
   const tick = row => {
     const key = select.id(row),
       input = el("input", { type: "checkbox", "aria-label": "select " + key });
@@ -49,16 +86,18 @@ export function pagedTable(
     });
     return input;
   };
+  const canTick = row => !select.can || select.can(row);
   const tickPage = page => {
-    // the header's tick: every row of this page, on or off
+    // the header's check: every row of this page that has a check, on or off
+    const rows = page.rows.filter(canTick);
     const input = el("input", {
       type: "checkbox",
       "aria-label": "select every row of this page",
-      title: "tick or untick every row of this page",
+      title: "check or uncheck every row of this page",
     });
-    input.checked = page.rows.length > 0 && page.rows.every(r => select.chosen.has(select.id(r)));
+    input.checked = rows.length > 0 && rows.every(r => select.chosen.has(select.id(r)));
     input.addEventListener("change", () => {
-      for (const r of page.rows) {
+      for (const r of rows) {
         if (input.checked) select.chosen.add(select.id(r));
         else select.chosen.delete(select.id(r));
         select.onchange(r, input.checked);
@@ -77,7 +116,7 @@ export function pagedTable(
           "th",
           {
             class: (c.num ? "num" : "") + (c.key ? " sortable" : ""),
-            title: c.title || null,
+            title: c.title || COLUMN_HELP[c.label] || null,
             onclick: c.key
               ? () => {
                   if (state.sort === c.key) state.dir = state.dir === "asc" ? "desc" : "asc";
@@ -97,7 +136,7 @@ export function pagedTable(
       el(
         "tr",
         rowAttrs ? rowAttrs(r) : {},
-        select ? el("td", {}, tick(r)) : null,
+        select ? el("td", {}, canTick(r) ? tick(r) : null) : null,
         ...cols.map(c => {
           const v = c.cell(r);
           return el("td", { class: c.num ? "num" : c.wrap ? "wrap" : "" }, v == null ? "" : v);
@@ -111,15 +150,19 @@ export function pagedTable(
             { class: "tablewrap" },
             el("table", { class: "plain" }, el("thead", {}, head), el("tbody", {}, ...rows)),
           )
-        : el("div", { class: "empty" }, state.q ? "Nothing matches the search." : empty),
+        : el(
+            "div",
+            { class: "empty" },
+            state.q ? "Nothing matches the search." : typeof empty === "function" ? empty() : empty,
+          ),
     );
     const last = state.offset + page.rows.length;
     pager.replaceChildren(
       el("span", {}, page.total ? `${num(state.offset + 1)}–${num(last)} of ${num(page.total)}` : ""),
       ...(page.total > state.limit
         ? [
-            step("‹ previous", !state.offset, state.offset - state.limit),
-            step("next ›", last >= page.total, state.offset + state.limit),
+            step("‹ previous", `The ${state.limit} rows before these.`, !state.offset, state.offset - state.limit),
+            step("next ›", `The next ${state.limit} rows.`, last >= page.total, state.offset + state.limit),
           ]
         : []),
     );

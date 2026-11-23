@@ -58,6 +58,65 @@ pre.err{white-space:pre-wrap;font-family:var(--mono);font-size:12px;margin:6px 0
 .subject h2{margin:0 0 6px;font-size:18px;overflow-wrap:anywhere}
 .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;margin:10px 0}
 .btn.danger{border-color:var(--warn);color:var(--warn)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:500}
+.btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.1)}
+.btn.primary:disabled{background:transparent;border-color:var(--axis);color:var(--muted)}
+/* a buffer's page: the strip of its six steps (the one shown filled, the ones that can be opened checked), what
+   is not a step behind Actions…, and under the step its one way back and its one way forward */
+.steps{list-style:none;display:flex;flex-wrap:wrap;padding:0;margin:0 0 12px;counter-reset:step}
+.steps li{counter-increment:step;display:flex;align-items:center;gap:8px;padding:6px 14px 6px 10px;border:1px solid var(--axis);border-right-width:0;font-size:13.5px;color:var(--muted);background:var(--surface)}
+.steps li:first-child{border-radius:8px 0 0 8px}
+.steps li:last-child{border-right-width:1px;border-radius:0 8px 8px 0}
+.steps li::before{content:counter(step);display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1px solid var(--axis);font-size:11.5px}
+.steps li a{color:var(--fg);text-decoration:none}
+.steps li.done{position:relative}
+.steps li.done a::after{content:"";position:absolute;inset:0}  /* the whole box opens the step, its mark included */
+.steps li.done:hover{background:var(--accent-soft)}
+.steps li.done::before{content:"✓";border-color:var(--s3);color:var(--s3)}
+.steps li.here{color:var(--fg);font-weight:600;background:var(--accent-soft);border-color:var(--accent);border-right-width:1px}
+.steps li.here + li{border-left-width:0}
+.steps li.here::before{border-color:var(--accent);background:var(--accent);color:#fff}
+/* step 1: the definition as two tabs over one text, then two numbers in a narrow column beside two cards */
+.pane{background:var(--surface);border:1px solid var(--ring);border-radius:8px;margin-bottom:14px}
+.panetabs{display:flex;gap:2px;padding:8px 10px 0;border-bottom:1px solid var(--grid)}
+.panetabs button{border:1px solid transparent;border-bottom:0;background:transparent;border-radius:6px 6px 0 0;padding:5px 16px;cursor:pointer;font-size:13.5px;color:var(--fg2);margin-bottom:-1px}
+.panetabs button[aria-selected=true]{border-color:var(--grid);background:var(--bg);color:var(--fg);font-weight:600;border-bottom:1px solid var(--bg)}
+.panetabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.panetabs .hint{margin-left:auto;align-self:center}
+.panebody{padding:14px}
+.panebody .specbox{max-width:none;min-height:26em}
+fieldset.lock{border:0;padding:0;margin:0;min-width:0}
+fieldset.lock:disabled{opacity:.6}
+.statrow{display:grid;grid-template-columns:170px minmax(0,1fr) minmax(0,1fr);gap:14px;margin-bottom:14px;align-items:start}
+.statrow .stack{display:grid;gap:10px}
+.statrow .card{margin-bottom:0}
+@media (max-width:760px){.statrow{grid-template-columns:1fr}}
+.takenout{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:6px 0;font-size:13px}
+/* how far something is: a filled bar */
+.progress{height:8px;border-radius:4px;background:var(--grid);overflow:hidden;margin:6px 0 14px;max-width:520px}
+.progress i{display:block;height:100%;width:0;background:var(--s3)}
+pre.snippet{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12.5px;margin:6px 0 0;padding:8px 10px;border:1px solid var(--axis);border-radius:6px;background:var(--bg)}
+/* a peek under the snippet: the levels of one crop in a row, each picture drawn pixel for pixel */
+.peek{margin-top:10px}
+.peekbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;font-size:13px}
+.peekbar select{border:1px solid var(--axis);border-radius:6px;padding:3px 6px;background:var(--surface)}
+.peekrows{margin-top:10px;overflow-x:auto}
+.peekrows .levels{display:flex;gap:10px;width:max-content}
+.peekrows figure{margin:0}
+.peekrows figcaption{font-size:12.5px;font-variant-numeric:tabular-nums}
+.peek .sub{margin:0}
+.peekrows figcaption.sub{margin-top:3px}
+.peekrows img{display:block;width:192px;height:192px;image-rendering:pixelated;border:1px solid var(--axis);background:#000}
+.peekrows .layer{font-size:12.5px;color:var(--fg2);margin:8px 0 3px}
+.peekrows .facts{font-size:13px;margin:8px 0 0}
+.more{position:relative}
+.more summary{list-style:none}
+.more summary::-webkit-details-marker{display:none}
+.more .actions{position:absolute;right:0;top:100%;z-index:5;margin:4px 0 0;padding:10px;min-width:220px;flex-direction:column;align-items:stretch;background:var(--surface);border:1px solid var(--ring);border-radius:8px;box-shadow:0 4px 14px var(--ring)}
+.stepfoot{position:sticky;bottom:0;z-index:4;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin:16px 0;padding:10px 0;background:var(--bg);border-top:1px solid var(--grid)}
+.stepfoot:empty{display:none}
+.stepfoot.above{position:static;margin:12px 0;border-top:0;border-bottom:1px solid var(--grid)}
+.stepfoot .right{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-left:auto}
 .chosen{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:4px 10px;border:1px solid var(--accent);border-radius:8px;background:var(--accent-soft);font-size:13px}
 .chosen[hidden]{display:none}
 .chosen b{font-weight:600}
@@ -71,7 +130,6 @@ dialog.ask label{display:block;margin:4px 0}
 dialog.ask .mono{overflow-wrap:anywhere;margin-bottom:8px}
 dialog.ask textarea{display:block;width:100%;box-sizing:border-box;margin:10px 0 0;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
 .specbox{width:100%;max-width:100ch;min-height:16em;font-family:var(--mono);font-size:12.5px;padding:6px 8px;border:1px solid var(--axis);border-radius:6px;background:transparent;color:var(--fg)}
-.ticks{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0;font-size:13px}
 /* a lifecycle: a kind's stages as boxes joined by arrows, the current one filled; a stage off the line (needs-human,
    cancelled) hangs under the step its round stopped at, or stands apart when no step is known */
 .flow{list-style:none;display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 0;padding:0;margin:2px 0 12px;font-size:12.5px}
@@ -161,6 +219,16 @@ input[type=range]{accent-color:var(--accent);width:140px;vertical-align:middle}
 .card{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:14px 14px 10px;min-width:0;margin-bottom:14px}
 .grid2 .card{margin-bottom:0}
 .card .sub{font-size:12.5px;color:var(--fg2);margin-bottom:8px}
+/* a section of Overview: a card that folds to its heading, with a count beside the title */
+.fold>summary{display:flex;align-items:baseline;gap:10px;cursor:pointer;list-style:none;margin-bottom:4px}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary::before{content:"▾";color:var(--muted);width:14px}
+.fold:not([open])>summary::before{content:"▸"}
+.fold:not([open])>summary{margin-bottom:0}
+.fold>summary h2{margin:0}
+.fold>summary .count{color:var(--fg2);font-size:13px;font-variant-numeric:tabular-nums}
+.fold>summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.why>summary{cursor:pointer}
 .card svg:not(.ghm){display:block;width:100%;height:auto;font-family:var(--sans)}  /* a card's chart; the GitHub mark in a link keeps its own size */
 .card svg text{fill:var(--fg2);font-size:12px}
 .card svg .lbl{fill:var(--fg)}
@@ -182,6 +250,7 @@ dl.kv dd{margin:0;overflow-wrap:anywhere;min-width:0}
 .health.ok{color:var(--s3)} .health.bad{color:var(--warn)}
 .links{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;margin:4px 0 12px}
 .toggles{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 12px}
+.tablebar .toggles{margin:0}
 .toggles .btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);font-weight:600}
 .links a[aria-current="page"]{color:var(--fg);font-weight:600;text-decoration:none}
 
@@ -256,9 +325,9 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 .docs h2{font-size:19px;font-weight:600;margin:34px 0 6px;text-wrap:balance}
 .docs p{margin:0 0 10px}
 .docs code{font-family:var(--mono);font-size:.92em}
-.docs figure{margin:14px 0 0;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 14px 10px;overflow-x:auto}
-.docs figure svg{display:block;max-width:100%;height:auto;min-width:640px;color:var(--fg);font-family:var(--sans)}
-.docs figcaption{font-size:13.5px;color:var(--muted);margin-top:10px}
+.docs figure{margin:18px 0;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 14px 10px;overflow-x:auto}
+.docs figure > svg{display:block;width:100%;height:auto;min-width:530px;color:var(--fg);font-family:var(--sans)}
+.docs figcaption{font-size:13.5px;color:var(--fg2);margin-top:10px}
 .docs figcaption b{color:var(--fg);font-weight:600}
 .docs pre{font-family:var(--mono);font-size:12.5px;line-height:1.5;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px;overflow-x:auto;margin:14px 0 0}
 .docs pre .c{color:var(--muted)}
@@ -268,29 +337,29 @@ td:has(img.thumb){padding-top:2px;padding-bottom:2px}
 .docs table{border-collapse:collapse;font-size:13.5px;margin:14px 0 0;max-width:100%}
 .docs th, .docs td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 .docs th{font-weight:600;font-size:12.5px;color:var(--muted)}
-.docs td code{white-space:nowrap}
-.docs .tw{overflow-x:auto}
+.docs td code{overflow-wrap:anywhere}
 /* SVG vocabulary */
 .docs .b{fill:var(--panel);stroke:var(--fg);stroke-opacity:.55;stroke-width:1.2}
 .docs .bs{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
-.docs .un{fill:var(--warn-soft);stroke:var(--warn);stroke-width:1.2}
-.docs .band{fill:var(--accent-soft);fill-opacity:.32;stroke:var(--line);stroke-dasharray:4 3}
-.docs .note{fill:var(--bg);stroke:var(--line)}
-.docs .t{font-size:12px;font-weight:500;fill:currentColor;font-family:var(--mono)}
-.docs .ts{font-size:12px;font-weight:600;fill:currentColor}
-.docs .s{font-size:10.5px;fill:var(--muted)}
-.docs .l{font-size:11px;fill:var(--muted)}
-.docs .lm{font-size:11px;fill:currentColor;font-family:var(--mono)}
-.docs .hd{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;fill:var(--muted)}
 .docs .e{stroke:currentColor;stroke-width:1.2;fill:none}
-.docs .ea{stroke:var(--accent);stroke-width:1.6;fill:none}
 .docs .ed{stroke:currentColor;stroke-width:1.1;fill:none;stroke-dasharray:5 4}
-.docs .em{stroke:var(--muted);stroke-width:.9;fill:none}
-.docs .ll{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 4}
 .docs .sq{fill:none;stroke:currentColor;stroke-width:1.2}
 .docs .sqa{fill:none;stroke:var(--accent);stroke-width:1.8}
 .docs .fa{fill:var(--accent)}
 .docs p{max-width:none}
 .docs table{width:auto}
 .docs th,.docs td{white-space:normal}
+.docs .buffer-steps tr > :first-child{white-space:nowrap}
 .docs th{position:static;cursor:default;user-select:auto}
+.docs h3{font-size:16px;font-weight:600;margin:20px 0 6px}
+.docs article{max-width:84ch;margin:0 auto;font-size:16px;line-height:1.58}
+.docs article h2{scroll-margin-top:calc(var(--topbar-h,60px) + 18px);border-top:1px solid var(--line);padding-top:14px}
+.docs .contents{border-left:3px solid var(--accent);padding:6px 18px;background:var(--panel)}
+.docs .contents ol{columns:2;column-width:225px;padding-left:20px;margin:4px 0}
+.docs .contents li{break-inside:avoid}
+.docs .plate-title{font-weight:600;margin-bottom:10px}
+.docs .plate .tissue{fill:var(--accent-soft);stroke:var(--axis);stroke-width:.8}
+.docs .plate .landmark{fill:var(--warn);stroke:var(--fg2);stroke-width:.6}
+.docs .plate .label{fill:var(--fg);font-size:15px;font-weight:500}
+.docs .plate .small{fill:var(--fg2);font-size:13px}
+.docs table{margin-bottom:16px}

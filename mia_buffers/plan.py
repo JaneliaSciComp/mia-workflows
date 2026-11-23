@@ -69,7 +69,7 @@ class Row:
     voxel_size_nm: dict[str, float | None] = field(default_factory=dict)
     assumed: list[str] = field(default_factory=list)  # axes whose voxel size is a guess (mia_buffers.assume)
     channel_recipe: dict | None = None  # how a crop gets the spec's channel count; None for `all`/first-c
-    bytes: int | None = None  # the record's size_bytes: what fetching it adds to the raw cache
+    bytes: int | None = None  # the record's size_bytes: its size upstream; nothing decides by it
     # The rule the harness derives this record's samples from (its crops per split), and its sha256; pool rows only.
     # Named plan_rule because `rule` is the selection rule above.
     plan_rule: dict | None = None
@@ -163,7 +163,8 @@ class Plan:
             total_bytes = _human_bytes(sum(row.planned_bytes for row in pool))
             lines += [
                 "",
-                f"planned {planned} of requested {requested} crops; ~{total_bytes} uncompressed "
+                f"planned {_up_to(pool[0].plan_rule)}{planned} of requested {requested} crops; "
+                f"~{total_bytes} uncompressed "
                 "(planned is an expectation over each record's items)",
             ]
         if self.excluded:
@@ -194,10 +195,16 @@ def _voxel_cell(row: Row) -> str:
 
 
 def _planned_cell(row: Row) -> str:
-    """`train 4096 · val 64 · …`: the crops the record is expected to stage per split."""
+    """`train 4096 · val 64 · …`: the crops the record is expected to stage per split; `up to` those when the rule
+    has filters, which only the stage job can apply."""
     if not row.in_pool or row.plan_rule is None:
         return ""
-    return " · ".join(f"{name} {row.planned.get(name, 0)}" for name in row.plan_rule["samples"])
+    return _up_to(row.plan_rule) + " · ".join(f"{name} {row.planned.get(name, 0)}" for name in row.plan_rule["samples"])
+
+
+def _up_to(rule: dict | None) -> str:
+    """`up to ` before a count of planned crops when the rule has filters, else nothing."""
+    return "up to " if rule and rule.get("filters") else ""
 
 
 def _coverage_cell(row: Row) -> str:
@@ -216,8 +223,30 @@ def _human_bytes(size: int) -> str:
     return f"{value:.1f} TB"
 
 
-def fit(f: Facts, spec: Spec) -> Fit:
-    """Whether the spec's coarsest crop fits this record's largest raw array, and whether its box is in nm."""
+def lacks_shape(f: Facts) -> bool:
+    """Whether the record's largest raw array has no extent along an axis a crop needs: no patch can be said to fit
+    an array whose shape the record does not give."""
+    largest = f.largest_raw
+    three_d = (f.dims or "").startswith("3D")
+    return (
+        largest is None
+        or largest.extent_y is None
+        or largest.extent_x is None
+        or (three_d and largest.extent_z is None)
+    )
+
+
+def bound_shapes(rows: list[dict]) -> dict[str, list[dict[str, int]]]:
+    """Record id -> the shape (axis -> extent) of each array its binding reads, for the dataset rows that say them
+    (`raw_shapes`, what mia-data's crop job measured)."""
+    return {row["id"]: row["raw_shapes"] for row in rows if row.get("raw_shapes")}
+
+
+def fit(f: Facts, spec: Spec, bound: list[dict[str, int]] | None = None) -> Fit:
+    """Whether the spec's coarsest crop fits this record's largest raw array, and whether its box is in nm. With
+    `bound` (the shapes of the arrays the dataset's binding reads), one of them must hold the footprint too: a
+    binding may read smaller arrays than the largest the record lists, and the harness draws no crop from an
+    array under the footprint. `bound` only refuses: a record whose own array is too small stays out."""
     patch = spec.patch_for(f.dims or "")
     if patch is None:
         return Fit(False, f"no patch for dims {f.dims}", (0, 0), False)
@@ -225,13 +254,9 @@ def fit(f: Facts, spec: Spec) -> Fit:
     footprint = (patch["y"] * scale, patch["x"] * scale)
     largest = f.largest_raw
     three_d = (f.dims or "").startswith("3D")
-    if (
-        largest is None
-        or largest.extent_y is None
-        or largest.extent_x is None
-        or (three_d and largest.extent_z is None)
-    ):
+    if largest is None or lacks_shape(f):
         return Fit(False, "no array shape", footprint, False)
+    assert largest.extent_y is not None and largest.extent_x is not None  # lacks_shape
     if footprint[0] > largest.extent_y or footprint[1] > largest.extent_x:
         return Fit(
             False,
@@ -241,6 +266,11 @@ def fit(f: Facts, spec: Spec) -> Fit:
         )
     if three_d and patch.get("z", 0) > (largest.extent_z or 0):
         return Fit(False, f"patch z {patch.get('z')} exceeds {largest.extent_z}", footprint, False)
+    extents = [(shape.get("y", 0), shape.get("x", 0)) for shape in bound or []]
+    if extents and not any(y >= footprint[0] and x >= footprint[1] for y, x in extents):
+        y, x = max(extents, key=lambda extent: extent[0] * extent[1])
+        reason = f"footprint {footprint[0]}×{footprint[1]} exceeds every bound array (largest {y}×{x})"
+        return Fit(False, reason, footprint, False)
     _, assumed = voxel_size(f)
     if assumed and not spec.sampling.assume_voxel_size:
         return Fit(False, "voxel size unknown", footprint, False)
@@ -331,9 +361,11 @@ def crops_for(weight: float, total: int, cap: int) -> int:
 
 def plan_rule(row: Row, spec: Spec) -> dict:
     """The rule the harness's `PlanRule` mirrors, same keys and value types: `samples` is the record's crops per
-    split, its weight's share of the buffer's (`crops_for`)."""
+    split, its weight's share of the buffer's (`crops_for`). `filters` is there only when the definition has some,
+    so a definition without them keeps its digests."""
     patch = spec.patch_for("2D") or {}  # as the levels key and the served config.patch: the square 2D crop
     sampling = spec.sampling
+    filters = {"filters": [entry.model_dump() for entry in sampling.filters]} if sampling.filters else {}
     return {
         "seed": sampling.seed,
         "patch": int(patch.get("y", 0)),
@@ -343,6 +375,7 @@ def plan_rule(row: Row, spec: Spec) -> dict:
         },
         "split": row.split,
         "channel_recipe": row.channel_recipe,
+        **filters,
     }
 
 
@@ -469,10 +502,12 @@ def build_plan(
     records: list[tuple[str, dict]],
     prepared: set[str] | None = None,
     stage_bytes: float | None = None,
+    bound: dict[str, list[dict[str, int]]] | None = None,
 ) -> Plan:
     """Fit, weigh and split the records the spec admits. With `prepared` (the ids of prepared datasets), a row
     that fits but is not prepared is out of the pool with the rule `not prepared`; None skips that rule. With
-    `stage_bytes` (the deployment's cap on one staged artifact), rows estimated over it are a warning."""
+    `stage_bytes` (the deployment's cap on one staged artifact), rows estimated over it are a warning. With
+    `bound` (`bound_shapes` of the dataset rows), a record is also fitted against the arrays its binding reads."""
     all_facts: list[Facts] = []
     rows: list[Row] = []
     for path, record in sorted(records, key=lambda item: item[0]):
@@ -505,7 +540,7 @@ def build_plan(
             bytes=f.size_bytes,
         )
         if decision.admitted:
-            row.fit = fit(f, spec)
+            row.fit = fit(f, spec, (bound or {}).get(f.id))
             row.voxel_size_nm, row.assumed = voxel_size(f)
             if largest is not None and spec.sampling.patch.c in (1, 3):
                 recipes = channel_recipes(largest.channels, f.family, f.modality_group)

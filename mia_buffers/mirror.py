@@ -15,8 +15,8 @@ from .spec import SpecError, load_prep_text
 
 
 def spec_page(cfg: Config) -> Callable[[dict], str]:
-    """A buffer spec subject -> the URL of its page."""
-    return lambda subject: f"{cfg.service.url.rstrip('/')}/#specs/{quote(subject['key'], safe='')}"
+    """A buffer subject -> the URL of its page."""
+    return lambda subject: f"{cfg.service.url.rstrip('/')}/#buffer/{quote(subject['key'], safe='')}"
 
 
 def request_page(cfg: Config) -> Callable[[dict], str]:

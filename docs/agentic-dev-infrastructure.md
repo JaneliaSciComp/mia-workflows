@@ -4,8 +4,8 @@ The goal is a system that reads issues from this GitHub repo, implements them as
 until a human approves it and it merges. All development runs as Claude Code on the Janelia cluster:
 
 - the orchestrator runs inside [agentic-sandbox](../../agentic-sandbox),
-- it submits Claude Code jobs through [csub](../../csub) (`csub submit --claude`, gated by the broker's
-  `allow_claude` policy),
+- it submits Claude Code jobs through [csub](../../csub) (`csub submit --agent claude`, gated by the `[agents]`
+  table of the broker's policy),
 - humans approve at checkpoints before merge, release and deploy,
 - and eventually the system develops itself.
 

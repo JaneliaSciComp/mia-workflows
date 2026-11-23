@@ -67,7 +67,15 @@ def test_agent_constraints_rejected(tmp_path, agent):
         make_cfg(tmp_path, github={"token_file": str(tmp_path / "tok")}, agent=agent)
 
 
+@pytest.mark.parametrize("evidence", ["evidence", "{state}", "{state}/sub", "{tmp}"])
+def test_an_evidence_dir_is_absolute_and_apart_from_what_the_agent_must_not_see(tmp_path, evidence):
+    evidence = evidence.format(state=str(tmp_path / "state"), tmp=str(tmp_path))
+    with pytest.raises(ValueError, match="evidence_dir"):
+        make_cfg(tmp_path, github={"token_file": str(tmp_path / "tok")}, agent={"evidence_dir": evidence})
+
+
 def test_agent_constraints_allow_safe_values(tmp_path):
+    assert make_cfg(tmp_path, agent={"evidence_dir": "/work/_evidence"}).agent.evidence_dir == Path("/work/_evidence")
     make_cfg(tmp_path, agent={"allow_hosts": ["pypi.org", "notgithub.com"], "extra_mounts": ["/tools:ro"]})
 
 

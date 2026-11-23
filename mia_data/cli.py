@@ -29,6 +29,8 @@ from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from autodev.github import GitHub
 from mia_core.fs import require_local_dir, require_secret_file
 from mia_core.registry import report_worker
+from mia_core.temporal import DRAIN, until_stopped
+from mia_core.transfers import TRANSFERS_ENV
 
 from .config import EXTRA_LABELS, STAGES, load_config
 
@@ -66,6 +68,14 @@ def _gh(cfg: Config, repo: str, tokens: Callable[[], str | None] | None = None) 
     return GitHub(repo, tokens or token_fn(cfg), api_url=cfg.github.api_url)
 
 
+def _mirror_gh(cfg: Config, gh: GitHub) -> GitHub:
+    """The mirror's own client for `gh`'s repository: it writes slowly, and a rate limit it meets holds the
+    mirror alone."""
+    from .mirror import WRITE_GAP_S
+
+    return GitHub(gh.repo, gh.tokens, api_url=cfg.github.api_url, writes_per_second=1 / WRITE_GAP_S)
+
+
 def _wanted_hosts(cfg: Config) -> list[str]:
     """Every host a mia-data job may need: package indexes, redirect sources and targets, the data hosts."""
     network = cfg.network
@@ -94,7 +104,8 @@ def _csub_problems(cfg: Config, probe: Any, lsf_queues: set[str] | None) -> list
             'agent "claude" not permitted (broker.toml: add [agents] claude = ["api.anthropic.com", '
             '"claude.ai", "platform.claude.com"])'
         )
-    if missing := [var for var in HARNESS_ENV if not any(fnmatchcase(var, pattern) for pattern in probe.env_allow)]:
+    every_job_env = (*HARNESS_ENV, TRANSFERS_ENV)  # the job runner sets TRANSFERS_ENV for every job
+    if missing := [var for var in every_job_env if not any(fnmatchcase(var, pattern) for pattern in probe.env_allow)]:
         problems.append(
             f'env not allowed: {", ".join(missing)} (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)'
         )
@@ -381,14 +392,14 @@ async def cmd_test_pr(cfg: Config, args: argparse.Namespace) -> int:
 
 
 async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
-    """Run the Temporal worker until SIGTERM: one worker for workflows and short activities, one for the
-    long-running job waits."""
+    """Run the Temporal workers until SIGTERM: one for workflows and short activities, one for the long-running
+    job waits, one for the mirror's passes."""
     from temporalio.worker import Worker
 
     from autodev.jobs import CsubJobs
 
     from .activities import Activities
-    from .mirror import Mirror, dataset_issue, dataset_page
+    from .mirror import Mirror, dataset_issue, dataset_page, mirror_worker
     from .workflows import MiaDataDataset, MiaDataPoll, MiaMirror
 
     client = await _client(cfg)
@@ -404,38 +415,46 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     # the dataset issues' mirror (spec webapp-actions §7)
     labels, openers = {"dataset": (cfg.label, STAGES)}, {"dataset": dataset_issue(cfg, clients[2])}
     pages = {"dataset": dataset_page(cfg)}
-    mirror = [Mirror(clients[0], activities.registry, bot, labels, openers, pages).mirror]
+    mirror_gh = _mirror_gh(cfg, clients[0])
+    mirror = Mirror(mirror_gh, activities.registry, bot, labels, openers, pages)
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
         workflows=[MiaDataDataset, MiaDataPoll, MiaMirror],
-        activities=[*activities.all(), *mirror],
+        activities=activities.all(),
         max_concurrent_activities=8,
+        graceful_shutdown_timeout=DRAIN,
     )
+    mirror_passes = mirror_worker(client, cfg.mirror_queue, mirror.mirror)
     await_worker = Worker(
-        client, task_queue=cfg.await_queue, activities=[activities.await_job], max_concurrent_activities=20
+        client,
+        task_queue=cfg.await_queue,
+        activities=[activities.await_job],
+        max_concurrent_activities=20,
+        graceful_shutdown_timeout=DRAIN,
     )
     task = asyncio.current_task()
     assert task is not None  # we are inside the worker coroutine
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
     log.info(
-        "worker up as %s: %s ns=%s queues %s, %s",
+        "worker up as %s: %s ns=%s queues %s, %s, %s",
         bot,
         cfg.temporal.address,
         cfg.temporal.namespace,
         cfg.task_queue,
         cfg.await_queue,
+        cfg.mirror_queue,
     )
     # the code this worker's activities were loaded from: the cleaner says when a restart is owed
-    report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log))
+    report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log, work_root=cfg.paths.work_root))
     try:
-        async with main_worker, await_worker:
-            await asyncio.Event().wait()
+        async with main_worker, await_worker, mirror_passes:
+            await until_stopped(main_worker, await_worker, mirror_passes)
     except asyncio.CancelledError:
         log.info("worker shutting down")
     finally:
         report.cancel()
-        for gh in clients:
+        for gh in (*clients, mirror_gh):
             await gh.aclose()
     return 0
 

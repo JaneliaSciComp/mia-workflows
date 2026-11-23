@@ -159,3 +159,52 @@ def test_a_prep_request_can_ask_for_prepared_datasets_again():
     base = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "a" * 40}, "records": ["r"]}
     assert load_prep_text(yaml.safe_dump(base)).again is False
     assert load_prep_text(yaml.safe_dump({**base, "again": True})).again is True
+
+
+def test_a_prep_request_says_restart_and_a_stored_one_that_says_again_reads_the_same():
+    base = {"schema_version": 1, "kind": "preparation", "catalog": {"repo": "o/c", "ref": "a" * 40}, "records": ["r"]}
+    assert load_prep_text(yaml.safe_dump(base)).restart is False
+    assert load_prep_text(yaml.safe_dump({**base, "restart": True})).restart is True
+    assert load_prep_text(yaml.safe_dump({**base, "again": True})).restart is True
+    assert load_prep_text(yaml.safe_dump({**base, "restart": True})).again is True  # what the round's pins carry
+
+
+BOTH_FILTERS = [{"name": "labelled"}, {"name": "content"}]
+
+
+def _with_filters(filters) -> str:
+    data = yaml.safe_load((FIXTURES / "spec.yaml").read_text())
+    data["sampling"]["filters"] = filters
+    return yaml.safe_dump(data)
+
+
+def test_filters_default_to_none_and_are_kept_in_name_order():
+    assert load_spec(FIXTURES / "spec.yaml").sampling.filters == []
+    filters = load_spec_text(_with_filters(BOTH_FILTERS)).sampling.filters
+    assert [entry.model_dump() for entry in filters] == [{"name": "content"}, {"name": "labelled"}]
+
+
+def test_a_min_fraction_on_labelled_is_read_and_ignored():
+    """A definition written for a share of annotated pixels still loads (a round may be pinned to one): the
+    filter it gets is the one every definition gets, and the spec says so."""
+    spec = load_spec_text(_with_filters([{"name": "labelled", "min_fraction": 0.05}]))
+    assert [entry.model_dump() for entry in spec.sampling.filters] == [{"name": "labelled"}]
+    assert "min_fraction" not in str(spec.model_dump(mode="json", by_alias=True)["sampling"]["filters"])
+    assert "sampling.filters: labelled's min_fraction is ignored: any annotation in a crop passes" in spec.warnings
+    assert not any("min_fraction" in warning for warning in load_spec_text(_with_filters(BOTH_FILTERS)).warnings)
+
+
+@pytest.mark.parametrize(
+    "filters,needle",
+    [
+        ([{"name": "sharp"}], "sharp"),
+        ([{"name": "content"}, {"name": "content"}], "a filter is named once: content"),
+        ([{"name": "content", "min_fraction": 0.5}], "min_fraction"),
+        ([{"name": "labelled", "min_fraction": "some"}], "min_fraction"),
+        ([{"name": "labelled", "share": 0.5}], "share"),
+        (["content"], "filters"),
+    ],
+)
+def test_filters_refused(filters, needle):
+    with pytest.raises(SpecError, match=needle):
+        load_spec_text(_with_filters(filters))

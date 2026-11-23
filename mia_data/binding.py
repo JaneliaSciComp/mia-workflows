@@ -11,7 +11,7 @@ import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from autodev.config import is_github_host
+from autodev.config import RAW_GITHUB, is_github_host
 from mia_core.hosts import missing_hosts as missing_hosts  # re-exported: importers use it from here
 
 if TYPE_CHECKING:
@@ -101,19 +101,31 @@ def check_binding(binding: dict, record: dict, catalog_names: set[str], *, pins:
 
 
 def hosts(urls: list[str], cfg: Config) -> list[str]:
-    """Exact hosts a job may reach: the URLs' hosts, their configured redirect targets, and the package hosts."""
+    """Exact hosts a job may reach: the URLs' hosts (never a GitHub one), their configured redirect targets, and
+    the package hosts."""
     return network_hosts(urls, cfg.network)
 
 
-def network_hosts(urls: list[str], network: NetworkCfg) -> list[str]:
-    """`hosts` over a network block alone."""
+def granted_hosts(noted: dict, patterns: list[str]) -> list[str]:
+    """What a dataset's jobs may reach beside its URLs' hosts, of what buffer-api holds for it (`noted`): the
+    hosts its jobs were refused (`hosts`) that the csub policy allows by now, since a person approved them, and
+    `raw.githubusercontent.com` when a person approved it for this dataset (`approved`) and the policy allows
+    it. No other GitHub host, ever."""
+    wanted = [host for host in noted.get("hosts") or [] if not is_github_host(host)]
+    wanted += [host for host in noted.get("approved") or [] if host == RAW_GITHUB]
+    return [host for host in wanted if not missing_hosts([host], patterns)]
+
+
+def network_hosts(urls: list[str], network: NetworkCfg, raw_github: bool = False) -> list[str]:
+    """`hosts` over a network block alone. A URL's GitHub host is left out: no job reaches GitHub. The one
+    exception is `raw.githubusercontent.com` (file contents, read only), kept with `raw_github`: buffer-api asks
+    that way which hosts a person could approve, and a job gets it through `granted_hosts` alone."""
     url_hosts = {host for url in urls if (host := _host(url))}
+    url_hosts = {host for host in url_hosts if not is_github_host(host) or (raw_github and host == RAW_GITHUB)}
     redirects = {host.lower(): targets for host, targets in network.redirect_hosts.items()}
-    allowed = sorted(
-        url_hosts
-        | {target.lower() for host in url_hosts for target in redirects.get(host, [])}
-        | {host.lower() for host in network.package_hosts}
-    )
-    if bad := [host for host in allowed if is_github_host(host)]:
+    configured = {target.lower() for host in url_hosts for target in redirects.get(host, [])} | {
+        host.lower() for host in network.package_hosts
+    }
+    if bad := sorted(host for host in configured if is_github_host(host)):
         raise ValueError(f"GitHub hosts {bad} must never be granted to a job")
-    return allowed
+    return sorted(url_hosts | configured)

@@ -4,7 +4,8 @@ import logging
 import httpx
 import pytest
 
-from mia_core.registry import Registry, RegistryError, best_effort, read_token
+from mia_core import jobrecord
+from mia_core.registry import Registry, RegistryError, best_effort, put_transfers_again, read_token, report_worker
 
 
 def transport(seen, status=200, body=None):
@@ -262,3 +263,62 @@ def test_a_worker_reports_its_code_until_the_registry_takes_it():
 
     asyncio.run(report_worker(Down(), "mia-data", logging.getLogger("test"), retry_s=0))
     assert len(calls) == 3 and len(set(calls)) == 1 and calls[0][0] == "mia-data"
+
+
+ROW = {
+    "minute": 100,
+    "host": "a.org",
+    "requests": 2,
+    "connection_seconds": 3.5,
+    "peak": 1,
+    "bytes": 10,
+    "answers": {"206": 2},
+    "recovered": {},
+    "final": {},
+    "asked_wait_seconds": 0.0,
+    "backoff_seconds": 0.0,
+}
+
+
+def test_put_transfers():
+    seen = []
+    reg = Registry("http://svc", "t", transport=transport(seen, body={"job": "r1/stage-1", "rows": 1}))
+    assert reg.put_transfers("r1/stage-1", [ROW], "buffers") == {"job": "r1/stage-1", "rows": 1}
+    assert seen[0].method == "PUT" and seen[0].url.path == "/transfers/r1/stage-1"
+    assert json.loads(seen[0].read()) == {"service": "buffers", "rows": [ROW]}
+
+
+def _records_with_transfers(root):
+    jobrecord._store(jobrecord.record_path(root, "r1/a"), {"service": "dep", "finished_at": "x", "transfers": [ROW]})
+    jobrecord._store(jobrecord.record_path(root, "r1/b"), {"service": "dep", "finished_at": "x"})
+
+
+async def test_a_starting_worker_puts_its_records_transfers_again(tmp_path):
+    root, seen = tmp_path / "work", []
+    _records_with_transfers(root)
+    reg = Registry("http://svc", "t", transport=transport(seen, body={}))
+    assert await put_transfers_again(reg, root, logging.getLogger("t")) == 1
+    assert seen[0].url.path == "/transfers/r1/a" and json.loads(seen[0].read()) == {"service": "dep", "rows": [ROW]}
+    down = Registry("http://svc", "t", transport=transport([], status=503))
+    assert await put_transfers_again(down, root, logging.getLogger("t")) == 0  # logged, not raised
+
+
+async def test_a_walk_that_fails_ends_the_put_again_with_what_it_delivered(tmp_path, monkeypatch, caplog):
+    def ended_then_broken(work_root, since):
+        yield "r1/a", {"service": "dep", "finished_at": "x", "transfers": [ROW]}
+        raise OSError("planted")
+
+    monkeypatch.setattr(jobrecord, "ended_since", ended_then_broken)
+    seen = []
+    reg = Registry("http://svc", "t", transport=transport(seen, body={}))
+    assert await put_transfers_again(reg, tmp_path, logging.getLogger("t")) == 1
+    assert [request.url.path for request in seen] == ["/transfers/r1/a"] and "planted" in caplog.text
+
+
+async def test_the_start_up_report_puts_transfers_again_once_the_commit_is_written(tmp_path):
+    root, seen = tmp_path / "work", []
+    _records_with_transfers(root)
+    reg = Registry("http://svc", "t", transport=transport(seen, body={}))
+    await report_worker(reg, "dep", logging.getLogger("t"), work_root=root)
+    assert [request.url.path for request in seen][-1] == "/transfers/r1/a"
+    assert seen[0].url.path.startswith("/workers") and len(seen) == 2

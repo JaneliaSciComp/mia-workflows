@@ -1,5 +1,6 @@
 import gzip
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -60,7 +61,12 @@ async def test_plain_job_spec(tmp_path):
         ),
     )
     s = fake.submitted[0]
-    assert s["agent"] is None and s["env"] == {"A": "1"} and s["session"] == "dep" and s["cwd"] == ws
+    assert (
+        s["agent"] is None
+        and s["env"] == {"A": "1", "MIA_HARNESS_TRANSFERS_DIR": f"{ws}/transfers"}
+        and s["session"] == "dep"
+        and s["cwd"] == ws
+    )
     assert s["mounts"] == [
         {"path": ws, "mode": "rw"},
         {"path": "/data", "mode": "ro"},
@@ -167,7 +173,10 @@ async def test_a_job_leaves_its_record_in_two_halves(tmp_path, monkeypatch):
     job_id = await jobs.submit("k1", spec)
     first = _record(root, "issue-1/r1/match-1")
     assert (first["service"], first["key"], first["job_id"]) == ("dep", "k1", "777")
-    assert first["request"]["command"] == "claude -p …" and first["request"]["env"] == ["KEY"]
+    assert first["request"]["command"] == "claude -p …" and first["request"]["env"] == [
+        "KEY",
+        "MIA_HARNESS_TRANSFERS_DIR",
+    ]
     assert first["submit"]["job_id"] == "777" and "outcome" not in first
     done = await jobs.wait(job_id, str(ws), lambda state: None)
     record = _record(root, "issue-1/r1/match-1")
@@ -209,3 +218,41 @@ async def test_no_job_gets_the_records_writable(tmp_path, writable):
         await jobs.submit("k1", JobSpec("j", "true", str(root / "ws"), 10, rw_mounts=[str(tmp_path / writable)]))
     with pytest.raises(ValueError, match="holds the job records"):
         await jobs.submit("k2", JobSpec("j", "true", str(tmp_path / writable), 10))
+
+
+def _row(minute, **fields):
+    return json.dumps({"minute": minute, "host": "a.org", "requests": 1, "bytes": 5, "answers": {"206": 1}, **fields})
+
+
+async def test_every_job_is_told_where_its_transfers_go(tmp_path):
+    fake, ws = FakeCsub(), str(tmp_path / "ws")
+    await _jobs(tmp_path, fake).submit("k1", JobSpec("j", "true", ws, 10))
+    assert fake.submitted[0]["env"] == {"MIA_HARNESS_TRANSFERS_DIR": f"{ws}/transfers"}
+
+
+async def test_a_jobs_transfers_go_to_its_record_and_to_the_sink(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobrecord, "lsf_usage", lambda job_id: None)
+    root, ws = tmp_path / "work", tmp_path / "work" / "r1" / "stage-1"
+    (ws / "transfers").mkdir(parents=True)
+    (ws / "transfers" / "5-1.jsonl").write_text(_row(int(time.time() // 60)))
+    jobs, given = CsubJobs("dep", tmp_path / "ids", client_factory=lambda: FakeCsub(), work_root=root), []
+    jobs.transfers_sink = lambda where, rows, service: given.append((where, rows, service))
+    job_id = await jobs.submit("k1", JobSpec("j", "true", str(ws), 10, allow_hosts=["a.org"]))
+    await jobs.wait(job_id, str(ws), lambda state: None)
+    record = _record(root, "r1/stage-1")
+    assert record["transfers"][0]["bytes"] == 5 and record["transfers_dropped"] == 0
+    assert given == [("r1/stage-1", record["transfers"], "dep")]
+    jobs.transfers_sink = lambda *args: 1 / 0
+    assert (await jobs.wait(job_id, str(ws), lambda state: None)).state == "DONE"  # a sink that raises
+
+
+async def test_a_job_found_again_keeps_the_minutes_before_it_was_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobrecord, "lsf_usage", lambda job_id: None)
+    root, ws = tmp_path / "work", tmp_path / "work" / "r1" / "stage-1"
+    (ws / "transfers").mkdir(parents=True)
+    (ws / "transfers" / "5-1.jsonl").write_text(_row(int(time.time() // 60) - 30))  # half an hour ago
+    fake = FakeCsub(existing=[SimpleNamespace(job_id="556", cwd=str(ws))])
+    jobs = CsubJobs("dep", tmp_path / "ids", client_factory=lambda: fake, work_root=root)
+    job_id = await jobs.submit("k1", JobSpec("j", "true", str(ws), 10, allow_hosts=["a.org"]))  # found, not sent
+    await jobs.wait(job_id, str(ws), lambda state: None)
+    assert fake.submitted == [] and len(_record(root, "r1/stage-1")["transfers"]) == 1

@@ -1,6 +1,8 @@
 import gzip
 import json
+import os
 import subprocess
+import time
 
 import pytest
 
@@ -152,3 +154,54 @@ def test_keep_result_copies_the_last_line_and_keeps_the_exit_status(tmp_path):
     subprocess.run(["bash", "-c", script], cwd=tmp_path, check=True)
     assert (tmp_path / "exit_code").read_text().strip() == "7"
     assert json.loads((tmp_path / "claude.json").read_text()) == {"result": 1}
+
+
+def test_the_end_without_a_first_half_keeps_no_transfers(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobrecord, "lsf_usage", lambda job_id: None)
+    root, ws = tmp_path / "work", tmp_path / "work" / "r1" / "job-1"
+    (ws / "transfers").mkdir(parents=True)
+    line = {"minute": int(time.time() // 60), "host": "a.org", "requests": 1, "bytes": 5}
+    (ws / "transfers" / "5-1.jsonl").write_text(json.dumps(line))
+    assert jobrecord.write_finished(root, ws, job_id="9", outcome={"state": "DONE"}) == []
+    record = json.loads(gzip.decompress((root / "_jobs" / "r1" / "job-1.json.gz").read_bytes()))
+    assert "transfers_refused" in record and "transfers" not in record
+
+
+def test_transfers_that_cannot_be_read_still_leave_the_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobrecord, "lsf_usage", lambda job_id: None)
+
+    def broken(*args, **kwargs):
+        raise OverflowError("planted")
+
+    monkeypatch.setattr(jobrecord, "collect", broken)
+    root, ws = tmp_path / "work", tmp_path / "work" / "r1" / "job-1"
+    ws.mkdir(parents=True)
+    assert jobrecord.write_finished(root, ws, job_id="9", outcome={"state": "DONE"}) == []
+    record = json.loads(gzip.decompress((root / "_jobs" / "r1" / "job-1.json.gz").read_bytes()))
+    assert record["outcome"] == {"state": "DONE"} and record["finished_at"] and record["transfers_refused"]
+
+
+def test_a_second_end_keeps_the_transfers_of_the_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobrecord, "lsf_usage", lambda job_id: None)
+    root, ws = tmp_path / "work", tmp_path / "work" / "r1" / "job-1"
+    (ws / "transfers").mkdir(parents=True)
+    line = {"minute": int(time.time() // 60), "host": "a.org", "requests": 1, "bytes": 5}
+    (ws / "transfers" / "5-1.jsonl").write_text(json.dumps(line))
+    write_submitted(root, ws, service="s", key="k", job_id="9", request={"allow_hosts": ["a.org"]})
+    first = jobrecord.write_finished(root, ws, job_id="9", outcome={"state": "DONE"})
+    assert [row["bytes"] for row in first] == [5]
+    (ws / "transfers" / "5-1.jsonl").write_text(json.dumps({**line, "bytes": 7}))
+    (ws / "transfers" / "6-1.jsonl").write_text("not a row")
+    assert jobrecord.write_finished(root, ws, job_id="9", outcome={"state": "DONE"}) == first
+    record = json.loads(gzip.decompress((root / "_jobs" / "r1" / "job-1.json.gz").read_bytes()))
+    assert record["transfers"] == first and record["transfers_dropped"] == 0
+
+
+def test_records_that_ended_lately_are_listed(tmp_path):
+    root = tmp_path / "work"
+    ended = {"finished_at": "x"}
+    for where, extra in (("r1/a", {**ended, "transfers": [{"host": "a.org"}]}), ("r1/b", {}), ("r1/old", ended)):
+        jobrecord._store(jobrecord.record_path(root, where), {"service": "dep", **extra})
+    os.utime(jobrecord.record_path(root, "r1/old"), (1.0, 1.0))
+    assert [where for where, _ in jobrecord.ended_since(root, time.time() - 60)] == ["r1/a"]
+    assert list(jobrecord.ended_since(tmp_path / "nothing", 0.0)) == []

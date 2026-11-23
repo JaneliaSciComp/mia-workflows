@@ -49,40 +49,45 @@ PREP_STAGES = {
     "needs-human": ("d93f0b", "mia-buffers: the request stopped, needs a human"),
     "cancelled": ("cccccc", "mia-buffers: the request was cancelled"),
 }
-PREP_HUMAN_LABELS = {"go": ("0e8a16", "Prepare the datasets this request names")}
-# stage -> (status word, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
+PREP_HUMAN_LABELS = {
+    "go": ("0e8a16", "Prepare the datasets this request names, each from scratch"),
+    "resume": ("0e8a16", "Prepare the datasets this request names: each runs what it has left"),
+}
+# stage -> (phase, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
 # A round in progress (`working`) accepts `cancel`, what feeds it (`dropped`) and the force stop; a new go, a
 # revoke or a retire waits until it has ended or been cancelled. `ready` takes `dropped` too: a dataset that
 # waited for its files at the approve keeps its place and joins when they land. The workflow stays the code that
 # carries a round out, and two things a stage does not say stay its refusal: a `staged` buffer whose late
 # datasets still have a job running refuses a go, and a `ready` buffer rebuilding a lost volume abandons the
-# rebuild on a go or retire.
+# rebuild on a go or retire. `edit` replaces the definition text where the buffer rests: no round is open and it
+# does not serve. buffer-api settles it itself, so the workflow hears of none.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
-    "new": ("not started", frozenset({"go"})),
+    "new": ("not started", frozenset({"edit", "go"})),
     "planning": ("working", frozenset({"cancel", "stop"})),
     "plan-review": ("waiting", frozenset({"approve", "go", "cancel", "stop"})),
     "sourcing": ("working", frozenset({"cancel", "dropped", "stop"})),
     "staged": ("waiting", frozenset({"approve", "go", "dropped", "cancel", "stop"})),
     "ready": ("done", frozenset({"go", "revoke", "retire", "dropped", "stop"})),
     "idle": ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"})),
-    "retired": ("done", frozenset({"go"})),
-    "needs-human": ("stuck", frozenset({"go"})),
-    "cancelled": ("done", frozenset({"go"})),
+    "retired": ("done", frozenset({"edit", "go"})),
+    "needs-human": ("stopped", frozenset({"edit", "go"})),
+    "cancelled": ("done", frozenset({"edit", "go"})),
 }
 CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")  # the buffer stages `cancel` ends a round at
 PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),  # a request has no `new` label: a subject before its first stage
     "requested": ("working", frozenset({"cancel", "stop"})),
-    "done": ("done", frozenset({"go"})),
-    "needs-human": ("stuck", frozenset({"go", "recheck"})),  # recheck: look at its datasets again
-    "cancelled": ("done", frozenset({"go"})),
+    # go: every dataset of the request starts over; resume: each runs what it has left (spec resume-restart §5)
+    "done": ("done", frozenset({"go", "resume"})),
+    "needs-human": ("stopped", frozenset({"go", "resume", "recheck"})),  # recheck: look at its datasets again
+    "cancelled": ("done", frozenset({"go", "resume"})),
 }
 # What a round is doing at each stage it works or waits at: the sentence of the stage's start entry when the round
 # has nothing more specific to say.
 STAGE_SENTENCES = {
     "planning": "The spec is resolved against the catalog into a plan: the pool of datasets and their weights.",
     "plan-review": "The plan is in the timeline; the round waits here for an approve, and no job has run yet.",
-    "sourcing": "The pool's datasets are fetched, staged and registered with the buffer, several at a time.",
+    "sourcing": "The pool's datasets are staged and registered with the buffer, several at a time.",
     "staged": "No job is left to run and the board is in the timeline; the round waits for an approve.",
     "idle": "No consumer has drawn for a while; a keep returns the buffer to ready, otherwise the keeper retires it.",
 }
@@ -123,7 +128,7 @@ class PathsCfg(mia_data_config.PathsCfg):
 
     ROOTS: ClassVar[tuple[str, ...]] = ("work_root", "storage_root", "raw_root", "staged_root")
 
-    raw_root: Path  # unset: mia-data's download cache, <work_root>/_cache, so a dataset is fetched once for both
+    raw_root: Path  # unset: mia-data's cache, <work_root>/_cache, so a file a reader took whole is cached once for both
     raw_root_url: str | None = None
     staged_root: Path
     staged_root_url: str | None = None
@@ -143,8 +148,8 @@ class PathsCfg(mia_data_config.PathsCfg):
 
 
 class SourcingCfg(BaseModel):
-    parallel: int = Field(default=4, ge=1)  # stage jobs in flight per buffer
-    parallel_fetch: int = Field(default=2, ge=1)  # fetch jobs in flight per buffer
+    parallel: int = Field(default=20, ge=1)  # stage jobs in flight per buffer
+    per_source: int = Field(default=1, ge=1)  # of those, on any one host a dataset's files are on
     tensorizer: str = "muvit-2d"  # must exist under <harness.dir>/tensorizers/
 
 

@@ -45,6 +45,7 @@ STAGES = {
 }
 HUMAN_LABELS = {  # the actions a person takes
     "go": ("0e8a16", "Start (or restart) a mia-data round"),
+    "resume": ("0e8a16", "Resume the round: every step that finished is kept, on the same pins"),
     "approve": (
         "0e8a16",
         "Approve the crops under review: they are saved to the dataset's folder (a snippet PR merges first)",
@@ -58,25 +59,32 @@ HUMAN_LABELS = {  # the actions a person takes
         "Revoke this dataset's saved crops: buffers that drew from it are degraded, nothing is deleted",
     ),
 }
-# `shelved` is no stage's word: buffer-api gives it to a subject a person has shelved, whatever its stage
-STATUS_WORDS = ("not started", "working", "waiting", "stuck", "done", "shelved")
-# stage -> (status word, the actions it accepts); "working" means a round is in progress, and a round in progress
+# what a round does at a stage: none has run, one is in progress, one is open and waits for a person's answer,
+# none is open short of the lifecycle's end, the end (spec overview §3.1). A worker decides by it; the status a
+# person reads is buffer-api's, from the phase, the subject's hold and the repair agent's case about it.
+PHASES = ("not started", "working", "waiting", "stopped", "done")
+# stage -> (phase, the actions it accepts); "working" means a round is in progress, and a round in progress
 # accepts only `cancel` (spec webapp-actions §5.1). `debugging` is between two rounds, so it also takes the `go`
-# that runs the next one: the debugger's own, or a person's who does not want to wait for it. buffer-api refuses any other action, the page offers only
-# these. The workflow stays the code that carries a round out.
+# that runs the next one: the debugger's own, or a person's who does not want to wait for it. A verdict is
+# taken at `review`, about the set under review, and at `done` as a `reject` of the saved set (spec
+# judge-decides §5.2). buffer-api refuses any other action and a verdict about another set; the page offers only
+# these. The workflow stays the code that carries a round out. `resume` (spec resume-restart §4.3) goes on with a round that
+# stopped or waits for its verdict: not where nothing has run, nothing is missing, or the debugger's own run
+# follows.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
     "new": ("not started", frozenset({"go"})),
     "matching": ("working", frozenset({"cancel", "stop"})),
     "developing": ("working", frozenset({"cancel", "stop"})),
     "testing": ("working", frozenset({"cancel", "stop"})),
-    "review": ("waiting", frozenset({"approve", "reject", "go", "cancel"})),  # go: start over, the set is dropped
+    # go: start over, the set is dropped; resume: the set stays, and is judged if the judge never looked
+    "review": ("waiting", frozenset({"approve", "reject", "go", "resume", "cancel"})),
     "merging": ("working", frozenset({"cancel", "stop"})),
     "debugging": ("working", frozenset({"go", "cancel", "stop"})),
-    "done": ("done", frozenset({"go", "revoke"})),
-    "failed": ("stuck", frozenset({"go", "revoke"})),
-    "blocked": ("stuck", frozenset({"go", "revoke"})),
-    "needs-human": ("stuck", frozenset({"go", "revoke"})),
-    "cancelled": ("done", frozenset({"go", "revoke"})),
+    "done": ("done", frozenset({"go", "reject", "revoke"})),
+    "failed": ("stopped", frozenset({"go", "resume", "revoke"})),
+    "blocked": ("stopped", frozenset({"go", "resume", "revoke"})),
+    "needs-human": ("stopped", frozenset({"go", "resume", "revoke"})),
+    "cancelled": ("done", frozenset({"go", "resume", "revoke"})),
 }
 
 
@@ -188,9 +196,6 @@ class LimitsCfg(BaseModel):
     autodev_quiet_hours: float = (
         2  # a round waiting for a snippet ends `blocked` after this long without autodev at work
     )
-    fetch_bytes: float = 50e9
-    fetch_walltime_min: int = 480
-    fetch_attempts: int = 4
 
 
 class HarnessCfg(BaseModel):
@@ -291,6 +296,12 @@ class Config(BaseModel):
     def await_queue(self) -> str:
         """The task queue for the long-running job waits, kept apart from the short activities."""
         return self.deployment + "-await"
+
+    @property
+    def mirror_queue(self) -> str:
+        """The task queue of the mirror's passes, kept apart from the rounds' activities: a pass waits on
+        GitHub, and no round waits for a pass."""
+        return self.deployment + "-mirror"
 
     def label(self, stage: str) -> str:
         return f"data:{stage}"

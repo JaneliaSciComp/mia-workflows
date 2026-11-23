@@ -63,7 +63,7 @@ def test_mixed_types_in_a_column_do_not_break_the_sort() -> None:
 
 # --- a plan as the designer shows it: one page of its rows and the numbers over all of them
 
-from mia_buffers.explore import decision_of, plan_view  # noqa: E402
+from mia_buffers.explore import PREPARATIONS, decision_of, plan_view  # noqa: E402
 
 
 def plan_row(record: str, **fields) -> dict:
@@ -117,7 +117,8 @@ def test_the_plan_summary_counts_over_every_row() -> None:
     summary = plan_view(PLAN, DATASETS, "p256-l1-2", ALL)["summary"]
     assert (summary["fitting"], summary["pool"], summary["prepared"], summary["in_progress"]) == (3, 2, 2, 0)
     assert (summary["unprepared"], summary["needs_human"], summary["not_prepared"]) == (1, 0, 1)
-    assert (summary["bytes_fitting"], summary["bytes_pool"], summary["bytes_to_fetch"]) == (180, 150, 80)
+    assert (summary["bytes_fitting"], summary["bytes_pool"]) == (180, 150)  # the datasets' size upstream
+    assert "bytes_to_fetch" not in summary  # a stage reads what its crops touch: no dataset is fetched
     assert (summary["dims"], summary["capacity"], summary["top_share"]) == (["2D"], 22, 0.75)
     assert [(step["label"], step["value"], step.get("remaining")) for step in summary["funnel"]] == [
         ("dims not selected", 4, 7),
@@ -130,36 +131,87 @@ def test_the_plan_summary_counts_over_every_row() -> None:
     assert summary["by_modality"] == [{"label": "TEM", "value": 2}, {"label": "confocal", "value": 1}]
     assert summary["weight_by_modality"] == [{"label": "TEM", "value": 0.75}, {"label": "confocal", "value": 0.25}]
     assert [(row["id"], row["weight"]) for row in summary["heaviest"]] == [("a", 0.75), ("b", 0.25)]
-    assert summary["to_prepare"] == ["c"]
-    # what a request could start is read from the stage: a dataset in a round or at review is not offered, whatever
-    # its state says; one that stopped is
-    for stage, offered in (("review", []), ("testing", []), ("needs-human", ["c"]), ("cancelled", ["c"])):
-        waiting = plan_view(PLAN, {**DATASETS, "c": {"stage": stage}}, "p256-l1-2", ALL)["summary"]
-        assert waiting["to_prepare"] == offered, stage
-    # nor is one whose catalog record cannot be run
-    gapped = plan_view(PLAN, {**DATASETS, "c": {"gaps": ["it names no data URL"]}}, "p256-l1-2", ALL)["summary"]
-    assert gapped["to_prepare"] == []
-    # nor one a person has shelved
-    shelved = {**PLAN, "rows": [{**row, "prepared": "shelved"} if row["id"] == "c" else row for row in PLAN["rows"]]}
-    assert plan_view(shelved, DATASETS, "p256-l1-2", ALL)["summary"]["to_prepare"] == []
 
 
 def test_the_plan_rows_are_joined_sorted_and_cut() -> None:
     view = plan_view(PLAN, DATASETS, "p256-l1-2", ALL)
-    assert [row["id"] for row in view["rows"]] == ["a", "b", "c", "d", "e"] and view["total"] == 5  # the plan's order
+    assert [row["id"] for row in view["rows"]] == ["a", "b", "c", "d"] and view["total"] == 4  # the plan's order
     by_decision = plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, "decision", False, ""))
-    assert [row["id"] for row in by_decision["rows"]] == ["a", "b", "e", "d", "c"]  # the pool, then the planner's rules
+    assert [row["id"] for row in by_decision["rows"]] == ["a", "b", "d", "c"]  # the pool, then the planner's rules
     first = view["rows"][0]
     assert (first["title"], first["licence"], first["issue"], first["staged_here"]) == ("Alpha", "CC0-1.0", 7, True)
     assert first["fits"] and first["in_pool"] and first["decision"]["group"] == "pool"
     assert view["rows"][2]["title"] == "" and view["rows"][2]["raw"] is None  # a record the registry knows nothing of
     page = plan_view(PLAN, DATASETS, "p256-l1-2", Page(2, 2, "dataset", False, ""))
-    assert [row["id"] for row in page["rows"]] == ["c", "d"] and page["total"] == 5
+    assert [row["id"] for row in page["rows"]] == ["c", "d"] and page["total"] == 4
     assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "beta"))["rows"]] == [
         "b"
     ]
     fit = plan_view(PLAN, DATASETS, "p256-l1-2", ALL, fit_only=True)
     assert [row["id"] for row in fit["rows"]] == ["a", "b", "c"] and fit["summary"]["fitting"] == 3
+
+
+def test_a_dataset_row_names_what_its_record_lacks() -> None:
+    """What a record lacks is the same for every buffer: a data URL (no round can run), an array shape or a voxel
+    size (no plan can place a crop in it without assuming). The Datasets list flags each and filters by it."""
+    import copy
+
+    from mia_buffers.explore import facets, lacks_filter, record_row
+    from mia_buffers.plan import load_records
+    from tests.test_buffers_plan import CATALOG
+
+    path, whole = next((p, r) for p, r in load_records(CATALOG) if "u937" in p)
+    assert record_row(path, whole)["lacks"] == []
+
+    def changed(edit) -> list[str]:
+        record = copy.deepcopy(whole)
+        edit(record)
+        return record_row(path, record)["lacks"]
+
+    def no_shapes(record: dict) -> None:
+        for array in record["technical"]["arrays"]:
+            array.pop("shape", None)
+
+    def no_voxels(record: dict) -> None:
+        record["imaging"]["voxel_size_nm"] = {}
+
+    def no_urls(record: dict) -> None:
+        record["data"] = {}
+        record["technical"].pop("sample", None)
+        for array in record["technical"]["arrays"]:
+            array["path_pattern"] = "file.tif"
+
+    assert changed(no_shapes) == ["array shape"] and changed(no_voxels) == ["voxel size"]
+    assert changed(lambda record: (no_shapes(record), no_voxels(record))) == ["array shape", "voxel size"]
+    assert "data URL" in changed(no_urls)
+    assert record_row(path, {"id": "x", "technical": "not a mapping"})["lacks"] == ["readable record"]
+    assert record_row(None, {"id": "gone"})["lacks"] == []  # in no synced catalog: nothing is known of its record
+    rows = [{"lacks": []}, {"lacks": ["array shape"]}, {"lacks": ["array shape", "voxel size"]}]
+    plain = {name: None for name in ("state", "modality", "dims", "licence")}
+    counts = facets([{**plain, **row} for row in rows])["lacks"]
+    assert counts == {"anything": 2, "nothing": 1, "array shape": 2, "voxel size": 1}
+    assert list(counts)[:2] == ["anything", "nothing"]  # the two that are about every lack come first
+    assert lacks_filter(rows, "nothing") == [{"lacks": []}]
+
+
+def test_a_dataset_whose_record_lacks_something_is_not_listed_in_a_buffers_plan() -> None:
+    """Buffer creation lists the datasets a definition can use and, on request, those its patch does not fit. A
+    dataset the planner could not place because of its record (no array shape, no voxel size, unreadable) is a
+    matter for the Datasets list: it is counted, never listed."""
+    lacking = {"e": "record unreadable"}
+    listed = plan_view(PLAN, DATASETS, "p256-l1-2", ALL)
+    assert [row["id"] for row in listed["rows"]] == ["a", "b", "c", "d"] and listed["total"] == 4
+    assert listed["summary"]["record_lacks"] == len(lacking) == 1
+    fitting = plan_view(PLAN, DATASETS, "p256-l1-2", ALL, fit_only=True)
+    assert [row["id"] for row in fitting["rows"]] == ["a", "b", "c"]
+    for reason in ("no array shape", "voxel size unknown"):
+        plan = {
+            **PLAN,
+            "rows": [
+                dict(row, fit={"ok": False, "reason": reason}) if row["id"] == "d" else row for row in PLAN["rows"]
+            ],
+        }
+        assert [row["id"] for row in plan_view(plan, DATASETS, "p256-l1-2", ALL)["rows"]] == ["a", "b", "c"], reason
 
 
 def test_the_registry_toggles_narrow_the_rows_and_the_numbers_but_not_the_funnel() -> None:
@@ -169,14 +221,38 @@ def test_the_registry_toggles_narrow_the_rows_and_the_numbers_but_not_the_funnel
     assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", ALL, raw_cached=True)["rows"]] == ["a"]
     assert [row["id"] for row in plan_view(PLAN, DATASETS, "p256-l1-2", ALL, staged_geom=True)["rows"]] == ["a"]
     assert plan_view(PLAN, DATASETS, "p512-l1", ALL, staged_geom=True)["rows"] == []
+    stopped = {**PLAN, "rows": [dict(row, prepared="needs-human") if row["id"] == "c" else row for row in PLAN["rows"]]}
+    assert plan_view(stopped, DATASETS, "p256-l1-2", ALL)["summary"]["needs_human"] == 1
+    hidden = plan_view(stopped, DATASETS, "p256-l1-2", ALL, no_needs_human=True)
+    assert [row["id"] for row in hidden["rows"]] == ["a", "b"] and hidden["summary"]["fitting"] == 2
 
 
-def test_the_datasets_to_prepare_follow_the_search() -> None:
-    """A request takes a bounded number of datasets: the search box is how a person prepares a large plan in parts."""
-    assert plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "zzz"))["summary"]["to_prepare"] == []
-    assert plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "not prepared"))["summary"][
-        "to_prepare"
-    ] == ["c"]
-    assert (
-        plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "zzz"))["summary"]["fitting"] == 3
-    )  # numbers stay
+def test_a_prepare_step_lists_the_datasets_at_one_point_of_their_preparation() -> None:
+    """The three choices share out every row (a stopped, shelved or revoked dataset is unprepared), as the
+    summary's three counts do; the choice narrows the rows and leaves the numbers alone."""
+    states = {"a": "prepared", "b": "in-progress", "c": "needs-human", "d": "shelved"}
+    plan = {**PLAN, "rows": [dict(row, prepared=states.get(row["id"], "unprepared")) for row in PLAN["rows"]]}
+    listed = {
+        choice: [row["id"] for row in plan_view(plan, DATASETS, "p256-l1-2", ALL, preparation=choice)["rows"]]
+        for choice in PREPARATIONS
+    }
+    assert listed == {"unprepared": ["c", "d"], "in-progress": ["b"], "prepared": ["a"]}
+    narrowed = plan_view(plan, DATASETS, "p256-l1-2", ALL, fit_only=True, preparation="unprepared")
+    assert [row["id"] for row in narrowed["rows"]] == ["c"] and narrowed["total"] == 1
+    summary = narrowed["summary"]
+    assert (summary["fitting"], summary["prepared"], summary["in_progress"], summary["unprepared"]) == (3, 1, 1, 1)
+
+
+def test_the_plan_sorts_by_where_each_dataset_stands() -> None:
+    """A buffer's Prepare step sorts by stage, to bring the datasets of one stage together; one never started is
+    last. The search narrows the rows and leaves the numbers alone."""
+    stages = {**DATASETS, "a": {"stage": "review"}, "b": {"stage": "blocked"}, "c": {}}
+    by_stage = plan_view(PLAN, stages, "p256-l1-2", Page(50, 0, "stage", False, ""), fit_only=True)
+    assert [(row["id"], row["stage"]) for row in by_stage["rows"]] == [("b", "blocked"), ("a", "review"), ("c", None)]
+    # a row carries what the Datasets list shows of a dataset, under the names it has there
+    last = by_stage["rows"][-1]
+    assert (last["state"], last["modality"]) == (last["prepared"], last["modality_group"])
+    assert {"reason", "staged", "lacks", "gaps", "updated_at"} <= set(last)
+    for name in ("crops", "staged", "updated"):  # and sorts by each of its columns
+        assert plan_view(PLAN, stages, "p256-l1-2", Page(50, 0, name, False, ""))["total"] == 4
+    assert plan_view(PLAN, DATASETS, "p256-l1-2", Page(50, 0, None, False, "zzz"))["summary"]["fitting"] == 3

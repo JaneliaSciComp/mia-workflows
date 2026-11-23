@@ -94,6 +94,9 @@ def test_train_dataset_streams_and_val_is_frozen(buffer_server):
     assert s["meta"]["descriptor"]["plane"]["z"] in range(4) and s["meta"]["descriptor"]["path"] == "/staged/a/v0.zarr"
     seqs = [train[i]["meta"]["descriptor"]["seq"] for i in range(10)]
     assert len(set(seqs)) == 10 and "array" not in s["meta"]  # a stream of distinct draws; meta is JSON-safe
+    with pytest.raises(IndexError):  # so a plain `for` over the dataset (no sampler) ends at its length
+        train[10]
+    assert sum(1 for _ in train) == 10
     val = BufferDataset(buffer_server, "b", "val", tensorizers=SNAP, prefetch=2)
     assert len(val) == 4
     first = [val[i]["meta"]["descriptor"]["seq"] for i in range(4)]

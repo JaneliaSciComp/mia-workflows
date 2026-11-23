@@ -10,6 +10,7 @@ from mia_buffers.plan import (
     UNKNOWN_SHAPE_NOTE,
     Fit,
     Plan,
+    bound_shapes,
     build_plan,
     crops_for,
     fit,
@@ -76,6 +77,24 @@ def test_fit_rules(spec):
     assert fit(F[DUP], spec).reason == "no array shape"
     assert fit(F[U937], spec).reason == "fits"
     assert fit(F[HEMIBRAIN], spec).reason == "fits"
+
+
+def test_fit_is_refused_when_no_bound_array_holds_the_footprint(spec, spec_2d):
+    """The record lists a large array, but the binding reads smaller ones: no crop can be drawn from them."""
+    small = [{"z": 27, "y": 355, "x": 389}, {"z": 73, "y": 817, "x": 686}]
+    assert fit(F[U937], spec, small).reason == "footprint 1024×1024 exceeds every bound array (largest 817×686)"
+    assert fit(F[U937], spec, [*small, {"c": 3, "y": 1024, "x": 2000}]).reason == "fits"  # one array is enough
+    assert fit(F[U937], spec, [{"y": 2000, "x": 1023}]).ok is False
+    assert fit(F[MITOLAB], spec, [{"y": 4096, "x": 4096}]).reason == "footprint 1024×1024 exceeds 224×224"
+    plan = build_plan(spec_2d, "h", None, records(), prepared={U937, BCSS}, bound={U937: small})
+    rows = plan.rows_by_id
+    assert not rows[U937].in_pool and rows[U937].fit.reason.endswith("(largest 817×686)")
+    assert rows[BCSS].in_pool and rows[BCSS].weight == 1.0  # no shapes on its row: the record's array decides
+
+
+def test_bound_shapes_takes_the_rows_that_have_them():
+    rows = [{"id": "a", "raw_shapes": [{"y": 8, "x": 8}]}, {"id": "b", "raw_shapes": None}, {"id": "c"}]
+    assert bound_shapes(rows) == {"a": [{"y": 8, "x": 8}]}
 
 
 def test_positions_and_weights(spec_2d):
@@ -436,3 +455,37 @@ def test_a_dataset_estimated_over_the_stage_cap_is_a_plan_warning(spec_2d, plan_
     assert tight.valid  # a warning: the stage job measures the real bytes
     roomy = build_plan(spec_2d, "h", None, records(), stage_bytes=1e15)
     assert not any("limits.stage_bytes" in warning for warning in roomy.warnings)
+
+
+FILTERS = [{"name": "content"}, {"name": "labelled"}]
+
+
+def test_plan_digest_with_filters_golden():
+    """The cross-repo pin: the harness's PlanRule.digest() of the same rule with these filters gives this hex."""
+    rule = {
+        "seed": 0,
+        "patch": 256,
+        "levels": [1, 2, 4],
+        "samples": {"train": 1000, "val": 20, "test": 20},
+        "split": {"policy": "fractions", "fractions": {"train": 0.8, "val": 0.1, "test": 0.1}, "seed": 0},
+        "channel_recipe": None,
+        "filters": FILTERS,
+    }
+    assert plan_digest(rule) == "543be40667f56b2ed78ee2da2472d6bf56a12649a3711589d3db493e1d5dbc5d"
+
+
+def test_a_rule_has_filters_only_when_the_definition_does(spec_2d):
+    plain = build_plan(spec_2d, "h", None, records()).rows_by_id[U937]
+    assert "filters" not in plain.plan_rule
+    filtered = build_plan(spec_with(spec_2d, **{"sampling.filters": FILTERS[::-1]}), "h", None, records())
+    row = filtered.rows_by_id[U937]
+    assert row.plan_rule["filters"] == FILTERS  # name order, whatever the definition's
+    assert {**row.plan_rule, "filters": None} == {**plain.plan_rule, "filters": None}
+    assert row.plan_digest != plain.plan_digest and row.planned == plain.planned
+
+
+def test_planned_reads_up_to_with_filters(spec_2d):
+    plain = build_plan(spec_2d, "h", None, records()).render_markdown()
+    assert "up to" not in plain
+    text = build_plan(spec_with(spec_2d, **{"sampling.filters": FILTERS}), "h", None, records()).render_markdown()
+    assert "| up to train " in text and "\nplanned up to " in text

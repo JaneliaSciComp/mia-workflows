@@ -33,7 +33,6 @@ BOARD_STATUSES = (
     "waiting-dataset",
     "waiting-lock",
     "waiting-drop",
-    "fetching",
     "blocked",
     "staging",
     "servable",
@@ -103,6 +102,10 @@ CREATE TABLE IF NOT EXISTS shelved (kind TEXT, number INTEGER, by TEXT, at TEXT,
 CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, number INTEGER, key TEXT NOT NULL,
     rule TEXT NOT NULL, state TEXT NOT NULL, opened REAL, updated REAL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS cases_state ON cases (state);
+CREATE TABLE IF NOT EXISTS transfers (host TEXT, minute INTEGER, job TEXT, service TEXT, requests INTEGER,
+    connection_seconds REAL, peak INTEGER, bytes INTEGER, asked_wait_seconds REAL, backoff_seconds REAL,
+    answers TEXT NOT NULL, recovered TEXT NOT NULL, final TEXT NOT NULL, PRIMARY KEY (host, minute, job));
+CREATE INDEX IF NOT EXISTS transfers_minute ON transfers (minute);
 """
 
 CASE_COLUMNS = ("id", "kind", "number", "key", "rule", "state", "opened", "updated", "data")
@@ -132,6 +135,11 @@ def _volume_from(data: dict) -> Volume:
     return Volume(**data)
 
 
+def _staged_key(artifact: str | None, path: str) -> str:
+    """What a buffer's staged reference names: the volume's artifact, else the directory of its pyramid."""
+    return artifact or str(PurePosixPath(path).parent)
+
+
 class Ledger:
     """All reads and writes go through one connection guarded by a lock; writes are single transactions."""
 
@@ -148,6 +156,8 @@ class Ledger:
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
+        # a case stored as `needs-person` ended with the repair agent giving up
+        self._db.execute("UPDATE cases SET state = 'gave-up' WHERE state = 'needs-person'")
 
     def close(self) -> None:
         with self._lock:
@@ -174,21 +184,46 @@ class Ledger:
                 self._db.execute("ROLLBACK")
                 raise
 
-    def put_volume(self, buffer: str, volume: Volume, refs: Iterable[tuple[str, str]] = ()) -> None:
-        """Upsert the volume and add its (kind, key) references in one transaction."""
+    def put_volume(self, buffer: str, volume: Volume, refs: Iterable[tuple[str, str]] = ()) -> int:
+        """Upsert the volume and add its (kind, key) references in one transaction. A volume re-registered under
+        another artifact or with other candidates takes the buffer's frozen eval lists with it (every split: a
+        frozen row names a candidate by index into the volume it was drawn from), and the buffer's reference to the
+        old artifact when no other volume still uses it. Returns the frozen rows removed."""
+        cleared = 0
         with self._transaction() as db:
+            previous = self._volume_of(db, buffer, volume.id)
             db.execute(
                 "INSERT OR REPLACE INTO volumes VALUES (?, ?, ?)",
                 (buffer, volume.id, json.dumps(dataclasses.asdict(volume))),
             )
             db.executemany("INSERT OR IGNORE INTO refs VALUES (?, ?, ?)", [(buffer, kind, key) for kind, key in refs])
+            if previous is not None and (previous.artifact, previous.samples) != (volume.artifact, volume.samples):
+                cleared = int(db.execute("DELETE FROM frozen WHERE buffer = ?", (buffer,)).rowcount)
+            if previous is not None and (staged := _staged_key(previous.artifact, previous.path)) != _staged_key(
+                volume.artifact, volume.path
+            ):
+                self._drop_unused_staged_ref(db, buffer, staged)
             self._volumes.pop(buffer, None)
+        return cleared
 
-    def clear_frozen(self, buffer: str) -> int:
-        """Drop the buffer's frozen eval lists (every split); returns the rows removed. Called when a volume's
-        candidates change, since a frozen row names a candidate by index into the volume it was drawn from."""
-        with self._transaction() as db:
-            return int(db.execute("DELETE FROM frozen WHERE buffer = ?", (buffer,)).rowcount)
+    @staticmethod
+    def _volume_of(db: sqlite3.Connection, buffer: str, volume_id: str) -> Volume | None:
+        """The buffer's volume as stored; None without it."""
+        found = db.execute("SELECT data FROM volumes WHERE buffer = ? AND id = ?", (buffer, volume_id)).fetchone()
+        return _volume_from(json.loads(found[0])) if found else None
+
+    @staticmethod
+    def _drop_unused_staged_ref(db: sqlite3.Connection, buffer: str, staged: str) -> None:
+        """Drop the buffer's reference to `staged` unless one of its volumes still lives there."""
+        still = {
+            _staged_key(known_artifact, known_path)
+            for known_artifact, known_path in db.execute(
+                "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes WHERE buffer = ?",
+                (buffer,),
+            )
+        }
+        if staged not in still:
+            db.execute("DELETE FROM refs WHERE buffer = ? AND kind = 'staged' AND key = ?", (buffer, staged))
 
     def volumes(self, buffer: str) -> list[Volume]:
         """The buffer's volumes by id, parsed once per write (every `next` and `split` request reads them); a new list
@@ -422,6 +457,50 @@ class Ledger:
             target.close()
         os.replace(tmp, dest)
 
+    # --- transfers: what jobs asked of each host, per clock minute ---------------------------------
+
+    def put_transfers(self, job: str, service: str, rows: list[dict]) -> int:
+        """Store a job's transfer rows; a row put again replaces itself. Returns how many were written."""
+        with self._transaction() as db:
+            db.executemany(
+                "INSERT OR REPLACE INTO transfers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        row["host"],
+                        row["minute"],
+                        job,
+                        service,
+                        row["requests"],
+                        row["connection_seconds"],
+                        row["peak"],
+                        row["bytes"],
+                        row["asked_wait_seconds"],
+                        row["backoff_seconds"],
+                        json.dumps(row["answers"]),
+                        json.dumps(row["recovered"]),
+                        json.dumps(row["final"]),
+                    )
+                    for row in rows
+                ],
+            )
+        return len(rows)
+
+    def transfers(self, since_minute: int, until_minute: int, host: str | None = None) -> list[dict]:
+        """The stored rows of minutes since..until (one host when given), ordered by host, minute, job."""
+        query = "SELECT * FROM transfers WHERE minute BETWEEN ? AND ?"
+        arguments: list[int | str] = [since_minute, until_minute]
+        if host is not None:
+            query, arguments = query + " AND host = ?", [*arguments, host]
+        with self._lock:
+            cursor = self._db.execute(query + " ORDER BY host, minute, job", arguments)
+            names = [column[0] for column in cursor.description]
+            found = cursor.fetchall()
+        rows = [dict(zip(names, values, strict=True)) for values in found]
+        for row in rows:
+            for name in ("answers", "recovered", "final"):
+                row[name] = json.loads(row[name])
+        return rows
+
     # --- catalogs and records: the parsed dataset records of a git ref ---------------------------
 
     def put_records(self, ref: str, records: list[tuple[str, dict]]) -> int:
@@ -601,15 +680,21 @@ class Ledger:
         marker: str = "",
         round_id: str | None = None,
         stage: str | None = None,
+        data: dict | None = None,
     ) -> tuple[dict, dict | None] | None:
         """Write a stage, an entry or both, in one transaction: (subject, entry), or None without such a subject.
         A `stage` always becomes the subject's and raises its revision. A `body` is appended once per marker: a
         second write with the marker (a retried activity, a stage entered twice in a round) returns the first
-        entry and appends nothing."""
+        entry and appends nothing. Each key of `data` replaces that key of the subject's data; the others stay."""
         key = (kind, number)
         with self._transaction() as db:
-            if not self._subjects(db, "WHERE kind = ? AND number = ?", key):
+            if not (found := self._subjects(db, "WHERE kind = ? AND number = ?", key)):
                 return None
+            if data:
+                db.execute(
+                    "UPDATE subjects SET data = ?, updated = ? WHERE kind = ? AND number = ?",
+                    (json.dumps({**found[0]["data"], **data}), time.time(), *key),
+                )
             if stage is not None:
                 db.execute(
                     "UPDATE subjects SET stage = ?, revision = revision + 1, updated = ? WHERE kind = ? AND number = ?",
@@ -679,26 +764,19 @@ class Ledger:
             )
             return self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))[0]
 
-    def _set_subject(self, kind: str, number: int, column: str, value: object) -> dict | None:
+    def _set_subject(self, kind: str, number: int, column: str, value: object, *, revise: bool = False) -> dict | None:
         with self._transaction() as db:
             db.execute(
-                f"UPDATE subjects SET {column} = ?, updated = ? WHERE kind = ? AND number = ?",
-                (value, time.time(), kind, number),
+                f"UPDATE subjects SET {column} = ?, revision = revision + ?, updated = ? WHERE kind = ? AND number = ?",
+                (value, int(revise), time.time(), kind, number),
             )
             found = self._subjects(db, "WHERE kind = ? AND number = ?", (kind, number))
         return found[0] if found else None
 
-    def spec_has_buffer(self, number: int) -> bool:
-        """Whether a round of the buffer spec with this number has created its buffer (ids are `i<number>-e<go>`)."""
-        with self._lock:
-            return (
-                self._db.execute("SELECT 1 FROM buffers WHERE id LIKE ? LIMIT 1", (f"i{number}-e%",)).fetchone()
-                is not None
-            )
-
-    def set_subject_data(self, kind: str, number: int, data: dict) -> dict | None:
-        """Replace what the subject carries (a buffer spec's text); None when there is no such subject."""
-        return self._set_subject(kind, number, "data", json.dumps(data))
+    def set_subject_data(self, kind: str, number: int, data: dict, *, revise: bool = False) -> dict | None:
+        """Replace what the subject carries (a buffer's definition text); None when there is no such subject.
+        `revise` raises the revision, so an action decided on the text as it was is refused."""
+        return self._set_subject(kind, number, "data", json.dumps(data), revise=revise)
 
     def set_subject_issue(self, kind: str, number: int, issue: int) -> dict | None:
         """The mirror's write-back: the GitHub issue it opened for the subject."""
@@ -900,7 +978,10 @@ class Ledger:
         """How the judge and the humans agree at a gate (spec autonomous-gates §9): per subject with a judge
         assessment, its newest judge verdict against the newest human verdict; no human verdict yet is `pending`.
         A person's verdict on a snippet PR head counts for the crop set made from that head (`head_of`).
-        Returns {"judged", "agree", "disagree", "pending", "pairs": [{subject, judge, human, agree}]}."""
+        A judge's decision that a person's later, opposite verdict overturned (spec judge-decides §5, §6) is a
+        disagreement that names who overturned it and when.
+        Returns {"judged", "agree", "disagree", "overturned", "abstain", "pending", "pairs": [{subject, judge,
+        human, agree, at, overturned_by, overturned_at}]}."""
         newest_judge: dict[str, dict] = {}
         newest_human: dict[str, dict] = {}
         on_head: dict[str, dict] = {}  # snippet PR head -> the newest human verdict recorded on it
@@ -920,19 +1001,24 @@ class Ledger:
             if human is None and key.startswith("crop_set:"):
                 human = on_head.get(head_of(judge["subject"]) or "")
             abstained = judge.get("verdict") == "escalate"  # the judge did not decide: neither agreement nor not
+            agree = None if human is None or abstained else judge.get("verdict") == human.get("verdict")
+            overturned = human if human and agree is False and str(human.get("at")) > str(judge.get("at")) else None
             pairs.append(
                 {
                     "subject": key,
                     "judge": judge.get("verdict"),
                     "human": human.get("verdict") if human else None,
-                    "agree": None if human is None or abstained else judge.get("verdict") == human.get("verdict"),
+                    "agree": agree,
                     "at": judge.get("at"),
+                    "overturned_by": overturned.get("by") if overturned else None,
+                    "overturned_at": overturned.get("at") if overturned else None,
                 }
             )
         return {
             "judged": len(pairs),
             "agree": sum(1 for pair in pairs if pair["agree"] is True),
             "disagree": sum(1 for pair in pairs if pair["agree"] is False),
+            "overturned": sum(1 for pair in pairs if pair["overturned_by"]),
             "abstain": sum(1 for pair in pairs if pair["judge"] == "escalate"),
             "pending": sum(1 for pair in pairs if pair["agree"] is None and pair["judge"] != "escalate"),
             "pairs": pairs[:200],
@@ -1044,30 +1130,36 @@ class Ledger:
         """Drop the volume, its frozen rows and the staged reference no other volume of the buffer still needs;
         False when the buffer has no such volume. The raw reference stays (a retire drops it)."""
         with self._transaction() as db:
-            found = db.execute(
-                "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes "
-                "WHERE buffer = ? AND id = ?",
-                (buffer, volume_id),
-            ).fetchone()
-            if found is None:
+            previous = self._volume_of(db, buffer, volume_id)
+            if previous is None:
                 return False
-            artifact, path = found
             db.execute("DELETE FROM volumes WHERE buffer = ? AND id = ?", (buffer, volume_id))
-            db.execute(
-                "DELETE FROM frozen WHERE buffer = ? AND json_extract(descriptor, '$.volume') = ?", (buffer, volume_id)
-            )
-            staged = artifact or str(PurePosixPath(path).parent)
-            still = {
-                known_artifact or str(PurePosixPath(known_path).parent)
-                for known_artifact, known_path in db.execute(
-                    "SELECT json_extract(data, '$.artifact'), json_extract(data, '$.path') FROM volumes WHERE buffer = ?",
-                    (buffer,),
-                )
-            }
-            if staged not in still:
-                db.execute("DELETE FROM refs WHERE buffer = ? AND kind = 'staged' AND key = ?", (buffer, staged))
+            self._drop_frozen_of(db, buffer, volume_id)
+            self._drop_unused_staged_ref(db, buffer, _staged_key(previous.artifact, previous.path))
             self._volumes.pop(buffer, None)
         return True
+
+    @staticmethod
+    def _drop_frozen_of(db: sqlite3.Connection, buffer: str, volume_id: str) -> None:
+        """Take the volume's rows out of every frozen list of the buffer and close the lists up: a list's indices
+        stay 0..n-1 (`extend_frozen` appends at its count, `_split` replays it by position) and each row's `seq` is
+        its index."""
+        rows = db.execute(
+            "SELECT split, idx, descriptor FROM frozen WHERE buffer = ? ORDER BY split, idx", (buffer,)
+        ).fetchall()
+        kept: dict[str, list[dict]] = {}
+        for split, _idx, descriptor in rows:
+            parsed = json.loads(descriptor)
+            if parsed.get("volume") != volume_id:
+                kept.setdefault(split, []).append(parsed)
+        if sum(len(descriptors) for descriptors in kept.values()) == len(rows):  # none of its rows: nothing to rewrite
+            return
+        for split in {split for split, _idx, _descriptor in rows}:
+            db.execute("DELETE FROM frozen WHERE buffer = ? AND split = ?", (buffer, split))
+            db.executemany(
+                "INSERT INTO frozen VALUES (?, ?, ?, ?)",
+                [(buffer, split, i, json.dumps({**d, "seq": i})) for i, d in enumerate(kept.get(split, []))],
+            )
 
     def volume_rows(self, buffer: str) -> list[dict]:
         """One small row per volume: {id, artifact, record, missing}; the record is the id up to its first '/'."""
@@ -1080,6 +1172,12 @@ class Ledger:
             }
             for volume in self.volumes(buffer)
         ]
+
+    def drop_frozen_of(self, buffer: str, volume_id: str) -> None:
+        """Take the volume's rows out of the buffer's frozen lists while it stays registered: a quarantined volume's
+        rows leave when a list is next served, before the buffer's round unregisters it."""
+        with self._transaction() as db:
+            self._drop_frozen_of(db, buffer, volume_id)
 
     def quarantined_volumes(self, buffer: str) -> list[str]:
         """The ids of the buffer's volumes whose staged artifact is quarantined."""
@@ -1176,7 +1274,8 @@ class Ledger:
         older_than: float | None = None,
         kinds: tuple[str, ...] = ("raw", "staged"),
     ) -> dict:
-        """Merge what a scan found (a new, stateless, missing or evicted row becomes ready; other states are kept),
+        """Merge what a scan found (a new, stateless, missing or evicted row becomes ready, and so does a raw row at
+        `partial` or `fetching`, which no job completes; other states are kept),
         mark `missing` every row of `kinds` the scan did not find unless a job is building it or it is evicted (a raw
         row with nothing cached, no bytes and no files, is dropped instead: the scan skips its empty directory), then
         merge each staged row's `last_used` from the draws (a new row, or a known one without it, starts with its
@@ -1198,13 +1297,15 @@ class Ledger:
                 if "scanned_at" in fields and (known is None or not known[0].get("last_used")):
                     # a new row (or one from before last_used) was last used when first seen, never later
                     fields = {"last_used": fields["scanned_at"], **fields}
-                becomes_ready = known is None or known[0].get("state") in (None, "missing", "evicted")
-                self._merge_asset(db, kind, key, {**fields, "state": "ready"} if becomes_ready else fields, now)
+                at_rest = (None, "missing", "evicted") + (("partial", "fetching") if kind == "raw" else ())
+                becomes_ready = known is None or known[0].get("state") in at_rest  # no job holds a raw row
+                ready = {**fields, "state": "ready"} | ({"job": None} if kind == "raw" else {})
+                self._merge_asset(db, kind, key, ready if becomes_ready else fields, now)
             missing = dropped = 0
             for (kind, key), (data, updated) in rows.items():
                 if kind not in kinds or (kind, key) in found or (older_than is not None and updated >= older_than):
                     continue
-                if data.get("state") in ("fetching", "staging", "waiting-drop", "evicted", "missing"):
+                if data.get("state") in ("staging", "waiting-drop", "evicted", "missing"):
                     continue
                 if kind == "raw" and not data.get("bytes") and not data.get("files"):
                     db.execute("DELETE FROM assets WHERE kind = ? AND key = ?", (kind, key))

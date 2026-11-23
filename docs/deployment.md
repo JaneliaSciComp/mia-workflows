@@ -1,84 +1,179 @@
-# Deploying to production
+# Installations, releases and the relay
 
-How the services run outside a developer's tmux: Temporal in Kubernetes, the workers and csub brokers on a
-cluster-attached host as a service account, under systemd. This page is the plan; the parts marked **todo** are
-not built yet. Developer setup is [`autodev-local-setup.md`](autodev-local-setup.md); the service-account checklist
-(GitHub App, branch protection, broker policy) is in [`docs/autodev-runbook.md`](autodev-runbook.md).
-Back to the [README](../README.md).
+How the services run as installations an operator keeps: a **prod** installation the user depends on and a
+**dev** installation the developer works in, on two hosts, sharing nothing; how a tagged release goes live; and how
+a host that cannot `bsub` submits jobs through a broker on a submit host. Developer setup of a single checkout is
+[`autodev-local-setup.md`](autodev-local-setup.md); the service-account checklist (GitHub App, branch protection,
+broker policy) is in [`autodev-runbook.md`](autodev-runbook.md). Back to the [README](../README.md).
 
-## The split
+## The two installations
 
-Temporal is only orchestration state and can live anywhere the workers can reach. Everything else has to run
-*as the cluster account* on a host that sees the cluster:
+An installation is one `mia.yaml` and everything it names: a checkout, a Temporal server, buffer-api's ledger, the
+raw and staged caches, the work and storage roots, a harness checkout, token files, a csub policy and the GitHub
+repos it writes. Prod and dev are two installations on two hosts; nothing is shared between them. The home
+directory *is* shared between every host here, dev, prod and the submit host alike (the relay depends on it), so an
+installation is named, not a host's: its root is `~/<installation>` (`~/mia-prod`, `~/mia-dev`), and nothing of it
+sits at a path the other installation would also read.
 
-- **Shared filesystem, read-write, as the right uid.** The worker creates job workspaces under `work_root`, syncs a
-  git mirror in `state_dir`, copies records into workspaces, reads job output back with `read_untrusted`, and
-  mia-data saves into `storage_root`. All of it must be visible to compute nodes and owned by the account that
-  runs the LSF jobs.
-- **Claude credentials and the broker policy are the account's.** Jobs run `claude` with the broker account's
-  credentials; `~/.config/csub/broker.toml`, `~/.csub` and the LSF project belong to that account.
-- **`bsub`.** csub has an `ssh` transport (`csub relay`) that would let a worker elsewhere reach a broker on the
-  submit host, so submission alone is not the blocker; the filesystem is. A worker in Kubernetes would need the
-  cluster filesystems mounted in the pod with a matching uid, which is a question for clusteradmins and a lot of
-  coupling for no gain.
+```
+~/mia-prod/                   the installation's root
+  mia.yaml                    its config, the one copy; `host:` names the host it runs on
+  releases/<tag>/             one checkout per released tag, `pixi install`ed; mia.yaml -> ../../mia.yaml
+  current -> releases/<tag>   the release that runs
+```
 
-| component | where | notes |
+`mia` is run as `~/mia-prod/current/.pixi/envs/default/bin/mia` (an alias in the operator's shell is theirs to make;
+nothing goes on a shared PATH). `mia.yaml` is found as always (`$MIA_CONFIG`, else `mia.yaml` in the checkout): the
+symlink in each checkout points at the installation's one copy, and `mia` resolves it before mounting it into the
+sandbox. `host:` in `mia.yaml` makes every `mia` command refuse to run on another host, matched by the first label of
+the hostname, so prod's stack cannot be started on dev by mistake. `sandbox_dir` and `harness.dir` are absolute paths
+there.
+
+**Where each path may live** follows from who reads it. *Shared* (the cluster filesystem, seen by compute nodes and
+the submit host): what a job mounts or runs, and what the broker reads. *Local* (`/opt`, `/scratch`: the host's own
+disk): what only this host's processes read, and what must not be on NFS.
+
+| path | where | who reads it |
 |---|---|---|
-| Temporal server, UI, Postgres | Kubernetes | one cluster; one namespace per service (`autodev`, `snippets`, `mia-data`, `mia-buffers`); TLS on the frontend; UI behind SSO |
-| csub broker + sandboxed worker, one pair per service | cluster-attached host, service account | systemd user units with linger, `Restart=always`, logs in journald |
-| buffer-api (`mia-buffers serve`) and its read-only page | same host, beside the mia-buffers broker, unsandboxed | a third unit for that service; its SQLite ledger lives in the service's `state_dir`, backed up every `keeper.minutes` |
-| agent and harness jobs | LSF via csub | unchanged |
-| configs and secrets | the service account's home | one `~svc/.config/mia/mia.yaml` named by `$MIA_CONFIG`, every service a block under `services:`; the App PEM, token files |
-| code | a tagged checkout at a fixed path, with a `current` symlink | the sandbox binds it read-only; deploy = `pixi install` in the new checkout, flip the symlink, `mia restart <service>` |
+| the checkout (`releases/`, `current`) | shared | the worker's sandbox on this host; with the relay, the submit host runs its `csub-broker` |
+| `sandbox_dir` | local or shared | `mia up`, wrapping the worker on this host. The compute-side sandbox is the one the csub base policy names (`sandbox_scripts_dir`), which must be shared; one shared checkout serves both |
+| `harness.dir` | shared | harness jobs on compute nodes |
+| `paths.work_root`, `storage_root`, `raw_root`, `staged_root` | shared | jobs mount them; buffer-api and `BufferDataset` clients read them |
+| `paths.state_root` | local or shared | the worker and buffer-api on this host; never mounted into a job. Backed-up storage is the better place |
+| `csub.policy_dir`, `csub.base_policy` | under home (shared) | the broker, on the submit host with the relay; `policy_dir` must be under home in any case, so when `state_root` is local it is set explicitly |
+| `paths.local_root` | local, required | locks and the ledger; refused on NFS |
+| `temporal.state_dir` (managed) | local, required | the Temporal dev server's SQLite; refused on NFS |
+| `csub.run_dir` | local | the broker or relay socket (default `/scratch/<user>`) |
+| `github.token_file`, `service.token_file`, the ssh key | local or home | this host's worker, buffer-api and relay |
 
-### Which host
+**GitHub.** Everything an installation writes on GitHub is its own: autodev's `snippets` deployment answers every
+`snippets:go` label on `github.snippets_repo`, the mirror finds a subject's issue by `<deployment>: subject` in
+`github.data_repo` and `buffers_repo`, and this repository's own `autodev` service polls its issues. Two
+installations on one repo would both answer. Dev points at repos of its own for all of these (a fork of mia-snippets,
+a dev datasets repo, a dev buffers repo); `catalog_repo` is only read and stays shared; the `autodev` service for this
+repository runs in one installation only.
 
-Ask the HPC team for a small VM that is an LSF client with `/groups` and `/nrs` mounted. The submit host is
-documented as one core and 16 GB shared by all users, for lightweight orchestration scripts; the worker is
-lightweight when idle, but mirror syncs and snapshot extraction are bursts, and a shared host is where the
-"unauthenticated dev server" gotcha came from. Fallback if no VM is possible: run each service as a long-running
-LSF job (csub's "agent as a csub job" mode provides the sandbox and the broker socket). Temporal makes the 48-hour
-queue limit harmless, since a restarted worker reattaches to running jobs, but the billing meter runs the whole
-time, so it is a fallback, not the plan.
+## The relay
 
-### mia.yaml stays
+`csub-broker` runs only on an LSF host, and the worker's sandbox talks to a unix socket outside it. On a host that
+cannot `bsub`, `csub.broker: relay` makes `mia up` serve that socket with `csub relay`, which forwards each request
+over ssh to a broker on a submit host; every check stays the broker's.
 
-`mia.yaml` is the one config file: which services run here, where agentic-sandbox is, whether `mia` runs
-Temporal, and each service's block (the per-app YAML files are deprecated). Production uses it with
-`temporal.managed: false`, so `mia up` only verifies the cluster answers and never starts or stops it. The service
-blocks keep their shape; only `temporal.address` and the new TLS fields change.
+```yaml
+csub:
+  base_policy: ~/.config/mia-prod/broker.toml
+  broker: relay                 # `local` (default): csub-broker --serve on this host
+  ssh_host: submit.example.org  # relay only; required
+  ssh_user: null                # relay only; default: this user
+  ssh_key: ~/.ssh/csub_ed25519  # relay only
+  run_dir: /opt/mia-prod/run    # the sockets; host-local (default /scratch/<user>)
+```
 
-## Changes needed (todo)
+The broker window of a service's tmux session then runs
 
-None of these touch `workflows.py`, so there is no replay risk.
+```
+env CSUB_TRANSPORT=ssh CSUB_SSH_HOST=<ssh_host> [CSUB_SSH_USER=<ssh_user>] CSUB_SSH_KEY=<ssh_key> \
+    CSUB_BROKER_CMD="<checkout>/.pixi/envs/default/bin/csub-broker --policy <policy>" csub relay <sock>
+```
 
-1. **systemd backend for `mia_ops`.** A `runner: systemd` key in `mia.yaml` (default `tmux`). `mia systemd
-   install` writes `~/.config/systemd/user/mia-<service>-broker.service` and `-worker.service` (and `-api.service`
-   for a service with a `service:` block) from the same `Stack`/`Service` objects `services.py` uses for tmux; `up`, `down`, `restart`, `ps`, `logs` and `attach` then
-   dispatch to `systemctl --user` and `journalctl --user`. The broker socket moves from `/scratch/$USER` (node-local,
-   periodically cleaned) to `$XDG_RUNTIME_DIR`, which exists once `loginctl enable-linger svc` is set.
-2. **Temporal TLS and auth.** `TemporalCfg` gains `tls: bool = False` and either `client_cert`/`client_key` paths
-   (mTLS) or `api_key_file`, all with defaults, so the `Deployment` protocol and every existing config stay valid.
-   `_client` in `autodev/cli.py` passes them to `Client.connect`; the `temporal` CLI calls in `mia_ops/services.py`
-   pass the matching `--tls-*` flags. HTTP CONNECT through the sandbox proxy (`via_https_proxy`) works unchanged.
-3. **Namespaces are an admin step.** In production `ensure_namespace` checks that the namespace exists and fails
-   with a message instead of creating it; creation needs an operator credential the worker should not hold.
-4. **Agent billing from a file.** Production should not depend on an interactive OAuth login for the service
-   account. Add `agent.api_key_file`, bind it read-only into the job and set `ANTHROPIC_API_KEY` from it (the
-   broker policy's `env_allow` must cover it), and drop the `mia up` refusal of `api_key_env`.
-5. **State on backed-up storage.** `paths.state_root` is the durable record on the cluster side (job ids, mirrors,
-   logs, buffer-api's ledger); put it under `/groups`, which is backed up, not under `/nrs`. `paths.local_root`
-   is the exception: it holds the raw-cache locks and must be host-local disk, never NFS (`mia_core.locks`), so
-   the VM needs a local scratch volume. The Temporal database is the other half; back up Postgres in Kubernetes.
-6. **Release procedure.** Tag, `git clone` into `releases/<tag>`, `pixi install`, `pixi run mia exec <service> check`
-   against production config, flip `current`, `mia restart <service>`. A broker reads the policy file it was started
-   with, so `mia restart` puts each service's broker on the generated csub policy (`--policy`, see
-   [`development.md`](development.md)). A worker restart mid-round is safe: job submission is idempotent and `wait`
-   reattaches by job id. Changes to `workflows.py` or `decide.py` still need `workflow.patched()` for runs in flight
-   ([`development.md`](development.md)).
+The remote command is this checkout's own `csub-broker`, which the submit host sees through the shared home, on this
+installation's generated policy: a release puts the broker on the new code with the workers, and two installations'
+brokers never read each other's policy. Nothing else changes: the worker gets the same `CSUB_TRANSPORT=unix
+CSUB_SOCKET=<sock>`, `mia exec` goes through the same socket, host approval regenerates the same file, and the
+placement rules of `policy_dir` are the same. Once the relay serves its socket, `mia up` runs one `csub probe`
+through it and fails with csub's message when the submit host does not answer (a missing key, a refused user), so
+that is found at start, not at the first job; the session stays for `mia logs <service> broker`.
 
-## Open questions for the HPC team
+The key is a plain key of the user's, kept outside every sandbox. The broker's own state (`state_dir` in the base
+policy) is on the submit host under the same home, so each installation's base policy names a `state_dir` of its
+own. Binding the key to a forced command (`restrict,command="csub-broker --policy ..."` in `authorized_keys` on the
+submit host) is the hardening that comes with the service account; `CSUB_BROKER_CMD` is then dropped.
 
-- A cluster-attached VM for the service account, or permission to run lingering user services on the submit host.
-- Whether the Kubernetes Temporal frontend is reachable from that host, and who issues its client certificates.
-- Rootless bwrap (or podman) for the service account on the VM, since the worker runs inside agentic-sandbox.
+## Releases
+
+`mia release <tag>` runs on the installation being released to, from its `current` (or any `releases/<x>`):
+
+1. finds `<root>` from the checkout it runs in; any other layout is refused with a message saying what the layout is;
+2. when `releases/<tag>` is not there, or is there without the `mia.yaml` link that marks a finished install, clones
+   the tag from the running checkout's `origin` (`git clone --branch <tag> --depth 1`) into it and runs
+   `pixi install --locked` there, where the environment stays (a pixi environment hard-codes its own path), so a
+   release has exactly the lockfile's packages; a failed clone or install leaves nothing behind. A tag is letters,
+   digits, `.`, `_` and `-`;
+3. links `mia.yaml` last, then runs the new checkout's `mia exec <service> check` for every service, and stops
+   before anything is touched if one fails;
+4. flips `current` (a new symlink beside it, renamed over the old: atomic);
+5. runs the new checkout's `mia restart`: `down` drains every worker and stops buffer-api last, `up` starts buffer-api
+   first, then the workers on the new code with their broker or relay; Temporal is left running.
+
+Rolling back is `mia release <earlier tag>`: the clone exists, so only the flip and the restart happen. Released
+checkouts are kept; removing one is a hand `rm` of a directory that is not `current`.
+
+From dev, `mia release <tag> --to <host>:<root>` pushes the tag to `origin` and runs `ssh <host>
+<root>/current/.pixi/envs/default/bin/mia release <tag>`, so the whole release is one command typed on dev. The
+operator tags; the command never makes a tag.
+
+What a user sees: buffer-api is away for the seconds between down and up, the page's buttons fail during them,
+running jobs run on, every workflow continues. A release whose `workflows.py` changed carries its
+`workflow.patched()` guard by the rule in [`development.md`](development.md).
+
+## Runbook: the cutover of a single checkout to prod
+
+A developer's checkout that runs the stack becomes the prod installation keeping everything it has: its managed
+Temporal server and `local_root` stay on the host's local disk; the work, crops and staged roots and the harness
+checkout move from their prefix on the cluster filesystem to the data share. Four kinds of absolute path point at the
+prefix that moves: the ledger (`volumes.data`'s `path`, `frozen.descriptor`, `assets.key` and `assets.data`,
+`cases.data`); the workflow states of open rounds (workspaces stored as `str(work_root / ...)`; a round at `review`
+saves its crops from that path when approved); timeline entries (browser links built from the roots' `url` at the
+time); job records are addressed relative to `work_root` and need nothing.
+
+1. `mia pause`; wait until no round is `working` (the Overview); `mia down` (Temporal keeps running).
+2. Copy the roots and the harness checkout to the share (`rsync -a`; the staged pyramids are the bulk).
+3. Back up the ledger (`cp <local_root>/service/buffers.sqlite <somewhere safe>`), then rewrite the prefix:
+
+   ```sql
+   UPDATE volumes SET data = replace(data, '/OLD/prefix', '/NEW/prefix');
+   UPDATE frozen SET descriptor = replace(descriptor, '/OLD/prefix', '/NEW/prefix');
+   UPDATE assets SET key = replace(key, '/OLD/prefix', '/NEW/prefix'), data = replace(data, '/OLD/prefix', '/NEW/prefix');
+   UPDATE cases SET data = replace(data, '/OLD/prefix', '/NEW/prefix');
+   ```
+
+4. Leave each old root as a symlink to its new place (`mv <old> <old>.moved && ln -s <new> <old>` once the copy is
+   verified, or remove the old copy and link), so every absolute path a round still holds resolves. The symlinks go
+   when no round that was open at the cutover is open any more. New jobs mount the new paths, which csub requires to
+   be real directories, and `mia.yaml` names only the new ones.
+5. Adopt the layout above: `~/mia-prod/mia.yaml` is the checkout's `mia.yaml` with the new roots and their `url`s,
+   `harness.dir`, `host:` and the `csub` block; tag the commit to run; make the first release by hand as the command
+   would (`git clone --branch <tag> --depth 1 <origin> ~/mia-prod/releases/<tag>`, `pixi install --locked` there,
+   `ln -s ../../mia.yaml` inside it, `ln -s releases/<tag> ~/mia-prod/current`).
+6. `mia up` from `current`; `mia resume`. Old timeline links point at the old paths and are left as they are.
+
+The developer's checkout then runs nothing on this host; it is dev's working checkout, run from the dev host.
+
+## Runbook: bringing up a new installation
+
+On a host with a local scratch volume and the cluster filesystems mounted:
+
+1. The installation's root and its first release, as in step 5 above; an agentic-sandbox checkout and a mia-snippets
+   checkout on the shared filesystem.
+2. A base policy of its own (`csub.base_policy`), with its own `state_dir` and the LSF project; `csub.policy_dir`
+   under home.
+3. For the relay: the ssh key to the submit host, tested by hand with `CSUB_TRANSPORT=ssh CSUB_SSH_HOST=<host>
+   CSUB_SSH_KEY=<key> CSUB_BROKER_CMD="<checkout>/.pixi/envs/default/bin/csub-broker --policy <policy>" csub probe`.
+4. The GitHub token file (`gh auth token > <file>`, mode 600) and `mia init-token` for the service token; for dev,
+   `github.snippets_repo`, `data_repo` and `buffers_repo` naming dev's own repos.
+5. `temporal.state_dir`, `paths.local_root` and `csub.run_dir` on the scratch volume, named for the installation;
+   `host:` naming this host; the roots on the shared filesystem, small for dev.
+6. `mia up`.
+
+## Not built: the service account
+
+What a prod installation run as a service account still needs, none of it touching `workflows.py`:
+
+- A systemd runner for `mia_ops` (`runner: systemd`), units from the same `Stack`/`Service` objects the tmux runner
+  uses, with the socket dir under `$XDG_RUNTIME_DIR` once `loginctl enable-linger` is set.
+- Temporal outside the host (Kubernetes), `temporal.managed: false`, TLS or an API key on `TemporalCfg`, namespaces
+  created by an operator and only checked by `ensure_namespace`.
+- Agent billing from a file (`agent.api_key_file` bound read-only into the job) instead of an interactive login.
+- A GitHub App identity (`github.auth: app`) per the runbook.
+- `paths.state_root` on backed-up storage and a backup of the Temporal database.
+- The ssh key to the submit host bound to a forced command, as above.

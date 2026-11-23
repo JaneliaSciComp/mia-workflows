@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from autodev.config import is_github_host
+from autodev.config import RAW_GITHUB, is_github_host
 from mia_core.hosts import HOST_RE, allowed_patterns, approve_hosts, is_ip_literal, missing_hosts
 from mia_core.untrusted import read_untrusted
 from mia_data.binding import network_hosts, record_urls
@@ -52,8 +52,9 @@ class HostCheck:
         )
 
     def _never_approved(self, host: str) -> str | None:
-        """Why a host is never approved (a GitHub host, an IP address, this deployment's own host), or None."""
-        if is_github_host(host):
+        """Why a host is never approved (a GitHub host other than `raw.githubusercontent.com`, an IP address, this
+        deployment's own host), or None."""
+        if is_github_host(host) and host != RAW_GITHUB:
             return "is a GitHub host"
         if is_ip_literal(host):
             return "is an IP address"
@@ -61,7 +62,7 @@ class HostCheck:
             return "is this deployment's own host"
         return None
 
-    def _group(self, hosts_by_record: dict[str, list[str]]) -> Needed:
+    def group(self, hosts_by_record: dict[str, list[str]]) -> Needed:
         """Host -> the sorted ids of the records that need it, leaving out every host that cannot be approved."""
         needed: dict[str, list[str]] = {}
         for record, hosts in hosts_by_record.items():
@@ -70,16 +71,18 @@ class HostCheck:
                     needed.setdefault(host, []).append(record)
         return {host: sorted(records) for host, records in sorted(needed.items())}
 
-    def for_records(self, records: dict[str, dict]) -> Needed:
-        """Hosts each catalog record's URLs need (record id -> catalog record), without the hosts that are never
-        approved; a record whose hosts cannot be computed (a GitHub URL) contributes nothing."""
+    def for_records(self, records: dict[str, dict], refused: dict[str, list[str]] | None = None) -> Needed:
+        """Hosts each catalog record's URLs need (record id -> catalog record) and those its jobs were refused
+        (`refused`: record id -> hosts), without the hosts that are never approved; a record whose hosts cannot
+        be computed (a malformed URL) contributes nothing."""
         hosts_by_record = {}
         for record_id, record in records.items():
             try:
-                hosts_by_record[record_id] = network_hosts(record_urls(record), self.network)
+                named = network_hosts(record_urls(record), self.network, raw_github=True)
+                hosts_by_record[record_id] = [*named, *(refused or {}).get(record_id, [])]
             except (ValueError, AttributeError, TypeError):
                 continue
-        return self._group(hosts_by_record)
+        return self.group(hosts_by_record)
 
     def for_bindings(self, folders: dict[str, str]) -> Needed:
         """Hosts each published binding's URLs need (record id -> its folder under storage_root), without the hosts
@@ -98,25 +101,36 @@ class HostCheck:
                     for url in (array.get("urls") or [])
                 ]
                 if not any(url.startswith("manual://") for url in urls):
-                    hosts_by_record[record_id] = network_hosts(urls, self.network)
+                    hosts_by_record[record_id] = network_hosts(urls, self.network, raw_github=True)
             except (ValueError, yaml.YAMLError, AttributeError, TypeError):
                 continue
-        return self._group(hosts_by_record)
+        return self.group(hosts_by_record)
 
-    def pool(self, round_id: str) -> list[str]:
-        """Ids of the in_pool rows of the round's plan.json; ValueError when it cannot be read as a plan."""
+    def plan_rows(self, round_id: str) -> dict[str, dict]:
+        """The in_pool rows of the round's plan.json by record id, in the plan's order; ValueError when it cannot
+        be read as a plan."""
         text = read_untrusted(self.rounds_dir, f"{round_id}/plan.json", PLAN_LIMIT)
         try:
             if text is None:
                 raise ValueError("no plan")
-            return [row["id"] for row in json.loads(text)["rows"] if _in_pool(row)]
+            return {row["id"]: row for row in json.loads(text)["rows"] if _in_pool(row)}
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             raise ValueError(f"round {round_id!r} has no readable plan") from error
 
-    def missing(self, needed: Needed) -> Needed:
-        """The needed hosts the csub policy does not allow."""
+    def pool(self, round_id: str) -> list[str]:
+        """Ids of the in_pool rows of the round's plan.json; ValueError when it cannot be read as a plan."""
+        return list(self.plan_rows(round_id))
+
+    def missing(self, needed: Needed, approved: dict[str, list[str]] | None = None) -> Needed:
+        """The needed hosts the csub policy does not allow. `raw.githubusercontent.com` is approved for one dataset
+        at a time (`approved`: record id -> the hosts approved for it alone): it is missing for every record that
+        needs it and has no approval of its own, whatever the policy allows."""
         absent = set(missing_hosts(list(needed), allowed_patterns(self.policy_dir)))
-        return {host: records for host, records in needed.items() if host in absent}
+        lacking = {host: records for host, records in needed.items() if host in absent and host != RAW_GITHUB}
+        unapproved = [
+            record for record in needed.get(RAW_GITHUB, []) if RAW_GITHUB not in (approved or {}).get(record, [])
+        ]
+        return dict(sorted({**lacking, **({RAW_GITHUB: unapproved} if unapproved else {})}.items()))
 
     def check(self, hosts: list[str], needed: Needed) -> None:
         """Raise ValueError naming the first host that is not an exact hostname, is never approved, or is not

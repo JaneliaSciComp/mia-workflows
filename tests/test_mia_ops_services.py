@@ -1,5 +1,6 @@
 """mia_ops.services against a fake tmux / temporal CLI: subprocess.run is replaced by a recorder."""
 
+import re
 import shlex
 import subprocess
 import tomllib
@@ -63,12 +64,13 @@ def make_stack_v2(tmp_path, **kw):
     return Stack(manifest)
 
 
-def make_stack(tmp_path, managed=True, address="localhost:7233"):
+def make_stack(tmp_path, managed=True, address="localhost:7233", csub=None):
     write_configs(tmp_path, address)
     return Stack(
         Manifest(
             sandbox_dir=tmp_path / "sandbox",
-            csub=CsubCfg(base_policy=tmp_path / ".config/csub/broker.toml", policy_dir=tmp_path / "csub-policy"),
+            csub=csub
+            or CsubCfg(base_policy=tmp_path / ".config/csub/broker.toml", policy_dir=tmp_path / "csub-policy"),
             temporal={"managed": managed, "state_dir": tmp_path / "temporal"},
             services={
                 "autodev": {"app": "autodev", "config": tmp_path / "autodev.yaml"},
@@ -82,8 +84,11 @@ def make_stack(tmp_path, managed=True, address="localhost:7233"):
 def fake(monkeypatch, tmp_path):
     """Records every subprocess.run; tmux sessions and Temporal health are simulated."""
     state = SimpleNamespace(calls=[], running=set(), healthy=False, namespace_rc=0, windows="  worker: alive\n")
-    state.worker_starts = True
+    state.worker_starts, state.api_starts, state.workers = True, True, ""  # workers: what pgrep finds
+    state.probe_rc, state.probe_err = 0, ""  # what `csub probe` through a relay's socket answers
+    monkeypatch.setattr(services, "CSUB", tmp_path / "csub")  # the file exists only in the tests that need it
     monkeypatch.setattr(services, "worker_started", lambda svc, since: state.worker_starts)
+    monkeypatch.setattr(services, "api_started", lambda svc, endpoint: state.api_starts)
     for name in ("python", "csub-broker"):
         (tmp_path / name).write_text("#!/bin/sh\n")
         (tmp_path / name).chmod(0o755)
@@ -113,12 +118,21 @@ def fake(monkeypatch, tmp_path):
                 state.running.add(argv[argv.index("-s") + 1])
                 if argv[argv.index("-s") + 1] == "temporal":
                     state.healthy = True
+                command = argv[argv.index("-n") + 2]
+                if " relay " in command and (found := re.search(r"(\S+/csub\.sock)", command)):
+                    state.stale_sock = Path(found.group(1)).exists()  # a socket a dead relay left behind?
+                    Path(found.group(1)).parent.mkdir(parents=True, exist_ok=True)
+                    Path(found.group(1)).touch()  # the relay serves its socket
             elif argv[1] == "kill-session":
                 state.running.discard(argv[3].lstrip("="))
                 if argv[3] == "=temporal":
                     state.healthy = False
             elif argv[1] == "list-panes":
                 return subprocess.CompletedProcess(argv, 0, stdout="4242\n", stderr="")
+        elif isinstance(argv, list) and argv[0] == "pgrep":
+            return subprocess.CompletedProcess(argv, 0, stdout=state.workers, stderr="")
+        elif isinstance(argv, list) and argv[-1:] == ["probe"]:
+            return subprocess.CompletedProcess(argv, state.probe_rc, stdout="", stderr=state.probe_err)
         elif isinstance(argv, list) and argv[0] == "/usr/bin/temporal":
             if argv[1:4] == ["operator", "cluster", "health"]:
                 rc = 0 if state.healthy else 1
@@ -543,6 +557,50 @@ def test_kill_waits_for_the_pane_process_group_to_exit(fake, monkeypatch):
     assert polls == [4242, 4242] and naps == [0.1, 0.1]  # alive twice, then gone
 
 
+def test_kill_tells_the_worker_to_stop_and_waits_for_it_before_the_session_goes(fake, monkeypatch):
+    """A worker that is told to stop hands its running activities back to Temporal; one that dies with its
+    session leaves each to its timeout (2026-11-18: twelve job waits for three minutes, four submits for ten).
+    So the worker gets SIGTERM, alone of its session, and the session is killed once it has gone."""
+    fake.running.add("mia-data")
+    fake.workers = "777\n"
+    order, polls = [], []
+
+    def signalled(pid, sig):
+        order.append(("signal", pid, sig))
+        if sig == 0:
+            polls.append(pid)
+            if len(polls) > 2:  # alive twice, then gone
+                raise ProcessLookupError
+
+    monkeypatch.setattr(services.os, "kill", signalled)
+    monkeypatch.setattr(services.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+    assert services.kill("mia-data") == 0
+    asked = next(argv for argv, _ in fake.calls if argv[0] == "pgrep")
+    assert asked[:3] == ["pgrep", "-g", "4242"] and asked[-1] == r"^\S*python\S* -m \S+ worker$"
+    assert order[0] == ("signal", 777, services.signal.SIGTERM) and polls == [777, 777, 777]
+    calls = [argv[:2] for argv, _ in fake.calls]
+    assert calls.index(["pgrep", "-g"]) < calls.index(["tmux", "kill-session"])
+
+
+def test_a_worker_that_does_not_stop_is_killed_with_its_session(fake, monkeypatch, capsys):
+    fake.running.add("mia-data")
+    fake.workers = "777\n"
+    monkeypatch.setattr(services.os, "kill", lambda pid, sig: None)  # never goes
+    monkeypatch.setattr(services.os, "killpg", lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()))
+    assert services.kill("mia-data") == 0 and tmux_calls(fake, "kill-session")
+    assert "has not stopped after 60 s" in capsys.readouterr().err
+
+
+def test_no_worker_starts_before_buffer_api_answers(tmp_path, fake, capsys):
+    """Every worker writes to buffer-api, its own too: the worker window opens once the service takes
+    connections, and a service that never does is reported instead."""
+    s = make_buffers_stack(tmp_path)
+    fake.api_starts = False
+    assert services.service_up(s.services["mia-buffers"], s, Temporal(s)) == 1
+    assert [c[c.index("-n") + 1] for c in tmux_calls(fake, "new-window")] == ["api"]
+    assert "buffer-api did not come up" in capsys.readouterr().err
+
+
 def test_up_refuses_a_missing_local_root_for_data_and_buffers(tmp_path, fake):
     s = make_stack_v2(tmp_path, local_root="")  # the builder omits the key when empty
     with pytest.raises(SystemExit, match="paths.local_root"):
@@ -635,3 +693,81 @@ def test_up_on_a_running_service_regenerates_the_policy(tmp_path, fake):
     policy.unlink()
     services.service_up(svc, stack, Temporal(stack))
     assert policy.exists()
+
+
+# ---- the relay and the socket dir
+
+
+def relay_csub(tmp_path, **kw) -> CsubCfg:
+    return CsubCfg(
+        base_policy=tmp_path / ".config/csub/broker.toml", policy_dir=tmp_path / "csub-policy", broker="relay", **kw
+    )
+
+
+def test_up_relay_runs_csub_relay_on_the_sock_and_probes_it(tmp_path, fake):
+    (tmp_path / "csub").write_text("#!/bin/sh\n")
+    (tmp_path / "csub").chmod(0o755)
+    s = make_stack(
+        tmp_path, csub=relay_csub(tmp_path, ssh_host="submit.example.org", ssh_user="svc", run_dir=tmp_path / "run")
+    )
+    assert services.service_up(s.services["autodev"], s, Temporal(s)) == 0
+    broker_call = tmux_calls(fake, "new-session")[1]
+    broker = broker_call[broker_call.index("-n") + 2]
+    sock = f"{tmp_path}/run/autodev/csub.sock"
+    for piece in (
+        "CSUB_TRANSPORT=ssh",
+        "CSUB_SSH_HOST=submit.example.org",
+        "CSUB_SSH_USER=svc",
+        f"CSUB_SSH_KEY={tmp_path}/.ssh/csub_ed25519",
+        shlex.quote(f"CSUB_BROKER_CMD={tmp_path}/csub-broker --policy {tmp_path}/csub-policy/broker.toml"),
+        f"{tmp_path}/csub relay {sock}",
+        "broker.log",
+    ):
+        assert piece in broker, piece
+    assert "--serve" not in broker
+    probe = [(c, kw) for c, kw in fake.calls if c[-1:] == ["probe"]]
+    assert len(probe) == 1 and probe[0][1]["env"]["CSUB_SOCKET"] == sock
+    assert probe[0][1]["env"]["CSUB_TRANSPORT"] == "unix"
+    worker = worker_command(fake, "autodev")
+    assert f"CSUB_SOCKET={sock}" in worker and f"--rw {tmp_path}/run/autodev" in worker
+
+
+def test_up_relay_fails_when_the_submit_host_does_not_answer(tmp_path, fake, capsys):
+    (tmp_path / "csub").write_text("#!/bin/sh\n")
+    (tmp_path / "csub").chmod(0o755)
+    fake.probe_rc, fake.probe_err = 1, "ssh submit.example.org: Permission denied (publickey)\n"
+    s = make_stack(tmp_path, csub=relay_csub(tmp_path, ssh_host="submit.example.org"))
+    assert services.service_up(s.services["autodev"], s, Temporal(s)) == 1
+    assert "Permission denied" in capsys.readouterr().err
+    assert "autodev" in fake.running  # the session stays: mia logs autodev broker shows why
+    assert not any(c[:2] == ["tmux", "new-window"] for c, _ in fake.calls)  # no worker was started
+
+
+def test_up_relay_removes_the_socket_a_dead_relay_left_before_probing(tmp_path, fake):
+    (tmp_path / "csub").write_text("#!/bin/sh\n")
+    (tmp_path / "csub").chmod(0o755)
+    stale = tmp_path / "run/autodev/csub.sock"
+    stale.parent.mkdir(parents=True)
+    stale.touch()  # tmux's SIGHUP gave the old relay no chance to unlink it
+    s = make_stack(tmp_path, csub=relay_csub(tmp_path, ssh_host="submit.example.org", run_dir=tmp_path / "run"))
+    assert services.service_up(s.services["autodev"], s, Temporal(s)) == 0
+    assert fake.stale_sock is False  # gone before the relay started, so the probe cannot reach the old file
+
+
+def test_up_relay_needs_the_csub_cli(tmp_path, fake):
+    s = make_stack(tmp_path, csub=relay_csub(tmp_path, ssh_host="submit.example.org"))
+    with pytest.raises(SystemExit, match="csub not found"):
+        services.service_up(s.services["autodev"], s, Temporal(s))
+
+
+def test_run_dir_is_host_local(tmp_path, fake, monkeypatch):
+    def refuse(path):
+        raise RuntimeError(f"{path} is on nfs")
+
+    monkeypatch.setattr(services, "require_local_dir", refuse)
+    csub = CsubCfg(
+        base_policy=tmp_path / ".config/csub/broker.toml", policy_dir=tmp_path / "csub-policy", run_dir=tmp_path / "run"
+    )
+    s = make_stack(tmp_path, csub=csub)
+    with pytest.raises(SystemExit, match="csub.run_dir"):
+        services.service_up(s.services["autodev"], s, Temporal(s))

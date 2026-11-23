@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from autodev.config import PROJECT_DIR
+from mia_ops import manifest as manifest_module
 from mia_ops.manifest import Manifest, load_manifest
 
 SERVICES = {
@@ -83,3 +84,21 @@ def test_manifest_carries_the_csub_paths(tmp_path, monkeypatch):
     manifest = load_manifest(path)
     assert manifest.csub.base_policy == tmp_path / "b.toml"
     assert str(manifest.csub.policy_dir) == "/x/state/csub"
+
+
+def write_host_manifest(tmp_path, host: str):
+    path = tmp_path / "mia.yaml"
+    path.write_text(f"host: {host}\nservices:\n  autodev: {{app: autodev, config: autodev.yaml}}\n")
+    return path
+
+
+@pytest.mark.parametrize("hostname", ["prod1", "prod1.example.org"])
+def test_host_matches_this_host_by_its_first_label(tmp_path, monkeypatch, hostname):
+    monkeypatch.setattr(manifest_module.socket, "gethostname", lambda: hostname)
+    assert load_manifest(write_host_manifest(tmp_path, "prod1")).host == "prod1"
+
+
+def test_host_of_another_host_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(manifest_module.socket, "gethostname", lambda: "dev1.example.org")
+    with pytest.raises(SystemExit, match="is for host prod1; this is dev1"):
+        load_manifest(write_host_manifest(tmp_path, "prod1"))

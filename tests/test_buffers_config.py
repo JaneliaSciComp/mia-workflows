@@ -65,7 +65,7 @@ def test_roots_accept_path_and_url_form(tmp_path):
     assert cfg.paths.staged_root == (tmp_path / "staged").resolve() and cfg.paths.staged_root_url is None
     assert cfg.paths.link(cfg.paths.raw_root / "r 1") == "https://b/raw/r%201"
     assert cfg.paths.link(cfg.paths.staged_root) is None
-    assert cfg.sourcing.parallel == 4 and cfg.sourcing.tensorizer == "muvit-2d"
+    assert (cfg.sourcing.parallel, cfg.sourcing.per_source, cfg.sourcing.tensorizer) == (20, 1, "muvit-2d")
     assert cfg.service.url == "http://127.0.0.1:8765"
 
 
@@ -76,7 +76,7 @@ def test_data_repo_key_is_refused(tmp_path):
         )
 
 
-@pytest.mark.parametrize("override", [{"sourcing": {"parallel": 0}}, {"sourcing": {"parallel_fetch": 0}}])
+@pytest.mark.parametrize("override", [{"sourcing": {"parallel": 0}}])
 def test_bad_sourcing_values_are_refused(tmp_path, override):
     with pytest.raises(ValidationError):
         make_cfg(tmp_path, **override)
@@ -189,7 +189,7 @@ def test_every_label_description_fits_github():
 
 def test_every_buffer_and_prep_stage_has_a_rule():
     from mia_buffers.config import CANCELLABLE, PREP_STAGE_ACTIONS, STAGE_ACTIONS
-    from mia_data.config import STATUS_WORDS
+    from mia_data.config import PHASES
 
     assert set(STAGE_ACTIONS) == set(STAGES) and set(PREP_STAGE_ACTIONS) == {"new", *PREP_STAGES}
     vocabulary = (set(HUMAN_LABELS) - {"plan"}) | {
@@ -197,11 +197,20 @@ def test_every_buffer_and_prep_stage_has_a_rule():
         "stop",
         "cancel",
         "recheck",
-    }  # plan is an option of go (§4.2)
+        "edit",
+        "resume",
+    }  # plan is an option of go (§4.2); edit is settled by buffer-api and is no signal; resume is a request's
     for status, actions in [*STAGE_ACTIONS.values(), *PREP_STAGE_ACTIONS.values()]:
-        assert status in STATUS_WORDS and actions <= vocabulary
+        assert status in PHASES and actions <= vocabulary
     assert STAGE_ACTIONS["idle"] == ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"}))
     assert PREP_STAGE_ACTIONS["requested"] == ("working", frozenset({"cancel", "stop"}))
+    # a request is resumed wherever it can be run again (spec resume-restart §5); a buffer takes no resume
+    reruns = {stage for stage, (_, actions) in PREP_STAGE_ACTIONS.items() if "go" in actions} - {"new"}
+    assert {stage for stage, (_, actions) in PREP_STAGE_ACTIONS.items() if "resume" in actions} == reruns
+    assert not any("resume" in actions for _, actions in STAGE_ACTIONS.values())
+    # the definition changes exactly where the buffer rests: no round open, not serving (spec buffer-flow §3.2)
+    resting = {"new", "retired", "needs-human", "cancelled"}
+    assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "edit" in actions} == resting
     # stop is offered exactly where closing the issue retired a buffer when a poller watched for that
     live = {"planning", "plan-review", "sourcing", "staged", "ready", "idle"}
     assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "stop" in actions} == live

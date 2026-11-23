@@ -11,7 +11,7 @@ testing autodev. For the shared service account, see "Run it as the group servic
 | tmux session | window | runs | where |
 |---|---|---|---|
 | `temporal` | `temporal` | Temporal dev server (gRPC `localhost:7233`, UI `:8233`); shared by every service | host |
-| `<service>` | `broker` | `csub-broker`, applying your `~/.config/csub/broker.toml` policy | host |
+| `<service>` | `broker` | `csub-broker`, on the policy mia generates from your `csub.base_policy` (`~/.config/csub/broker.toml`) plus the hosts approved on the page | host |
 | `<service>` | `worker` | `autodev worker`, wrapped in `agentic-sandbox` | sandbox |
 
 For a personal instance `mia.yaml` lists one service, your `autodev` block. The worker polls GitHub, drives the
@@ -26,15 +26,15 @@ Run these from a Janelia cluster submit host.
    its `scripts` directory. It needs rootless podman or bwrap set up, per its README.
 3. **csub with Claude support.** The pixi env pins csub to `krokicki/csub` branch `deploy-all`, so `pixi install`
    provides it, including `csub-broker`.
-4. **Broker policy** in `~/.config/csub/broker.toml`:
-   - `allow_claude = true`
-   - `allowed_hosts` includes `api.anthropic.com`, `claude.ai`, `platform.claude.com`, plus everything in
-     `agent.allow_hosts` from `services.autodev.agent` in `mia.yaml`
+4. **Broker policy** in `~/.config/csub/broker.toml` (the `csub.base_policy` of `mia.yaml`; mia reads it and never
+   writes it):
+   - an `[agents]` table with `claude = ["api.anthropic.com", "claude.ai", "platform.claude.com"]`
+   - `allowed_hosts` includes everything in `agent.allow_hosts` from `services.autodev.agent` in `mia.yaml`
    - `allowed_roots` contains your `paths.work_root`
 
    Check with `csub probe`.
 5. **Claude login** for your account: `claude auth login`. Check:
-   `csub submit --claude --walltime 5 --wait -- claude -p "Reply OK" --model sonnet` prints `OK`.
+   `csub submit --agent claude --walltime 5 --wait -- claude -p "Reply OK" --model sonnet` prints `OK`.
 6. **A GitHub repo** you can write to, to hold test issues. The default in the example config is this repo.
 
 ## Steps
@@ -95,7 +95,7 @@ The Temporal UI is at `http://localhost:8233`. From your laptop use
 
 autodev opens PR `autodev-<you>/issue-N` and labels the issue `autodev-<you>:review`. Because you are both the bot
 and the reviewer, GitHub won't let you approve your own PR. Comment `/approve <first 7+ chars of the head sha>`
-instead. Only `/approve` comments posted after the bot's latest round summary count. Use `/revise <what>` or a
+instead. Only `/approve` comments posted after the head commit was made count. Use `/revise <what>` or a
 *Request changes* review to run another round.
 
 ## Day to day
@@ -106,7 +106,7 @@ pixi run mia logs autodev [worker|broker] [-n N] [-f]
 pixi run mia logs temporal
 pixi run mia attach autodev
 pixi run mia restart autodev        # after changing code or config; leaves Temporal and other services alone
-pixi run mia restart                # everything, Temporal included
+pixi run mia restart                # every service; Temporal only when it is named (mia restart temporal)
 pixi run mia down                   # everything, Temporal last
 pixi run mia exec autodev check     # any app command, with this service's config
 pixi run test                       # unit tests; no GitHub, LSF or Temporal server needed

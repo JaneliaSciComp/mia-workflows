@@ -13,14 +13,19 @@ import signal
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
+
+from mia_core.transfers import TRANSFERS_ENV
 
 from .config import STAGES, load_config
 
 if TYPE_CHECKING:
     from temporalio.client import Client
+
+    from mia_core.registry import Registry
 
     from .config import Config, Deployment
 
@@ -75,6 +80,11 @@ def _csub_problems(cfg: Config, probe: Any) -> list[str]:
             []
             if any(work_root.is_relative_to(Path(root).resolve()) for root in probe.allowed_roots)
             else [f"work_root {work_root} not under allowed_roots {probe.allowed_roots}"]
+        ),
+        *(
+            []  # the job runner sets TRANSFERS_ENV for every job, and csub refuses a submit whose env it does not allow
+            if any(fnmatchcase(TRANSFERS_ENV, pattern) for pattern in probe.env_allow)
+            else [f'env not allowed: {TRANSFERS_ENV} (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)']
         ),
     ]
 
@@ -147,10 +157,23 @@ async def cmd_init_labels(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def report_code(registry: Registry | None, task_queue: str, work_root: Path) -> asyncio.Task | None:
+    """Tell buffer-api, beside the worker's own work, what code this worker loaded: the cleaner names a worker
+    whose code is not the checkout's any more (`mia_core.registry.report_worker`). None for a deployment with no
+    buffer-api to tell."""
+    if registry is None:
+        return None
+    from mia_core.registry import report_worker
+
+    return asyncio.create_task(report_worker(registry, task_queue, log, work_root=work_root))
+
+
 async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
     """Run the Temporal worker until SIGTERM: one worker for workflows and short activities, one for the
     long-running job waits."""
     from temporalio.worker import Worker
+
+    from mia_core.temporal import DRAIN, until_stopped
 
     from .activities import Activities
     from .agent import AgentJobs
@@ -168,7 +191,7 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         cfg.paths.state_dir / "mirror" / f"{cfg.repo_slug}.git",
         cfg.git_url,
         tokens,
-        author=(bot, await noreply_email(cfg, bot)),
+        author=(bot, await noreply_email(cfg, bot, tokens())),
     )
     activities = Activities(cfg, gh, mirror, AgentJobs(cfg), bot, client)
     task_queue = cfg.task_queue
@@ -178,9 +201,14 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         workflows=[IssueWorkflow, PollWorkflow],
         activities=activities.all(),
         max_concurrent_activities=8,
+        graceful_shutdown_timeout=DRAIN,
     )
     await_worker = Worker(
-        client, task_queue=f"{task_queue}-await", activities=[activities.await_agent], max_concurrent_activities=20
+        client,
+        task_queue=f"{task_queue}-await",
+        activities=[activities.await_agent],
+        max_concurrent_activities=20,
+        graceful_shutdown_timeout=DRAIN,
     )
     task = asyncio.current_task()
     assert task is not None  # we are inside the worker coroutine
@@ -193,12 +221,15 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace) -> int:
         task_queue,
         task_queue,
     )
+    report = report_code(activities.registry, task_queue, cfg.paths.work_root)
     try:
         async with main_worker, await_worker:
-            await asyncio.Event().wait()
+            await until_stopped(main_worker, await_worker)
     except asyncio.CancelledError:
         log.info("worker shutting down")
     finally:
+        if report is not None:
+            report.cancel()
         await gh.aclose()
     return 0
 

@@ -31,17 +31,18 @@ from temporalio.exceptions import ApplicationError
 from autodev.activities import PERMANENT_CSUB
 from autodev.jobs import JobSpec
 from mia_core import autonomy
-from mia_core.assets import cache_missing, raw_asset, read_files_json
+from mia_core.assets import cache_key, cache_missing, raw_asset, read_files_json
 from mia_core.config import manifest_path
 from mia_core.fs import dir_bytes
 from mia_core.jobrecord import address, job_link, record_path
 from mia_core.judge import policy
 from mia_core.locks import LockLost, heartbeat_through, release_or_log, take_or_holder
 from mia_core.registry import Registry, RegistryError, best_effort
+from mia_core.temporal import heartbeats
 from mia_core.untrusted import loads, neutralize, read_untrusted, text, texts, write_atomic
 from mia_data.activities import mia_permanent_errors
+from mia_data.binding import granted_hosts, missing_hosts
 from mia_data.binding import hosts as job_hosts
-from mia_data.binding import missing_hosts, record_gaps
 from mia_data.catalog import dataset_folder
 from mia_data.config import round_open
 from mia_data.jobspec import SHA_RE, check_hosts_allowed, harness_pin, harness_snapshot, lock_dir, snapshot
@@ -52,6 +53,7 @@ from mia_data.status import render_jobs, render_links, render_result, stage_entr
 
 from .api import BufferConfig
 from .assume import VOXEL_NM
+from .cleaner import standing
 from .config import (
     HUMAN_LABELS,
     PREP_HUMAN_LABELS,
@@ -62,9 +64,10 @@ from .config import (
     STAGES,
     stage_pass,
 )
-from .drop import cache_key, drop_names, merge_manifest, read_manifest
-from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, fetch_job, levels_key, stage_job
-from .keeper import demand, evict_path, free_assets, live_bytes, plan_evictions, stale_builds
+from .drop import drop_names, merge_manifest, read_manifest
+from .explore import start_gaps
+from .jobspec import PLAN_FILE, VOXEL_FILE, artifact_id, catalog_snapshot, levels_key, stage_job
+from .keeper import evict_path, free_assets, live_bytes, plan_evictions, stale_builds
 from .models import (
     MAX_POLL_MINUTES,
     BindingInfo,
@@ -75,15 +78,12 @@ from .models import (
     DatasetPlan,
     DegradedSignal,
     DropResult,
-    FetchJobArgs,
-    FetchResult,
     KeeperReport,
     PlanResult,
     PrepOutcome,
     PrepPins,
     PrepState,
     QuotaCheck,
-    RawStatus,
     RegisterResult,
     RevokedArtifacts,
     RevokedSignal,
@@ -93,8 +93,8 @@ from .models import (
     StageResult,
     job_key,
 )
-from .plan import MANUAL_DROP_NOTE, UNREADABLE, Row, _group_key, build_plan, load_records, plan_hash
-from .register import buffer_config, recipe_for, volume_bodies
+from .plan import MANUAL_DROP_NOTE, UNREADABLE, Row, _group_key, bound_shapes, build_plan, load_records, plan_hash
+from .register import buffer_config, recipe_for, shortfall, volume_bodies
 from .select import decide_all
 from .spec import SpecError, load_prep_text, load_spec
 from .specmap import facts
@@ -112,9 +112,8 @@ log = logging.getLogger(__name__)
 ROUND_RE = re.compile(r"[ip]\d+-e\d+")  # i<issue>-e<event>: a buffer round; p<issue>-e<event>: a preparation request
 BUILDING_DIR_RE = re.compile(r"\.building-([0-9a-f]{16})-buf-.+")  # a stage job's build: the artifact id, the job key
 MANIFEST_SOURCE_MANUAL = "manual"
+UNCHECKED_BUILD = "stage.json says ok but records no check: the job ended before harness check-stage finished"
 STAGE_JSON_LIMIT = 64 << 20  # stage.json carries a 4,096-value sample per channel per volume: ~150 KB per RGB volume
-FETCH_JSON_LIMIT = 16 << 20  # fetch.json has one short entry per url of the binding
-FETCH_JSON_MISSING = "fetch.json missing: the job ended before writing it"
 KEEPER = "keeper"  # the cache keeper's lock owner
 KEEPER_LOCK_TTL_S = 900
 KEEPER_HEARTBEAT_S = 60  # the keep activity heartbeats at least this often, whatever step it is in
@@ -181,6 +180,8 @@ class Activities:
         self.cfg, self.gh_issues, self.gh_snippets, self.gh_catalog = cfg, gh_issues, gh_snippets, gh_catalog
         self.jobs, self.bot, self.client = jobs, bot, client
         self.registry = Registry.from_config(cfg.service)  # synchronous: call it through asyncio.to_thread
+        if jobs is not None:  # a job's transfer rows go to the ledger at its end
+            jobs.transfers_sink = self.registry.put_transfers
         self.probe = probe or (lambda: list(jobs.client.probe().allowed_hosts) if jobs else [])
 
     def all(self) -> list:
@@ -200,11 +201,7 @@ class Activities:
             self.read_stage,
             self.take_lock,
             self.release_lock,
-            self.raw_status,
             self.check_quota,
-            self.prepare_fetch,
-            self.submit_fetch,
-            self.read_fetch,
             self.mark_asset,
             self.verify_drop,
             self.create_buffer,
@@ -536,9 +533,10 @@ class Activities:
         if ref not in {catalog["ref"] for catalog in await asyncio.to_thread(registry.catalogs)}:
             await catalog_sync(self.cfg, self.gh_catalog, registry, ref)
         records = await asyncio.to_thread(registry.records, ref)
-        prepared = {row["id"] for row in await asyncio.to_thread(registry.datasets, "prepared")}
+        rows = await asyncio.to_thread(registry.datasets, "prepared")
+        prepared, bound = {row["id"] for row in rows}, bound_shapes(rows)
         stage_bytes = self.cfg.limits.stage_bytes or self.cfg.limits.job_bytes
-        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared, stage_bytes)
+        plan = await asyncio.to_thread(build_plan, spec, pins.spec_hash, ref, records, prepared, stage_bytes, bound)
         tensorizer = self.cfg.sourcing.tensorizer
         if not (self.cfg.harness.dir / "tensorizers" / tensorizer / "tensorizer.yaml").is_file():
             plan.errors.append(f"no tensorizer {tensorizer} in the harness checkout")
@@ -584,11 +582,9 @@ class Activities:
             cfg.sourcing.parallel,
             cfg.limits.job_walltime_min,
             cfg.service.url,
-            parallel_fetch=cfg.sourcing.parallel_fetch,
-            fetch_walltime_min=cfg.limits.fetch_walltime_min,
-            fetch_attempts=cfg.limits.fetch_attempts,
             poll_minutes=cfg.temporal.poll_minutes,
             max_tick_minutes=MAX_POLL_MINUTES,
+            per_source=cfg.sourcing.per_source,
         )
 
     # --- the issue ---------------------------------------------------------------------------
@@ -646,9 +642,14 @@ class Activities:
 
     def _shown(self, state: BufferState | PrepState) -> str:
         """What goes under the result of the pass open in `state`: a link to the record of each job the pass
-        submitted (a job that left none is not listed)."""
+        submitted."""
+        return self._jobs_line(state.pass_jobs)
+
+    def _jobs_line(self, workspaces: list[str]) -> str:
+        """`**Jobs:**` with a link to the record of each job run in `workspaces` (a job that left none is not
+        listed); empty when there is none."""
         links = {}
-        for workspace in state.pass_jobs:
+        for workspace in workspaces:
             where = address(self.cfg.paths.work_root, workspace)
             if where and record_path(self.cfg.paths.work_root, where).is_file():
                 links[Path(workspace).name] = job_link(self.cfg.service.url, where)
@@ -675,11 +676,12 @@ class Activities:
 
     @activity.defn(name="comment")
     @mia_permanent_errors
-    async def comment(self, issue: int, body: str, marker: str) -> str | None:
-        """Add an entry to the buffer spec's timeline, once per marker. Returns None; the return type is
-        recorded in histories."""
+    async def comment(self, issue: int, body: str, marker: str, jobs: list[str] | None = None) -> str | None:
+        """Add an entry to the buffer spec's timeline, once per marker, linking the records of the jobs run in
+        `jobs` (a dataset's own). Returns None; the return type is recorded in histories."""
         full_marker = self.cfg.marker(marker)
-        await self._post("buffer", issue, f"{self._clean(body)}\n\n{full_marker}", full_marker)
+        text = "\n\n".join(part for part in (self._clean(body), self._jobs_line(jobs or [])) if part)
+        await self._post("buffer", issue, f"{text}\n\n{full_marker}", full_marker)
         return None
 
     @activity.defn(name="comment_plan")
@@ -706,10 +708,16 @@ class Activities:
         """nudge_dataset's work, and whether the dataset was started for the first time. The dataset's subject
         says where it stands; a dataset that needs a round gets a `go` sent to buffer-api with the worker token:
         actor `buffer:<number>` or `prep:<number>`, the round's root (who is charged), and the key
-        `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). No issue is
-        searched, opened or labelled. `DatasetIssue.number` is the dataset's number."""
+        `<round id>/<record>`, so a retried activity sends no second go (spec webapp-actions §6). A stopped
+        dataset whose jobs were refused a host that is still unapproved gets none. No issue is searched, opened
+        or labelled. `DatasetIssue.number` is the dataset's number.
+
+        What is sent (spec resume-restart §5): a dataset that never ran gets a `go`. One that stopped, or whose
+        set waits at review, gets a `resume`, which keeps what its round has; where its stage takes none (its
+        saved crops were revoked) it gets a `go`. `again`: every dataset gets a `go`, a round from scratch,
+        also one that is done or at review."""
         entry = self._record(round_id, record)
-        if gaps := record_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
+        if gaps := start_gaps(entry):  # buffer-api refuses a go for it: say why, once, instead of asking
             raise ValueError(f"{record}: the record cannot be run: {'; '.join(gaps)}")
         registry, folder = self.registry, dataset_folder(entry, record)
         subject = await asyncio.to_thread(registry.subject, "dataset", record)
@@ -721,14 +729,21 @@ class Activities:
                 "run it again from its page so mia-data saves both"
             )
             return DatasetIssue(number, stage, False, note, folder), False
-        if subject and subject["status"] in ("working", "waiting"):  # a round is in progress, or at review
+        if subject and standing(subject) == "working":  # a round that is running is left to it
             return DatasetIssue(number, stage, False, folder=folder), False
+        resumes = not again and subject is not None and "resume" in subject["actions"]
+        if subject and standing(subject) == "stopped" and (waiting := subject.get("hosts")):
+            # only a person's click approves a host: a new round would be refused the same ones
+            raise ValueError(
+                f"{record}: its jobs were refused hosts no one approved yet: {', '.join(waiting)}; "
+                "press Resume on its page and check them"
+            )
         pins = self._pins(round_id)
         kind = "prep" if round_id.startswith("p") else "buffer"
         go = functools.partial(
             registry.send_action,
             f"/datasets/{record}/actions",
-            "go",
+            "resume" if resumes else "go",
             key=f"{round_id}/{record}",
             actor=f"{kind}:{_issue_of(round_id)}",
             root=pins.root,
@@ -758,13 +773,19 @@ class Activities:
         """Pin a preparation request: the prep spec its action carries, the catalog at its ref
         and the records it names (or its `select` admits there). Written once to state_dir/rounds/p<issue>-e<event>/
         with a plan.json of {id, path} rows and buffer-shaped pins, so nudge_dataset reads the records as it does a
-        buffer round's; a retry returns the same pins."""
+        buffer round's; a retry returns the same pins.
+
+        `PrepPins.again` says how the round runs its datasets (spec resume-restart §5): the text's `restart` for
+        the request's first round; after that the action decides, a `resume` resuming them and a `go` starting
+        each over."""
         if not re.fullmatch(r"\d+", str(event_id)):
             raise ValueError(f"bad event id {event_id!r}")
         round_dir = self._round_dir(f"p{int(issue)}-e{event_id}")
         if (round_dir / "prep.json").is_file():
             return PrepPins(**json.loads((round_dir / "prep.json").read_text()))
         text = await self._spec_text("prep", issue, event_id, "preparation request")
+        action = await self._action("prep", issue, event_id)
+        ran_before = any(round_dir.parent.glob(f"p{int(issue)}-e*/prep.json"))
         try:
             spec = load_prep_text(text)
         except SpecError as error:
@@ -799,29 +820,35 @@ class Activities:
         spec_hash, root = hashlib.sha256(text.encode()).hexdigest(), self.cfg.root_of(issue)
         buffer_pins = BufferPins(spec_hash, ref, "", "", root=root)
         write_atomic(round_dir / "pins.json", json.dumps(dataclasses.asdict(buffer_pins)))
-        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root, again=spec.again)
+        asked = action["action"] if action else "go"
+        again = asked != "resume" and (ran_before or spec.restart)
+        pins = PrepPins(round_dir.name, ref, records, spec.timeout_days, int(issue), root=root, again=again)
         write_atomic(round_dir / "prep.json", json.dumps(dataclasses.asdict(pins)))  # last: marks the request admitted
         return pins
 
     @activity.defn(name="prep_nudge")
     @mia_permanent_errors
     async def prep_nudge(self, round_id: str, record: str) -> PrepOutcome:
-        """Hand one requested record to mia-data unless the registry already settled it (prepared, shelved or
-        needs-human); otherwise nudge_dataset, its result named for the request's entry. A request that says
-        `again` hands those over too: the dataset gets a new round, and its row says `in-progress` at once, so
-        the request follows that round instead of settling on what the last one left."""
+        """Hand one requested record to mia-data unless the registry says it is prepared or shelved; otherwise
+        nudge_dataset, its result named for the request's entry. A dataset that stopped (`needs-human`) is handed
+        over, and so is a prepared one when the round restarts its datasets (`PrepPins.again`): its row says
+        `in-progress` at once, so the request follows that round instead of settling on what the last one left.
+        A dataset at review that is resumed keeps its row: it waits for a verdict unless its judge still has to
+        look, and the request hears of a dataset that becomes prepared. A dataset whose round is running is
+        left to it."""
         again = PrepPins(**json.loads((self._round_dir(round_id) / "prep.json").read_text())).again
         try:
             row = await asyncio.to_thread(self.registry.dataset, record)
         except RegistryError as error:  # best effort: the dataset's subject tells the rest
             log.warning("prep_nudge: registry row of %s unread: %s", record, error)
             row = None
-        settled = (state := _followed_state(row)) in ("prepared", "shelved", "needs-human")
-        if settled and (not again or state == "shelved"):  # a shelved dataset is never asked
+        state = _followed_state(row)
+        if state == "shelved" or (state == "prepared" and not again):  # a shelved dataset is never asked
             issue = (row or {}).get("issue")
             return PrepOutcome(record, str(state), issue if isinstance(issue, int) else None)
         found, created = await self._nudge(round_id, record, again=again)
-        if settled and found.nudged:
+        kept_at_review = found.stage == "review" and not again
+        if state in ("prepared", "needs-human") and found.nudged and not kept_at_review:
             await asyncio.to_thread(self.registry.put_dataset, record, state="in-progress")
         if found.nudged:
             outcome = "opened" if created else "nudged"
@@ -932,21 +959,22 @@ class Activities:
     @activity.defn(name="prep_cancel")
     @mia_permanent_errors
     async def prep_cancel(self, issue: int, records: list[str]) -> list[str]:
-        """A request was cancelled: cancel the dataset rounds it started and no others. A record counts when its
-        dataset is still in a round and that round's `go` was sent by this request (`prep:<issue>`); a dataset
-        somebody else started, or one that has settled, is left alone. Returns the records cancelled."""
+        """A request was cancelled: cancel the dataset rounds it runs and no others. A record counts when its
+        dataset is still in a round and what last ran that round, a `go` or a `resume`, was sent by this request
+        (`prep:<issue>`); a dataset somebody else started or resumed, or one that has settled, is left alone.
+        Returns the records cancelled."""
         registry, actor, cancelled = self.registry, f"prep:{int(issue)}", []
         for record in records:
             subject = await asyncio.to_thread(registry.subject, "dataset", record)
             if subject is None or "cancel" not in subject["actions"]:
                 continue
             found = await asyncio.to_thread(registry.timeline, "dataset", subject["number"])
-            # the debugger and the cleaner run a round again for whoever asked for the one before: their go is
+            # the debugger and the cleaner run a round again for whoever asked for the one before: theirs is
             # not looked at
             gos = [
                 a
                 for a in (found or {}).get("actions", [])
-                if a["action"] == "go" and a["state"] == "sent" and a["actor"] not in RERUNNERS
+                if a["action"] in ("go", "resume") and a["state"] == "sent" and a["actor"] not in RERUNNERS
             ]
             if not gos or gos[-1]["actor"] != actor:
                 continue
@@ -1001,15 +1029,22 @@ class Activities:
         shutil.copyfile(source, dest)
         digest = hashlib.sha256(dest.read_bytes()).hexdigest()
         url_hosts = sorted({host for url in urls if (host := (urlsplit(url).hostname or "").lower())})
-        manual = any(url.startswith("manual://") for url in urls) or bool(
-            missing_hosts(url_hosts, await asyncio.to_thread(self.probe))
-        )
+        patterns = await asyncio.to_thread(self.probe)
+        manual = any(url.startswith("manual://") for url in urls) or bool(missing_hosts(url_hosts, patterns))
         staged, artifact, refused = await self._staged_before(round_id, record)
         if manual:
             drops = [list(pair) for pair in drop_names(urls)]
             return BindingInfo(True, str(dest), digest, [], drops, staged=staged, artifact=artifact, refused=refused)
+        # what a person approved for this dataset beside its URLs' hosts (redirect targets its rounds were refused,
+        # raw GitHub); buffer-api unreachable: none, and a job that needs one says `host_not_allowed`
+        try:
+            granted = granted_hosts(await asyncio.to_thread(self.registry.dataset_hosts, record), patterns)
+        except RegistryError as error:
+            activity.logger.warning("%s: registry unavailable, no host of its own granted: %s", record, error)
+            granted = []
+        hosts = sorted({*job_hosts(urls, self.cfg), *granted})
         return BindingInfo(
-            True, str(dest), digest, job_hosts(urls, self.cfg), staged=staged, artifact=artifact, refused=refused
+            True, str(dest), digest, hosts, sources=url_hosts, staged=staged, artifact=artifact, refused=refused
         )
 
     async def _staged_before(self, round_id: str, record: str) -> tuple[bool, str, str]:
@@ -1065,6 +1100,7 @@ class Activities:
 
     @activity.defn(name="submit")
     @mia_permanent_errors
+    @heartbeats
     async def submit(self, key: str, args: StageJobArgs) -> str:
         """Build the stage job (snippets at the binding's commit, the round's building directory as `out`), refuse
         hosts a fresh `csub probe` doesn't allow, and submit at most once per key. Returns the job id; the staged
@@ -1128,11 +1164,18 @@ class Activities:
         """The stage job's stage.json, reduced; tolerant of any shape. An ok build naming the expected artifact id is
         published: the building directory renamed to the final one (when that exists already, an identical pyramid
         won: the build is removed and the final one reused). A failed or foreign build stays where it is, for the
-        keeper's `.building-*` rule. Idempotent on retry."""
+        keeper's `.building-*` rule. A pyramid is ok only once `harness check-stage` passed it: `harness stage`
+        writes `ok` with a `verification` whose `ok` is null, and the check sets it true, so a report with the one
+        and not the other is a job that ended between the two; neither a build nor a published pyramid with such a
+        report is served. Idempotent on retry."""
         final, building = self._staged_dir(round_id, record), self._building_dir(round_id, record, rebuild)
         report = _stage_json(building if building.exists() else final)
-        if isinstance(report, dict) and report.get("ok") is True and building.exists():
-            report = await asyncio.to_thread(self._publish, round_id, record, report, building, final, rebuild > 0)
+        if isinstance(report, dict) and report.get("ok") is True:
+            verification = report.get("verification")
+            if not (isinstance(verification, dict) and verification.get("ok") is True):
+                report = {**report, "ok": False, "errors": [UNCHECKED_BUILD, *texts(report.get("errors"))]}
+            elif building.exists():
+                report = await asyncio.to_thread(self._publish, round_id, record, report, building, final, rebuild > 0)
         if not isinstance(report, dict):
             return StageResult(False, errors=["stage.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")
@@ -1196,7 +1239,7 @@ class Activities:
     async def _record_assets(self, round_id: str, record: str, result: StageResult, rebuild: bool = False) -> None:
         """Register with buffer-api what the stage job left on disk: the staged artifact under its id (with every
         input the id hashes, so a later round can reuse it; `ready`, or `partial` when the job failed) and the
-        record's raw cache as files.json lists it, both just used. A failed build beside a published artifact (not
+        record's raw cache as it is on disk (`ready`: at rest, whatever the job left in it), both just used. A failed build beside a published artifact (not
         a rebuild of it) leaves that artifact's row as it was before submit marked it `staging`."""
         block, cache = self._artifact_block(round_id, record), self._cache_dir(record)
         binding = yaml.safe_load(self._binding_path(round_id, record).read_text())
@@ -1226,13 +1269,12 @@ class Activities:
                 "last_used": now,
                 "job": None,
             }
-        raw = await asyncio.to_thread(raw_asset, cache, self._binding_urls(round_id, record))
-        del raw["state"]  # the fetch phase owns the raw state (it knows the stream urls); a stage updates the rest
+        raw = await asyncio.to_thread(raw_asset, cache)  # at rest: while a job writes it, the lock spares it
         raw["last_used"] = now
         await asyncio.to_thread(self.registry.put_asset, "staged", artifact, staged)
         await asyncio.to_thread(self.registry.put_asset, "raw", record, raw)
 
-    # --- the fetch phase: locks, quota, the fetch job, raw-cache state ---------------------------
+    # --- locks, the quota, raw-cache state -------------------------------------------------------
 
     @activity.defn(name="take_lock")
     @mia_permanent_errors
@@ -1246,112 +1288,30 @@ class Activities:
         """Release the lock if `owner` still holds it; a lock that lapsed or changed hands is logged and left."""
         await asyncio.to_thread(release_or_log, lock_dir(self.cfg), kind, key, owner)
 
-    @activity.defn(name="raw_status")
-    @mia_permanent_errors
-    async def raw_status(self, round_id: str, record: str) -> RawStatus:
-        """Whether files.json of the record's raw cache lists every whole file of the round's binding but the
-        stream urls an earlier fetch recorded on the raw row (buffer-api unreachable: none known). The row's
-        `last_used` is touched, so the keeper's hold rule spares what this buffer is about to use."""
-        try:
-            row = await asyncio.to_thread(self.registry.asset, "raw", record)
-        except RegistryError as error:
-            log.warning("%s: registry unavailable, no stream urls known: %s", record, error)
-            row = None
-        if isinstance(row, dict):
-            await self.mark_asset("raw", record, {"last_used": time.time()})
-        recorded = row.get("stream") if isinstance(row, dict) else None
-        urls = self._binding_urls(round_id, record)
-        stream = [url for url in urls if isinstance(recorded, list) and url in recorded]
-        manifest = await asyncio.to_thread(read_files_json, self._cache_dir(record))
-        ready, missing = cache_missing(manifest, urls, stream)  # raw_asset's `ready` rule, without the du
-        return RawStatus(ready, missing, texts(stream))
-
     @activity.defn(name="raw_ready")
     @mia_permanent_errors
     async def raw_ready(self, round_id: str, record: str) -> bool:
-        """Whether the record's raw cache still holds its binding's files: a missing pyramid can be staged again."""
-        return (await self.raw_status(round_id, record)).ready
+        """Whether the record's raw cache holds every file of the round's binding (`cache_missing`): asked for a
+        record whose files a person dropped, which a rebuild can only take from there. The row's `last_used` is
+        touched, so the keeper's hold rule spares what this buffer is about to use."""
+        await self.mark_asset("raw", record, {"last_used": time.time()})
+        cache = self._cache_dir(record)
+        manifest = await asyncio.to_thread(read_files_json, cache)
+        ready, _ = await asyncio.to_thread(cache_missing, cache, manifest, self._binding_urls(round_id, record))
+        return ready
 
     @activity.defn(name="check_quota")
     @mia_permanent_errors
     async def check_quota(self, round_id: str, record: str) -> QuotaCheck:
-        """Whether fetching the record (its catalog size) keeps the raw cache within `quota.raw_bytes` (0 is no
-        limit). The record's own row is left out of the total, so a resumed fetch does not count its partial
-        cache twice. Over: the row records `wanted` (the catalog size) and `blocked_at`, best effort, for the
-        keeper. A RegistryError propagates: the workflow retries rather than fetch past the quota."""
+        """Whether the raw cache, as the registry sums it, is within `quota.raw_bytes` (0 is no limit). The record
+        is charged nothing: what its stage adds is known only once its readers have run. A RegistryError
+        propagates: the workflow retries rather than stage past the quota."""
         limit = int(self.cfg.quota.raw_bytes)
         if limit == 0:
             return QuotaCheck(True)
-        expected = int(self._row(round_id, record).get("bytes") or 0)
         listing = await asyncio.to_thread(self.registry.assets, "raw")
-        own = next((asset.get("data") or {} for asset in listing["assets"] if asset.get("key") == record), {})
-        counted = own.get("state") not in ("missing", "evicted")  # the rows the registry's `bytes` total sums
-        own_bytes = own.get("bytes")
-        own_bytes = own_bytes if counted and type(own_bytes) is int else 0
-        over_by = int(listing["bytes"]) - own_bytes + expected - limit
-        if over_by > 0:  # the keeper frees room for the largest blocked fetch (`wanted`), not only the headroom
-            await self.mark_asset("raw", record, {"wanted": expected, "blocked_at": time.time()})
-        return QuotaCheck(over_by <= 0, max(over_by, 0), expected)
-
-    @activity.defn(name="prepare_fetch")
-    @mia_permanent_errors
-    async def prepare_fetch(self, issue: int, round_id: str, record: str, attempt: int) -> str:
-        """The fetch job's workspace, one per attempt, with record.yaml and binding.yaml; the raw cache exists
-        afterwards (a mount must). Returns the workspace path."""
-        workspace = self._round_workspace(issue, round_id) / f"fetch-{record}-{int(attempt)}"
-        workspace.mkdir(parents=True, exist_ok=True)
-        write_atomic(workspace / "record.yaml", yaml.safe_dump(self._record(round_id, record), sort_keys=False))
-        shutil.copyfile(self._binding_path(round_id, record), workspace / "binding.yaml")
-        self._cache_dir(record).mkdir(parents=True, exist_ok=True)
-        return str(workspace)
-
-    @activity.defn(name="submit_fetch")
-    @mia_permanent_errors
-    async def submit_fetch(self, key: str, args: FetchJobArgs) -> str:
-        """Submit the fetch job at most once per key, hosts checked as `submit` does. Returns the job id; the raw
-        asset row says `fetching` under it (best effort)."""
-        job_id = await self._submit_job(key, args.workspace, args.record, lambda snap: fetch_job(self.cfg, args, snap))
-        await self.mark_asset("raw", args.record, {"state": "fetching", "job": job_id})
-        return job_id
-
-    @activity.defn(name="read_fetch")
-    @mia_permanent_errors
-    async def read_fetch(self, round_id: str, record: str, workspace: str) -> FetchResult:
-        """The fetch job's fetch.json, reduced; none (a job killed at its walltime) is partial, since the next
-        attempt resumes from the cache. The raw asset row is then put from the cache as it is (best effort)."""
-        report = loads(read_untrusted(Path(workspace), "fetch.json", FETCH_JSON_LIMIT))
-        stream: list[str] | None = None  # no report: the row keeps the stream urls it has
-        if not isinstance(report, dict):
-            result = FetchResult(True, partial=True, errors=[FETCH_JSON_MISSING])
-        else:
-            reported = report.get("files")
-            entries = reported if isinstance(reported, list) else []
-            files = [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("url"), str)]
-            files = [entry for entry in files if entry["url"]]
-
-            def urls(outcome: str) -> list[str]:
-                return texts([entry["url"] for entry in files if entry.get("outcome") == outcome])
-
-            fetched, blocked, failed = report.get("bytes_fetched"), report.get("host_not_allowed"), urls("failed")
-            result = FetchResult(
-                report.get("ok") is True and not failed,
-                report.get("partial") is True or any(entry.get("outcome") == "pending" for entry in files),
-                fetched if type(fetched) is int and fetched >= 0 else 0,
-                urls("stream"),
-                failed,
-                texts(report.get("errors")),
-                text(blocked.get("host"), 300) if isinstance(blocked, dict) and blocked.get("host") else None,
-            )
-            # the binding's own urls the harness streams, kept on the row so raw_status leaves them out
-            streamed = {entry["url"] for entry in files if entry.get("outcome") == "stream"}
-            stream = [url for url in self._binding_urls(round_id, record) if url in streamed]
-        row = await asyncio.to_thread(raw_asset, self._cache_dir(record), self._binding_urls(round_id, record))
-        row.update(state="ready" if result.ok and not result.partial else "partial", job=None, last_used=time.time())
-        row.update(wanted=None, blocked_at=None)  # the fetch ran: no longer blocked
-        if stream is not None:
-            row["stream"] = stream
-        await self.mark_asset("raw", record, row)
-        return result
+        over_by = int(listing["bytes"]) - limit
+        return QuotaCheck(over_by <= 0, max(over_by, 0))
 
     @activity.defn(name="mark_asset")
     @mia_permanent_errors
@@ -1364,13 +1324,17 @@ class Activities:
     @mia_permanent_errors
     async def verify_drop(self, round_id: str, record: str) -> DropResult:
         """Move the files a human placed under raw_root/<record>/incoming/ into the cache under the harness's
-        key and list them in files.json. A listed file that is missing, empty or a symlink stays missing. When none
-        is, the raw row becomes `ready` (best effort)."""
+        key and list them in files.json. A file the cache holds already (`cache_missing`: its entry and its bytes,
+        not an entry alone, which a HEAD leaves) is skipped. A listed file that is missing, empty or a symlink stays
+        missing. When none is, the raw row becomes `ready` and just used (best effort): these files exist nowhere
+        else, and the keeper's hold rule spares them while the record waits for its stage slot."""
         urls = self._binding_urls(round_id, record)
         cache, known = self._cache_dir(record), read_manifest(self._cache_dir(record))
+        wanted = drop_names(urls)
+        _, uncached = cache_missing(cache, known, [url for url, _name in wanted])
         placed, missing, entries = [], [], {}
-        for url, name in drop_names(urls):
-            if url in known:
+        for url, name in wanted:
+            if url not in uncached:
                 continue
             path = cache / "incoming" / name
             try:
@@ -1395,8 +1359,8 @@ class Activities:
             placed.append(name)
         if entries:
             merge_manifest(cache, entries)
-        if not missing:  # the row said waiting-drop: the files are in (best effort)
-            await self.mark_asset("raw", record, {"state": "ready"})
+        if not missing:  # the row said waiting-drop: the files are in, and about to be used (best effort)
+            await self.mark_asset("raw", record, {"state": "ready", "last_used": time.time()})
         return DropResult(not missing, placed, missing)
 
     @activity.defn(name="create_buffer")
@@ -1428,7 +1392,7 @@ class Activities:
         report = _stage_json(staged)
         if not isinstance(report, dict):
             return RegisterResult(refused={record: "stage.json is missing, unreadable or not a JSON object"})
-        result = RegisterResult()
+        result = RegisterResult(short=shortfall(report))
         bodies = volume_bodies(
             self._row(round_id, record),
             staged,
@@ -1746,7 +1710,7 @@ class Activities:
         }
         locks = lock_dir(self.cfg)
 
-        def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its fetch and stage of the record
+        def lock_key(row: dict) -> str:  # a buffer holds raw/<record> across its stage of the record
             return row["key"] if kind == "raw" else str((row.get("data") or {}).get("record") or row["key"])
 
         def spare(row: dict, owner: str) -> dict:  # a lock holder counts as a reference: plan around the row
@@ -1762,7 +1726,6 @@ class Activities:
             planned,
             quota_bytes=limit,
             headroom_bytes=self.cfg.quota.headroom_bytes,
-            demand_bytes=demand(rows, hold_s=hold_s, now=now) if kind == "raw" else 0,
             **rules,
         )
         evicted: list[dict] = []
@@ -1776,6 +1739,10 @@ class Activities:
                     spare(row, owner)
                     continue
                 try:
+                    current = await asyncio.to_thread(self.registry.asset_row, kind, row["key"])
+                    if current is None or not free_assets([current], **rules):  # referenced or used since the plan
+                        report.locked.append(f"{kind} {row['key']} (referenced since the plan)")
+                        continue
                     removed = await self._keeper_remove(report, kind, row, roots, now)
                 finally:
                     await asyncio.to_thread(release_or_log, locks, "raw", lock_key(row), KEEPER)
@@ -1792,15 +1759,15 @@ class Activities:
         self, report: KeeperReport, kind: str, row: dict, roots: tuple[Path, ...], now: float
     ) -> bool:
         """Remove one asset's directory and mark its row `evicted`. A refusal leaves the row; a removal that failed
-        half way marks it damaged (`partial` raw, a fetch resumes it; `missing` staged, it is staged again)."""
+        half way marks it `missing` (nothing is left at its path: a staged artifact is staged again, a raw cache
+        is read from its source again)."""
         data, key, registry = row["data"], row["key"], self.registry
         path = data.get("path")
         try:
             removed = isinstance(path, str) and await asyncio.to_thread(evict_path, Path(path), roots)
         except OSError as error:
-            damaged = "partial" if kind == "raw" else "missing"
-            report.errors.append(text(f"evict {kind}: removing {key} at {path} failed, now {damaged}: {error}", 500))
-            await asyncio.to_thread(registry.put_asset, kind, key, {"state": damaged, "job": None})
+            report.errors.append(text(f"evict {kind}: removing {key} at {path} failed, now missing: {error}", 500))
+            await asyncio.to_thread(registry.put_asset, kind, key, {"state": "missing", "job": None})
             return False
         if not removed:
             report.errors.append(text(f"evict {kind}: refused to remove {key} at {path}", 500))

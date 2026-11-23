@@ -54,24 +54,13 @@ class Reviewers:
         return self.marker_prefix in (body or "")
 
 
-def latest_round_at(comments: list[dict], reviewers: Reviewers) -> str | None:
-    """When the current head was published: the time of the bot's latest round-summary comment."""
-    return max(
-        (
-            comment.get("created_at") or ""
-            for comment in comments
-            if _login(comment) == reviewers.bot and f"{reviewers.marker_prefix} round " in (comment.get("body") or "")
-        ),
-        default=None,
-    )
-
-
 def approved(head_sha: str, reviews: list[dict], comments: list[dict], reviewers: Reviewers, since: str | None) -> bool:
     """Whether a human with write access approved exactly `head_sha`, by review or by `/approve <sha>` comment
     (a trusted bot's `/approve` counts too, see Reviewers.may_command).
 
-    `/approve` comments count only if posted after `since`: a short prefix of an older head must not approve
-    a later head the agent happens to produce. GitHub's ISO-8601 UTC timestamps compare correctly as strings."""
+    `/approve` comments count only if posted after `since`, the time `head_sha` was committed: a short prefix of
+    an older head must not approve a later head the agent happens to produce. GitHub's ISO-8601 UTC timestamps
+    compare correctly as strings."""
     latest: dict[str, dict] = {}
     for review in reviews:  # GitHub returns reviews oldest first; a reviewer's latest verdict counts
         if review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED") and (login := _login(review)):

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -22,10 +23,12 @@ from autodev.auth import bot_login
 from autodev.cli import _client, _setup_logging, apply_schedule, run_checks
 from mia_core.fs import require_local_dir, require_secret_file
 from mia_core.registry import Registry, RegistryError, read_token, report_worker
-from mia_data.cli import _gh, _github_clients
+from mia_core.temporal import DRAIN, until_stopped
+from mia_data.cli import _gh, _github_clients, _mirror_gh
 from mia_data.jobspec import harness_env, harness_pin
 
 from .config import PREP_STAGES, STAGES, load_config
+from .drop import cached_files
 from .jobspec import catalog_snapshot
 from .plan import build_plan, load_records, plan_hash
 from .spec import SpecError, load_spec, spec_hash
@@ -42,6 +45,26 @@ def catalog_head(catalog_dir: Path) -> str | None:
     """The checkout's HEAD commit, or None when the directory is not a git checkout."""
     result = subprocess.run(["git", "-C", str(catalog_dir), "rev-parse", "HEAD"], capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _raw(args: argparse.Namespace) -> int:
+    """Print a raw cache's files as `<cache entry>\t<upstream name>` and, with --to, link or copy each under its
+    name."""
+    files = cached_files(args.cache_dir)
+    for name, entry in files:
+        print(f"{entry}\t{name}")
+        if args.to:
+            target = args.to / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink():  # a link of an earlier run: never written through, which would reach the cache
+                target.unlink()
+            if args.copy:
+                shutil.copyfile(entry, target)
+            else:  # a real file there is left alone, and this fails
+                target.symlink_to(entry.resolve())
+    if not files:
+        print(f"{args.cache_dir}: no file is cached whole here", file=sys.stderr)
+    return 0 if files else 1
 
 
 def _plan(args: argparse.Namespace) -> int:
@@ -109,11 +132,12 @@ def _register(args: argparse.Namespace) -> int:
 
 
 async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int:
-    """Run the Temporal workers until SIGTERM: one for the workflows and short activities, one for the job waits."""
+    """Run the Temporal workers until SIGTERM: one for the workflows and short activities, one for the job waits,
+    one for the mirror's passes."""
     from temporalio.worker import Worker
 
     from autodev.jobs import CsubJobs
-    from mia_data.mirror import Mirror
+    from mia_data.mirror import Mirror, mirror_worker
     from mia_data.workflows import MiaMirror
 
     from .activities import Activities
@@ -134,33 +158,40 @@ async def cmd_worker(cfg: Config, args: argparse.Namespace | None = None) -> int
     labels = {"buffer": (cfg.label, STAGES), "prep": (cfg.prep_label, PREP_STAGES)}
     openers = {"buffer": buffer_issue(cfg), "prep": prep_issue(cfg)}  # a subject created on the page has no issue
     pages = {"buffer": spec_page(cfg), "prep": request_page(cfg)}
-    mirror = Mirror(clients[0], activities.registry, bot, labels, openers, pages)
+    mirror_gh = _mirror_gh(cfg, clients[0])
+    mirror = Mirror(mirror_gh, activities.registry, bot, labels, openers, pages)
     main_worker = Worker(
         client,
         task_queue=cfg.task_queue,
         workflows=[MiaBuffer, MiaCacheKeeper, MiaCleaner, MiaPrep, MiaMirror],
-        activities=[*activities.all(), mirror.mirror],
+        activities=activities.all(),
         max_concurrent_activities=8,
+        graceful_shutdown_timeout=DRAIN,
     )
+    mirror_passes = mirror_worker(client, cfg.mirror_queue, mirror.mirror)
     await_worker = Worker(
-        client, task_queue=cfg.await_queue, activities=[activities.await_job], max_concurrent_activities=20
+        client,
+        task_queue=cfg.await_queue,
+        activities=[activities.await_job],
+        max_concurrent_activities=20,
+        graceful_shutdown_timeout=DRAIN,
     )
     task = asyncio.current_task()
     assert task is not None  # we are inside the worker coroutine
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
     print(
-        f"worker up as {bot}: {cfg.temporal.address} ns={cfg.temporal.namespace} queues {cfg.task_queue}, {cfg.await_queue}"
+        f"worker up as {bot}: {cfg.temporal.address} ns={cfg.temporal.namespace} queues {cfg.task_queue}, {cfg.await_queue}, {cfg.mirror_queue}"
     )
     # the code this worker's activities were loaded from: the cleaner says when a restart is owed
-    report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log))
+    report = asyncio.create_task(report_worker(activities.registry, cfg.task_queue, log, work_root=cfg.paths.work_root))
     try:
-        async with main_worker, await_worker:
-            await asyncio.Event().wait()
+        async with main_worker, await_worker, mirror_passes:
+            await until_stopped(main_worker, await_worker, mirror_passes)
     except asyncio.CancelledError:
         print("worker shutting down")
     finally:
         report.cancel()
-        for gh in clients:
+        for gh in (*clients, mirror_gh):
             await gh.aclose()
     return 0
 
@@ -284,16 +315,16 @@ async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
             raise RuntimeError(f"{tensorizer} is missing")
         return f"{commit[:12]} env {digest[:12]} tensorizer {cfg.sourcing.tensorizer}"
 
-    async def harness_fetch():
-        """The harness checkout has the `fetch` subcommand the fetch jobs run."""
+    async def harness_stage():
+        """The harness environment runs, and its checkout has the `stage` subcommand the stage jobs run."""
         command = [str(harness_env(cfg)), "-c", "import sys; from mia_harness.cli import main; sys.exit(main())"]
         try:
-            result = subprocess.run([*command, "fetch", "--help"], capture_output=True, text=True, timeout=120)
+            result = subprocess.run([*command, "stage", "--help"], capture_output=True, text=True, timeout=120)
         except OSError as error:
             raise RuntimeError(f"cannot run the harness environment's python: {error}") from error
         if result.returncode:
-            raise RuntimeError(f"`harness fetch --help` exited {result.returncode}: {result.stderr.strip()[-300:]}")
-        return f"{cfg.harness.dir} has `harness fetch`"
+            raise RuntimeError(f"`harness stage --help` exited {result.returncode}: {result.stderr.strip()[-300:]}")
+        return f"{cfg.harness.dir} has `harness stage`"
 
     async def buffer_api():
         url = f"{cfg.service.url}/buffers/_check_/status"
@@ -316,7 +347,7 @@ async def cmd_check(cfg: Config, args: argparse.Namespace | None = None) -> int:
             ("local root", local_root),
             ("service token", service_token),
             ("harness", harness),
-            ("harness fetch", harness_fetch),
+            ("harness stage", harness_stage),
             ("buffer-api", buffer_api),
         ]
     )
@@ -438,6 +469,13 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-ref-mismatch", action="store_true", help="plan even when the checkout is not at catalog.ref"
     )
     plan.set_defaults(func=_plan)
+    raw = sub.add_parser(
+        "raw", help="list a record's raw cache (<raw_root>/<record id>) under the files' upstream names"
+    )
+    raw.add_argument("cache_dir", type=Path)
+    raw.add_argument("--to", type=Path, help="also make this folder, with a symlink to each file under its name")
+    raw.add_argument("--copy", action="store_true", help="with --to: copy each file instead of linking it")
+    raw.set_defaults(func=_raw)
     reg = sub.add_parser("register", help="register a plan's staged volumes with a running buffer-api")
     reg.add_argument("plan", type=Path, help="plan.json from `mia-buffers plan --json`")
     reg.add_argument("spec", type=Path)
@@ -456,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
         ("init-labels", "create the buffer:* labels on the issue repo"),
         (
             "check",
-            "verify GitHub repos, Temporal, directories, the local root, the token, the harness (and its fetch) and "
+            "verify GitHub repos, Temporal, directories, the local root, the token, the harness (and its stage) and "
             "buffer-api",
         ),
     ):

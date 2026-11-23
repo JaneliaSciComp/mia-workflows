@@ -56,12 +56,15 @@ const ghMark = () => {
 };
 // a link into this page (a job's record in a timeline: `<this origin>/#job/…`) opens here, any other in a new tab
 const intoThisPage = href => typeof location !== "undefined" && String(href).startsWith(`${location.origin}/#`);
+// `<file url>::<member or glob>` is the harness's address of a file inside a zip or a directory, which no host
+// serves: its link opens the part before the `::` (the first one after the host, so an IPv6 host stays whole)
+const served = href => String(href).replace(/^(https?:\/\/[^/]+\/.*?)::.*$/is, "$1");
 // catalog records are untrusted: only an http(s) href becomes a link, anything else (javascript:, data:) stays text
 export const link = (href, text, title) =>
   /^https?:\/\//i.test(String(href || ""))
     ? el(
         "a",
-        intoThisPage(href) ? { href, title } : { href, target: "_blank", rel: "noopener", title },
+        intoThisPage(href) ? { href, title } : { href: served(href), target: "_blank", rel: "noopener", title },
         ...(/^https:\/\/github\.com\//i.test(href) ? [ghMark(), " "] : []),
         ...[].concat(text),
       )
@@ -69,77 +72,86 @@ export const link = (href, text, title) =>
 // what each pill means, by its text; the tooltip shows it (a decision pill adds the planner's exact reason)
 export const PILL_HELP = {
   // the planner's decision for a dataset against the current spec
-  "pool": "Fits the spec and is prepared: the dataset is in the plan's pool and would supply crops.",
-  "path not selected": "The record's path in the catalog is not under the spec's select.paths globs.",
-  "excluded by path": "The record's path matches one of the spec's exclude.paths globs.",
-  "excluded by id": "The record's id is listed in the spec's exclude.ids.",
-  "dims not selected": "The dataset's dimensionality (2D, 2D+t, 3D, 3D+t) is not in the spec's where.dims.",
-  "modality": "None of the dataset's modalities is in the spec's where.modality.",
-  "organism": "The dataset's organism is not in the spec's where.organism.",
-  "licence unknown": "The record names no SPDX licence and the spec does not allow unknown licences.",
-  "licence not allowed": "The record's licence is not in the spec's licence allowlist.",
-  "annotations required": "The spec requires annotations and the record has none.",
-  "annotation types": "The record's annotation types (masks, boxes, points, …) are not among those the spec asks for.",
+  "pool": "Fits the definition and is prepared: the dataset is in the plan's pool and would supply crops.",
+  "path not selected": "The record's path in the catalog is not under the definition's select.paths globs.",
+  "excluded by path": "The record's path matches one of the definition's exclude.paths globs.",
+  "excluded by id": "The record's id is listed in the definition's exclude.ids.",
+  "dims not selected": "The dataset's dimensionality (2D, 2D+t, 3D, 3D+t) is not in the definition's where.dims.",
+  "modality": "None of the dataset's modalities is in the definition's where.modality.",
+  "organism": "The dataset's organism is not in the definition's where.organism.",
+  "licence unknown": "The record names no SPDX licence and the definition does not allow unknown licences.",
+  "licence not allowed": "The record's licence is not in the definition's licence allowlist.",
+  "annotations required": "The definition requires annotations and the record has none.",
+  "annotation types":
+    "The record's annotation types (masks, boxes, points, …) are not among those the definition asks for.",
   "annotation source":
-    "The record's annotation source (manual, proofread, automatic, …) is not among those the spec asks for.",
-  "array below minimum": "The record's largest array has fewer voxels than the spec's where.min_size_voxels.",
+    "The record's annotation source (manual, proofread, automatic, …) is not among those the definition asks for.",
+  "array below minimum": "The record's largest array has fewer voxels than the definition's where.min_size_voxels.",
   "no mia-data folder":
     "The record names no modality the preparation pipeline knows, and a prepared dataset's folder is named after its modality family, so the pipeline cannot place it.",
   "duplicate DOI": "Another record with the same DOI is already in the pool; dedup keeps the first.",
   "record unreadable": "The record's YAML could not be parsed; the planner skipped it.",
   "no patch for dims":
-    "The spec has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
+    "The definition has no patch size for this dataset's dimensionality (sampling.patch has no entry for it).",
   "no array shape":
-    "The catalog record does not give the shape of its largest array (y and x extents, and z for 3D), so the planner cannot tell whether a crop fits in it.",
+    "The catalog record does not give the shape of its largest array (y and x extents, and z for 3D), so the planner cannot tell whether a crop fits in it. No buffer can take the dataset, so no round can be started for it.",
   "footprint too large":
     "The coarsest crop (patch size times the largest pyramid level) is bigger than the dataset's largest array.",
   "too few z slices": "The 3D patch's z extent is deeper than the dataset's largest array.",
+  "no voxel size":
+    "The catalog record gives no voxel size. A buffer takes this dataset only when its definition allows assuming one (sampling.assume_voxel_size).",
+  "no data URL": "The catalog record names no URL a job could fetch its files from, so no round can run.",
+  "no readable record": "The catalog record could not be read.",
   "voxel size unknown":
-    "The record gives no voxel size and the spec does not allow assuming one (sampling.assume_voxel_size).",
+    "The record gives no voxel size and the definition does not allow assuming one (sampling.assume_voxel_size).",
   "not prepared":
-    "Fits the spec, but no reader exists for the dataset's files yet; prepare it, and a later round will pick it up.",
+    "Fits the definition, but no reader exists for the dataset's files yet; prepare it, and a later round will pick it up.",
   // the preparation pipeline's view of a dataset
   "prepared": "An approved binding and verified crops exist: the dataset can be staged and served.",
   "in-progress":
     "The preparation pipeline is working on it by itself: nothing here waits for a person. The stage says where it is.",
   "unprepared": "Nobody has asked for this dataset to be prepared.",
+  // who moves a subject next
+  "needs human":
+    "Nothing automatic will move it: a person has to look. The stage says why: a verdict or an approval is wanted, a step failed, or a decision is needed.",
+  "in repair": "It stopped and the repair agent is working on it. Nothing here waits for a person.",
   "cannot start":
     "The dataset's catalog record lacks what a preparation round needs; the lines below say what. No round can be started for it. It can be started once a catalog sync brings a record that has it.",
   "needs-human":
     "A person has to act. The stage says what: review (its crops wait for a verdict), failed (a step failed; running it again may pass) or blocked (something has to be decided or changed first). The newest entry of its timeline says why.",
   "revoked":
-    "Withdrawn by a person after its crops were saved (Revoke): nothing is selected or reused from it; Run again on its page repairs it.",
+    "Withdrawn by a person after its crops were saved (Revoke): nothing is selected or reused from it; Restart on its page repairs it.",
   "shelved":
     "Set aside by a person, with a reason (Shelve): no preparation request starts it and no buffer plan takes it. Unshelve on its page takes it back.",
   // a cache directory or a staged pyramid
   "cached":
-    "The dataset's raw files are in the shared cache and no job is writing them; a buffer checks them against its binding before reusing them.",
-  "fetching": "A fetch job is downloading the dataset's raw files into the cache.",
-  "staging": "A stage job is converting the raw files into an OME-Zarr pyramid.",
+    "On disk, at rest. For a raw cache: the files a reader took whole; the keeper may evict it once nothing holds it.",
+  "staging": "A stage job is reading what the planned crops need from the source and writing an OME-Zarr pyramid.",
   "waiting-drop":
     "The files cannot be fetched by a job; a person has to place them in the dataset's incoming/ directory.",
-  "partial": "A fetch ended before the cache was complete; the next fetch resumes it.",
+  "partial": "A stage job failed before its pyramid was complete; the keeper removes what it left.",
   "missing": "Expected on disk but not found by the last scan.",
-  "evicted": "Removed by the keeper to stay under quota; a buffer that needs it fetches or stages again.",
+  "evicted": "Removed by the keeper to stay under quota; a buffer that needs it stages again.",
   "staged": "At least one pyramid of this dataset exists in the staged cache.",
   "quarantined":
     "Kept on disk for autonomy.quarantine_days after a revocation; the keeper does not evict it while an investigation may need it.",
   // a buffer's stage
   "new": "Nothing has run yet.",
-  "planning": "Resolving the spec against the catalog.",
+  "planning": "Resolving the definition against the catalog.",
   "plan-review": "The plan is in the timeline; the round waits here for Run, and no job has run yet.",
-  "sourcing": "Fetching and converting the pool's datasets, several at a time.",
+  "sourcing": "Staging the pool's datasets, several at a time.",
   "ready": "Serving: consumers can draw crops.",
   "idle": "No consumer has drawn for a while; Keep returns it to ready, otherwise the keeper retires it later.",
   "retired": "Its references are released; consumers get 410, and the keeper may reclaim the space.",
-  "superseded": "A newer round of the same spec replaced this buffer.",
+  "superseded": "A newer version of the same buffer replaced this one.",
   // a dataset of a buffer's pool during sourcing (the board)
   "pending": "Not started yet; waits for a sourcing slot.",
   "waiting-dataset": "No approved binding yet; the preparation pipeline is working on the dataset.",
   "waiting-lock": "Another job holds the dataset's raw-cache lock; this one waits for it.",
-  "blocked": "The raw cache is over its quota; the fetch waits for the keeper to make room.",
+  "blocked":
+    "The raw cache is over its quota; the dataset is staged once the keeper frees space or the quota is raised.",
   "servable": "Its volumes are registered and the service can draw crops from them.",
-  "failed": "The fetch or stage job failed; the reason is in the row and in the spec's timeline.",
+  "failed": "The stage job failed; the reason is in the row and in the buffer's timeline.",
   "dropped": "Left out of the round: still waiting when the day limit passed.",
   // the preparation pipeline's stages (mia-data)
   "matching": "Looking for an existing reader snippet that fits the dataset's files.",
@@ -156,9 +168,7 @@ export const PILL_HELP = {
 export function tipOn(node, lines) {
   // the page's tooltip on hover (no tab stop: tables hold hundreds of pills). A line is {k, b, t, img, full}:
   // a colour key, a bold word, text, a 256 px picture, a picture at its own size (as far as the window has room)
-  node.addEventListener("pointerenter", e => showTip(e, lines));
-  node.addEventListener("pointermove", moveTip);
-  node.addEventListener("pointerleave", hideTip);
+  node.tipLines = lines;
   return node;
 }
 // a pill explains itself on hover: PILL_HELP by its text, plus any extra lines (a count pill passes its own)
@@ -173,7 +183,11 @@ const BAD = new Set(["failed", "needs-human", "missing", "blocked", "evicted", "
 export const statePill = s => (s ? pill(s, GOOD.has(s) ? "pool" : BAD.has(s) ? "warn" : "") : "");
 // a subject's stage as a pill. A stage that shares its name with another thing's state says what the stage means.
 const STAGE_HELP = {
-  "staged": "No job is left to run and the board is in the timeline; the round waits for Approve.",
+  "review": "The sample crops are ready and wait for a person's verdict: approve or reject them.",
+  "plan-review": "The plan is in the timeline and waits for an approval; no job has run yet.",
+  "idle": "No consumer has drawn for a while: Keep returns it to ready, otherwise the keeper retires it.",
+  "needs-human": "The round stopped; the newest entry of the timeline says why.",
+  "staged": "No job is left to run and the step lists what is on disk; the round waits for Approve.",
   "requested": "The request's datasets are handed to the preparation pipeline; it follows them until each has settled.",
   "cancelled": "A person cancelled the round.",
   "failed":
@@ -181,13 +195,15 @@ const STAGE_HELP = {
   "blocked":
     "The round stopped until a person decides or changes something; the newest entry of the timeline says what.",
 };
+// what a stage means, in a sentence
+export const stageHelp = s => STAGE_HELP[s] || PILL_HELP[s] || "";
 export const stagePill = s => {
   if (!s) return "";
   const node = el("span", { class: "pill" + (GOOD.has(s) ? " pool" : BAD.has(s) ? " warn" : "") }, s),
     help = STAGE_HELP[s] || PILL_HELP[s];
   return help ? tipOn(node, [{ b: s, t: help }]) : node;
 };
-// an asset's `ready` only says its directory is there and no job writes it: the page says "cached"
+// an asset's `ready` only says its directory is there, at rest: the page says "cached"
 export const assetPill = s => statePill(s === "ready" ? "cached" : s);
 // ---- times: the ledger stores epoch seconds; keep ISO strings working too
 export function toEpoch(t) {
@@ -233,10 +249,41 @@ function moveTip(evt) {
 export function hideTip() {
   tip.hidden = true;
 }
+// What the pointer is over says its tooltip: the nearest node with lines of its own (tipOn) or a `title`. So every
+// `title` of the page shows here, never in the browser's own box: the pointer's first visit moves its text to
+// `data-tip` (and to `aria-description`, which a screen reader still reads). A line of a title is a line here.
+function tipLines(node) {
+  const title = node.getAttribute?.("title");
+  if (title) {
+    node.dataset.tip = title;
+    node.setAttribute("aria-description", title);
+    node.removeAttribute("title");
+  }
+  return node.tipLines || (node.dataset?.tip ? node.dataset.tip.split("\n").map(t => ({ t })) : null);
+}
+let tipped = null; // the node whose tooltip the pointer brought up
+document.addEventListener("pointerover", evt => {
+  let node = evt.target,
+    lines = null;
+  for (; node; node = node.parentNode) {
+    lines = tipLines(node);
+    if (lines) break;
+  }
+  if (node === tipped) return;
+  tipped = node;
+  if (node) showTip(evt, lines);
+  else hideTip();
+});
+document.addEventListener("pointermove", evt => tipped && moveTip(evt));
+document.addEventListener("pointerout", evt => {
+  if (evt.relatedTarget) return; // the pointer left the window
+  tipped = null;
+  hideTip();
+});
+document.addEventListener("pointerdown", hideTip); // a press may redraw the page under the pointer
+// a mark that is reached by keyboard too (a chart's bar): its tooltip also shows while it has the focus
 export function hoverable(node, lines) {
-  node.addEventListener("pointerenter", e => showTip(e, lines));
-  node.addEventListener("pointermove", moveTip);
-  node.addEventListener("pointerleave", hideTip);
+  tipOn(node, lines);
   node.setAttribute("tabindex", "0");
   node.addEventListener("focus", () => {
     const b = node.getBoundingClientRect();
@@ -359,10 +406,11 @@ export function lifecycle(line, stage, history, busy) {
 export const VERDICT_KIND = { approve: "pool", reject: "warn", escalate: "" };
 
 // ---- addresses: a subject's own page by kind, and the view and tab its address belongs to
-export const SUBJECT_VIEWS = { datasets: "dataset", specs: "buffer", requests: "prep" }; // #datasets/<record>, #specs/<key>, #requests/<key>
-export const SUBJECT_TAB = { datasets: "datasets", specs: "buffers", requests: "preparation" };
+export const SUBJECT_VIEWS = { datasets: "dataset", requests: "prep" }; // #datasets/<record>, #requests/<key>; a buffer: flow.js
+export const SUBJECT_TAB = { datasets: "datasets", requests: "datasets" };
+export const KIND_WORDS = { dataset: "dataset", buffer: "buffer", prep: "request" };
 export const SUBJECT_HASH = {
   dataset: key => "#datasets/" + encodeURIComponent(key),
-  buffer: key => "#specs/" + encodeURIComponent(key),
+  buffer: key => "#buffer/" + encodeURIComponent(key),
   prep: key => "#requests/" + encodeURIComponent(key),
 };

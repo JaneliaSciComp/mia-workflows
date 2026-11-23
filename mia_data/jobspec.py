@@ -15,6 +15,7 @@ does, and every builder then refuses (PinMoved).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import re
@@ -72,6 +73,25 @@ class HarnessPinned(Protocol):
 
 class PinMoved(RuntimeError):
     """The harness environment changed since the round was admitted. Not retryable: the round ends `failed`."""
+
+
+class NoReachableFiles(RuntimeError):
+    """A new reader is needed, and the job that would write it may reach none of the hosts the record's files are
+    on, so it could test nothing. Not retryable: the fix is approving `approvable` on the page when the run is
+    started again, or, with none to approve, file URLs in the catalog record on a host a job may reach."""
+
+    def __init__(self, approvable: list[str]):
+        self.approvable = approvable
+        fix = (
+            f"(host not allowed: {', '.join(approvable)}). Approve it for this dataset on the page when the run "
+            "is started again"
+            if approvable
+            else "(its URLs are on GitHub hosts no job reaches). Its catalog record needs file URLs on "
+            "`raw.githubusercontent.com`, which a person can approve for one dataset, or on another host"
+        )
+        super().__init__(
+            f"a new reader is needed, and the job that writes one could reach none of this record's files {fix}"
+        )
 
 
 class HostsNotAllowed(RuntimeError):
@@ -246,6 +266,15 @@ def assert_pin(cfg: Config, pins: HarnessPinned) -> None:
             f"harness environment in {cfg.harness.dir} changed since admission: pixi.lock "
             f"{pins.env_digest[:12]} -> {current[:12]}"
         )
+
+
+def with_hosts(spec: JobSpec, more: list[str]) -> JobSpec:
+    """The job with `more` hosts it may reach (those its dataset's jobs were refused and a person approved since);
+    a job that reaches no host stays offline."""
+    if not (spec.allow_hosts and more):
+        return spec
+    allow = sorted({*spec.allow_hosts, *more})
+    return dataclasses.replace(spec, allow_hosts=allow, env={**spec.env, "MIA_HARNESS_ALLOWED_HOSTS": ",".join(allow)})
 
 
 def check_hosts_allowed(spec: JobSpec, patterns: list[str]) -> None:

@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
-MANIFEST_ONLY = frozenset({"sandbox_dir", "services"})  # top-level keys no service config receives
+MANIFEST_ONLY = frozenset({"host", "sandbox_dir", "services"})  # top-level keys no service config receives
 TEMPORAL_MANIFEST_ONLY = frozenset({"managed", "state_dir"})  # temporal keys read by the ops CLI, not by services
 
 
@@ -49,16 +49,28 @@ class ServiceCfg(BaseModel):
 
 
 class CsubCfg(BaseModel):
-    """The csub block: the operator's policy (read, never written) and the directory where mia keeps the policy it
-    generates. Both paths come out expanded and absolute."""
+    """The csub block: the operator's policy (read, never written), the directory where mia keeps the policy it
+    generates, where the broker runs (`local`: csub-broker on this host; `relay`: csub relay to a csub-broker on
+    `ssh_host`, reached with `ssh_key`) and the host-local directory of the broker sockets. Paths come out expanded
+    and absolute."""
 
     base_policy: Path = Path("~/.config/csub/broker.toml")
     policy_dir: Path = Path("~/.local/state/csub")
+    broker: Literal["local", "relay"] = "local"
+    ssh_host: str | None = None  # relay only: the submit host
+    ssh_user: str | None = None  # relay only: default, this user
+    ssh_key: Path = Path("~/.ssh/csub_ed25519")  # relay only
+    run_dir: Path | None = None  # the broker sockets, host-local; None: /scratch/<user>
 
     @model_validator(mode="after")
     def _expand(self) -> CsubCfg:
         self.base_policy = self.base_policy.expanduser().absolute()
         self.policy_dir = self.policy_dir.expanduser().absolute()
+        self.ssh_key = self.ssh_key.expanduser().absolute()
+        if self.run_dir is not None:
+            self.run_dir = self.run_dir.expanduser().absolute()
+        if self.broker == "relay" and not self.ssh_host:
+            raise ValueError("csub.ssh_host: required when csub.broker is relay")
         return self
 
 
@@ -94,6 +106,9 @@ class AutonomyCfg(BaseModel):
     pause: bool = False  # `mia pause` flips it; every workflow stops at its next job while it is set
     quarantine_days: float = Field(default=30, ge=0)  # a revoked artifact is held this long before eviction
     root: RootBudgetCfg = RootBudgetCfg()
+    # What this installation pays for a dollar Claude Code counts (it counts list price): a budget books an
+    # agent job's reservation and its cost times this, so `max_usd` is money paid.
+    price_factor: float = Field(default=1.0, gt=0)
 
     def caps(self) -> dict[str, float]:
         """The root caps as the `caps` dict buffer-api's reserve route takes."""
@@ -102,11 +117,20 @@ class AutonomyCfg(BaseModel):
 
 class GateCfg(BaseModel):
     """One judged gate (spec autonomous-gates §9): `off` runs no judge, `shadow` records the verdict beside the human's and
-    decides nothing, `active` lets an approve authorize (a reject or an escalate still waits for a person).
-    `max_suspect` is how many `suspect` crops a set may carry and still be approved (§4.2)."""
+    decides nothing, `active` lets the judge decide: an approve authorizes, and at the crops gate a set with a
+    `suspect` or `bad` crop is sent back to the developer (spec judge-decides §3). `max_reworks` is how often the
+    judge may send one dataset's sets back before a person is asked (§4.3)."""
 
     mode: Literal["off", "shadow", "active"] = "off"
-    max_suspect: int = Field(default=2, ge=0)
+    max_reworks: int = Field(default=1, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_suspect_cap(cls, data: object) -> object:
+        """Refuse a config that still sets the suspect cap, saying what took its place."""
+        if isinstance(data, dict) and "max_suspect" in data:
+            raise ValueError("max_suspect is gone: one suspect finding sends a set back; max_reworks bounds how often")
+        return data
 
     @field_validator("mode", mode="before")
     @classmethod

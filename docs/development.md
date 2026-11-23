@@ -29,7 +29,9 @@ sets `MIA_SERVICE` for you.
   evictions). `autonomy` is per request (what every job of one root adds up to) plus the operator's switches:
   `pause` (`mia pause` and `mia resume` edit it in place, comments kept; every worker re-reads the file before each
   job), `quarantine_days`, and the `root` caps a request may spend in all (`max_usd`, `max_fetch_bytes`, `max_jobs`,
-  `max_concurrent_jobs`, `max_days`).
+  `max_concurrent_jobs`, `max_days`). `max_usd` is money paid: an agent job is reserved at its per-run cap and
+  settled at the cost Claude Code reports for it (`JobDone.cost_usd`, list price), both times
+  `autonomy.price_factor`; a job whose cost nobody read keeps its reservation as its cost.
 
 ## The four checks
 
@@ -95,20 +97,35 @@ posting it to GitHub.
 **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
 `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there. buffer-api
 refuses any other action and the page offers only these; a round in progress accepts only `cancel` (and, for a
-buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round). A new stage or action goes into the table first.
+buffer, what feeds it: `dropped`, and the force stop; for a dataset at `debugging`, the `go` of its next round).
+A new stage or action goes into the table first.
+
+**Resume and Restart.** A dataset and a preparation request are run again in one of two ways (spec
+`2026-11-18-resume-restart.md`). **Restart** is the action `go`: the round's state is wiped, it is pinned anew
+(catalog, readers, harness) and every step runs. **Resume** is the action `resume`: the round keeps its id, its
+pins and every result on its state, and goes on from the first step with none, which `resume_step`
+(`mia_data/models.py`) names: the match, the crops, the judge, the save, or the reader's pull request as it is
+now. A step that failed, was refused, cancelled or skipped has no result and runs; a step that finished is kept
+whatever changed since. So a step that failed because of a fault in the pinned harness or reader fails again on
+Resume, and the fix is picked up by Restart. `resume` is taken at `failed`, `blocked`, `needs-human`, `cancelled`
+and `review`, and never by a dataset whose saved crops were revoked. The resumed round is charged to whoever
+asked for it, runs its steps as a new attempt (`DatasetState.attempt`: its own job keys, workspaces, test ids
+and markers), and says in its first entry what it kept. A round's results are in its workflow's state: a force
+stop ends the workflow, and a Resume after one starts from the beginning.
 
 **Shelving is beside the stage tables** (spec `docs/specs/2026-11-14-shelved-subjects.md`). A person sets a
 subject of any kind aside with a reason: `shelve`, with the reason in `note`, is accepted whenever the subject's
-status is `not started`, `stuck` or `done` and no action is waiting for its workflow's answer; `unshelve` takes it
+phase is `not started`, `stopped` or `done` and no action is waiting for its workflow's answer; `unshelve` takes it
 back. A subject whose round waits for a verdict (`waiting`, and its stage takes `cancel`: a dataset at `review`, a
 buffer at `plan-review` or `staged`) takes it too, and that shelve sends the round a `cancel` first, as an action
-of its own: a cancel that is not delivered shelves nothing. One function gives a subject its status word and its actions (`BufferService._rules`): the stage's, or
-`shelved` and `unshelve` alone for a shelved one. buffer-api carries both actions out itself (`_hold`): the row of
+of its own: a cancel that is not delivered shelves nothing. One function gives a subject its phase and its actions (`BufferService._rules`): the stage's, and `unshelve`
+alone for a shelved one. buffer-api carries both actions out itself (`_hold`): the row of
 the ledger's `shelved` table, the action and its timeline entry are one transaction, and nothing but that cancel
 is sent to Temporal. `_hold` writes neither the stage (a cancelled round writes its own `cancelled`) nor the
 dataset's stored row. What reads the hold:
 
-- `GET /needs` leaves a shelved subject out, counts them as `shelved` and lists them with `?shelved=1`.
+- `GET /subjects` gives a shelved subject the status `shelved`, so it is in no other status's list;
+  `?status=shelved` lists them.
 - `Ledger.dataset` and `Ledger.datasets` give a shelved dataset `state: shelved` and the hold's reason (a row is
   made up for one that never ran), so `POST /plan`, the `plan` activity and the Datasets list need no rule of
   their own; `shelved` is not a state a worker can write.
@@ -182,15 +199,49 @@ facts about them, listed with sha256 in `evidence.json`. Nothing from the author
 caller names that exact file (`IndependenceError` otherwise); the binding goes in without its `reasons`,
 agent-written text is fenced and labelled as data. Its final message is one JSON verdict (`schema.parse_verdict`);
 policy (`schema.effective_verdict`) turns a `reject` without a `bad` finding into an approve with notes and a
-confidence under `judge.min_confidence` into an escalate, and the result is an assessment `by: judge` with the
+confidence under `judge.min_confidence` into an escalate; at the crops gate one `suspect` finding rejects too
+(`suspect_rejects`), since a doubted set is sent back for rework, and the result is an assessment `by: judge` with the
 evidence digest, model and prompt version. A `judge.model` other than `agent.model` is a precaution, not a rule.
 
-**An active crop judge approves, and does nothing else.** With `judge.crops.mode: active`, `read_judge` asks
-`authorized()` (with the gate enabled) about the judge's approve and returns `JudgeResult.authorized`; the round
-then goes on as it does after a person's approve (`_judge_grants` in `mia_data/workflows.py`): it saves a matched
-binding's set, or comments `/approve <head>` on the snippet PR. Anything else the judge says, and any verdict, go
-or revoke queued while it looked, leaves the set to a person. `judge.review.mode: active` is refused by the
-config: nothing grants on the review judge's verdict.
+**An active crop judge decides, and a person can overturn it** (spec `2026-11-17-judge-decides.md`). With
+`judge.crops.mode: active`, `read_judge` asks `authorized()` (with the gate enabled) about the judge's approve and
+returns `JudgeResult.authorized` and `worst` (the worst finding). Every crop `ok`: the round goes on as after a
+person's approve (`_judge_grants` in `mia_data/workflows.py`): it saves a matched binding's set, or comments
+`/approve <head>` on the snippet PR. A `suspect` or a `bad` crop: the set is sent back (`_sends_back`,
+`_send_back`): its findings go to the developer as a person's reject would (`crop_test.rework_request`: a snippets
+issue superseding the binding's reader, or `/revise` on the pull request), and the judge's evidence is copied to
+`<work_root>/_evidence/issue-<snippets issue>/` (`share_evidence`), which autodev mounts read-only into that
+issue's agent job (`agent.evidence_dir`). The judge sends a dataset's sets back `judge.crops.max_reworks` times
+(default 1) since a person last acted; after that a doubted set waits at `review`. An escalate, a judge that did
+not run, and any verdict, go or revoke queued while it looked leave the set to a person.
+`judge.review.mode: active` is refused by the config: nothing grants on the review judge's verdict.
+
+**"The crops are right as they are" is an outcome the developer states and autodev validates.** A request for
+rework names itself (`Request: <set id>#<n>`) and lists its findings. The agent that finds nothing to change
+makes no commits and writes `no_change.json` in its checkout, answering every finding; autodev accepts it only
+for that request, from a run that ended by itself (`agent.read_no_change`), posts the answers under the marker
+`no-change <request>`, and ends a first round `answered` (a stage label) where it would otherwise stop. The
+round reads the marker (`AutodevLook.no_change`, `_answered`): a set the judge doubted (`suspect` only) is
+approved by `policy:developer` and saved; a set with a `bad` finding, and any set a person rejected, goes back
+to `review` with the answer. A round of autodev's with no commits and no such marker says nothing about the
+crops; on a pull request it still brings a person's own revision request back to them.
+
+**Sets outlive their round, and a verdict names its set.** `DatasetState.held` is the set that was sent back
+(by the judge or a person) and not yet superseded by an approved one; `DatasetState.saved` is the saved set.
+Each is a `CropSet`: the round, the test, the pins, the binding. The stage write puts the set under review and
+the saved one into the subject's `data.sets` (`models.sets_view`), which the page reads. A verdict is about
+the set under review. The held set takes none: it is what the developer's answer is about, and when that
+answer brings it back to `review` its round becomes the state's again (`_switch_to`). A reject that names the
+saved set (`rework_events`, `_rework_saved`) revokes it and starts a round of its own that asks the developer
+for a fix. For one set a person's newest verdict decides:
+`authorized()` leaves out what `MACHINE_AUTHORS` (the judge, `policy:developer`) wrote once a person has spoken.
+
+**A person's verdict never waits for the crop judge.** The judge runs as a task beside the round's (`_judged`,
+patch `verdict-first`): the round waits for its verdict or for a label, whichever comes first. A label is acted on
+at once; the judge's job runs on, its verdict is read as shadow whatever the mode (so it grants nothing after a
+person decided), and its assessment and entry are written. The round closes when they are (`_guard`), so a `go`
+sent before that starts its round then; a cancel kills the judge's job with the round's (`_cancel_round`), and no
+run rolls over while a judge looks (`_roll_due`).
 
 **Shadow never blocks.** With `judge.<gate>.mode: shadow` the judge runs on every live round (the crop judge after
 a passing set, the review judge after a pushed head), its assessment and comment are written, and the round goes
@@ -213,11 +264,13 @@ whatever the buffer's workflow or the keeper have done yet. The keeper holds a q
 quarantined volumes, sends the `revoked` signal: the buffer unregisters those volumes, fails the dataset with the
 reason and serves on at its floor, or ends in needs-human below it (*Retire* stops it altogether). A board approve
 never writes over an artifact whose newest assessment is a reject: only a repair supersedes a revocation. A new
-`go` on the dataset that saves its crops removes `revoked.json`, writes a `policy:repair` approve on each
-quarantined artifact of the record and clears their quarantine marks, and the next stage write makes the row
-prepared again. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
-page's *Revoke the ticked*; records not in the buffer are ignored), rejects and quarantines those records'
-artifacts and takes the keeper's `revoked` path at once.
+`go` on the dataset that saves its crops removes `revoked.json`, and the next stage write makes the row
+prepared again. The save repairs by recipe: a quarantined artifact that was staged from the binding the save
+wrote (the asset's `binding_hash`) gets a `policy:repair` approve and its quarantine mark cleared; an artifact
+of any other binding was read by the recipe that was rejected, stays quarantined, and the record is staged
+anew. From the buffer side, `revoke` on a ready or idle spec carries the `records` to withdraw (the
+page's *Revoke* on the datasets checked under *Included datasets*; records not in the buffer are ignored),
+rejects and quarantines those records' artifacts and takes the keeper's `revoked` path at once.
 
 **A stage pass writes its start and its result.** A round is a series of stage passes: every stage whose word in
 its stage table is `working` or `waiting` (`mia_data.config.round_open`, `mia_buffers.config.stage_pass`). A
@@ -232,7 +285,7 @@ gets the state with every write, writes the open pass's result before the next s
 fails or is cancelled reports itself and no stage ends silently; with no pass open the resting stage has an entry
 of its own. Where a pass ends and no stage write follows (a PR head whose crops failed, a round started over a
 pass still open), `_flush` writes the result through `stage_result`. A buffer round's passes are `planning`,
-`plan-review`, `sourcing` (its result counts the pool's datasets by status and links the fetch and stage jobs),
+`plan-review`, `sourcing` (its result counts the pool's datasets by status and links the stage jobs),
 `staged` and `idle`; a request's one pass is `requested`. Entries an activity writes by itself (the plan, the
 staged board, a request's outcomes table, per-dataset notices, a judge's verdict) stay entries of their own. All
 of it is behind `workflow.patched("stage-results")`; a run that takes the patch mid-round has no pass open and
@@ -250,6 +303,22 @@ would get `_jobs` writable; nothing deletes a record. buffer-api serves the file
 gzip passed through) and the page renders it at `#job/<address>`. It looks under its own `work_root` and then
 under that of the service that runs autodev on the snippets repo (`snippets_work_root`, which the `mia.yaml`
 loader fills when that service has a root of its own), whose addresses begin with `<owner>__<repo>/`.
+
+**What a job asked of a host.** `CsubJobs.submit` sets `MIA_HARNESS_TRANSFERS_DIR` to `<workspace>/transfers` for every
+job, and the harness writes one line per host and clock minute to a `.jsonl` file there: requests, connection
+seconds, peak connections, bytes, the answers by status code or kind, the answers that recovered and the ones that
+ended a call, and the seconds spent waiting. When the wait sees the job end, `mia_core.transfers.collect` reads the
+files with `read_untrusted` (at most 256 files, 8 MiB and 20,000 rows), reduces each line to a typed row with bounded
+numbers, keeps only rows of hosts in the request's `allow_hosts` and of minutes not after the read and not more than 7
+days before it, and adds up the rows of one host and minute. The record holds them as `transfers`, the lines it
+dropped as `transfers_dropped`, and `transfers_refused` (with the reason) in place of rows for a job over a limit, a
+record with no first half (no `request`, so no `allow_hosts`; an empty list is not refused) or files that could not be
+read. A later end of the same job leaves what a record holds of these as it is. The same rows go to the ledger through
+`CsubJobs.transfers_sink`, which each worker's `Activities` sets to `Registry.put_transfers` (autodev with no `service`
+block has no registry and sets none). Both are best effort and fail no wait. A worker that starts puts the rows of every
+record of its work root that ended in the last 7 days (`mia_core.registry.put_transfers_again`, inside the start-up
+report, one record at a time); the ledger replaces row by row (a row put again replaces itself, and rows absent from a
+later put stay), so this repeats nothing.
 
 ## Style
 
@@ -311,6 +380,21 @@ A volume leaves a buffer with `DELETE /buffers/<b>/volumes/<vid>` (worker; drops
 reference no other volume needs); `GET /buffers/<b>/volumes` (read) lists `{id, artifact, record, missing}` rows,
 and `GET /buffers/<b>/status` names the `quarantined` volumes (those whose artifact row is quarantined).
 
+**Hosts.** `PUT /transfers/<job address>` (worker; `{service, rows}`) stores the rows of that job row by row (table
+`transfers`, key host, minute and job): a row put again replaces itself, and rows absent from a later put stay.
+`GET /hosts?days=7` lists each host over the window (minutes with load, bytes, bytes per second, requests, the answers,
+the last minute seen), `GET /hosts/<host>?days=7` the same host by load level, and `GET /hosts/<host>/minutes?from=&to=`
+its minutes added over jobs (`from` and `to` in unix seconds, `to` by default now and `from` a day before `to`, a span
+of at most 7 days; all read; the arithmetic is in `mia_buffers/throughput.py`). The routes compute and label nothing. A
+minute's level is its mean connections open (`connection_seconds / 60`, rounded), so three connections open for twenty
+seconds and one open for the whole minute are both level 1, and `peak` added over jobs is only an upper bound. The
+levels are the loads that rounds ran at; a host's limit is found by raising `sourcing.per_source` for a while. A job the
+installation kills itself (a cancelled round, the repair agent's kill, a lost raw-cache lock) leaves no rows, and
+neither does a job whose record kept none (`transfers_refused`), one that ran on a harness without the files, or one
+under an autodev with no `service` block. A job whose delivery to the ledger failed is missing until its worker next
+starts. Rows can be missing without a sign in the routes: the minutes such jobs shared with others show less load than
+there was, and the job records say which jobs these are.
+
 **Sync commands**, for a service with an empty ledger or one that missed writes:
 
 ```
@@ -319,11 +403,20 @@ mia exec mia-buffers datasets sync                        # rebuild the prepared
 ```
 
 **Subjects.** A dataset, a buffer spec and a preparation request are each a *subject*: `{kind, number, key, stage,
-revision, issue, data}`, with the status word (`not started`, `working`, `waiting`, `stuck`, `done`) and the
-actions its stage accepts, both read from one table per kind (`STAGE_ACTIONS` in `mia_data/config.py`,
-`STAGE_ACTIONS` and `PREP_STAGE_ACTIONS` in `mia_buffers/config.py`). `GET /subjects/<kind>/<key>` reads one,
-`GET /subjects/<kind>` lists a kind, `GET /needs` lists those waiting on a person or stuck (and the actions of the
-last day that did not reach Temporal), `GET /lookup?q=` finds subjects from an issue number, an issue URL or a
+revision, issue, data}`. Three words say how it stands (spec `docs/specs/2026-11-19-overview-and-needs-human.md` §3).
+Its **stage** is where it is in its lifecycle. Its **phase** is what a round does at that stage (`not started`,
+`working`, `waiting` for an answer only a person gives, `stopped`, `done`), read with the actions the stage accepts
+from one table per kind (`STAGE_ACTIONS` in `mia_data/config.py`, `STAGE_ACTIONS` and `PREP_STAGE_ACTIONS` in
+`mia_buffers/config.py`); every worker decision reads the phase and the hold (`mia_buffers.cleaner.standing`). Its
+**status** is who moves it next, the one word a person reads and the only thing that says a human is needed:
+`shelved`, `in repair`, `needs human`, `done`, `not started` or `working`. buffer-api computes it for each view
+(`status_of`) from the phase, the hold and `repair`, the repair agent's case about the subject as it stands: a case
+in work while the agent acts (its last sweep reported in `act` mode, and that report is not overdue by three of
+its periods) makes it `in repair`, one the agent gave up on makes it `needs human` until the
+subject's revision moves, and a phase of `waiting` or `stopped` with neither is `needs human`. `GET /subjects/<kind>/<key>` reads one,
+`GET /subjects/<kind>` lists a kind, `GET /subjects?status=` lists the subjects of every kind with one status
+(`needs human` when none is named), with every kind's count by status and the actions of the last day that did not
+reach Temporal; it builds a view only for the subjects it lists, `GET /lookup?q=` finds subjects from an issue number, an issue URL or a
 key, and `GET /stream` is a server-sent event per change (`{kind, number}`; the reader fetches the subject again).
 A subject's number comes from the clock (whole seconds since 2026-01-01; action ids are milliseconds since the
 epoch), so a ledger restored from a backup issues no id twice.
@@ -339,7 +432,12 @@ none, posts each entry not yet posted as a comment, in order, once (the entry's 
 pass that died before its write-back, `PUT /timeline/<kind>/<number>/<seq>`, finds its comment again), then
 leaves the subject's stage as the issue's only stage label. It retries without limit, so GitHub being slow or
 away only delays the issue; nothing reads the issue back. mia-data's worker runs the mirror for datasets,
-mia-buffers' for buffers and requests. buffer-api therefore needs to reach Temporal: it uses `temporal.address`
+mia-buffers' for buffers and requests. The pass (the `mirror` activity) runs on a task queue of its own,
+`<task queue>-mirror`, whose worker takes one pass at a time (`mirror_worker`), through a GitHub client of its
+own that sends one write every `WRITE_GAP_S` (9 s: 400 an hour, under GitHub's 500 content-creating requests an
+hour). A rate-limit answer holds every request of that client for as long as GitHub says, else a minute that
+doubles with each such answer in a row up to 15. So a burst of entries reaches GitHub over hours, and the
+rounds' activities never wait behind a pass. buffer-api therefore needs to reach Temporal: it uses `temporal.address`
 of its own service block, its own namespace and task queue for buffers and requests, and for datasets the
 namespace and name of the service whose `app` is `mia-data`. It connects on first use, so it starts and serves
 with Temporal away; a kick that fails is logged, and a start kicks every subject that has an entry not yet
@@ -369,21 +467,29 @@ the reason.
 
 | subject | routes | actions |
 |---|---|---|
-| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Run again*, at `review` *Restart*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
-| buffer spec (`#specs/<key>`) | `POST /specs`, `POST /specs/<key>/actions` | `go` (*Plan*), `approve` (*Run* at the plan, *Approve* at the board), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel`, `stop` |
-| preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go`, `cancel`, `stop` |
+| dataset (`#datasets/<record>`) | `POST /datasets/<record>/actions` | `go` (*Start*, *Restart*, at `debugging` *Restart now*), `resume` (*Resume*), `approve`, `reject` with `note` (*Reject…* opens a dialog for it), `revoke`, `cancel` |
+| buffer (`#buffer/<key>`) | `POST /specs`, `POST /specs/<key>/actions` | `edit` with `spec`, `go` (*Continue* on step 3, *Plan a new version*), `approve` (*Run* at the plan, *Approve and serve* at `staged`), `keep`, `retire`, `revoke` with `records`, `dropped` with `record` (*Files are in place*), `cancel` (also the way back from steps 4 and 5), `stop` |
+| preparation request (`#requests/<key>`) | `POST /prep`, `POST /prep/<number>/actions` | `go` (*Restart*), `resume` (*Resume*), `cancel`, `stop` |
 
-`POST /specs` with `{spec}` saves a buffer spec as a new subject, every time: a spec's `name` is a label and
-need not be unique (the first subject of a name has it as its key, a later one `buffer-<number>`; the subject's
-view carries `name`). With `action: go` it also runs it, and `plan_first: true` makes it a round that waits at the
-plan (the workflow's `plan` signal). A `go` to `/specs/<key>/actions` runs the text the spec holds; it may carry a
-changed `spec` until a round of the spec has created its buffer (`frozen` in the view), and is refused with a 409
-after that: a change to a spec that has built a buffer is a new spec. On the spec's page *Edit* (until then) and
-*Clone* open New buffer with the controls set from the spec, read through `POST /specs/parse` (the spec as the
-service parses it, defaults filled in); what the controls cannot hold keeps the spec's own text in the box. The page always sends `plan_first`, so a round a person starts stops at its
-plan and the approve there is the button *Run*. The go's payload is the spec text, the round runs exactly that
-(`admit` reads the action), and its timeline entry shows it. `POST /prep` with `{spec}` files a preparation
-request as a new subject `prep-<number>` and runs it.
+`POST /specs` with `{spec}` saves a buffer as a new subject, every time, at `new`: the `name` in its definition
+(the text the code calls its spec) is a label and need not be unique (the first subject of a name has it as its
+key, a later one `buffer-<number>`; the subject's view carries `name`). With `action: go` it also runs it, and
+`plan_first: true` makes it a round that waits at the plan (the workflow's `plan` signal).
+
+The definition changes in two ways. `edit` (with `spec`) replaces it where the buffer rests (`new`, `retired`,
+`needs-human`, `cancelled`: the stage table says so): buffer-api stores the text and its name, raises the
+subject's revision and writes the timeline entry itself, and no workflow hears of it. A `go` to
+`/specs/<key>/actions` runs the text the buffer holds, or a changed `spec` sent with it, which is stored once the
+stage takes the go; a buffer that serves (`ready`, `idle`) is fixed, and a changed text there is a 409. The page
+reads a definition into its controls through `POST /specs/parse` (the spec as the service parses it, defaults
+filled in). The page always sends `plan_first`, so a round a person starts stops at its plan and the approve there
+is the button *Run*. The go's payload is the spec text, the round runs exactly that (`admit` reads the action),
+and its timeline entry shows it.
+
+`POST /prep` with `{spec}` files a preparation request as a new subject `prep-<number>` and runs it. With
+`buffer: <number>` (a buffer's Prepare step) the request's data names that buffer, and `GET
+/subjects/prep?buffer=<number>` lists a buffer's requests; `MiaPrep` and the request's budget are the same either
+way. `GET /subjects/buffer` adds `serving` to each buffer: the id of the version consumers draw from now, or null.
 
 - `cancel` ends a round in progress (`planning`, `plan-review`, `sourcing`, `staged`; a request at `requested`; a
   dataset from `matching` to `merging`): its dataset tasks are cancelled, every cluster job it waits on is killed by
@@ -426,6 +532,17 @@ long as one is away, with the `mia restart` that brings it back. Temporal rememb
 so a worker that stops is reported that long after; one that never started is reported at once.
 `GET /run/<kind>/<number>` is the Temporal status of a subject's latest run.
 
+**Restarts.** `mia restart` restarts the services and leaves Temporal running unless it is named. `mia down` stops
+the service that runs buffer-api last; `mia up` starts it first, and its worker only once buffer-api takes
+connections (`api_started`), so no worker runs against a registry that does not answer. A worker is stopped, not
+killed: `mia down` sends its process SIGTERM and waits for it (`drain`). The worker's task queues stop together
+(`mia_core.temporal.until_stopped`), a running activity gets `DRAIN` (10 s) to finish, and one still running then
+is cancelled and handed back to Temporal, which gives it to the next worker at once. A worker that dies any other
+way leaves each running activity to its timeout: a job wait three minutes (its heartbeat), a job submit two
+(`heartbeats`, `BEAT_TIMEOUT`), any other its `seconds`. The jobs on the cluster run on through all of it: a wait
+finds its job again by id, and a submit is at most once per key. An activity that a workflow gives a heartbeat
+timeout (`beats=True` in `_act`) carries `@heartbeats`; `tests/test_core_temporal.py` holds the two together.
+
 **Planning from outside.** `POST /plan` plans a spec against the synced catalog and the registry; datasets that
 are not `prepared` are out of the pool with the rule `not prepared`. The body is `{"spec": "<yaml text>"}`; read
 the spec from a file:
@@ -446,8 +563,8 @@ saving, and the snippet PR loop.
 ## A buffer round
 
 The deployment reads its `mia-buffers` block of `mia.yaml` (`mia.yaml.example`; `buffers_repo` is the repo of the
-mirrored issues, `storage_root` is mia-data's, `raw_root` defaults to mia-data's `<work_root>/_cache` so downloads
-are shared). `mia up mia-buffers` starts the broker (on the generated csub policy, below), buffer-api (`mia-buffers
+mirrored issues, `storage_root` is mia-data's, `raw_root` defaults to mia-data's `<work_root>/_cache` so a file
+either pipeline's reader took whole is cached once for both). `mia up mia-buffers` starts the broker (on the generated csub policy, below), buffer-api (`mia-buffers
 serve` on the host, bound to the host and port of `service.url`, log `mia logs mia-buffers api`) and the sandboxed
 worker, which may reach that host through the sandbox proxy. `service.url` must name the host (not `localhost`: the
 sandbox bypasses its proxy for loopback names, and inside it they point at the sandbox's own empty loopback). By hand:
@@ -455,24 +572,51 @@ sandbox bypasses its proxy for loopback names, and inside it they point at the s
 
 **Hosts.** Every broker `mia up` starts runs `csub-broker --policy <csub.policy_dir>/broker.toml`, a file
 `mia_core.hosts` generates from the operator's `csub.base_policy` plus `<policy_dir>/approved-hosts.jsonl` (one line per
-host: `host`, `at`, `by`, `kind`, `number`). Before a run starts, the page posts to `/hosts/missing` and lists the hosts
+host: `host`, `at`, `by`, `kind`, `number`). With `csub.broker: relay` (a host that cannot `bsub`; see
+[`deployment.md`](deployment.md)) the broker window runs `csub relay` on the same socket and the broker is this
+checkout's `csub-broker` on `csub.ssh_host`, reading the same generated policy through the shared home directory; the
+sockets live under `csub.run_dir`, host-local disk. Before a run starts, the page posts to `/hosts/missing` and lists the hosts
 the run needs that the policy lacks: the hosts of the URLs its catalog records name (a dataset round, a request) or its
 saved bindings name that its catalog records also name (a buffer at `plan-review`, over its round's `plan.json`
-pool), their `network.redirect_hosts` targets and the package hosts. Ticked hosts travel as `approve_hosts` on a
+pool), their `network.redirect_hosts` targets, the package hosts, and for a dataset the hosts its jobs were refused
+(below). Checked hosts travel as `approve_hosts` on a
 dataset's `go`, filing a request (`POST /prep`), a request's `go` and a buffer's `approve` at `plan-review`; any other
 action carrying a non-empty `approve_hosts` (a buffer's `go` too) is refused with 422. buffer-api, the only appender,
-accepts only hosts that run needs (never a GitHub host, an IP literal or the host of `service.url` or
+accepts only hosts that run needs (never a GitHub host but `raw.githubusercontent.com`, an IP literal or the host of `service.url` or
 `temporal.address`), appends, regenerates (503 if it cannot) and posts a timeline entry. A broker loads its policy file
 on every request, so an approved host needs no restart: the next job sees it. Every generation checks that `policy_dir`
 is under home, apart from every read-write sandbox mount, and that its `broker.toml` is not the base policy file.
 Withdrawing an approval is a hand edit: remove the host's lines, then `mia up` (or the next approval) regenerates. A
-redirect target still needs `network.redirect_hosts`, and a pattern or a host wanted before any run is added to the base
-policy by hand. `mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
+pattern or a host wanted before any run is added to the base policy by hand.
+
+A host nobody could name before the run, a redirect target mostly, is learned from the refusal. A dataset job that the
+harness refuses a host (`host_not_allowed` in `smoke.json` or the crop job's `report.json`, or `hosts` in a match or
+debug agent's `outcome.json`) has it noted for its dataset (`PUT /datasets/<record>/hosts`, worker token; the `kv` row
+`refused_hosts`). From then on it is one of the hosts the dataset's runs need: the dataset's page says so, and its next
+start (or a request's that names it) lists the host to check. A noted host the policy allows is granted to every job of
+that dataset that reaches any host (`with_hosts` in `submit`; a buffer's stage jobs through `read_binding`),
+and to no other dataset's. `network.redirect_hosts` names such targets ahead of the first refusal.
+
+No job reaches GitHub: a GitHub host among a record's or a binding's URLs is left out of the job's hosts
+(`network_hosts`). The one exception is `raw.githubusercontent.com` (file contents, read only), approved for one
+dataset at a time. The start dialog lists it for each record that names it and has no approval of its own
+(`per_dataset` in `/hosts/missing`), whatever the policy allows; an approval is written for each of the run's records
+that need it (the `kv` row `dataset_hosts`, `_approve_for`), beside the policy line the broker needs. A worker grants
+the host to jobs of an approved dataset only (`granted_hosts`), and names it in that dataset's snippets issue, so the
+job that writes its reader gets it too and no other issue's does. No job gets another GitHub host.
+
+`mia exec <service> ...` goes through the service's broker when it is running. An autodev agent job
 names its `agent.allow_hosts` plus the hosts its issue names, where the policy allows them
 (`autodev.agent.agent_hosts`); a job that would need more than csub's 64 is not started and its round fails saying so. An issue names hosts with `<!-- autodev: hosts a.org b.org -->` in its body
 (`hosts_marker`), and only when a bot of `github.trusted_bots` opened it: a dataset round writes there the hosts
-of its record's URLs and their redirect targets, so a reader's job reaches its own dataset's files and no other
-approved host.
+of its record's URLs and their configured redirect targets, and what a person has approved for the dataset since
+(`granted_hosts`: the hosts its own jobs were refused, where a download host hands the file to a storage host, and
+`raw.githubusercontent.com`), so a reader's job reaches its own dataset's files and no other approved host. An open
+issue of an earlier round gets that line written again when a round comes back to it (`open_snippet_issue`, and
+`ask_autodev` on a resume), so a host approved after the issue was opened reaches its next agent job. autodev grants
+no GitHub host but `raw.githubusercontent.com`, and that one only to an issue that names it. When the policy allows
+none of the hosts the line would name, the reader's job could read no file of the record: autodev is not asked, and
+the round ends `blocked` saying which host to approve (`NoReachableFiles`).
 
 1. **The go.** A `go` action carries the spec text (the page's *Plan*). With `plan_first` the round waits at its
    plan; without it the round stages first and asks once, at `staged`.
@@ -480,7 +624,12 @@ approved host.
    catalog at `catalog.ref` under `work_root/_catalog/<ref>/` and builds the plan from the catalog's records and
    the registry's prepared datasets, so the plan, the page and the worker agree on "prepared" (one row per record
    selection admitted, the rest as a count per rule under `excluded`; a record that fits but is not prepared is
-   out with the rule `not prepared`). When the registry has never seen the round's catalog ref, the activity
+   out with the rule `not prepared`). A record is fitted twice: its largest raw array must hold the coarsest
+   footprint, and so must one of the arrays its binding reads, which may be smaller ones (a prepared
+   dataset's row carries them as `raw_shapes`: what the crop job measured, saved as `shapes.json` beside
+   `manifest.json` with the sha256 of the binding they were read with, `mia_data.publish.prepared_row`). A row
+   without `raw_shapes` is fitted on the record alone. When the registry has never seen the round's catalog ref,
+   the activity
    syncs it first. `plan.md` and `plan.json` land in the round directory and in the browsable
    `work_root/issue-<n>/<round>/`. Everything sourcing needs is checked here: a record mia-data could not place
    (no modality family, the rule behind `<dataset folder>`; a record without one organism is filed under
@@ -492,10 +641,12 @@ approved host.
 3. **The plan gate** (a `plan_first` round). The stage is `plan-review`. `approve` (the page's *Run*) starts
    sourcing; a new `go` with an edited spec plans again.
 4. **Sourcing.** The buffer is created in buffer-api (id = round id, `i<number>-e<action id>`). Per dataset, in
-   parallel (`sourcing.parallel` stage jobs at a time, heaviest first): the binding is read from
+   parallel (`sourcing.parallel` stage jobs at a time, `sourcing.per_source` of them on one host, heaviest
+   first): the binding is read from
    `<storage_root>/<dataset folder>/binding.yaml`, prepared only with the `manifest.json` mia-data saved for
-   it (`mia_data.publish.prepared_row`, the registry's rule too); the raw files are fetched and the pyramid staged
-   (see "The cache"); then every volume is registered. `read_stage` registers what the job left with the registry
+   it (`mia_data.publish.prepared_row`, the registry's rule too); the quota is waited for and the pyramid staged,
+   its job reading from the source what the planned crops touch (see "Sourcing on demand" and "The cache"); then
+   every volume is registered. `read_stage` registers what the job left with the registry
    (`PUT assets/staged/<staged dir>` with the binding hash it was built from, `PUT assets/raw/<record>` from
    `files.json`), and registering a volume references both for the buffer (`refs`); `read_binding` asks the
    registry first, and a pyramid staged earlier under the same artifact id and still on disk is re-read and
@@ -539,6 +690,74 @@ fractions and seed with a logged warning. A non-empty `splits.stratify_by` is a 
 **One ticker.** Lock and quota waits share one timer per round: it ticks every `poll_minutes`, doubling while no
 dataset changes status, to at most 30 minutes, and runs only while someone waits. mia-data keeps its own backoff.
 
+## Sourcing on demand
+
+A buffer holds a few hundred crops of each dataset, so a round transfers what those crops touch and nothing more.
+No job of a round downloads a record, or one of its files, ahead of its reads: a round has no fetch step, and a
+record's size upstream decides nothing (the plan row keeps it as `bytes`, for the page to show). A record of
+terabytes whose planned crops touch a few hundred megabytes costs those megabytes.
+
+**One record, from its plan row to its volumes** (`_source_cached` and `_source_locked` in
+`mia_buffers/workflows.py`):
+
+1. **Binding.** `read_binding` copies the prepared binding into the round and names the hosts its job gets: the
+   hosts of the binding's urls and what a person approved for the dataset. A pyramid already saved under the same
+   artifact id is registered as it is: no job, no lock, nothing read from the source. A record whose files no
+   job may reach waits here for a person to place them (below).
+2. **Lock.** The worker takes `locks/raw/<record>` and holds it until the volumes are registered.
+3. **Quota wait.** While the raw cache is over `quota.raw_bytes` the dataset is `blocked`, with its lock released
+   and no stage slot held. The check is about what the cache holds now; the record is charged nothing.
+4. **Stage slot.** One of `sourcing.parallel` in all, and one of `sourcing.per_source` on each host the binding's
+   files are on (`BindingInfo.sources`, the hosts of its URLs), so one archive is asked by few jobs at a time
+   while the datasets of other archives go on (`StageSlots` in `mia_buffers/workflows.py`). A job that stages
+   dropped files reads the cache alone and counts against no source. A dataset that had to wait for its slot is
+   checked against the quota once more, and goes back to waiting without the slot when the cache filled
+   meanwhile.
+5. **Stage job.** `harness stage`, then `harness check-stage`, with the binding's hosts and the record's raw cache
+   read-write. The job opens the binding's arrays and reads the planned regions; each read goes where its reader
+   sends it (the table below).
+6. **Report.** `read_stage` saves the pyramid by rename, writes the raw row from the cache as the job left it, and
+   the job's reservation is settled with the `bytes_fetched` of its `stage.json`.
+7. **Register**, then release the lock.
+
+**What a read transfers.** The dataset's reader snippet decides, file by file, through the harness's `IO`
+(`harness/src/mia_harness/io.py` in mia-snippets); mia-data's crop jobs read the same way.
+
+| the reader calls | what crosses the network | where it lands | after the job |
+|---|---|---|---|
+| `io.open(url)` | the 1 MiB blocks its reads touch, by range request | the job's workspace | not reused: a rebuild, and a later buffer of the record, read the source again |
+| `io.fetch(url)` | the whole file, or a whole zip member (inflated and CRC-checked) | the record's raw cache, `raw_root/<record>/`, listed in `files.json` | a hit for every later job, until the keeper evicts it |
+
+A reader opens by range first and takes a file whole only when the harness answers `NeedsFetch`: a server that
+ignores Range or gives no length, a deflated zip member, a format with no random access. A file the raw cache
+already holds whole is read from there and costs nothing.
+
+**What bounds it.**
+
+- **One job's transfer: `limits.job_bytes`** (`MIA_HARNESS_JOB_BYTES`), ranges and whole files together. A stage
+  that would pass it fails its dataset with the harness's message, which names the url and the cap. So a file its
+  reader must take whole and that is larger than the cap cannot be staged; raising the limit is the remedy.
+- **The raw cache: `quota.raw_bytes`**, which is where staging waits and the keeper evicts, not a ceiling. A stage
+  job writes the raw cache only when a reader takes a file whole, so jobs that passed the check together, and
+  mia-data's crop jobs, which ask nothing, can each take the cache past the quota by up to `limits.job_bytes`; the
+  keeper brings it back under on its next pass, as far as rows are free.
+- **The round's budget: `max_fetch_bytes`** of its root, which counts what stage jobs reported as `bytes_fetched`
+  (a failed stage's report too). A job that left no report counts as 0.
+
+**A record whose files a person dropped** (a `manual://` url, or a host the policy refuses to jobs) is staged
+offline: no hosts, the raw cache read-only, no quota wait, since it adds nothing to the cache. Its files exist
+nowhere else, so its drop is marked just used (`verify_drop`) and the keeper's hold rule spares it while the
+record waits for its slot.
+
+**A rebuild** of a pyramid that vanished ("After ready", Degraded) goes the same way and reads the source again,
+so it works only while the source still answers. For a record staged offline it first asks whether the raw cache
+still holds the binding's files (`raw_ready`) and fails with `pyramid missing and raw cache gone` when not.
+
+**Where to see what a stage transferred.** The `stage.json` beside the pyramid and the staged asset's row
+(`GET /assets/staged?record=`) carry `bytes_fetched`; `mia-buffers raw <raw_root>/<record id>` lists the files a
+reader took whole, and the Cache tab sums the raw cache. `harness fetch`, which downloads every url of a binding, is for a person
+filling a record's cache by hand: no workflow runs it.
+
 ## The cache
 
 **The raw lock.** No job writes a record's raw cache unless its worker holds `<local_root>/locks/raw/<record>`, a
@@ -546,33 +765,43 @@ file with `{owner, taken_at, heartbeat_at, ttl_s}` (TTL 900 s). Every `await_job
 is renamed aside as `<key>.stale-<time>`. A wait whose heartbeat finds the lock gone (`mia_core.locks.LockLost`)
 kills its job (`csub kill`) and fails the round; a stale lease is never evidence that its writer stopped. mia-data
 takes it around trusted crop jobs (owner `mia-data <round> crop`); mia-buffers from before the
-fetch through the stage (owner `mia-buffers <round> <record>`), released while the dataset is blocked on quota and
+quota wait through the stage (owner `mia-buffers <round> <record>`), released while the dataset is blocked on quota and
 re-taken after; the keeper takes it (owner `keeper`) before evicting a record's assets and skips a held record.
 Snapshot extraction uses `snapshot/<sha>`. `GET /locks` lists the holders. A worker waiting for a lock (or for
 quota) polls after `poll_minutes`, doubling each try up to 30 minutes. A re-take that had to wait for another
-owner re-reads the binding and the raw cache before going on. Hand-run harness commands bypass all of this: run
+owner re-reads the binding before going on. Hand-run harness commands bypass all of this: run
 them only on records no round is touching. `assets sync` on a host other than the workers' sees none of their
 locks, so there it refuses to run without `--dry-run`.
 
-**The fetch phase.** Per dataset the worker runs `harness fetch binding.yaml --record record.yaml --out
-fetch.json` with the cache read-write, the byte cap `limits.fetch_bytes` and the walltime
-`limits.fetch_walltime_min`, up to `limits.fetch_attempts` attempts that resume from the cache (`partial`),
-`sourcing.parallel_fetch` fetch jobs per buffer. `fetch.json` lists one outcome per URL: `cached`, `fetched`,
-`stream`, `pending` or `failed`; a missing `fetch.json` counts as partial. The fetch is skipped when `files.json`
-already lists every binding url: a plain file is listed by the HEAD that fetched it, a `<zip>::<member or glob>`
-url only once `harness fetch` has every matching member in the cache (source `members`); the zip's own entry
-proves nothing about members, as mia-data's verify reads only a sample of them. The harness also caches the zip's
-directory, so the offline stage expands a glob without a request. The binding is re-read under the lock: if the
-previous holder built the artifact, it is reused ("staged by <holder> while this buffer waited"). A fetch still
-partial after its attempts names the last job's id, state and exit code; `mia-buffers check` verifies the harness
-checkout has `harness fetch`.
+**The quota wait.** Before its stage slot a dataset waits while the raw cache is over `quota.raw_bytes`
+(`check_quota`: the registry's total, nothing charged for the record, nothing written on its row), holding no
+slot and with its lock released; once it has waited for a slot the quota is asked again, and over means back to
+waiting without the slot. A record whose files a person dropped has no quota wait. The quota is where staging
+waits and the keeper evicts, not a ceiling: a stage job writes the raw cache only when a reader takes a file
+whole, at most `limits.job_bytes` of it, and jobs that passed the check together, or mia-data's crop jobs, which
+ask nothing, can take the cache past the quota by that much each. The binding is re-read under the lock: if the
+previous holder built the artifact, it is reused ("staged by <holder> while this buffer waited"). `mia-buffers
+check` verifies the harness checkout has `harness stage`.
 
-**Staging.** The stage job runs `harness stage`, then `harness check-stage`, offline (cache read-only, no hosts),
-unless a URL streams: then the stage keeps the cache read-write and the hosts. A dropped (hand-placed) dataset
-stages offline. The job writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned
+**What a raw cache holds.** `mia_core.assets.cache_missing` says whether a cache holds a binding's urls, which
+`raw_ready` asks before a dropped record is staged again: a plain file counts when `files.json` lists it and its
+entry is on disk, as a HEAD lists a file before a byte of it is kept and a read by range keeps none; a
+`<zip>::<member or glob>` url counts once `harness fetch` has every matching member in the cache and lists it
+(source `members`); the zip's own entry proves nothing about members.
+
+**Reading a raw cache by hand.** A cache entry is the upstream file's own bytes (a zip member inflated and
+CRC-checked) under a hash of its URL and validators. `mia-buffers raw <raw_root>/<record id>` prints each entry
+with the name it had upstream (`<zip name>/<member path>` for a member), and `--to <folder>` makes that folder with
+a symlink per file, which any viewer opens by its own name. With `--copy` the folder holds copies instead: they
+outlast an eviction and open over a share that does not follow links.
+
+**Staging.** The stage job runs `harness stage`, then `harness check-stage`; what it reads, and from where, is
+"Sourcing on demand". It writes one sparse OME-Zarr 0.6 pyramid per volume, holding only the chunks the planned
 samples touch, with its derivation recorded in the Zarr's attributes; `check-stage` verifies it against the 0.6
-schemas. The stage job reads its byte cap from `MIA_HARNESS_STAGE_BYTES` (config `limits.stage_bytes`, default
-`limits.job_bytes`).
+schemas. The job's reservation is settled once, after its report is read, with the report's `bytes_fetched` (a
+failed report's too) and with 0 when there is no report. Two byte caps reach the job: `MIA_HARNESS_JOB_BYTES`
+(`limits.job_bytes`) on what it transfers from the source, and `MIA_HARNESS_STAGE_BYTES` (`limits.stage_bytes`,
+default `limits.job_bytes`) on the uncompressed bytes of the artifact it plans to write.
 
 **How many crops, and where.** The spec's `sampling.crops` is the buffer's distinct crops per split. A dataset's
 count in a split is its weight's share of that, at least 1, rounded up to a power of two and at most
@@ -587,10 +816,27 @@ its coverage (its crops over the crops it holds side by side: above 1× they ove
 candidates the frozen lists are drawn from: a list is as long as `sampling.crops` of its split, or holds every
 candidate when there are fewer.
 
+**Filters.** A definition's `sampling.filters` names what a crop must hold: `{name: content}` (not blank, not one
+value: the crop job's test) and `{name: labelled}` (a nonzero pixel, a single point being enough, in a label
+paired with its raw; a raw without labels fails every draw, so a record with no label array stages nothing). A
+`min_fraction` on `labelled` is read and ignored with a warning. The list is kept in name order and enters
+the plan rule only when it is not empty, so a definition without filters keeps its plan digests. Only the stage
+job can apply them: it tests each draw's full-resolution box, the label's before the raw's, and draws again until
+the split's count is kept or 2000 draws in a row were rejected (`plan.GIVE_UP` in the harness; a repeated
+position is one). So with filters a dataset's planned crops are the most it can stage, and the plan says `up to`.
+Rejected draws are read within `limits.job_bytes` like every other read of the job. `stage.json` gives each
+volume's `selection` (per split: wanted, staged, draws, rejected by reason) and lists a raw that kept nothing
+under `unstaged`, with its planes; it is not written, and its planes still count when registration shares the
+record's weight among its volumes. A record that kept nothing at all fails its stage job, naming the filters.
+Registration multiplies a volume's weight by staged / wanted (`register.staged_share`), so a crop of a short
+volume is served about as often as any other, and the timeline line that says a record is servable names what
+came up short (`register.shortfall`). Nothing is handed to another volume or record.
+
 **An artifact id is a recipe hash** (`jobspec.artifact_id`): binding hash, levels key, voxel size, harness commit,
 env digest and plan digest. A pyramid on disk is reused only when all of them match. Changing how the harness
 derives samples changes plan digests, so every volume restages; a buffer that re-registers a volume under a new
-artifact loses its frozen eval lists by design. The plan digest holds the record's crop count, which follows its
+artifact loses its frozen eval lists by design. A definition's filters are part of the plan rule, so setting,
+changing or dropping one does the same. The plan digest holds the record's crop count, which follows its
 weight: the rounding to a power of two keeps it still while the pool changes a little, and a record whose share
 crosses a doubling restages.
 
@@ -600,31 +846,32 @@ the harness: every input the artifact id hashes) names this job's artifact id, r
 foreign id, then renames the build to `<artifact>`. The saved directory is never written again. A rebuild
 lands under the same id through the same rename; a retry that finds the final directory reuses it.
 
-**Dataset statuses** during sourcing: `pending`, `waiting-dataset`, `waiting-lock`, `fetching`, `staging`,
+**Dataset statuses** during sourcing: `pending`, `waiting-dataset`, `waiting-lock`, `staging`,
 `blocked` (quota), `waiting-drop`, `servable`, `failed`, `dropped`. `blocked` and `waiting-drop` are dropped at
-`sourcing.dataset_timeout_days`, `waiting-lock` is not. A blocked dataset holds no fetch slot (it waits for quota
-first) and re-checks the quota once it has waited for one. `check_quota` records `wanted` (the record's catalog
-size) and `blocked_at` on the raw row; the next fetch clears them.
+`sourcing.dataset_timeout_days`, `waiting-lock` is not. A blocked dataset reads "raw cache over its quota by N
+bytes": it waits on what the cache holds, never on the record's size upstream, and stays blocked while too little
+of the cache is free to evict.
 
-**Asset rows.** `state` is one of `fetching`, `staging`, `waiting-drop`, `ready`, `partial`, `missing`, `evicted`;
-rows also carry `bytes`, `job`, `last_used` and `scanned_at`, and raw rows `stream` (URLs that stream) and
-`files`; a revoked staged row carries `quarantined`, `quarantined_at` and `quarantined_by`.
+**Asset rows.** A staged row's `state` is one of `staging`, `ready`, `partial` (a failed build), `missing`,
+`evicted`; a raw row's is `waiting-drop`, `ready` (at rest on disk, whatever jobs left in it), `missing` or
+`evicted`. A raw row is written when a stage's or a crop job's report is read (`mia_core.assets.raw_asset`) and
+by the scan, which also makes `ready` a raw row it finds at `partial` or `fetching`; while a job writes a raw cache the record's lock, not the row, keeps the
+keeper off. Rows also carry `bytes`, `job`, `last_used` and `scanned_at`, and raw rows `files`; a revoked staged row carries `quarantined`, `quarantined_at` and `quarantined_by`.
 `PUT /assets/<kind>/<key>` merges fields into the row. `GET /assets/<kind>?state=&record=` filters and adds a
 `bytes` total. `POST /sync/assets` (worker token) scans the roots, skips a missing or empty root, lists
 `.building-*` directories (staged builds and eviction asides in both roots) and sets staged `last_used` from the
-draws; a row without `last_used` gets its first scan's time. `raw_status` and a reusable staged find touch
+draws; a row without `last_used` gets its first scan's time. `raw_ready` and a reusable staged find touch
 `last_used`.
 
 **The keeper.** `MiaCacheKeeper` runs on the schedule `<deployment>-keeper` every `keeper.minutes`
 (`mia-buffers schedule`, which `mia up` runs). One pass:
 
 1. datasets sync and assets sync (each with a 10-minute timeout);
-2. stale builds: a `fetching` or `staging` row whose csub job is gone becomes `partial` or `missing`;
+2. stale builds: a `staging` row whose csub job is gone becomes `missing`;
 3. `.building-*` directories older than `quota.hold_hours` are removed (a build whose artifact row says `staging`
    is spared, whatever its age), and so are empty raw directories (a job's mount point that never received a file;
    the scan does not register one, and drops the row of one it had);
-4. eviction per root until usage is under `quota.<kind>_bytes - quota.headroom_bytes` (for raw, minus the largest
-   `wanted` of a fetch blocked within `hold_hours` when that is more than the headroom), oldest `last_used` first,
+4. eviction per root until usage is under `quota.<kind>_bytes - quota.headroom_bytes`, oldest `last_used` first,
    free assets only: no refs, `ready`, unused for `hold_hours`, not within its quarantine hold, and for raw no
    mia-data round in progress on the record and the record's lock not held. An evicted row keeps `state: evicted`,
    `bytes: 0`. A directory is renamed to `.building-evicted-*` before removal, so a half-removed artifact is
@@ -673,10 +920,11 @@ today's draws.
 **Degraded.** `GET /buffers/<id>/status` stats each volume's pyramid directory (when the service has a staged
 root) and lists the missing ones, which `draw`, `next` and `split` skip. The keeper signals `degraded(records,
 reason, buffer)`. The workflow asks buffer-api which of those records are still missing (`missing_records`; a
-re-send for one rebuilt, rebuilding or failed is ignored) and stages them again from the raw cache, under the
-same artifact id, with a job key and build directory of their own; the save sets the broken final directory
-aside as `.building-stale-*`. The rebuild runs alongside the ready loop: a `go` or a retire abandons it. The spec
-goes `needs-human` only if a weighting group falls below its floor; a record whose raw cache is gone fails.
+re-send for one rebuilt, rebuilding or failed is ignored) and stages them again as a round does, reading the
+source ("Sourcing on demand"), under the same artifact id, with a job key and build directory of their own; the
+save sets the broken final directory aside as `.building-stale-*`. The rebuild runs alongside the ready loop: a
+`go` or a retire abandons it. The spec goes `needs-human` only if a weighting group falls below its floor; a
+record whose files a person dropped fails when its raw cache no longer holds them.
 
 **Whose signal.** The keeper's `idle`, `retire` and `degraded` name the buffer they are about; the workflow
 ignores one about another buffer, but for a superseded one: a `go` from ready or idle records the buffer it
@@ -694,7 +942,7 @@ pyramid as it is. A failed build next to a saved artifact (not a rebuild of it) 
 ## Preparation requests
 
 A buffer never asks mia-data for a dataset; a preparation request does. The page files one (`POST /prep`) for the
-datasets ticked on the Datasets list or the ones a new buffer's plan needs. Its spec is YAML, with `records` or
+datasets checked on the Datasets list or the ones a new buffer's plan needs. Its spec is YAML, with `records` or
 `select` (exactly one):
 
 ```yaml
@@ -703,7 +951,7 @@ kind: preparation
 catalog: {repo: <owner/catalog>, ref: <40-hex commit>}
 records: [<record id>, ...]     # an explicit list, or
 select: {...}                   # the buffer spec's select block, run over the git catalog snapshot at catalog.ref
-again: false                    # optional; true also gives a new round to datasets that are prepared or that stopped
+again: false                    # optional; true also gives a new round to datasets that are prepared or at review
 timeout_days: 14                # optional, default 14
 max_records: 25                 # optional; a request for more records must say so here (each is an agent run)
 ```
@@ -718,12 +966,18 @@ action carries, once.
 `needs-human`: the request stopped, and its entry names the records that did not settle, each with its last
 registry state. `cancelled`: a person cancelled it.
 
-**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or `needs-human`
-settles the record, unless the request says `again`: then the dataset is sent a `go` all the same, and its row is
-set to `in-progress` at once, so the request follows the new round instead of settling on what the last one
-left. A dataset whose crops wait for a review is `needs-human`, so it settles too. Otherwise the dataset's
-subject says where it stands: one in a round is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is `done-unpublished`, and
-any other is sent a `go` through buffer-api with the worker token (`Registry.send_action`): actor
+**What it does.** Per record, `prep_nudge` reads the registry first: a row that is `prepared` or shelved settles
+the record. How the round runs its datasets is `PrepPins.again`: the text's `restart` (a stored request's
+`again` reads the same) for the request's first round; after that the action decides, a `resume` resuming them
+and a `go` restarting each. A round that resumes sends a dataset that never ran a `go`, and one that stopped or
+whose crops wait for a review a `resume`, which keeps what its round has. A round that restarts sends every
+dataset a `go`, a prepared one and one at review too. A dataset that is sent something has its row set to
+`in-progress` at once, so the request follows the round instead of settling on what the last one left; one
+resumed at review keeps its row, since it waits for a verdict unless its judge still has to look. A stopped
+dataset whose jobs were refused a host that no one approved yet is sent nothing (its note names the hosts,
+which Resume on its page lists to check). Otherwise the dataset's subject says where it stands: one in a round
+is left to it (`in-progress`), one at `done` whose folder has no binding with a matching manifest is
+`done-unpublished`, and any other is sent its action through buffer-api with the worker token (`Registry.send_action`): actor
 `prep:<number>`, the request's root (who is charged), and the key `<round id>/<record>`, so a retried activity
 sends no second go. The outcome is `opened` for a dataset started for the first time and `nudged` otherwise, and
 `unknown` for a go that failed (its error is the note). One entry lists each record with its outcome. A failed go
@@ -740,7 +994,7 @@ nothing to mia-data: a dataset that was prepared when the plan was made and is n
 **`evaluate.enabled`.** mia-data's config has `evaluate: {enabled: false}`. It is a switch only: no evaluate job
 exists.
 
-## The cleaner
+## The repair agent
 
 `MiaCleaner` runs on the schedule `<deployment>-cleaner` every `cleaner.minutes` (`mia-buffers schedule`; the
 schedule is deleted while `cleaner.mode` is `off`). Its one activity, `sweep` (`mia_buffers/sweep.py`), is a pass
@@ -752,13 +1006,15 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
 1. **The installation first.** `service_findings` reads `GET /health` (Temporal, a worker per task queue),
    `GET /workers` (what each worker said it started on: `mia_core.checkout.code_digest`, a digest of the
    packages as committed, against the checkout's now; a commit that touches only docs, tests or the page's
-   files changes nothing),
+   files changes nothing; every worker reports when it starts, the mia-data and mia-buffers ones and each
+   autodev deployment's, `mia_core.registry.report_worker`: a worker that does not is one the repair agent cannot
+   see),
    `GET /schedules` and `autonomy.pause`. Each finding names the subject kinds behind it, and those are left
    alone for the pass: a worker that is down or runs old code is said once, never "fixed" by cancelling what waits
    on it. Findings that only show across subjects (`evidence_findings`: workflow tasks failing on more than one
    run of a kind, a service refusing several rounds, jobs pending in the cluster queue) are added after step 2.
-   They are the report's `findings`: the page's banner and the Cleaner view show them.
-2. **Evidence.** For every subject that has been `working` for `quiet_minutes` or `stuck` for `stopped_minutes`
+   They are the report's `findings`: the page's banner and Overview's System section show them.
+2. **Evidence.** For every subject that has been `working` for `quiet_minutes` or `stopped` for `stopped_minutes`
    and has no case of its present revision: its timeline and actions, its run (`GET /run/<kind>/<number>?detail=1`:
    run id, a workflow task that keeps failing, pending activities), the jobs of its round whose record has no end
    (`mia_core.jobrecord.open_records`, each asked of the cluster by id), and the party it waits for (the snippets
@@ -767,24 +1023,32 @@ over the whole installation; the rules it applies are pure functions in `mia_buf
    `plan_for` turns the rule into steps. A case (ledger table `cases`, routes `POST /cases`, `PUT /cases/<id>`,
    `GET /cases`) holds what was seen, the revision and run it was seen at, the steps done and the steps left.
    `GET /cases` adds `jobs` to each: the addresses of the job records of the round it saw, of autodev's jobs on
-   the snippets issue it is about, and of the cleaner's own jobs for it (`cleaner/case-<id>/diagnose-<n>`),
-   which the Cleaner view links.
+   the snippets issue it is about, and of the repair agent's own jobs for it (`cleaner/case-<id>/diagnose-<n>`),
+   which the case links on Overview.
    Leftovers get cases of their own kind: `run` (an open run of a workflow type in no worker, `WORKFLOW_TYPES`),
    `job` (alive after its round ended), `snippets` (an open issue or pull request of ours nobody follows).
 4. **Carrying cases on.** In `act` mode each open case does its remaining steps in order until one has to wait
-   (it returns None and is tried at the next pass), one is refused (the case is `needs-person` and says why), or
+   (it returns None and is tried at the next pass), one is refused (the case ends `gave-up` and says what it takes), or
    none is left (`waiting` for the outcome when a step started work, else `resolved`). `report` mode opens cases
-   and does nothing; at most `max_parallel` cases are in work.
+   and does nothing; at most `max_parallel` cases are in work. A case records a repair and nothing more: it ends
+   `resolved`, `dropped` (somebody acted) or `gave-up`, and a `gave-up` case about a subject records the revision
+   the subject stood at (`ended_revision`), which is how long buffer-api shows it as the subject's `repair`. A
+   left-over thing the agent gave up on is resolved once it is gone. A case that gives up while the subject has
+   not yet answered the agent's own last action (a cancel whose stage write is still to come) stays in work
+   until it has, so that it ends at the revision the answer leaves. A round the agent ended (`cancel`, `stop`)
+   with nothing run after it ends its case `gave-up`: nobody decided that, so the subject needs a human.
 
 **What keeps a remedy on the round it was decided about.** Before a step the subject is read again; a person's
 action since the case opened drops the case, and so does a subject that moved before the case did anything. An
 action goes to buffer-api as the actor `cleaner` with the revision just read (buffer-api refuses any action whose
 `revision` is not the subject's), the key `cleaner/<case>/<step>` and, for a `stop`, the run id the sweep saw
-(`run`). A `go` after a `cancel` that found no run, or after a `stop`, waits for `kill_jobs`: every job of the
-ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses while a
-job may still write. A dataset's `go` after a command to autodev waits until the snippets issue has lost
-`snippets:needs-human` (`await_autodev`). A request gets a `go` only when that starts no dataset round
-(`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The cleaner never
+(`run`). A subject is run again with a `resume`; a `go` stays for a buffer, and where the remedy needs more
+than the round's pins hold (a changed record, a pull request the plan closed, a run with the diagnosing
+agent's advice). Either, after a `cancel` that found no run or after a `stop`, waits for `kill_jobs`: every job
+of the ended round is killed and seen dead first, since such a round kills none itself and its raw lock lapses
+while a job may still write. A dataset's `resume` after a command to autodev waits until the snippets issue has
+lost `snippets:needs-human` (`await_autodev`). A request gets no `go` from the repair agent, and a `resume` only when
+that runs no dataset round (`_request_may_go`). At most `max_remedies` steps that start work per subject in seven days. The repair agent never
 sends a `stop` to a buffer spec (it retires the spec's buffers), kills a left-over job only where no job of the
 round can be wanted any more (never at a person's turn or at `ready`), acts on a snippets issue only when its
 first line names the dataset and the bot wrote it, and judges a remedy's outcome only once the subject has moved
@@ -850,7 +1114,7 @@ The `MiaBuffer` workflow runs these steps for a round; each can also be run by h
    `MuViTMAE2d(in_channels=train_ds.n_channels, levels=train_ds.levels, ...)` takes it as it is; the `DataLoader`
    takes `collate_fn=BufferDataset.collate`, because a buffer mixes datasets whose label layers differ and
    torch's default collate needs identical samples (the batch keeps the keys every sample has, `meta` as a list).
-   Train is a stream of crops (`idx` is ignored, `len` is `n_samples`); val and test replay a frozen list that is
+   Train is a stream of crops (`idx` only has to be under `len`, which is `n_samples`); val and test replay a frozen list that is
    identical every epoch. Each DataLoader worker registers its own consumer. `GET /buffers/<id>/status` shows
    servable volumes per split, draws per volume and consumers.
 
@@ -868,6 +1132,23 @@ config), and `muvit-2d` then scales by those bounds instead of the patch's own p
 (`meta.normalize_scope` says which). A staged directory without a sample has its volumes refused at registration
 under a non-`patch` scope, with a reason that says to re-stage.
 
+**A peek.** `GET /buffers/<id>/peek?split=train|val|test` (a read route) answers one crop for a person to look
+at: the descriptor a consumer would have been handed (without `seq`), the tensorizer's `img` and each label
+layer as one PNG per level (base64), each level's pixel size and the dataset's facts from the newest catalog.
+buffer-api reads no array itself: `mia_buffers.peek.Peeker` runs the `harness.dir` checkout's
+`harness tensorize --png` with the harness environment's python, the parameters `BufferDataset` passes, one BLAS
+thread, a 60 s limit and one process at a time, and reads the pictures back with `read_untrusted`. The process
+gets `PATH`, `HOME`, `TMPDIR` and `LANG` of the service's environment and nothing else, so no token. A peek waits
+5 s for the one before it and is then refused (`503`), so no queue of processes builds up. A harness that
+fails is a `502` with the end of its stderr; a service started without a harness (a test) answers `503`. The
+buffer keeps no trace of a peek: the draw has a generator of its own, no consumer is registered, no draw or
+empty answer is counted, the idle clock does not move, and a `val` or `test` crop is one of the split's
+candidates, not a row of its frozen list (`tests/test_buffers_peek.py`). It runs the checkout as it stands, not
+the snapshot the buffer's round pinned. The page shows it on the serve step, under the two lines a training run
+writes: a split, **Next crop**, and nothing asked until the button is pressed. A crop that is drawn asks for the
+one after it of the same split (`ahead` in `peek.js`), so the next press shows a crop without waiting for a
+process.
+
 ## The page
 
 buffer-api serves one page at `/` on `service.url` (static files under `/ui/`). It holds no token: it fetches
@@ -881,14 +1162,18 @@ above it in this table, never in a circle:
 
 | module | |
 |---|---|
-| `spec.js` | the YAML the page writes (a buffer spec, a preparation request); no DOM |
+| `spec.js` | the YAML the page writes (a buffer's definition, a preparation request) and reads back into the controls; no DOM |
+| `steps.js` | a buffer's six steps: which step a stage is, which step an address may show, the list's words; no DOM |
 | `dom.js` | nodes built from text (never parsed HTML), numbers and times, links and addresses, pills, the tooltip, cards, a lifecycle's line |
 | `api.js` | the page's one `fetch`, the banner its errors go to, and what the service said at boot |
-| `table.js` | a table paged by the server |
+| `table.js` | a table paged by the server, and what the shared column names mean |
 | `markdown.js` | a timeline entry's markdown as DOM nodes, and its gist as one line |
 | `actions.js` | what each button says and does, the dialogs before a send, a subject's action bar, the Prepare button |
 | `job.js` | a job's record, every value of it inserted as text |
-| `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views |
+| `designer.js`, `buffers.js`, `datasets.js`, `operations.js`, `subjects.js` | the views; `designer.js` is steps 1 and 2 of a buffer (its definition and that definition's plan) |
+| `peek.js` | the serve step's peek: one crop as the tensorizer returns it, its levels side by side; imports `dom.js` and `api.js` only |
+| `overview.js` | Overview, the landing page: the system, the counts by status, what needs a human, what is in repair, what is working, the week's repairs and what is shelved, each a section that folds |
+| `flow.js` | a buffer's page: its heading, the strip of steps, the step shown with its way back and forward, steps 3 to 6, the timeline |
 | `app.js` | the Docs view, health, the stream, hash routing and boot |
 
 Every file is sent with `Cache-Control: no-cache`, so a browser never runs the modules of two deployments
@@ -897,28 +1182,73 @@ small fake DOM, and reads all the files as one text for the rules about the page
 code is compared without whitespace (`has()`, `count()`), so it holds however Biome lays the code out.
 `ui/package.json` only tells node that the files are modules; the service does not serve it.
 
+Every help text shows in the page's one tooltip (`dom.js`): the pointer brings up the nearest node's own lines
+(`tipOn`: a pill, a crop) or its `title`, so a new control needs only a `title` and the browser's own box never
+shows. Every button has one (`BUTTON_HELP` and `ACTION_HELP` in `actions.js`) and so has every column: its own
+`title` where its meaning is its table's, else `COLUMN_HELP` in `table.js` by its label. A test fails a column or
+a button that has none.
+
 Each tab is one kind of thing, and each thing has one page:
 
-- **Needs you** reads `/needs`: everything that waits on a person, with the buttons that answer it. *Shelve…* on
-  a row (or on the subject's page) takes it off the list with a reason; the *Shelved* toggle lists those, each with
-  its reason and *Unshelve*.
+- **Overview**, the landing page, is sections that fold and stay as the viewer left them (`overview.js`):
+  *System* (the last sweep's findings, and left-behind things the repair agent could not remove), *Counts* (every
+  kind's subjects by status), *Needs human* (`/subjects`: the subjects with that status, why, and the buttons that
+  answer it; also the actions that were not delivered), *In repair* and *Repairs in the last week* (`/cases`),
+  *Working* and *Shelved* (`/subjects?status=`). *Shelve…* on a row (or on the subject's page) takes it out of
+  *Needs human* with a reason; *Shelved* lists those, each with its reason and *Unshelve*. Overview follows the
+  stream at most once in ten seconds and is redrawn by each health check; a redraw keeps the sections, leaves a
+  table or a case list alone while a fold in it is open, and loads the cases again at most once a minute.
 - **Datasets** reads `/catalog/datasets`: every record of the newest catalog joined with its preparation row, raw
-  download, staged artifacts and buffers; filters by state, modality, dims and licence. Every row has a tick (the
-  header's and *Select all* tick the page that is showing). While something is ticked, a box says how many datasets are
-  selected and offers *Prepare* and *Create buffer*. The ticked are prepared in one request (one
-  `POST /prep` that says `again`, so a prepared dataset gets a new round), or opened in New buffer as a spec that
+  download, staged artifacts and buffers; filters by state, modality, dims, licence and what the record lacks
+  (`lacks`: `data URL`, `array shape`, `voxel size`, `readable record`, `anything` or `nothing`; `record_row` names them,
+  whatever buffer asks, and the row shows each as a pill). Every row has a check (the
+  header's checks the page that is showing). While something is checked, a box says how many datasets are
+  selected and offers *Prepare* and *Create buffer* (`chosenBox`). The checked are prepared in one request (one
+  `POST /prep` that says `again`, so a prepared dataset and one at review get a new round), or opened in New buffer as a definition that
   selects exactly them (`specFromDatasets`: one `*/<id>.yaml` glob per dataset in `select.paths`). `#datasets?state=<state>` opens the list with a filter set.
 - **A dataset's page** (`#datasets/<record>`) reads `/catalog/datasets/<record>`, `/subjects/dataset/<record>`,
   its timeline, `/decisions?record=`, `/assets/staged?record=` and `/buffers?record=`: its record, preparation,
   crops, decisions, cache, buffers, buttons and timeline.
-- **Preparation** reads `/subjects/prep`: the requests. A request's page lists its datasets
-  (`/catalog/datasets?request=<number>`: the records its stored spec names).
-- **Buffers** reads `/subjects/buffer` (specs) and `/buffers`. **New buffer** (`#buffers/new`) is the designer:
-  its controls are a spec, run through `POST /plan` with `page` (debounced 300 ms) for the funnel, the charts and
-  one page of the plan's rows. A spec's page (`#specs/<key>`) has its buttons, its text with *Plan again*, *Edit* and *Clone*, its timeline and
-  its buffers; a
-  buffer's page reads `/buffers/<id>/status`, `/events`, `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
-- **A lifecycle** tops the page of a dataset, a spec, a request and a buffer: the kind's stages as boxes and arrows
+- **Preparation requests** (`#preparation`, a link on the Datasets view; it has no tab) reads `/subjects/prep`. A
+  request's page lists its datasets (`/catalog/datasets?request=<number>`: the records its stored spec names).
+- **Buffers** reads `/subjects/buffer`: one row per buffer, with its step, what it is doing and the id it serves.
+- **A buffer's page** (`#buffer/<key>`, `#buffer/<key>/<step>`; `#buffers/new` for one that is not saved yet; an old
+  `#specs/<key>` redirects) is `flow.js`: a heading (name, stage, *More* for what is not a step), the strip of six
+  steps, the step shown, and the timeline. `steps.js` says which step a stage is: a stage a round works or waits
+  at is the step of that work, and every stage a buffer rests at is Prepare. An address may ask for a step already
+  passed, never one ahead. Each step draws a footer with the one way back and the one way forward.
+  - *Define* and *Datasets* are `designer.js`. The definition is one text: what the controls write
+    (`toSpecYaml`), or, while the YAML tab holds a text the controls did not write, that text (`TEXT`), read back
+    into the controls by `POST /specs/parse`; what it holds that no control shows (`specDiff`) makes the controls
+    read-only. It is run through `POST /plan` with `page` (debounced 300 ms) for the numbers, the charts and one
+    page of rows. Step 2's table asks for the rows that fit (`page.fit_only`), which is the number step 1 counts; the
+    rows the selection admits but the patch does not fit are listed only on request, and the rows the planner could
+    not place because of their record (`RECORD_LACKS_GROUPS`) never: the step counts them (`summary.record_lacks`)
+    and links to `#datasets?lacks=anything`. Unchecking a
+    dataset adds its id to `select.exclude.ids`. Step 2's button saves a new
+    buffer (`POST /specs`, no action); leaving steps 1 and 2 of a saved buffer with a changed definition sends
+    `edit` with the revision the page read. A redraw (the stream, the 30 s poll) never replaces a definition
+    someone is changing (`ensureDefinition`).
+  - *Prepare* lists the plan's rows that fit (`page.fit_only`) as the Datasets list lists datasets: the same
+    columns (`datasetCols`; `plan_view` gives a row those fields), a check per row, and the box of the checked
+    (`chosenBox`), whose *Prepare* files the request with `buffer` and `again`. Toggle buttons narrow the list
+    to the unprepared, those being prepared or the prepared (`page.preparation`, rows only: the numbers above
+    stay the plan's). It also lists the buffer's requests. Its way
+    forward is the one `go` a buffer gets from the page (`planRound`). The bar of a step's buttons at the
+    window's lower edge brings up no tooltip (`foot`): a button there keeps its help as `aria-description`.
+  - *Plan* shows the plan entry of the timeline; *Source* the version's datasets (`poolTable`, also on the
+    version's page) and *Files are in place*; *Serve* its buttons, then the version's id, the line a training
+    script pastes and the version's included datasets (`includedCard`: `/buffers/<id>/datasets?included=1`, the
+    rows that are servable or that a `revoke` of the buffer named, each with its plan row's size, splits and
+    notes and the bytes of its raw cache and its pyramid; the box of the checked holds *Revoke*). The way back
+    from Plan and Source is a `cancel`.
+  - The heading says `serving` for a buffer at `ready` or `idle`, whatever step is shown. The timeline under
+    the steps (`bufferTimeline`) says how many datasets an entry concerns, never which: an entry about one
+    dataset is left out, and the plan, the staged board and a result are shown without their table, their fold
+    of jobs and their list of datasets. The registry and the issue on GitHub hold the entries whole.
+- **A version's page** (`#buffers/<id>`: one round's buffer) reads `/buffers/<id>/status`, `/events`,
+  `/datasets`, `/volumes`, `/consumers` and `/usage/<id>`.
+- **A lifecycle** tops the page of a dataset, a request and a version: the kind's stages as boxes and arrows
   with the current one filled. The stages are `lines` of `/meta`, which is each stage table in its own order
   without the stages a round can end in from any step (`failed`, `blocked`, `needs-human`, `cancelled`); those
   hang under the step the round stopped at. Under it one line says what the newest timeline entry says and
@@ -935,7 +1265,8 @@ Each tab is one kind of thing, and each thing has one page:
 - **Cache** reads `/assets/raw|staged`, `/locks`, `/keeper` and the quotas from `/meta`.
 - **Decisions** reads `/decisions` (newest first, by gate, with the judge/human agreement); a human approve that a
   later reject overrules is marked by the server.
-- **Docs** is static: the user guide (`#docs`) and the architecture overview (`#docs/architecture`). Each is a file
+- **Docs** is static: the user guide (`#docs`) and the Developer guide (`#docs/architecture`). Chapter links
+  use `#docs/guide/N` and `#docs/architecture/N`. Keep the chapter IDs stable when editing either guide. Each is a file
   of the page (`ui/guide.html`, `ui/architecture.html`), read when it is first shown.
 
 The page opens `GET /stream` and refetches what an event names.
@@ -960,8 +1291,9 @@ copy of the timeline. No link to GitHub is spelled out in words.
 
 **A subject's page says where it stands with its lifecycle.** Under the name comes one row with the links to what the
 workflows made (its GitHub issue, its workflow in Temporal, its round's crops), then the line of stages; the step a
-round is working at is marked (`subject.status === "working"`). There is no status word on the page or in a
-table: a table shows the stage as a pill, and the buttons say whose turn it is.
+round is working at is marked (`subject.phase === "working"`). A subject's own page shows no status word: the
+line of stages and the buttons say whose turn it is. Overview groups the subjects by status and the Buffers list
+shows it; every other table shows the stage as a pill.
 
 **A button with more to enter ends in an ellipsis.** *Reject…* opens a dialog for the feedback and sends nothing
 until some is typed; the dialog hangs off the body, so a redraw of the view behind it keeps what was typed.

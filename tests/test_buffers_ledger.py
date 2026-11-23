@@ -34,12 +34,16 @@ def test_volumes_are_parsed_once_per_write(tmp_path):
     first = led.volumes("b")
     second = led.volumes("b")
     assert first == second == [vol("a")] and first is not second  # a copy: a caller may replace entries
-    assert sum("FROM volumes" in statement for statement in statements) == 1  # the second read never hit SQLite
+
+    def reads() -> int:  # the reads of `volumes` (a put reads the one row it replaces, not the list)
+        return sum("SELECT data FROM volumes" in s and "ORDER BY id" in s for s in statements)
+
+    assert reads() == 1  # the second read never hit SQLite
     led.put_volume("b", vol("c"))
     assert [v.id for v in led.volumes("b")] == ["a", "c"]
     led.set_volume_missing("b", "c", True, vol("c").path)
     assert [v.missing for v in led.volumes("b")] == [False, True]
-    assert sum("FROM volumes" in statement for statement in statements) == 3
+    assert reads() == 3
 
 
 def test_consumers_and_staleness(tmp_path):
@@ -158,6 +162,36 @@ def test_put_volume_with_refs_is_atomic(tmp_path):
     assert [v.id for v in led.volumes("b")] == ["a"]
 
 
+def test_a_volume_moved_to_another_artifact_takes_the_stale_staged_ref_with_it(tmp_path):
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {})
+    led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art1"), refs=[("staged", "art1"), ("raw", "rec")])
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art1"), refs=[("staged", "art1")])
+    led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art2"), refs=[("staged", "art2"), ("raw", "rec")])
+    assert led.refs("staged", "art1") == ["b"]  # rec/b still lives in art1
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art2"), refs=[("staged", "art2")])
+    assert led.refs("staged", "art1") == [] and led.refs("staged", "art2") == ["b"] and led.refs("raw", "rec") == ["b"]
+    led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art2", weight=0.5), refs=[("staged", "art2")])
+    assert led.refs("staged", "art2") == ["b"]  # the same artifact again: nothing dropped
+
+
+def test_a_volume_re_registered_with_other_candidates_clears_the_frozen_lists_in_the_same_write(tmp_path):
+    """The frozen rows index the candidates of the volume they were drawn from: a re-put that changes them (a
+    rebuild under another artifact, another sample list) removes every split's rows as part of the volume write,
+    so no stop between the two can leave the new volume with the old rows, and a same-candidates re-put keeps them."""
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {})
+    planned = dataclasses.replace(vol("a"), artifact="art1", samples={"val": ({"plane": 0},)})
+    assert led.put_volume("b", planned) == 0
+    led.extend_frozen("b", "val", [{"volume": "a", "candidate": 0, "seq": 0}])
+    led.extend_frozen("b", "test", [{"volume": "a", "candidate": 0, "seq": 0}])
+    assert led.put_volume("b", dataclasses.replace(planned, weight=0.5)) == 0 and len(led.frozen("b", "val")) == 1
+    assert led.put_volume("b", dataclasses.replace(planned, artifact="art2")) == 2
+    assert led.frozen("b", "val") == [] and led.frozen("b", "test") == []
+    led.extend_frozen("b", "val", [{"volume": "a", "candidate": 0, "seq": 0}])
+    assert led.put_volume("b", dataclasses.replace(planned, artifact="art2", samples={"val": ({"plane": 1},)})) == 1
+
+
 def test_backup_is_a_consistent_copy(tmp_path):
     led = Ledger(tmp_path / "l.sqlite")
     led.put_buffer("b", {"x": 1})
@@ -168,9 +202,9 @@ def test_backup_is_a_consistent_copy(tmp_path):
 
 def test_put_asset_merges_and_filters(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite")
-    ledger.put_asset("raw", "rec", {"state": "fetching", "job": "1", "path": "/netfs/lab/raw/rec"})
+    ledger.put_asset("raw", "rec", {"state": "waiting-drop", "job": "1", "path": "/netfs/lab/raw/rec"})
     merged = ledger.put_asset("raw", "rec", {"bytes": 10, "scanned_at": 5.0})
-    assert merged["state"] == "fetching" and merged["job"] == "1" and merged["bytes"] == 10
+    assert merged["state"] == "waiting-drop" and merged["job"] == "1" and merged["bytes"] == 10
     ledger.put_asset("staged", "art1", {"state": "ready", "record": "rec", "bytes": 100})
     ledger.put_asset("staged", "art2", {"state": "evicted", "record": "rec", "bytes": 0})
     ledger.add_ref("b", "staged", "ref-only")
@@ -248,7 +282,7 @@ def test_staged_last_used_comes_from_draws(tmp_path):
 
 def test_status_board_and_events(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite")
-    ledger.put_buffer_dataset("b1", "rec", "fetching", job="j1")
+    ledger.put_buffer_dataset("b1", "rec", "staging", job="j1")
     row = ledger.put_buffer_dataset("b1", "rec", "servable")
     assert row["status"] == "servable" and row["job"] is None and ledger.buffer_datasets("b1")[0]["record"] == "rec"
     assert ledger.buffer_datasets("b2") == [] and ledger.latest_event("b1") is None
@@ -378,16 +412,38 @@ def test_kv(tmp_path):
 
 def test_sync_assets_drops_a_raw_row_with_nothing_cached_that_the_scan_skipped(tmp_path):
     """The scan skips an empty raw directory; its row (registered by an earlier scan) goes rather than turning
-    `missing`. A row with content is still marked missing, and a fetch in progress is untouched."""
+    `missing`. A row with content is still marked missing."""
     ledger = Ledger(tmp_path / "l.sqlite")
     ledger.put_asset("raw", "phantom", {"state": "ready", "bytes": 0, "files": {}})
     ledger.put_asset("raw", "wiped", {"state": "ready", "bytes": 12, "files": {}})
-    ledger.put_asset("raw", "fetching", {"state": "fetching", "bytes": 0, "files": {}, "job": "1"})
     counts = ledger.sync_assets({}, older_than=time.time() + 1, kinds=("raw",))
     by_key = {a["key"]: a["data"] for a in ledger.assets("raw")}
-    assert "phantom" not in by_key
-    assert by_key["wiped"]["state"] == "missing" and by_key["fetching"]["state"] == "fetching"
+    assert "phantom" not in by_key and by_key["wiped"]["state"] == "missing"
     assert counts == {"scanned": 0, "new": 0, "missing": 1, "dropped": 1}
+
+
+def test_sync_assets_readies_a_raw_row_left_partial_or_fetching(tmp_path):
+    """A raw cache has no state but at rest: a row at `partial` or `fetching`, which no job completes, is `ready`
+    once the scan finds its directory, so the keeper may evict it. A staged row at `partial` is a failed build
+    and stays one."""
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.put_asset("raw", "half", {"state": "partial", "bytes": 3, "scanned_at": 1.0, "last_used": 1.0})
+    ledger.put_asset("raw", "busy", {"state": "fetching", "bytes": 3, "job": "1", "last_used": 1.0})
+    ledger.put_asset("staged", "failed", {"state": "partial", "bytes": 3})
+    found = {
+        ("raw", "half"): {"bytes": 10, "scanned_at": 9.0},  # a stage with no report wrote 7 more bytes
+        ("raw", "busy"): {"bytes": 3, "scanned_at": 9.0},
+        ("staged", "failed"): {"bytes": 3, "scanned_at": 9.0},
+    }
+    ledger.sync_assets(found, older_than=time.time() + 1)
+    half = ledger.asset("raw", "half")
+    assert half["state"] == "ready" and half["bytes"] == 10 and half["last_used"] == 1.0
+    busy = ledger.asset("raw", "busy")
+    assert busy["state"] == "ready" and busy["job"] is None  # the job that held it is long gone
+    assert ledger.asset("staged", "failed")["state"] == "partial"
+    ledger.put_asset("raw", "gone", {"state": "fetching", "bytes": 3, "job": "1"})
+    ledger.sync_assets({}, older_than=time.time() + 1, kinds=("raw",))
+    assert ledger.asset("raw", "gone")["state"] == "missing"  # not on disk: no job holds a raw row
 
 
 # --- assessments, budgets, revoked rows, quarantined volumes ------------------------
@@ -458,9 +514,14 @@ def test_delete_volume_drops_its_frozen_rows_and_an_orphaned_ref(tmp_path):
     led.put_buffer("b", {})
     led.put_volume("b", dataclasses.replace(vol("rec/a"), artifact="art1"), refs=[("staged", "art1"), ("raw", "rec")])
     led.put_volume("b", dataclasses.replace(vol("rec/b"), artifact="art1"), refs=[("staged", "art1")])
-    led.extend_frozen("b", "val", [{"volume": "rec/a", "i": 0}, {"volume": "rec/b", "i": 1}])
+    led.extend_frozen("b", "val", [{"volume": "rec/a", "seq": 0}, {"volume": "rec/b", "seq": 1}])
+    led.extend_frozen("b", "test", [{"volume": "rec/b", "seq": 0}, {"volume": "rec/a", "seq": 1}])
     assert led.delete_volume("b", "rec/a") and not led.delete_volume("b", "rec/a")
-    assert [v.id for v in led.volumes("b")] == ["rec/b"] and led.frozen("b", "val") == [{"volume": "rec/b", "i": 1}]
+    assert [v.id for v in led.volumes("b")] == ["rec/b"]
+    assert led.frozen("b", "val") == [{"volume": "rec/b", "seq": 0}]  # the list closed up: its index and seq moved
+    assert led.frozen("b", "test") == [{"volume": "rec/b", "seq": 0}]
+    led.extend_frozen("b", "val", [{"volume": "rec/b", "seq": 1}])  # appends at the count: no hole, no collision
+    assert [d["seq"] for d in led.frozen("b", "val")] == [0, 1]
     assert led.refs("staged", "art1") == ["b"]  # rec/b still lives in art1
     assert led.delete_volume("b", "rec/b") and led.refs("staged", "art1") == []
     assert led.volume_rows("b") == []
@@ -527,6 +588,34 @@ def test_assessments_before_cursor_and_by_filter(tmp_path):
     assert led.assessments(by="judge") == [rows[1]] and led.assessments(before=rows[0]["id"]) == []
 
 
+def test_a_judges_decision_a_person_overturned_later_is_counted_and_named(tmp_path):
+    """spec judge-decides §6: what the judge decided and a person then overturned is shown as overturned."""
+    from mia_core.judge.policy import new_assessment
+
+    led = Ledger(tmp_path / "l.sqlite")
+
+    def put(ref, verdict, by, at):
+        led.put_assessment(
+            new_assessment(gate="crops", subject_kind="crop_set", subject_ref=ref, verdict=verdict, by=by, at=at)
+        )
+
+    put("sent-back", "reject", "judge", 10.0)  # the judge sent it back; a person accepted the set afterwards
+    put("sent-back", "approve", "human:alice", 20.0)
+    put("saved", "approve", "judge", 30.0)  # the judge approved; a person rejected the saved set afterwards
+    put("saved", "reject", "human:bob", 40.0)
+    put("first", "reject", "human:carol", 50.0)  # the person spoke first: a disagreement, nothing overturned
+    put("first", "approve", "judge", 60.0)
+    put("agreed", "approve", "judge", 70.0)
+    put("agreed", "approve", "human:alice", 80.0)
+    out = led.agreement("crops")
+    assert (out["judged"], out["agree"], out["disagree"], out["overturned"]) == (4, 1, 3, 2)
+    pairs = {pair["subject"]: pair for pair in out["pairs"]}
+    assert pairs["crop_set:sent-back"]["overturned_by"] == "human:alice"
+    assert pairs["crop_set:sent-back"]["overturned_at"] == "1970-01-01T00:00:20+00:00"
+    assert pairs["crop_set:saved"]["overturned_by"] == "human:bob"
+    assert pairs["crop_set:first"]["overturned_by"] is None and pairs["crop_set:agreed"]["overturned_by"] is None
+
+
 def test_agreement_pairs_judge_with_newest_human(tmp_path):
     from mia_core.judge.policy import new_assessment
 
@@ -563,12 +652,15 @@ def test_agreement_pairs_judge_with_newest_human(tmp_path):
         "human": "approve",
         "agree": False,
         "at": by_subject["crop_set:s3"]["at"],
+        "overturned_by": "human:b",  # the judge rejected first, the person approved afterwards
+        "overturned_at": "1970-01-01T00:00:31+00:00",
     }
     assert by_subject["crop_set:s2"]["agree"] is None and "crop_set:s4" not in by_subject
     assert led.agreement("staged")["judged"] == 1 and led.agreement("review") == {
         "judged": 0,
         "agree": 0,
         "disagree": 0,
+        "overturned": 0,
         "abstain": 0,
         "pending": 0,
         "pairs": [],
@@ -722,3 +814,38 @@ def test_cases_are_opened_updated_and_listed_by_state_or_age(tmp_path):
     assert [case["id"] for case in ledger.cases()] == [left["id"], first["id"]]  # newest first
     assert [case["id"] for case in ledger.cases(states=("open", "working"))] == [left["id"]]
     assert [case["id"] for case in ledger.cases(states=("open",), since=0.0)] == [left["id"], first["id"]]
+
+
+def test_a_case_stored_as_needs_person_is_read_as_gave_up(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    case = ledger.open_case("dataset", 7, "rec-a", "diagnosis", "open", {})
+    ledger._db.execute("UPDATE cases SET state = 'needs-person' WHERE id = ?", (case["id"],))
+    ledger.close()
+    assert [row["state"] for row in Ledger(tmp_path / "l.sqlite").cases()] == ["gave-up"]
+
+
+ROW = {
+    "minute": 100,
+    "host": "a.org",
+    "requests": 2,
+    "connection_seconds": 3.5,
+    "peak": 1,
+    "bytes": 10,
+    "answers": {"206": 2},
+    "recovered": {},
+    "final": {},
+    "asked_wait_seconds": 0.0,
+    "backoff_seconds": 0.0,
+}
+
+
+def test_a_transfer_row_put_again_replaces_itself(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite")
+    assert ledger.put_transfers("r1/stage-1", "buffers", [ROW, {**ROW, "minute": 101}]) == 2
+    ledger.put_transfers("r1/stage-1", "buffers", [{**ROW, "bytes": 99}])
+    ledger.put_transfers("r1/stage-2", "buffers", [ROW])
+    assert ledger.transfers(100, 100, "a.org") == [
+        {**ROW, "bytes": 99, "job": "r1/stage-1", "service": "buffers"},
+        {**ROW, "job": "r1/stage-2", "service": "buffers"},
+    ]
+    assert len(ledger.transfers(0, 200)) == 3 and ledger.transfers(100, 101, "b.org") == []

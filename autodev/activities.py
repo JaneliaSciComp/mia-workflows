@@ -35,7 +35,16 @@ from mia_core.registry import Registry, best_effort
 from mia_core.untrusted import neutralize as neutralize
 from mia_core.untrusted import write_atomic
 
-from .agent import TooManyHostsError, issue_hosts, judge_dir, log_tail, read_result, render_prompt
+from .agent import (
+    TooManyHostsError,
+    cut_off,
+    issue_hosts,
+    judge_dir,
+    log_tail,
+    read_no_change,
+    read_result,
+    render_prompt,
+)
 from .config import STAGES
 from .decide import WAIT, decide
 from .github import GitHubError
@@ -62,7 +71,7 @@ from .models import (
     Workspace,
     check_key,
 )
-from .review import WRITE_PERMISSIONS, Reviewers, approved, feedback, handled_ids, latest_round_at
+from .review import WRITE_PERMISSIONS, Reviewers, approved, feedback, handled_ids
 from .workflows import IssueWorkflow
 
 if TYPE_CHECKING:
@@ -89,6 +98,10 @@ async def refuse_while_paused() -> None:
     while it is set. The round that asked ends with this as its failure; a review judge is skipped."""
     if await asyncio.to_thread(autonomy.paused, manifest_path()):
         raise ApplicationError(PAUSED, non_retryable=True)
+
+
+# What GitHub answers a merge with (405) when the base branch got a commit while it worked on the merge.
+BASE_MOVED = "Base branch was modified"
 
 
 def permanent_errors[Fn: Callable[..., Awaitable]](fn: Fn) -> Fn:
@@ -136,11 +149,14 @@ summary is the first comment.
 {cfg.marker("pr")}"""
 
 
+NO_COMMITS = "made no commits"  # how a round summary names a round that changed nothing; mia-data reads it
+
+
 def render_summary(
     cfg: Config, round_number: int, branch: str, head_sha: str | None, summary: str, cost: float | None
 ) -> str:
     """The comment posted after each round: what was pushed, what it cost, and the agent's own summary."""
-    what = f"pushed `{head_sha[:12]}` to `{branch}`" if head_sha else "made no commits"
+    what = f"pushed `{head_sha[:12]}` to `{branch}`" if head_sha else NO_COMMITS
     cost_text = f" · ${cost:.2f}" if cost is not None else ""
     return f"### {cfg.deployment}: round {round_number} {what}{cost_text}\n\n{summary}"
 
@@ -168,6 +184,8 @@ class Activities:
     ):
         self.cfg, self.gh, self.mirror, self.jobs, self.bot, self.client = cfg, gh, mirror, jobs, bot, client
         self.registry = Registry.from_config(cfg.service) if cfg.service else None  # where assessments go
+        if self.registry is not None and jobs is not None:  # a job's transfer rows go to the ledger at its end
+            jobs.jobs.transfers_sink = self.registry.put_transfers
 
     @property
     def temporal(self) -> Client:
@@ -186,6 +204,7 @@ class Activities:
             self.submit_agent,
             self.publish_round,
             self.observe_pr,
+            self.accepted_head,
             self.merge_pr,
             self.report_failure,
             self.poll_issues,
@@ -282,7 +301,11 @@ class Activities:
 
     @activity.defn(name="await_agent")
     async def await_agent(self, request: AwaitInput) -> JobOutcome:
-        return await self.jobs.wait(request.job_id, request.workspace, activity.heartbeat)
+        """Wait for the job; a failed one says whether Claude Code ended the agent's session (`cut_off`)."""
+        outcome = await self.jobs.wait(request.job_id, request.workspace, activity.heartbeat)
+        if outcome.exit_code not in (0, None):
+            outcome.cut_off = self._clean(await asyncio.to_thread(cut_off, Path(request.workspace.dir)))
+        return outcome
 
     @activity.defn(name="publish_round")
     @permanent_errors
@@ -321,9 +344,18 @@ class Activities:
         if request.feedback_id:
             markers.append(f"handled {request.feedback_id}")  # tells observe_pr this feedback was addressed
         body = render_summary(self.cfg, request.round, request.workspace.branch, head_sha, self._clean(summary), cost)
+        no_change: str = ""
+        answers: dict[str, str] = {}
+        if not head_sha:  # no commits: did the agent answer a request with "nothing needs changing"?
+            asked = request.feedback_text or (await self.gh.get_issue(request.issue)).get("body") or ""
+            no_change, answers = read_no_change(workspace_dir, asked)
+        if no_change:
+            markers.append(f"no-change {no_change}")  # tells whoever asked that this request was answered so
+            listed = "\n".join(f"- {self._clean(item)}: {self._clean(answer)}" for item, answer in answers.items())
+            body += f"\n\n**Nothing needs changing.** The answer to each finding:\n\n{listed}"
         body += "\n\n" + "\n".join(self.cfg.marker(marker) for marker in markers)
         await self._comment_once(pr_number or request.issue, body, self.cfg.marker(markers[0]))
-        return PrRef(pr_number, head_sha)
+        return PrRef(pr_number, head_sha, no_change)
 
     # --- the review judge (spec autonomous-gates §4.1, §9) ------------------------------------------
 
@@ -497,20 +529,37 @@ class Activities:
         pending = [
             item for item in feedback(reviews, inline_comments, comments, reviewers, head_sha) if item.id not in handled
         ]
-        is_approved = approved(head_sha, reviews, comments, reviewers, latest_round_at(comments, reviewers))
+        # an `/approve` older than the head itself is about some other head whose sha it happens to prefix
+        is_approved = approved(head_sha, reviews, comments, reviewers, await self.gh.commit_date(head_sha))
         checks = await self.gh.check_state(head_sha, self.cfg.github.required_checks)
         return PrSnapshot(number, "open", head_sha, is_approved, checks, pending)
+
+    @activity.defn(name="accepted_head")
+    async def accepted_head(self, pr: int) -> str:
+        """Always "": only a workflow run without the `no-accept` patch asks (see `_run_round`)."""
+        return ""
 
     @activity.defn(name="merge_pr")
     @permanent_errors
     async def merge_pr(self, request: MergeInput) -> MergeResult:
-        """Squash-merge the approved commit, then delete the branch and close the issue."""
+        """Squash-merge the approved commit, then delete the branch and close the issue. A merge GitHub refuses
+        because the base branch moved at that moment (`BASE_MOVED`: another pull request was merging) fails the
+        activity, so that it is tried again in seconds: nothing is wrong with the pull request, and no one is
+        told."""
         merged, message = await self.gh.merge_pr(request.pr, request.sha)
         if not merged and (await self.gh.get_pr(request.pr)).get("merged"):  # a retry after a merge that went through
             merged, message = True, "merged"
+        if not merged and BASE_MOVED in message:
+            raise ApplicationError(f"PR #{request.pr}: {BASE_MOVED}; the merge is tried again", type="BaseMoved")
         if merged:
             await self.gh.delete_branch(self.cfg.branch(request.issue))
-            await self.gh.update_issue(request.issue, state="closed", state_reason="completed")
+            try:
+                await self.gh.update_issue(request.issue, state="closed", state_reason="completed")
+            except GitHubError as error:
+                # GitHub closes the issue itself for a merged pull request that names it, and answers a close
+                # that arrives in the same moment with 422: the issue is closed, which is all that was asked
+                if error.status != 422 or (await self.gh.get_issue(request.issue)).get("state") != "closed":
+                    raise
         return MergeResult(merged, message)
 
     @activity.defn(name="report_failure")

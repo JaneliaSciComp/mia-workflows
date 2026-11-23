@@ -80,7 +80,8 @@ async def test_bot_login_app_mode(tmp_path, key):
 
 @respx.mock
 async def test_noreply_email_uses_the_bot_user_id(tmp_path):
-    respx.get(f"{API}/users/autodev-bot%5Bbot%5D").mock(return_value=httpx.Response(200, json={"id": 123}))
-    assert (
-        await noreply_email(make_cfg(tmp_path), "autodev-bot[bot]") == "123+autodev-bot[bot]@users.noreply.github.com"
-    )
+    route = respx.get(f"{API}/users/autodev-bot%5Bbot%5D").mock(return_value=httpx.Response(200, json={"id": 123}))
+    email = await noreply_email(make_cfg(tmp_path), "autodev-bot[bot]", "tok")
+    assert email == "123+autodev-bot[bot]@users.noreply.github.com"
+    # with the token: an anonymous request is refused once the host's shared address has used its 60 an hour
+    assert route.calls.last.request.headers["Authorization"] == "Bearer tok"

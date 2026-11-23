@@ -9,7 +9,7 @@ binding; **mia-buffers** turns a training-buffer spec into staged OME-Zarr pyram
 multi-resolution crops to training jobs. The three meet in **buffer-api**'s registry and its web page, where a
 person starts, approves and cancels rounds.
 Setup: [`docs/autodev-local-setup.md`](docs/autodev-local-setup.md). Running it under a bot identity:
-[`docs/github-app.md`](docs/github-app.md). Production layout: [`docs/deployment.md`](docs/deployment.md).
+[`docs/github-app.md`](docs/github-app.md). Installations, releases and the relay: [`docs/deployment.md`](docs/deployment.md).
 
 ## autodev
 
@@ -40,9 +40,10 @@ assessment, and *Revoke*
 withdraws a prepared dataset later: nothing is deleted, the buffers that drew from it are degraded. A **judge**
 (a second model, read-only, over the same gallery) can look at every set before the human does: in shadow mode its
 verdict is recorded beside the human's and decides nothing, and the buffers page's Decisions tab shows how often
-they agree; with the crop gate active, the judge's approve saves the set and a person sees only what it rejects
-or escalates. Every stage is an entry
-in the dataset's timeline, with links to the folders involved. The whole flow, with a diagram and the component for each
+they agree; with the crop gate active, the judge decides: a set it finds in order is saved, a set it doubts
+goes back to the developer once (which fixes the reader, or answers that the crops are right as they are), and
+a person sees what is left. A saved set can be rejected later, which revokes it and starts the rework. Every
+stage is an entry in the dataset's timeline, with links to the folders involved. The whole flow, with a diagram and the component for each
 step: [`docs/mia-data-workflow.md`](docs/mia-data-workflow.md). Design: [`docs/specs/2026-10-12-mia-crops.md`](docs/specs/2026-10-12-mia-crops.md).
 
 ## mia-buffers
@@ -52,7 +53,8 @@ datasets by catalog fields, patch size and pyramid levels, splits, weighting, ho
 created and run on the buffers page (*Create buffer*, *Run*); its issue in
 [mia-buffers](https://github.com/JaneliaSciComp/mia-buffers) is a copy of its timeline. On *Run* the worker plans it
 against the catalog at a pinned commit and the registry's **prepared** datasets, then sources every dataset of the
-pool in parallel: the raw files are fetched into a shared raw cache (one writer per record), and a harness job
+pool in parallel: a harness job reads from the source what the planned samples touch (a file its reader must
+take whole lands in a shared raw cache, one writer per record) and
 stages one **sparse OME-Zarr 0.6 pyramid per volume**, holding only the chunks that cover the planned samples, with
 the derivation (source bytes, code commits, plan, voxel size, verification) recorded in the Zarr itself and
 checked against the 0.6 schemas before it is saved. Each volume is registered with buffer-api as it becomes
@@ -62,10 +64,19 @@ addressed by its recipe, so a later buffer with the same binding, levels and pla
 again. After that the buffer lives until it is retired: idle when no consumer has drawn for a while, *Keep* to
 hold it, *Retire* to release what it references, *Revoke* to withdraw single records; a round in progress takes
 only *Cancel*. A keeper evicts unreferenced caches under the configured quotas and is the only code that deletes.
-A cleaner looks every few minutes for rounds that read "in progress" with nothing running, rounds that stopped
+A repair agent looks every few minutes for rounds that read "in progress" with nothing running, rounds that stopped
 for a reason with a known remedy, and jobs, issues and pull requests a round left behind; it says what is wrong
 with the installation, resolves what it can through the same actions the page's buttons send, and leaves the
-rest under *Needs you* with what it takes.
+rest under *Needs human* on the Overview page with what it takes.
+
+**A buffer is sourced on demand.** Nothing is downloaded ahead of a stage, and a dataset's size upstream decides
+nothing: a record of terabytes costs what its few hundred planned crops touch. The stage job is online, and the
+dataset's reader decides what crosses the network: it reads by HTTP range, in 1 MiB blocks kept in the job's own
+workspace, and takes a file whole only where ranges will not do (a server that ignores Range, a compressed zip
+member). Only a file taken whole lands in the raw cache, where later jobs find it. One job transfers at most
+`limits.job_bytes`; the raw quota is where staging waits while the cache is over it, never a charge for the
+record; and a dataset whose files a person placed by hand is staged from the cache with no network. The path of
+one record, the caps and what a rebuild reads: [Sourcing on demand](docs/development.md#sourcing-on-demand).
 
 A dataset that is not prepared is out of the pool. A preparation request (*Prepare these datasets* on the page)
 hands its records to mia-data, each with a `go` sent through buffer-api and charged to the request, and follows

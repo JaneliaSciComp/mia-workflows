@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
@@ -12,6 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
+from mia_core import jobrecord
 from mia_core.checkout import code_digest, head_commit
 from mia_core.config import ServiceCfg
 
@@ -106,6 +109,15 @@ class Registry:
     def dataset(self, record: str) -> dict | None:
         return self._lookup(f"/datasets/{quote(record, safe='')}")
 
+    def dataset_hosts(self, record: str) -> dict:
+        """What is held for the dataset alone: `hosts` its jobs were refused (its runs need them beside its
+        record's own) and `approved`, the hosts a person approved for it and no other dataset."""
+        return self.request("GET", f"/datasets/{quote(record, safe='')}/hosts")
+
+    def add_refused_hosts(self, record: str, hosts: list[str]) -> list[str]:
+        """Say that a job of the dataset was refused these hosts; the dataset's list after it."""
+        return self.request("PUT", f"/datasets/{quote(record, safe='')}/hosts", json={"hosts": hosts})["hosts"]
+
     def datasets(self, state: str | None = None) -> list[dict]:
         return self.request("GET", "/datasets", params={"state": state} if state else None)["datasets"]
 
@@ -128,10 +140,13 @@ class Registry:
         marker: str = "",
         round_id: str | None = None,
         stage: str | None = None,
+        data: dict | None = None,
     ) -> dict:
-        """Write a subject's stage, a timeline entry (once per marker), or both: {subject, entry}. 404: no such
-        subject."""
-        fields = {"body": body, "marker": marker, "round": round_id, "stage": stage}
+        """Write a subject's stage, a timeline entry (once per marker), or both: {subject, entry}. `data` rides
+        with either: the keys of the subject's data this write replaces. 404: no such subject."""
+        fields: dict[str, Any] = {"body": body, "marker": marker, "round": round_id, "stage": stage}
+        if data is not None:
+            fields["data"] = data
         return self.request("POST", f"/timeline/{quote(kind, safe='')}/{number}", json=fields)
 
     def timeline(self, kind: str, number: int) -> dict | None:
@@ -167,6 +182,10 @@ class Registry:
         found = self._lookup(f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}")
         return None if found is None else found["data"]
 
+    def asset_row(self, kind: str, key: str) -> dict | None:
+        """{kind, key, data, refs}: the row with the buffers that reference it; None when the registry has neither."""
+        return self._lookup(f"/assets/{quote(kind, safe='')}/{quote(key, safe='')}")
+
     def assets(self, kind: str, state: str | None = None, record: str | None = None) -> dict:
         """{kind, assets: [{key, data, refs}], bytes}, filtered on the rows' state and record when given."""
         params = {name: value for name, value in (("state", state), ("record", record)) if value is not None}
@@ -178,6 +197,10 @@ class Registry:
     def put_records(self, ref: str, records: list[tuple[str, dict]]) -> dict:
         body = {"records": [{"path": path, "record": record} for path, record in records]}
         return self.request("PUT", f"/records/{quote(ref, safe='')}", json=body)
+
+    def put_transfers(self, job: str, rows: list[dict], service: str = "") -> dict:
+        """Store a job's transfer rows (job: its record's address, slashes kept)."""
+        return self.request("PUT", f"/transfers/{quote(job)}", json={"service": service, "rows": rows})
 
     def sync_datasets(self) -> dict:
         return self.request("POST", "/sync/datasets", timeout=SYNC_TIMEOUT_S)
@@ -335,9 +358,38 @@ def best_effort(action: Callable[[], Any], what: str, log: logging.Logger) -> bo
     return True
 
 
-async def report_worker(registry: Registry, service: str, log: logging.Logger, retry_s: float = 30.0) -> None:
+async def put_transfers_again(registry: Registry, work_root: Path, log: logging.Logger, days: float = 7.0) -> int:
+    """Put to the ledger the transfer rows of every record under `work_root` that ended in the last `days` days
+    (a put replaces, so rows already there stay as they are). One record per thread hop, so a cancel lands
+    between records; a put that fails is logged and the rest go on, a walk that fails is logged and ends the pass.
+    The number of records delivered."""
+    delivered, ended = 0, jobrecord.ended_since(work_root, time.time() - days * 86400)
+    while True:
+        try:
+            found = await asyncio.to_thread(next, ended, None)
+        except OSError as error:
+            log.warning("the walk of job records under %s stopped: %s", work_root, error)
+            return delivered
+        if found is None:
+            return delivered
+        where, record = found
+        if rows := record.get("transfers"):
+            put = functools.partial(registry.put_transfers, where, rows, str(record.get("service") or ""))
+            delivered += await asyncio.to_thread(best_effort, put, f"transfers of {where}", log)
+
+
+async def report_worker(
+    registry: Registry,
+    service: str,
+    log: logging.Logger,
+    retry_s: float = 30.0,
+    work_root: Path | None = None,
+) -> None:
     """Tell the registry what code this worker loaded (read now, when it starts), again until it is written:
-    buffer-api may come up after the worker does, and the cleaner compares the last report it has."""
+    buffer-api may come up after the worker does, and the cleaner compares the last report it has. Once that is
+    written, with a `work_root`, the transfer rows of its recent job records are put again."""
     started_on = (service, head_commit(), code_digest())
     while not await asyncio.to_thread(best_effort, lambda: registry.put_worker(*started_on), "worker commit", log):
         await asyncio.sleep(retry_s)
+    if work_root is not None:
+        await put_transfers_again(registry, work_root, log)

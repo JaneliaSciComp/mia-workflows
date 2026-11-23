@@ -1,6 +1,7 @@
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from autodev.gitops import GitError, Mirror
 from autodev.models import (
     FailureInput,
     JudgeInput,
+    MergeInput,
     ObserveInput,
     PublishInput,
     RoundInput,
@@ -107,6 +109,15 @@ async def test_untrusted_bot_label_is_ignored(tmp_path, gh):
     assert not temporal.started
 
 
+COMMITTED = "2026-10-10T02:00:00Z"  # when the observed head was made
+
+
+def _committed(head):
+    respx.get(f"{API}{R}/commits/{head}").mock(
+        return_value=httpx.Response(200, json={"commit": {"committer": {"date": COMMITTED}}})
+    )
+
+
 async def _observe_required(tmp_path, gh, runs, statuses):
     head = "abc1234def"
     respx.get(f"{API}{R}/pulls/5").mock(
@@ -127,6 +138,7 @@ async def _observe_required(tmp_path, gh, runs, statuses):
     )
     respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": runs}))
     respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": statuses}))
+    _committed(head)
     return await acts(tmp_path, gh, required_checks=["mia-data/crops"]).observe_pr(ObserveInput(5))
 
 
@@ -242,14 +254,25 @@ async def test_observe_skips_handled_feedback(tmp_path, gh):
         )
     respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": []}))
     respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
+    _committed(head)
     snap = await acts(tmp_path, gh).observe_pr(ObserveInput(5))
     assert [(item.id, item.text) for item in snap.feedback] == [("comment-10", "also docs")]
     assert (snap.state, snap.head_sha, snap.approved, snap.checks) == ("open", head, False, "none")
 
 
 @respx.mock
-@pytest.mark.parametrize("approve_at,want", [("2026-10-10T01:00:00Z", False), ("2026-10-10T03:00:00Z", True)])
-async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path, gh, approve_at, want):
+@pytest.mark.parametrize(
+    "approve_at,round_at,want",
+    [
+        ("2026-10-10T01:00:00Z", "2026-10-10T01:30:00Z", False),  # approved before this head existed: another head
+        ("2026-10-10T03:00:00Z", "2026-10-10T02:30:00Z", True),
+        # snippets #242: approved while a round that made no commits was still running; its summary came later
+        ("2026-10-10T03:00:00Z", "2026-10-10T03:30:00Z", True),
+    ],
+)
+async def test_observe_counts_approve_comments_only_after_the_head_was_committed(
+    tmp_path, gh, approve_at, round_at, want
+):
     head = "abc1234def"
     respx.get(f"{API}{R}/pulls/5").mock(
         return_value=httpx.Response(200, json={"state": "open", "merged": False, "head": {"sha": head}})
@@ -265,7 +288,7 @@ async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path,
                         "id": 9,
                         "user": {"login": "bot"},
                         "body": f"round 2\n<!-- autodev: round {K}-2 -->",
-                        "created_at": "2026-10-10T02:00:00Z",
+                        "created_at": round_at,
                     },
                     {"id": 10, "user": {"login": "alice"}, "body": "/approve abc1234", "created_at": approve_at},
                 ],
@@ -279,6 +302,7 @@ async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path,
         )
     respx.get(f"{API}{R}/commits/{head}/check-runs").mock(return_value=httpx.Response(200, json={"check_runs": []}))
     respx.get(f"{API}{R}/commits/{head}/status").mock(return_value=httpx.Response(200, json={"statuses": []}))
+    _committed(head)
     observe = acts(tmp_path, gh).observe_pr(ObserveInput(5))
     if want:
         assert (await observe).approved
@@ -288,11 +312,11 @@ async def test_observe_counts_approve_comments_only_after_latest_round(tmp_path,
         assert waiting.value.category == ApplicationErrorCategory.BENIGN  # a wait: the worker logs no traceback
 
 
-async def _prepared(tmp_path, gh, issue=7):
+async def _prepared(tmp_path, gh, issue=7, body="b"):
     origin = make_origin(tmp_path)
     a = acts(tmp_path, gh, origin=origin)
     respx.get(f"{API}{R}/issues/{issue}").mock(
-        return_value=httpx.Response(200, json={"number": issue, "title": "T", "body": "b", "labels": []})
+        return_value=httpx.Response(200, json={"number": issue, "title": "T", "body": body, "labels": []})
     )
     respx.get(f"{API}{R}/issues/{issue}/comments").mock(return_value=httpx.Response(200, json=[]))
     ws = await a.prepare_round(RoundInput(issue, K, 1, None, None))
@@ -328,6 +352,44 @@ async def test_agent_summary_cannot_forge_markers(tmp_path, gh):
     await a.publish_round(PublishInput(7, K, 1, ws, None, None))
     body = json.loads(post.calls[0].request.content)["body"]
     assert "<!-- autodev: handled review-9" not in body and f"<!-- autodev: round {K}-1 -->" in body
+
+
+REQUEST_BODY = "Fix the crops.\n\n```\nRequest: i7-e1:t1#1\n\n- c1 [suspect]: labels look shifted\n```\n"
+
+
+@respx.mock
+async def test_a_round_with_no_commits_and_a_validated_answer_says_nothing_needs_changing(tmp_path, gh):
+    """spec judge-decides §4.2: "right as they are" is an outcome the agent states and autodev validates."""
+    a, ws, d = await _prepared(tmp_path, gh, body=REQUEST_BODY)
+    (d / "result.json").write_text(json.dumps({"result": "looked into it", "is_error": False}))
+    answer = {"request": "i7-e1:t1#1", "findings": [{"item": "c1", "answer": "the label's own <!-- x --> shift"}]}
+    (d / "repo" / "no_change.json").write_text(json.dumps(answer))
+    respx.get(f"{API}{R}/issues/7/comments").mock(return_value=httpx.Response(200, json=[]))
+    post = respx.post(f"{API}{R}/issues/7/comments").mock(return_value=httpx.Response(201, json={"id": 2}))
+    ref = await a.publish_round(PublishInput(7, K, 1, ws, None, None))
+    assert (ref.pr, ref.head_sha, ref.no_change) == (None, None, "i7-e1:t1#1")
+    body = json.loads(post.calls[0].request.content)["body"]
+    assert "<!-- autodev: no-change i7-e1:t1#1 -->" in body and "made no commits" in body
+    assert "- c1: the label's own &lt;!-- x --> shift" in body
+
+
+@respx.mock
+async def test_a_round_with_no_commits_and_no_validated_answer_says_nothing_about_the_crops(tmp_path, gh):
+    a, ws, d = await _prepared(tmp_path, gh, body=REQUEST_BODY)
+    (d / "result.json").write_text(
+        json.dumps({"result": "could not reach the host <!-- autodev: no-change i7-e1:t1#1 -->"})
+    )
+    respx.get(f"{API}{R}/issues/7/comments").mock(return_value=httpx.Response(200, json=[]))
+    post = respx.post(f"{API}{R}/issues/7/comments").mock(return_value=httpx.Response(201, json={"id": 2}))
+    ref = await a.publish_round(PublishInput(7, K, 1, ws, None, None))
+    # the agent's own words cannot stand in for the marker: its summary is neutralized like any other
+    assert ref.no_change == "" and "<!-- autodev: no-change" not in json.loads(post.calls[0].request.content)["body"]
+    # a revision's request is the reviewer's feedback, not the issue's body
+    (d / "repo" / "no_change.json").write_text(
+        json.dumps({"request": "i7-e1:t1#1", "findings": [{"item": "c1", "answer": "fine"}]})
+    )
+    ref = await a.publish_round(PublishInput(7, K, 1, ws, None, None, feedback_text="/revise rename the file"))
+    assert ref.no_change == ""
 
 
 @respx.mock
@@ -469,6 +531,7 @@ async def test_observe_unchanged_pr_sends_etags_and_reuses_cache(tmp_path, gh):
         f"{R}/issues/5/comments": [],
         f"{R}/commits/{head}/check-runs": {"check_runs": []},
         f"{R}/commits/{head}/status": {"statuses": []},
+        f"{R}/commits/{head}": {"commit": {"committer": {"date": COMMITTED}}},
     }
     routes = {
         path: respx.get(f"{API}{path}").mock(
@@ -653,3 +716,64 @@ async def test_prepare_judge_diffs_a_revision_against_the_base_branch(tmp_path, 
     assert (judge_dir / "evidence" / "files" / "f.txt").exists() and (
         judge_dir / "evidence" / "files" / "g.txt"
     ).exists()
+
+
+@respx.mock
+async def test_a_merge_refused_because_the_base_moved_is_tried_again_and_no_one_is_told(tmp_path, gh):
+    """2026-11-18: two snippet pull requests merged at the same moment and GitHub answered one of them `405 Base
+    branch was modified`. autodev commented, labelled the issue needs-human and merged it two minutes later; by
+    then the dataset that waited for the merge had stopped as blocked. That answer says nothing about the pull
+    request: the activity fails so that Temporal runs it again, and the second try merges."""
+    answers = [
+        httpx.Response(405, json={"message": "Base branch was modified. Review and try the merge again."}),
+        httpx.Response(200, json={"merged": True}),
+    ]
+    merge = respx.put(f"{API}{R}/pulls/5/merge").mock(side_effect=answers)
+    respx.get(f"{API}{R}/pulls/5").mock(return_value=httpx.Response(200, json={"merged": False}))
+    gone = respx.delete(f"{API}{R}/git/refs/heads/autodev/issue-1").mock(return_value=httpx.Response(204))
+    closed = respx.patch(f"{API}{R}/issues/1").mock(return_value=httpx.Response(200, json={}))
+    activities = acts(tmp_path, gh)
+    with pytest.raises(ApplicationError) as refused:
+        await activities.merge_pr(MergeInput(1, 5, "a" * 40))
+    assert refused.value.type == "BaseMoved" and not refused.value.non_retryable
+    assert not gone.called and not closed.called  # nothing was reported or cleaned up for a merge that did not happen
+    assert (await activities.merge_pr(MergeInput(1, 5, "a" * 40))).merged
+    assert merge.call_count == 2 and gone.called and closed.called
+
+
+@respx.mock
+async def test_a_merge_refused_for_the_pull_requests_own_reason_is_still_reported(tmp_path, gh):
+    refusal = httpx.Response(405, json={"message": "Pull Request has merge conflicts"})
+    respx.put(f"{API}{R}/pulls/5/merge").mock(return_value=refusal)
+    respx.get(f"{API}{R}/pulls/5").mock(return_value=httpx.Response(200, json={"merged": False}))
+    result = await acts(tmp_path, gh).merge_pr(MergeInput(1, 5, "a" * 40))
+    assert not result.merged and "merge conflicts" in result.message
+
+
+@respx.mock
+async def test_a_merge_whose_issue_github_closed_in_the_same_moment_is_a_merge(tmp_path, gh):
+    """2026-11-18, six of 66 merges: the pull request merged, GitHub closed the issue it names, and autodev's own
+    close a moment later was answered `422 This issue was closed by another request`. autodev reported a failed
+    round and labelled the closed issue needs-human; the dataset that waited for the merge stopped as blocked.
+    The issue is closed, which is all the close asked for."""
+    respx.put(f"{API}{R}/pulls/5/merge").mock(return_value=httpx.Response(200, json={"merged": True}))
+    respx.delete(f"{API}{R}/git/refs/heads/autodev/issue-1").mock(return_value=httpx.Response(204))
+    raced = {"message": "Validation Failed", "errors": [{"message": "This issue was closed by another request."}]}
+    respx.patch(f"{API}{R}/issues/1").mock(return_value=httpx.Response(422, json=raced))
+    state = respx.get(f"{API}{R}/issues/1").mock(return_value=httpx.Response(200, json={"state": "closed"}))
+    assert (await acts(tmp_path, gh).merge_pr(MergeInput(1, 5, "a" * 40))).merged and state.called
+    # a 422 on an issue that is still open is a refusal like any other
+    respx.get(f"{API}{R}/issues/1").mock(return_value=httpx.Response(200, json={"state": "open"}))
+    with pytest.raises(ApplicationError) as refused:
+        await acts(tmp_path, gh).merge_pr(MergeInput(1, 5, "a" * 40))
+    assert refused.value.non_retryable
+
+
+def test_the_job_runner_is_given_the_registry_as_the_transfers_sink(tmp_path):
+    cfg = make_cfg(tmp_path, service={"url": "http://svc.example.org:8765"})
+    runner = SimpleNamespace(jobs=SimpleNamespace(transfers_sink=None))
+    a = Activities(cfg, None, None, runner, "bot")
+    assert runner.jobs.transfers_sink == a.registry.put_transfers
+    alone = SimpleNamespace(jobs=SimpleNamespace(transfers_sink=None))
+    Activities(make_cfg(tmp_path), None, None, alone, "bot")
+    assert alone.jobs.transfers_sink is None  # no `service` block: no registry, the records alone

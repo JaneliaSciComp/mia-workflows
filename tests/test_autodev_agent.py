@@ -14,10 +14,12 @@ from autodev.activities import Activities
 from autodev.agent import (
     AgentJobs,
     csub_client,
+    cut_off,
     hosts_marker,
     issue_hosts,
     job_script,
     log_tail,
+    read_no_change,
     read_result,
     render_prompt,
 )
@@ -76,6 +78,19 @@ def test_read_result_tolerates_garbage(tmp_path):
     (tmp_path / "result.json").write_text(json.dumps({"result": "x" * 50000, "total_cost_usd": "free"}))
     text, cost = read_result(tmp_path)
     assert len(text) < 20100 and text.endswith("(truncated)") and cost is None
+
+
+def test_cut_off_is_claude_codes_own_error_and_nothing_else(tmp_path):
+    for result, said in (
+        ({"is_error": True, "result": "Not logged in · Please run /login"}, "Not logged in · Please run /login"),
+        ({"is_error": True, "result": "the tests fail"}, ""),  # the agent's own failure
+        ({"is_error": False, "result": "I could not log in to the FTP server; Please run /login"}, ""),
+        (["is_error"], ""),
+    ):
+        (tmp_path / "result.json").write_text(json.dumps(result))
+        assert cut_off(tmp_path) == said
+    (tmp_path / "result.json").unlink()
+    assert cut_off(tmp_path) == ""
 
 
 def test_log_tail_reads_claude_and_job_stderr(tmp_path):
@@ -145,7 +160,44 @@ async def test_submit_is_idempotent_and_scoped(tmp_path):
     spec = fake.submitted[0]
     assert spec["agent"] == "claude" and spec["shell"] is True and spec["cwd"] == ws.dir
     assert spec["mounts"] == [{"path": ws.dir, "mode": "rw"}, {"path": "/tools", "mode": "ro"}]
-    assert spec["allow_hosts"] == ["pypi.org"] and spec["name"] == "autodev-7-r1" and "env" not in spec
+    assert (
+        spec["allow_hosts"] == ["pypi.org"]
+        and spec["name"] == "autodev-7-r1"
+        and set(spec["env"]) == {"MIA_HARNESS_TRANSFERS_DIR"}
+    )
+
+
+async def test_an_agent_job_reads_the_evidence_folder_of_its_own_issue_and_no_other(tmp_path):
+    """spec judge-decides §4.1: the folder is found by the issue's number under the configured directory, never
+    by a path an issue or a comment names."""
+    evidence = tmp_path / "evidence"
+    (evidence / "issue-8").mkdir(parents=True)  # another issue's
+    ws = Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7")
+    fake = FakeCsub()
+    j = _jobs(tmp_path, fake, evidence_dir=str(evidence))
+    await j.submit(7, K, 1, ws)
+    assert fake.submitted[0]["mounts"] == [{"path": ws.dir, "mode": "rw"}]  # none for this issue: no mount
+    (evidence / "issue-7").mkdir()
+    await j.submit(7, K, 2, ws)
+    assert fake.submitted[1]["mounts"] == [
+        {"path": ws.dir, "mode": "rw"},
+        {"path": str(evidence / "issue-7"), "mode": "ro"},
+    ]
+    (evidence / "issue-9").symlink_to(tmp_path)  # a link is not a folder of evidence
+    await j.submit(9, K, 1, ws)
+    assert fake.submitted[2]["mounts"] == [{"path": ws.dir, "mode": "rw"}]
+    plain = _jobs(tmp_path, FakeCsub())  # no evidence_dir configured: nothing is looked for
+    assert plain.cfg.agent.evidence_dir is None
+
+
+def test_the_prompt_names_the_evidence_folder_when_there_is_one(tmp_path):
+    evidence = tmp_path / "evidence"
+    cfg = make_cfg(tmp_path, agent={"evidence_dir": str(evidence)})
+    issue = {"number": 7, "title": "T", "body": "b"}
+    assert "evidence" not in render_prompt(cfg, issue, [], "autodev/issue-7", "abc", None, None).lower()
+    (evidence / "issue-7").mkdir(parents=True)
+    prompt = render_prompt(cfg, issue, [], "autodev/issue-7", "abc", None, None)
+    assert f"`{evidence / 'issue-7'}`" in prompt and "read-only" in prompt
 
 
 async def test_an_agent_job_names_its_configured_hosts_then_those_its_issue_names(tmp_path):
@@ -160,6 +212,23 @@ async def test_an_agent_job_names_its_configured_hosts_then_those_its_issue_name
     assert fake.submitted[0]["allow_hosts"] == ["pypi.org", "zenodo.org", "cdn.huggingface.co"]
     await j.submit(8, K, 1, Workspace(str(tmp_path / "work" / "r2"), "abc123", "autodev/issue-8"))
     assert fake.submitted[1]["allow_hosts"] == ["pypi.org"]  # an issue that names none: nothing of the policy's
+
+
+async def test_an_agent_job_gets_raw_github_when_its_issue_names_it_and_no_other_github_host(tmp_path):
+    """2026-11-19, RV-PBS: a dataset whose files are on raw.githubusercontent.com alone. The reader's job was
+    granted no GitHub host whatever its issue named, so the agent could read nothing and made no commits."""
+    raw = "raw.githubusercontent.com"
+    named = [raw, "github.com", "gist.githubusercontent.com", "api.github.com"]
+    fake = FakeCsub(policy_hosts=[*named, "pypi.org"])
+    j = _jobs(tmp_path, fake, allow_hosts=["pypi.org"])
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r1"), "abc123", "autodev/issue-7"), named)
+    assert fake.submitted[0]["allow_hosts"] == ["pypi.org", raw]
+    await j.submit(8, K, 1, Workspace(str(tmp_path / "work" / "r2"), "abc123", "autodev/issue-8"))
+    assert fake.submitted[1]["allow_hosts"] == ["pypi.org"]  # the policy allowing it grants it to no other issue
+    unapproved = FakeCsub(policy_hosts=["pypi.org"])
+    j = _jobs(tmp_path / "other", unapproved, allow_hosts=["pypi.org"])
+    await j.submit(7, K, 1, Workspace(str(tmp_path / "work" / "r3"), "abc123", "autodev/issue-7"), named)
+    assert unapproved.submitted[0]["allow_hosts"] == ["pypi.org"]
 
 
 def test_an_issue_names_its_jobs_hosts_in_a_marker():
@@ -262,7 +331,7 @@ async def test_api_key_mode_passes_key_in_job_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SVC_KEY", "sk-1")
     fake = FakeCsub()
     await _jobs(tmp_path, fake, api_key_env="SVC_KEY").submit(7, K, 1, Workspace(str(tmp_path / "round"), "a", "b"))
-    assert fake.submitted[0]["env"] == {"ANTHROPIC_API_KEY": "sk-1"}
+    assert fake.submitted[0]["env"]["ANTHROPIC_API_KEY"] == "sk-1"
 
 
 async def test_wait_heartbeats_until_terminal(tmp_path):
@@ -413,3 +482,71 @@ def test_judge_script_is_read_only(tmp_path):
     assert '--allowedTools "Read,Glob,Grep"' in script and '--tools "Read,Glob,Grep"' in script
     assert "--restricted" in script and "--add-dir evidence > claude.json" in script and "--model opus" in script
     assert "> exit_code" in script and "git bundle" not in script and "Edit" not in script and "Bash" not in script
+
+
+REQUEST = """/revise Request: i7-e1:t1#1
+
+The crop judge looked at the sample crops this reader made and doubts them. Its findings:
+
+- crop-3 [suspect]: labels look shifted
+- crop-5 [bad]: empty
+
+Look into every finding before you change anything."""
+ANSWERS = [
+    {"item": "crop-3", "answer": "the shift is the label's own: the record says so"},
+    {"item": "crop-5", "answer": "there are no cells in that field"},
+]
+
+
+def _answered(round_dir, content, result=None):
+    """A round dir whose agent left `content` as no_change.json in its checkout, and a result object."""
+    (round_dir / "repo").mkdir(exist_ok=True)
+    (round_dir / "result.json").write_text(json.dumps(result or {"result": "nothing to change", "is_error": False}))
+    if content is not None:
+        text = content if isinstance(content, str) else json.dumps(content)
+        (round_dir / "repo" / "no_change.json").write_text(text)
+
+
+def test_a_complete_answer_to_this_request_counts(tmp_path):
+    _answered(tmp_path, {"request": "i7-e1:t1#1", "findings": ANSWERS})
+    assert read_no_change(tmp_path, REQUEST) == (
+        "i7-e1:t1#1",
+        {"crop-3": "the shift is the label's own: the record says so", "crop-5": "there are no cells in that field"},
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,  # no file
+        "not json",
+        ["a", "list"],
+        {"request": "i7-e0:t9#1", "findings": ANSWERS},  # another request
+        {"request": "i7-e1:t1#1", "findings": ANSWERS[:1]},  # one finding left out
+        {"request": "i7-e1:t1#1", "findings": [{"item": "crop-3", "answer": " "}, ANSWERS[1]]},  # an empty answer
+        {"request": "i7-e1:t1#1", "findings": [*ANSWERS, {"item": "crop-9", "answer": "x"}]},  # one it was not asked
+        {"request": "i7-e1:t1#1", "findings": [ANSWERS[0], ANSWERS[0]]},  # one twice, one missing
+        {"request": "i7-e1:t1#1", "findings": "all fine"},
+        {"request": "i7-e1:t1#1", "findings": [{"item": "crop-3", "answer": 1}, ANSWERS[1]]},
+        "x" * (300 * 1024),  # oversized
+    ],
+)
+def test_anything_else_is_not_an_answer(tmp_path, content):
+    _answered(tmp_path, content)
+    assert read_no_change(tmp_path, REQUEST) == ("", {})
+
+
+def test_an_answer_counts_only_for_a_request_with_findings_and_a_run_that_ended_by_itself(tmp_path):
+    good = {"request": "i7-e1:t1#1", "findings": ANSWERS}
+    _answered(tmp_path, good)
+    assert read_no_change(tmp_path, "/revise please rename the file") == ("", {})  # nothing was asked that way
+    assert read_no_change(tmp_path, "Request: i7-e1:t1#1\n\nno findings listed") == ("", {})
+    _answered(tmp_path, good, result={"result": "API Error", "is_error": True})
+    assert read_no_change(tmp_path, REQUEST) == ("", {})  # Claude Code ended the session
+    (tmp_path / "result.json").write_text("garbage")
+    assert read_no_change(tmp_path, REQUEST) == ("", {})
+    _answered(tmp_path, good)
+    (tmp_path / "repo" / "no_change.json").unlink()
+    (tmp_path / "elsewhere.json").write_text(json.dumps(good))
+    (tmp_path / "repo" / "no_change.json").symlink_to(tmp_path / "elsewhere.json")
+    assert read_no_change(tmp_path, REQUEST) == ("", {})  # a link is not the agent's file

@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
-BUILDING = ("fetching", "staging")  # states a job is writing under
+BUILDING = ("staging",)  # the state a job is writing under
 
 
 def _bytes(data: dict, name: str = "bytes") -> float:
@@ -27,17 +27,6 @@ def live_bytes(assets: list[dict]) -> float:
     return sum(
         _bytes(data) for row in assets if (data := row.get("data") or {}).get("state") not in ("missing", "evicted")
     )
-
-
-def demand(assets: list[dict], *, hold_s: float, now: float) -> float:
-    """The largest `wanted` among the rows a fetch is blocked on (check_quota marks them), blocked within `hold_s`."""
-    wanted = [0.0]
-    for row in assets:
-        data = row.get("data") or {}
-        blocked_at = data.get("blocked_at")
-        if isinstance(blocked_at, int | float) and blocked_at + hold_s > now:
-            wanted.append(_bytes(data, "wanted"))
-    return max(wanted)
 
 
 def _quarantined(data: dict, quarantine_s: float, now: float) -> bool:
@@ -71,14 +60,13 @@ def plan_evictions(
     now: float,
     in_round: set[str],
     kind: str,
-    demand_bytes: float = 0,
     quarantine_s: float = 0,
 ) -> list[dict]:
-    """The free rows to evict, oldest first, until the kind is under its quota minus the headroom, or minus
-    `demand_bytes` (what a blocked fetch wants) when that is larger; none when the quota is 0 (unlimited)."""
+    """The free rows to evict, oldest first, until the kind is under its quota minus the headroom; none when the
+    quota is 0 (unlimited)."""
     if quota_bytes <= 0:
         return []
-    remaining, target, picked = live_bytes(assets), quota_bytes - max(headroom_bytes, demand_bytes), []
+    remaining, target, picked = live_bytes(assets), quota_bytes - headroom_bytes, []
     free = free_assets(assets, hold_s=hold_s, now=now, in_round=in_round, kind=kind, quarantine_s=quarantine_s)
     for row in free:
         if remaining <= target:
@@ -112,10 +100,9 @@ def evict_path(path: Path, roots: tuple[Path, ...]) -> bool:
 
 
 def stale_builds(assets: list[dict], finished: Callable[[str], bool]) -> list[tuple[str, str, str]]:
-    """(kind, key, new state) for each row still `fetching`/`staging` under a job that has ended: a raw cache
-    becomes `partial` (a fetch resumes it), a staged artifact `missing`."""
+    """(kind, key, `missing`) for each row still `staging` under a job that has ended."""
     return [
-        (row["kind"], row["key"], "partial" if row["kind"] == "raw" else "missing")
+        (row["kind"], row["key"], "missing")
         for row in assets
         if (data := row.get("data") or {}).get("state") in BUILDING and data.get("job") and finished(str(data["job"]))
     ]

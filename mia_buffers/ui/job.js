@@ -1,7 +1,7 @@
 // A job's record (`#job/<address>`): what ran and how it ended, an agent's prompt and conversation, the script,
 // what the cluster was asked and what it answered, and the ends of stdout and stderr. A record holds what a
 // sandboxed job printed: every value of it is inserted as a text node, never parsed as HTML or as markdown.
-import { $, ago, card, el, kv } from "./dom.js";
+import { $, ago, card, el, KIND_WORDS, kv, SUBJECT_HASH } from "./dom.js";
 import { api, banner } from "./api.js";
 
 const STILL_RUNNING = "This job is still running, or its end was not recorded.";
@@ -93,8 +93,17 @@ function turnNode(turn) {
   );
 }
 
-export function jobView(record, address) {
-  // the nodes of a record's page, top to bottom
+export function subjectOf(record, address) {
+  // whose round a job ran in, from its address (`issue-<number>/<round>/…`): mia-data's rounds are a dataset's,
+  // of the others an `i…` round is a buffer spec's and a `p…` round a preparation request's. null: no round's job
+  const named = /^issue-(\d+)\/([ip])/.exec(address);
+  if (!named) return null;
+  const kind = part(record).service === "mia-data" ? "dataset" : named[2] === "p" ? "prep" : "buffer";
+  return { kind, number: Number(named[1]) };
+}
+
+export function jobView(record, address, subject) {
+  // the nodes of a record's page, top to bottom; `subject` ({kind, key}) is whose round the job ran in, linked
   const whole = part(record),
     logs = part(whole.logs),
     agent = whole.agent ? part(whole.agent) : null;
@@ -105,6 +114,14 @@ export function jobView(record, address) {
   return [
     el("h2", {}, shown(name) ? text(name) : lastOf(address)),
     el("div", { class: "small mono" }, address),
+    subject &&
+      el(
+        "div",
+        {},
+        KIND_WORDS[subject.kind],
+        " ",
+        el("a", { href: SUBJECT_HASH[subject.kind](subject.key) }, subject.key),
+      ),
     whole.outcome ? null : el("div", { class: "notice" }, STILL_RUNNING),
     kv(summaryRows(whole)),
     agent &&
@@ -145,8 +162,18 @@ export async function viewJob(address) {
   } catch (e) {
     failure = e;
   }
+  let subject = null;
+  const whose = failure ? null : subjectOf(record, address);
+  if (whose) {
+    try {
+      const found = (await api(`/lookup?q=${whose.number}`))?.subjects || [];
+      subject = found.find(s => s.kind === whose.kind && s.number === whose.number) || null;
+    } catch {
+      /* the record is shown without its link */
+    }
+  }
   if (location.hash !== hash) return; // the reader moved on while this loaded
-  if (!failure) return root.replaceChildren(...jobView(record, address));
+  if (!failure) return root.replaceChildren(...jobView(record, address, subject));
   if (failure.status !== 404) banner(`GET /jobs/${address} → ${failure.status || "network error"}: ${failure.message}`);
   root.replaceChildren(
     el("h2", {}, lastOf(address)),

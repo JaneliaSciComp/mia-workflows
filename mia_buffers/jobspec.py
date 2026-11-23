@@ -1,10 +1,10 @@
-"""The buffer worker's job specs, `fetch` and `stage`, plus the catalog snapshot a plan is built from.
+"""The buffer worker's stage job spec, plus the catalog snapshot a plan is built from.
 
-A fetch job runs the mia-snippets harness's `fetch` on a dataset's binding: every file into the raw cache, mounted
-read-write, under the fetch byte and walltime limits. A stage job runs the harness's `stage` on the binding with
-the dataset's staged directory as its output; after a fetch phase the cache is mounted read-only and the job runs
-offline, otherwise (the reader snippets are reviewed code, as in mia-data's trusted crop job) the cache is
-read-write and the harness fetches what is missing first.
+A stage job runs the mia-snippets harness's `stage` on a dataset's binding with the dataset's staged directory as
+its output. It has the binding's hosts and the record's raw cache read-write (the reader snippets are reviewed
+code, as in mia-data's trusted crop job): its readers take from the source what the planned crops touch, and a
+file one of them takes whole lands in the cache. A record whose files a person dropped is staged with no hosts
+and the cache read-only.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .config import Config
-    from .models import FetchJobArgs, StageJobArgs
+    from .models import StageJobArgs
 
 PLAN_FILE = "plan-rule.json"  # the sample rule, written beside binding.yaml in the job workspace
 VOXEL_FILE = "voxel_size.json"  # the record's voxel size in nm, likewise
@@ -84,21 +84,5 @@ def stage_job(cfg: Config, args: StageJobArgs, snapshot: Path) -> JobSpec:
         MIA_HARNESS_CACHE_DIR=cache,
         MIA_HARNESS_CACHE_WRITABLE="1" if args.cache_writable else "0",
         MIA_HARNESS_STAGE_BYTES=str(int(cfg.limits.stage_bytes or cfg.limits.job_bytes)),
-    )
-    return spec
-
-
-def fetch_job(cfg: Config, args: FetchJobArgs, snapshot: Path) -> JobSpec:
-    """`harness fetch` on the workspace's binding: every file into the raw cache (read-write), hosts as given,
-    under `limits.fetch_bytes` and `limits.fetch_walltime_min`; the report is fetch.json in the workspace."""
-    body = f"harness fetch {BINDING_FILE} --record {RECORD_FILE} --out fetch.json"
-    spec = _spec(cfg, "fetch", Path(args.workspace), args.pins, body, list(args.hosts), [snapshot])
-    cache = str(cfg.paths.raw_root / args.record)
-    spec.rw_mounts.append(cache)
-    spec.walltime_min = cfg.limits.fetch_walltime_min
-    spec.env.update(
-        MIA_HARNESS_CACHE_DIR=cache,
-        MIA_HARNESS_CACHE_WRITABLE="1",
-        MIA_HARNESS_JOB_BYTES=str(int(cfg.limits.fetch_bytes)),
     )
     return spec

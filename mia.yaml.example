@@ -11,13 +11,19 @@
 # to, plus the operator's switches. A number that is per job goes in limits, per root in quota, per request in
 # autonomy.
 
-# The agentic-sandbox checkout, relative to this repo: its scripts wrap every worker and job in a sandbox.
+# The host this file is for. When set, `mia` refuses to run on any other host, so an installation's stack cannot be
+# started elsewhere by mistake (the home directory is shared between hosts). Matched by the first label of the name.
+# host: prod1
+
+# The agentic-sandbox checkout, relative to this repo or absolute: its scripts wrap every worker in a sandbox on
+# this host. Jobs on compute nodes use the checkout the csub base policy names, which must be on the shared fs.
 sandbox_dir: ../agentic-sandbox/scripts
 
 # Temporal, the workflow engine. On a dev host `managed: true` makes `mia up` run a local dev server from
 # `state_dir` (SQLite: host-local disk, refused on a network fs; logs/ and bin/temporal live there too). For an
 # external Temporal, omit `managed` and `state_dir`. $TEMPORAL_ADDRESS overrides `address`. Each service names its
-# own namespace under `services`. `poll_minutes` is how often a round retries a lock or quota someone else holds.
+# own namespace under `services`. `poll_minutes` is a round's first wait for a lock or quota someone else holds
+# (it doubles each try, up to 30 minutes) and how often mia-data looks at the snippet pull requests.
 temporal:
   managed: true
   state_dir: /scratch/mia/temporal
@@ -69,10 +75,10 @@ paths:
 harness:
   dir: /path/to/mia-snippets-checkout
 
-# Per job: what one csub job may read, write and run for. `job_bytes` caps a crop or stage job's input;
-# `stage_bytes` caps one staged artifact's uncompressed planned bytes and defaults to job_bytes; a spec's
-# `sampling.max_crops_per_dataset` crops must fit under it. The fetch_* values
-# bound one fetch job and how many fetch attempts a dataset gets. Also here, outside the per-job rule:
+# Per job: what one csub job may read, write and run for. `job_bytes` caps what a crop or stage job transfers
+# from a dataset's source (a stage reads what its planned crops touch, and takes a file whole only where its
+# reader must); `stage_bytes` caps one staged artifact's uncompressed planned bytes and defaults to job_bytes; a
+# spec's `sampling.max_crops_per_dataset` crops must fit under it. Also here, outside the per-job rule:
 # `agent_max_budget_usd` (one match-agent run, default 5) and `max_pr_revisions` (one round, default 5).
 # `debug_cycles` (default 1): how often a failed dataset round is handed to a debugging agent and run again before
 # it stops as `failed`; 0 turns that off. `debug_wait_min` (default 5): the wait before the debugging agent starts.
@@ -82,12 +88,10 @@ limits:
   job_bytes: 5e9
   # stage_bytes: 2e9
   job_walltime_min: 120
-  fetch_bytes: 50e9
-  fetch_walltime_min: 480
-  fetch_attempts: 4
 
 # Hosts the sandbox lets jobs reach. `package_hosts` are the package indexes every job may use.
-# `redirect_hosts` is filled from the redirect probe: exact hosts, no patterns.
+# `redirect_hosts` names hosts a data host redirects to (exact hosts, no patterns) ahead of a run; one it does not
+# name is offered for approval on the dataset's page after the first job that was refused it.
 network:
   package_hosts: [pypi.org, files.pythonhosted.org, conda.anaconda.org, repo.prefix.dev]
   redirect_hosts: {}
@@ -97,14 +101,26 @@ network:
 # home directory (csub lets no job mount anything there), and it neither contains nor lies inside any directory a
 # worker sandbox binds read-write (state dirs, work_root, storage_root, raw_root, staged_root, the lock directory).
 # Its broker.toml must not be the base policy itself.
+# Where the broker runs. `local`: `mia up` runs csub-broker on this host, which must be able to `bsub`. `relay`: this
+# host cannot; `mia up` runs `csub relay` on the same socket, which forwards each request over ssh to this checkout's
+# csub-broker on `ssh_host` (a submit host that sees the same home directory, so it runs on the same generated policy
+# and the checkout's own binary), as `ssh_user` (default: you) with `ssh_key` (the user's key, kept outside every
+# sandbox). `mia up` probes the broker through the relay once and fails with csub's message when the submit host does
+# not answer. `run_dir` holds the broker or relay sockets: host-local disk (default /scratch/<user>).
 csub:
   base_policy: ~/.config/csub/broker.toml
   # policy_dir: ~/.local/state/mia/csub
+  broker: local
+  # ssh_host: submit.example.org
+  # ssh_user: null
+  # ssh_key: ~/.ssh/csub_ed25519
+  # run_dir: /scratch/<user>
 
 # buffer-api (`mia-buffers serve`) and its clients. The port is required in `url`. `token_file` holds the worker
 # token its write routes need (chmod 600; `mia init-token` creates it). buffer-api also reaches Temporal (the
-# `temporal.address` above): it starts the workflow that copies each dataset's, buffer's and request's timeline
-# to its GitHub issue, on mia-buffers' namespace and on that of the service whose app is mia-data.
+# `temporal.address` above), on mia-buffers' namespace and on that of the service whose app is mia-data: an action
+# from the page starts, signals or stops the subject's workflow, and it starts the workflow that copies each
+# dataset's, buffer's and request's timeline to its GitHub issue.
 service:
   url: http://host.example.org:8765
   token_file: ~/.config/mia/service-token
@@ -112,6 +128,8 @@ service:
 # Per disk root: how much the shared caches may hold. The buffers worker's keeper evicts free assets (unreferenced,
 # unused for `hold_hours`) until a root is under its quota minus `headroom_bytes`; 0 = unlimited. `raw_bytes` is
 # paths.raw_root, `staged_bytes` is paths.staged_root. Older .building-* directories are removed on the same pass.
+# The raw quota is where staging waits and the keeper evicts, not a ceiling: a dataset is `blocked` while the raw
+# cache is over it, and jobs already running can each add up to `limits.job_bytes` of whole files.
 quota:
   raw_bytes: 0
   staged_bytes: 0
@@ -150,15 +168,17 @@ cleaner:
 # galleries, a PR diff) and answers approve / reject / escalate. A `model` other than the authors' agent.model is a
 # precaution, not a rule.
 # Each gate has a mode: `off` (no judge runs), `shadow` (the verdict is recorded beside the person's and decides
-# nothing; the Decisions tab shows the agreement), `active` (`crops` only: the judge's approve saves the set or has
-# the snippet PR merged with no person; its reject or escalate waits for one). A gate goes active only after its
-# shadow numbers say so. `min_confidence`: under it the judge abstains and a human decides.
+# nothing; the Decisions tab shows the agreement), `active` (`crops` only: a set with every crop `ok` is saved, or
+# its snippet PR merged, with no person; a set with a `suspect` or `bad` crop goes back to the developer, at most
+# `max_reworks` times (default 1) before a person is asked; an escalate waits for a person). A person can reject a
+# saved set at any time. A gate goes active only after its shadow numbers say so. `min_confidence`: under it the
+# judge abstains and a human decides.
 judge:
   model: opus
   max_budget_usd: 2
   walltime_min: 30
   min_confidence: 0.6
-  crops: {mode: "off"}
+  crops: {mode: "off", max_reworks: 1}
   review: {mode: "off"}
 
 # Per request, and the operator's switches (autonomous-gates spec). `pause`: `mia pause` and `mia resume` flip it;
@@ -166,9 +186,13 @@ judge:
 # artifact is held this long before the keeper may evict it. `root`: what one request (a buffer spec, a preparation
 # request or a dataset, including the dataset rounds it starts) may spend in all. A request busy for `max_days` straight is
 # stopped; one idle that long starts a fresh budget. The concurrency cap makes a job wait; the others end the work.
+# `price_factor`: what this installation pays for a dollar Claude Code counts. Claude Code counts list price, and so
+# do the per-run caps handed to it (`limits.agent_max_budget_usd`, `judge.max_budget_usd`); a budget books a run's
+# reservation and its cost times this factor, so `max_usd` and the cleaner's `max_usd_per_day` are money paid.
 autonomy:
   pause: false
   quarantine_days: 30
+  price_factor: 0.1
   root:
     max_usd: 100
     max_fetch_bytes: 500e9
@@ -185,7 +209,8 @@ services:
   # `/approve` and `/revise` count. Under `agent`: the model, the job's shape (walltime <= 60 lands in the short
   # queue; mem_mb under one slot keeps the job at 1 slot), the hosts it may reach, extra read-only mounts and PATH
   # entries for its tests, how many revisions it gets, an optional `max_budget_usd` passed to claude -p, and
-  # `api_key_env` to bill an API key instead of a login.
+  # `api_key_env` to bill an API key instead of a login (`mia up` refuses a service that sets it: give the account
+  # a Claude login).
   autodev:
     app: autodev
     temporal: {namespace: default}
@@ -218,24 +243,24 @@ services:
       repo: JaneliaSciComp/mia-snippets
       base_branch: main
       protected_paths: [".github/"]
+    agent:
+      # where mia-data leaves what a developer should look at (the crops its judge doubted):
+      # `<evidence_dir>/issue-<n>/` is mounted read-only into the agent job of snippets issue n
+      evidence_dir: /path/to/mia/work/_evidence        # = mia-data paths.work_root + /_evidence
 
   # mia-data: dataset to saved crops. `data_repo` receives one issue per dataset, a copy of its timeline that the
   # system writes and nothing reads (datasets are started and steered from the buffers page). `crops`: the round's set
-  # (`per_round`, reviewed and, approved, saved), the hand-run `test-pr` command's `test_per_round`, and how
-  # many crops per plane and per file. `gallery.branch` receives the crop galleries. `agent` is the match agent:
-  # its walltime is limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not
-  # accepted here. `evaluate` is a switch for the evaluate job after cropping; nothing runs behind it yet.
+  # (`per_round`, reviewed and, approved, saved) and the hand-run `test-pr` command's `test_per_round`.
+  # `gallery.branch` receives the crop galleries. `agent` is the match agent: its walltime is
+  # limits.job_walltime_min, and autodev's allow_hosts, extra_mounts and api_key_env are not accepted here. `evaluate` is a switch for the evaluate job after cropping; nothing runs behind it yet.
   mia-data:
     app: mia-data
     temporal: {namespace: mia-data}
     github:
       data_repo: JaneliaSciComp/mia-workflow-data
     crops:
-      size: 256
       per_round: 16
       test_per_round: 4
-      per_plane: 4
-      per_file: 8
     gallery: {branch: galleries}
     agent:
       model: sonnet
@@ -246,8 +271,8 @@ services:
 
   # mia-buffers: training buffers. `buffers_repo` receives one issue per buffer spec and per preparation request,
   # a copy of its timeline (they are created and run on the page); `datasets_repo` is mia-data's issue repo.
-  # `sourcing`: stage jobs (`parallel`) and fetch jobs (`parallel_fetch`) in flight per buffer, the tensorizer under
-  # <harness.dir>/tensorizers/, and the frozen val and test list lengths.
+  # `sourcing`: stage jobs in flight per buffer (`parallel`), of those on any one host a dataset's files are on
+  # (`per_source`), and the tensorizer under <harness.dir>/tensorizers/.
   mia-buffers:
     app: mia-buffers
     temporal: {namespace: mia-buffers}
@@ -255,6 +280,6 @@ services:
       buffers_repo: JaneliaSciComp/mia-buffers
       datasets_repo: JaneliaSciComp/mia-workflow-data
     sourcing:
-      parallel: 4
-      parallel_fetch: 2
+      parallel: 20
+      per_source: 1
       tensorizer: muvit-2d

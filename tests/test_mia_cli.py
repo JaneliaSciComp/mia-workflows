@@ -154,6 +154,18 @@ def test_check_flags_csub_env_roots_and_home(monkeypatch, tmp_path, capsys):
     assert f"home directory {tmp_path.resolve()}" in row and str(cfg.harness.dir) in row.split("home directory")[1]
 
 
+def test_check_names_the_transfers_variable(monkeypatch, tmp_path, capsys):
+    from mia_data.jobspec import HARNESS_ENV
+
+    _fake_env(monkeypatch, ["*"], env_allow=HARNESS_ENV)
+    cfg = make_cfg(tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda _: cfg)
+    monkeypatch.setattr(cli, "_setup_logging", lambda *a: None)
+    main(["check"])
+    row = next(line for line in capsys.readouterr().out.split("\n") if "csub broker" in line)
+    assert row.startswith("BAD") and "env not allowed: MIA_HARNESS_TRANSFERS_DIR (" in row
+
+
 def test_check_flags_policy_queue_lsf_does_not_have(monkeypatch, tmp_path, capsys):
     _fake_env(
         monkeypatch, ["*"], queues={"short": {}, "long": {}, "gpu": {"gpu": True}}

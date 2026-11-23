@@ -111,6 +111,9 @@ class JobOutcome:
     job_id: str
     state: str  # csub/LSF state: DONE | EXIT | UNKNOWN
     exit_code: int | None = None
+    # Claude Code's own error when it ended the agent's session (a login that lapsed, an API error): the agent
+    # did not fail at its work, and the same round may pass when run again. "" when the agent ended by itself.
+    cut_off: str = ""
 
 
 @dataclass
@@ -121,6 +124,7 @@ class PublishInput:
     workspace: Workspace
     pr: int | None
     feedback_id: str | None = None
+    feedback_text: str = ""  # a revision round: the reviewer's request as the agent was given it
 
 
 @dataclass
@@ -151,6 +155,8 @@ class JudgeOutcome:
 class PrRef:
     pr: int | None
     head_sha: str | None
+    # the id of the request the round answered with a validated "nothing needs changing" (no commits); "" otherwise
+    no_change: str = ""
 
 
 @dataclass
@@ -175,6 +181,7 @@ class PrSnapshot:
     approved: bool  # a qualifying approval of head_sha exists (a human's, or a trusted bot's `/approve` comment)
     checks: str  # success | pending | failure | none
     feedback: list[Feedback] = field(default_factory=list)  # requests not yet handled, per GitHub markers
+    accepted: str = ""  # read by nothing: snapshots in recorded histories carry the field
 
 
 @dataclass

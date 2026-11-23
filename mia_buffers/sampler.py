@@ -93,11 +93,12 @@ def capacity(volumes: list[Volume], split: str) -> int | None:
 def draw(
     rng: random.Random, volumes: list[Volume], split: str, *, patch: int, levels: list[int], channels: int | str
 ) -> dict | None:
-    """One crop descriptor (without seq) for the split, with replacement, or None when no volume serves it."""
-    choices = servable(volumes, split)
+    """One crop descriptor (without seq) for the split, with replacement, or None when no volume of a weight
+    above 0 serves it."""
+    choices = _drawable(volumes, split)
     if not choices:
         return None
-    volume = rng.choices(choices, weights=[max(v.weight, 0.0) for v in choices])[0]
+    volume = rng.choices(choices, weights=[v.weight for v in choices])[0]
     index = rng.randrange(len(volume.samples[split])) if volume.samples else None
     return _crop(rng, volume, split, index, patch=patch, levels=levels, channels=channels)
 

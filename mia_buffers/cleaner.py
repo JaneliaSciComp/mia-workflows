@@ -40,6 +40,7 @@ NOT_REGISTERED_RE = re.compile(r"not registered", re.IGNORECASE)
 ENTRY_NOISE_RE = re.compile(r"(?s:<!--.*?-->)|^\*\*(Stage|Result|Folders|Jobs):\*\*[^\n]*$", re.MULTILINE)
 SEEN_CHARS = 600  # how much of a stop's own words a case quotes
 # what a stop says, by the remedy it calls for (spec §4.5); the first that matches decides
+BUDGET_RE = re.compile(r"root budget: (.*?max_\w+ \S+)")  # the refusal of `Ledger.reserve`, to its cap
 HOSTS_RE = re.compile(r"host not allowed: ([^)\n]+)")
 RECORD_GAP_RE = re.compile(r"match blocked:")
 REVISION_LIMIT_RE = re.compile(r"revision limit", re.IGNORECASE)
@@ -52,6 +53,7 @@ PASSING_RE = re.compile(
     re.IGNORECASE,
 )
 WORKER_ERROR_RE = re.compile(r"\b[A-Z][A-Za-z]*(Error|Exception)\b")
+NEEDS_HUMAN = "snippets:needs-human"  # how a round that stopped on autodev's label says so
 SECOND_RETRY = 6  # the second run after a passing cause waits this many times as long as the first
 REVISE_TEXT = "/revise Merge `main` into this branch and resolve the conflicts. Change nothing else."
 
@@ -59,7 +61,8 @@ STEP_WORDS = {
     "cancel": "cancel the round",
     "stop": "force-stop the run",
     "kill_jobs": "end the round's cluster jobs",
-    "go": "run it again",
+    "go": "run it again from the beginning",
+    "resume": "resume it",
     "recheck": "tell the request to look at its datasets again",
     "terminate": "terminate the run",
     "kill_job": "kill the job",
@@ -204,18 +207,24 @@ def last_person(actions: list[dict]) -> float | None:
     return max(times, default=None)
 
 
+def standing(view: dict) -> str:
+    """Where a subject stands, for a decision about it: `shelved` when a person set it aside, else the phase of
+    its stage. No decision reads the status a person is shown (spec overview §3.1)."""
+    return "shelved" if view.get("shelved") else view["phase"]
+
+
 def sighting(item: dict, cfg: CleanerCfg, now: float) -> dict | None:
     """Whether the subject is stuck, and how: {what: quiet | stopped, rule, seen}; None when it is not. `item`
     is the subject's evidence: {subject, entries, actions, run, jobs, party}. A rule of None is for the
     diagnosis."""
     subject, entries = item["subject"], item.get("entries") or []
-    status, stage = subject["status"], subject["stage"]
+    status, stage = standing(subject), subject["stage"]
     if status == "working":
         since = max((_at(entry) for entry in entries), default=subject.get("updated") or now)
         if now - since < cfg.quiet_minutes * 60:
             return None
         return _quiet(item, f"at `{stage}` with no write for {_age(now - since)}")
-    if status == "stuck":
+    if status == "stopped":
         stop = stop_entry(entries, stage)
         since = _at(stop) if stop else subject.get("updated") or now
         if now - since < cfg.stopped_minutes * 60:
@@ -256,11 +265,14 @@ def _quiet(item: dict, where: str) -> dict | None:
 
 
 def stop_rule(item: dict, said: str, since: float) -> str | None:
-    """Which remedy a stop calls for, from what it said, the snippets issue it waited on (`party`) and when
-    the worker of its rounds started on its present commit (`worker`); None when no rule covers it."""
+    """Which remedy a stop calls for, from what it said, the hosts its jobs were refused (the subject's `hosts`),
+    the snippets issue it waited on (`party`) and when the worker of its rounds started on its present commit
+    (`worker`); None when no rule covers it."""
     party, worker = item.get("party") or {}, item.get("worker") or {}
     if item["subject"]["kind"] != "dataset":
         return None
+    if party.get("merged") and NEEDS_HUMAN in said:  # the round gave up on a pull request that merged afterwards
+        return "merged since"
     if party.get("stopped") and party.get("state") == "open":  # autodev stopped on the snippets issue
         words = f"{said} {party.get('last_word') or ''}"
         if party.get("pr") and (party.get("mergeable") is False or CONFLICT_RE.search(words)):
@@ -270,7 +282,10 @@ def stop_rule(item: dict, said: str, since: float) -> str | None:
         if not party.get("pr") and RUN_FAILED_RE.search(words):
             return "autodev's run failed"
         return None
+    if any(host in said for host in item["subject"].get("hosts") or ()):  # a host its jobs were refused, unapproved
+        return "host not approved"
     for rule, pattern in (
+        ("budget used up", BUDGET_RE),  # first: its numbers read like a passing cause's
         ("host not approved", HOSTS_RE),
         ("record gap", RECORD_GAP_RE),
         ("revision limit", REVISION_LIMIT_RE),
@@ -291,12 +306,12 @@ def leftover_reason(view: dict | None, labels: set[str], newer: bool, leftover_d
         return None
     if newer:
         return "its dataset has opened a newer snippets issue"
-    if view["status"] == "shelved":
+    if view.get("shelved"):
         return "its dataset is shelved"
     if view["stage"] == "done":
         return "its dataset is prepared through another reader"
     rested = now - (view.get("updated") or now)
-    if view["status"] in ("stuck", "done") and rested >= leftover_days * 86400:
+    if view["phase"] in ("stopped", "done") and rested >= leftover_days * 86400:
         return f"its dataset has rested at `{view['stage']}` for {rested / 86400:.0f} days"
     return None
 
@@ -305,15 +320,20 @@ def leftover_reason(view: dict | None, labels: set[str], newer: bool, leftover_d
 
 
 def plan_for(found: dict, item: dict) -> list[dict]:
-    """The steps for a sighting, in order. A step is {do, ...}; `needs` ends a plan with what a person must do."""
+    """The steps for a sighting, in order. A step is {do, ...}; `needs` ends a plan with what a person must do.
+
+    A subject is run again with a `resume`, which keeps what its round has (spec resume-restart §9): a dataset
+    and a request take one, a buffer is planned again with a `go`. A `go` stays where the remedy needs more
+    than the round's pins hold: a changed record, a pull request the plan closed."""
     rule, kind = found["rule"], item["subject"]["kind"]
+    again = {"do": "go" if kind == "buffer" else "resume"}
     if rule == "no run":
-        return [{"do": "cancel"}, {"do": "kill_jobs"}, {"do": "go"}]
+        return [{"do": "cancel"}, {"do": "kill_jobs"}, again]
     if rule == "frozen run":
         if kind == "buffer":  # a stop retires every buffer of the spec, also one that is served: a person's call
             text = "its run is frozen: Force stop on its page ends it and retires the spec's buffers, then Plan again"
             return [{"do": "needs", "text": text}]
-        return [{"do": "stop"}, {"do": "kill_jobs"}, {"do": "go"}]
+        return [{"do": "stop"}, {"do": "kill_jobs"}, again]
     if rule == "request behind":
         return [{"do": "recheck"}]
     party = item.get("party") or {}
@@ -323,29 +343,41 @@ def plan_for(found: dict, item: dict) -> list[dict]:
         tried = [step for case in earlier for step in case["data"].get("steps", ())]
         if any(step["do"] == "snippets_go" and step.get("issue") == issue for step in tried):  # once per issue
             return [{"do": "diagnose"}]
-        return [{"do": "snippets_go", "issue": issue}, {"do": "await_autodev", "issue": issue}, {"do": "go"}]
+        return [{"do": "snippets_go", "issue": issue}, {"do": "await_autodev", "issue": issue}, again]
     if rule == "merge conflict":
         issue, pr = party["issue"], party["pr"]
         if REVISION_LIMIT_RE.search(party.get("last_word") or ""):  # no revision left: start over from the match
             why = "the pull request cannot be merged and autodev has no revision left"
             return [{"do": "close", "issue": issue, "pr": pr, "why": why}, {"do": "go"}]
-        return [{"do": "revise", "issue": issue, "pr": pr}, {"do": "await_autodev", "issue": issue}, {"do": "go"}]
+        return [{"do": "revise", "issue": issue, "pr": pr}, {"do": "await_autodev", "issue": issue}, again]
+    if rule == "merged since":
+        if any((case["data"].get("party") or {}).get("pr") == party.get("pr") for case in earlier):
+            return [{"do": "diagnose"}]  # once per pull request
+        return [again]  # the round finds the merge: the crops that were approved are saved, or the merge's own made
     if rule == "passing cause":
         if len(earlier) >= 2:  # at most twice
             return [{"do": "diagnose"}]
-        return [{"do": "wait", "hours": item["retry_hours"] * (SECOND_RETRY if earlier else 1)}, {"do": "go"}]
+        return [{"do": "wait", "hours": item["retry_hours"] * (SECOND_RETRY if earlier else 1)}, again]
     if rule == "fixed since":
         commit = (item.get("worker") or {}).get("commit")
         if any(case["data"].get("commit") == commit for case in earlier):  # once per commit
             return [{"do": "diagnose"}]
-        return [{"do": "go"}]
+        return [again]
+    if rule == "budget used up":
+        refusal = BUDGET_RE.search(found["seen"])
+        named = refusal.group(1) if refusal else "see its page"
+        text = (
+            f"its budget is used up ({named}): raise that cap (`autonomy.root`) and restart the workers, then resume it"
+        )
+        return [{"do": "needs", "text": text}]
     if rule == "host not approved":
         hosts = HOSTS_RE.search(found["seen"])
-        named = hosts.group(1).strip() if hosts else "see its page"
-        text = f"approve the hosts its jobs need ({named}): press Run again on its page and tick them"
+        waiting = ", ".join(item["subject"].get("hosts") or ())  # what Resume lists to check
+        named = hosts.group(1).strip() if hosts else waiting or "see its page"
+        text = f"approve the hosts its jobs need ({named}): press Resume on its page and check them"
         return [{"do": "needs", "text": text}]
     if rule == "record gap":
-        text = "its catalog record needs a decision or a correction; the round runs again once the record changes"
+        text = "its catalog record needs a decision or a correction; the dataset is restarted once the record changes"
         return [{"do": "needs", "text": text}]
     if rule == "input changed":
         return [{"do": "go"}]

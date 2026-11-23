@@ -40,7 +40,9 @@ const flow = xs => `[${xs.map(yq).join(", ")}]`;
 export function toSpecYaml(c, ref, repo) {
   const p = c.patch,
     z = c.patchZ,
-    sources = SRC.filter(s => c.sources.has(s));
+    sources = SRC.filter(s => c.sources.has(s)),
+    // in name order, as the service keeps them
+    filters = [...(c.filterContent ? ["{name: content}"] : []), ...(c.filterLabelled ? ["{name: labelled}"] : [])];
   return [
     "schema_version: 1",
     `name: ${yq(c.name.trim() || "buffer")}`,
@@ -60,6 +62,8 @@ export function toSpecYaml(c, ref, repo) {
     `      required: ${c.annRequired}`,
     `      source: ${sources.length === SRC.length ? "any" : `{in: ${flow(sources)}}`}`,
     `    min_size_voxels: ${c.minVox}`,
+    // a dataset unchecked on the Datasets step
+    ...(c.exclude?.size ? ["  exclude:", `    ids: ${flow([...c.exclude].sort())}`] : []),
     "  dedup:",
     `    by: ${flow(c.dedup ? ["doi"] : [])}`,
     "",
@@ -73,6 +77,7 @@ export function toSpecYaml(c, ref, repo) {
     `  levels: ${flow(levelsOf(c.level))}`,
     `  crops: {train: ${c.cropsTrain}, val: ${c.cropsVal}, test: ${c.cropsTest}}`,
     `  max_crops_per_dataset: ${c.maxCrops}`,
+    ...(filters.length ? [`  filters: [${filters.join(", ")}]`] : []),
     "  weighting:",
     "    scheme: temperature",
     "    over: [modality, dataset]",
@@ -98,12 +103,13 @@ export function toPrepYaml(records, ref, repo) {
   ].join("\n");
 }
 
-// ---- a spec opened in the designer (Clone, Edit)
+// ---- a definition read back into the controls
 // The controls' values for a spec as the service parsed it (POST /specs/parse).
 export function fromSpec(s) {
   const where = s.select.where,
     patch = s.sampling.patch,
-    crops = s.sampling.crops;
+    crops = s.sampling.crops,
+    filters = s.sampling.filters || [];
   return {
     name: s.name,
     paths: s.select.paths.join(" "),
@@ -122,7 +128,10 @@ export function fromSpec(s) {
     cropsVal: crops.val,
     cropsTest: crops.test,
     maxCrops: s.sampling.max_crops_per_dataset,
+    filterContent: filters.some(f => f.name === "content"),
+    filterLabelled: filters.some(f => f.name === "labelled"),
     holdout: s.splits.holdout_ids.join(" "),
+    exclude: new Set(s.select.exclude.ids),
   };
 }
 // Where two parsed specs differ, as dotted paths: a spec against the one the controls write for it names what the

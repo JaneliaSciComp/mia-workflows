@@ -107,20 +107,33 @@ def test_judge_section_loads(tmp_path):
 
 
 def test_every_dataset_stage_has_a_rule():
-    from mia_data.config import HUMAN_LABELS, STAGE_ACTIONS, STAGES, STATUS_WORDS
+    from mia_data.config import HUMAN_LABELS, PHASES, STAGE_ACTIONS, STAGES
 
     assert set(STAGE_ACTIONS) == set(STAGES)
     for status, actions in STAGE_ACTIONS.values():
-        assert status in STATUS_WORDS and actions <= {*HUMAN_LABELS, "cancel", "stop"}
-    # a verdict, or a restart that drops the set under review
-    assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "go", "cancel"}))
+        assert status in PHASES and actions <= {*HUMAN_LABELS, "cancel", "stop"}
+    # a verdict, a restart that drops the set under review, or a resume that keeps it
+    assert STAGE_ACTIONS["review"] == ("waiting", frozenset({"approve", "reject", "go", "resume", "cancel"}))
+    # a resume goes on with a round that stopped or waits for its verdict, and with no other
+    resumable = {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "resume" in actions}
+    assert resumable == {"failed", "blocked", "needs-human", "cancelled", "review"}
     # a round in progress is cancelled (or, when it cannot answer, stopped) before anything else is asked of its
     # dataset; between a failed round and its re-run a go is taken too: the debugger's own, or a person's who
     # does not wait for it
+    # a verdict is taken at review alone; the saved set can be rejected
+    assert [stage for stage, (_, actions) in STAGE_ACTIONS.items() if "approve" in actions] == ["review"]
     working = {stage: actions for stage, (status, actions) in STAGE_ACTIONS.items() if status == "working"}
     assert working.pop("debugging") == {"go", "cancel", "stop"}
-    assert all(actions == {"cancel", "stop"} for actions in working.values())
-    assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"go", "revoke"}))
+    assert all(actions == {"cancel", "stop"} for actions in working.values()) and set(working) == {
+        "matching",
+        "developing",
+        "testing",
+        "merging",
+    }
+    assert STAGE_ACTIONS["cancelled"] == ("done", frozenset({"go", "resume", "revoke"}))
+    assert STAGE_ACTIONS["done"] == ("done", frozenset({"go", "reject", "revoke"}))
+    for stage in ("failed", "blocked", "needs-human"):
+        assert STAGE_ACTIONS[stage] == ("stopped", frozenset({"go", "resume", "revoke"}))
 
 
 def test_a_datasets_state_is_what_a_person_reads_and_the_stage_decides_it():

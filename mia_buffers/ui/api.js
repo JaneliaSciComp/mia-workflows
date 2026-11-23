@@ -2,7 +2,7 @@
 // boot (`S`).
 import { $, el } from "./dom.js";
 
-// ---- fetch: errors go to the banner, the caller gets null
+// ---- fetch: errors go to the banner, the caller gets no value
 export class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -47,7 +47,11 @@ export function banner(message) {
       "div",
       { "data-message": message },
       el("span", {}, message),
-      el("button", { type: "button", "aria-label": "dismiss", onclick: () => line.remove() }, "×"),
+      el(
+        "button",
+        { type: "button", "aria-label": "dismiss", title: "Dismiss this message.", onclick: () => line.remove() },
+        "×",
+      ),
     );
   line.timer = setTimeout(() => line.remove(), 20000);
   if (!same) {
@@ -56,12 +60,14 @@ export function banner(message) {
   }
 }
 export async function load(path, quiet404) {
-  // quiet404: a 404 is an expected answer (a buffer not sourced yet), not an error
+  // null: nothing is there, a 404 that is an expected answer (quiet404: a buffer not sourced yet, a dataset nobody
+  // started). undefined: the request failed, which says nothing about what is there; the banner says how
   try {
     return await api(path);
   } catch (e) {
-    if (!(quiet404 && e.status === 404)) banner(`GET ${path} → ${e.status || "network error"}: ${e.message}`);
-    return null;
+    if (quiet404 && e.status === 404) return null;
+    banner(`GET ${path} → ${e.status || "network error"}: ${e.message}`);
+    return undefined;
   }
 }
 
@@ -71,3 +77,17 @@ export const S = { meta: {}, catalogs: [], ref: null, plan: null, planError: nul
 // ---- what an action route takes: JSON, and one key per click
 export const JSON_HEADERS = { "Content-Type": "application/json" };
 export const newKey = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10); // one per click; Retry sends it again
+// ---- what is away, in words: the banner's lines and Overview's System section
+export function downLines(health, findings) {
+  // what is away, in words; a service's task queue carries its name. `findings`: what the repair agent's last sweep
+  // found wrong with the installation, less what the health check says itself
+  const away = Object.keys(health.queues || {}).filter(queue => !health.queues[queue]);
+  return [
+    !health.temporal && "Temporal does not answer: nothing can be started or cancelled from this page right now.",
+    away.length &&
+      `No worker is running for ${away.join(", ")}: nothing that waits on ${away.length > 1 ? "them" : "it"} is moving. On the host: pixi run mia restart ${away.join(" ")}`,
+    ...(Array.isArray(findings) ? findings : [])
+      .filter(finding => finding.id !== "temporal" && !finding.id.startsWith("worker "))
+      .map(finding => finding.text.replaceAll("`", "")),
+  ].filter(Boolean);
+}

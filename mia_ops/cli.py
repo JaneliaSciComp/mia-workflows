@@ -16,26 +16,36 @@ from mia_core.autonomy import set_pause
 from mia_core.config import JudgeCfg, manifest_path, read_manifest
 from mia_core.judge import eval as judge_eval
 
-from . import services
+from . import release, services
 from .manifest import load_manifest
-from .services import Stack, Temporal, attach, dead_windows, is_running, kill, service_up, windows
+from .services import Service, Stack, Temporal, attach, dead_windows, is_running, kill, service_up, windows
+
+
+def _serves_api(svc: Service) -> bool:
+    """Whether the service runs buffer-api, which every worker writes to."""
+    return svc.app.api_endpoint(svc.cfg) is not None
 
 
 def cmd_up(stack: Stack, args: argparse.Namespace) -> int:
+    """Start Temporal, then the services: the one that runs buffer-api first, so that no worker starts before
+    the registry answers."""
     temporal = Temporal(stack)
     want_temporal, selected = stack.select(args.services)
     if want_temporal and not selected:  # `mia up temporal`
         temporal.up()
     rc = 0
-    for svc in selected:  # each call starts or verifies Temporal first; after the first that is a health check
+    # each call starts or verifies Temporal first; after the first that is a health check
+    for svc in sorted(selected, key=lambda svc: not _serves_api(svc)):
         rc |= service_up(svc, stack, temporal)  # 1 when its worker did not start: the others are still started
     return rc
 
 
 def cmd_down(stack: Stack, args: argparse.Namespace) -> int:
+    """Stop the services, then Temporal: the one that runs buffer-api last, so that every other worker hands
+    its work back while the registry still answers."""
     want_temporal, selected = stack.select(args.services)
     rc = 0
-    for svc in reversed(selected):
+    for svc in sorted(reversed(selected), key=_serves_api):
         rc |= kill(svc.name)
     if want_temporal:
         rc |= Temporal(stack).down(explicit="temporal" in args.services)
@@ -43,6 +53,10 @@ def cmd_down(stack: Stack, args: argparse.Namespace) -> int:
 
 
 def cmd_restart(stack: Stack, args: argparse.Namespace) -> int:
+    """Down, then up. With no names that is every service and not Temporal, which holds the rounds' state and
+    runs no code of this repository: it is restarted only when it is named."""
+    if not args.services:
+        args.services = list(stack.services)
     return cmd_down(stack, args) or cmd_up(stack, args)
 
 
@@ -141,14 +155,25 @@ def cmd_judge(stack: Stack, args: argparse.Namespace) -> int:
     cfg = JudgeCfg(**(data.get("judge") or {}))
     if args.model:
         cfg = cfg.model_copy(update={"model": args.model})
-    max_suspect = cfg.crops.max_suspect if args.gate == "crops" else None  # the per-gate cap policy applies (§4.2)
-    rows = judge_eval.evaluate(Path(args.dir), cfg, limit=args.limit, max_suspect=max_suspect)
+    # the gate's own policy applies: the crops gate sends a set with a suspect crop back
+    rows = judge_eval.evaluate(Path(args.dir), cfg, limit=args.limit, suspect_rejects=args.gate == "crops")
     for row in rows:
         cost = f"${row.cost_usd:.2f}" if row.cost_usd is not None else "-"
         print(f"{row.item}\t{row.category}\texpected {row.expected}\tgot {row.got}\t{row.confidence:g}\t{cost}")
     print()
     print(judge_eval.render(judge_eval.summarize(rows)), end="")
     return 0
+
+
+def cmd_release(args: argparse.Namespace) -> int:
+    """`mia release <tag>` on this installation, or with `--to HOST:ROOT` on that one over ssh. Needs no manifest,
+    so it runs from any checkout with an `origin`."""
+    try:
+        if args.to:
+            return release.release_to(args.tag, args.to)
+        return release.release(args.tag)
+    except release.LayoutError as error:
+        sys.exit(f"mia release: {error}")
 
 
 COMMANDS = {
@@ -173,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     for cmd, help_text in (
         ("up", "start all services (Temporal first), or the named ones"),
         ("down", "stop all services (Temporal last), or the named ones"),
-        ("restart", "down, then up, same selection"),
+        ("restart", "down, then up: the named services, or every one but Temporal"),
         ("ps", "show which services are running"),
     ):
         sub.add_parser(cmd, help=help_text).add_argument("services", nargs="*", metavar="SERVICE")
@@ -198,7 +223,12 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("dir")
     ev.add_argument("--limit", type=int, help="only the first N items")
     ev.add_argument("--model", help="override judge.model for this run")
+    rel = sub.add_parser("release", help="put a tagged checkout live: clone, install, check, flip current, restart")
+    rel.add_argument("tag")
+    rel.add_argument("--to", metavar="HOST:ROOT", help="push the tag and run the release on that installation over ssh")
     args = parser.parse_args(argv)
+    if args.cmd == "release":  # no manifest: it runs from any checkout with an origin
+        return cmd_release(args)
     stack = Stack(load_manifest(args.manifest))
     return COMMANDS[args.cmd](stack, args)
 

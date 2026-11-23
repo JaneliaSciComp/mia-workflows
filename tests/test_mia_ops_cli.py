@@ -61,6 +61,28 @@ def test_restart_one(stack, fake):  # noqa: F811
     assert killed(fake) == ["autodev"] and new_sessions(fake) == ["temporal", "autodev", "mia-data", "autodev"]
 
 
+def test_restart_of_everything_leaves_temporal_running(stack, fake):  # noqa: F811
+    """Temporal holds the rounds' state and runs no code of this repository: a restart with no names is for the
+    services, and Temporal is restarted only when it is named."""
+    cli.main(["up"])
+    assert cli.main(["restart"]) == 0
+    assert killed(fake) == ["mia-data", "autodev"] and "temporal" in fake.running
+    assert new_sessions(fake) == ["temporal", "autodev", "mia-data", "autodev", "mia-data"]
+    assert cli.main(["restart", "temporal"]) == 0 and killed(fake)[-1] == "temporal"
+
+
+def test_buffer_api_is_the_last_to_stop_and_the_first_to_start(tmp_path, fake, monkeypatch):  # noqa: F811
+    """Every worker writes to buffer-api. On 2026-11-18 it went down first and came up last: activities of the
+    other workers failed an attempt on a registry that did not answer, and dataset rows were skipped. So the
+    service that runs it stops after every other worker has handed its work back, and starts before any."""
+    s = make_stack_v2(tmp_path)
+    monkeypatch.setattr(cli, "load_manifest", lambda _: s.manifest)
+    assert cli.main(["up"]) == 0
+    assert new_sessions(fake) == ["temporal", "mia-buffers", "autodev", "snippets", "mia-data"]
+    assert cli.main(["down"]) == 0
+    assert killed(fake) == ["mia-data", "snippets", "autodev", "mia-buffers", "temporal"]
+
+
 def test_unknown_service_exits(stack, fake):  # noqa: F811
     with pytest.raises(SystemExit, match="unknown service"):
         cli.main(["up", "nope"])
@@ -168,9 +190,13 @@ def test_judge_eval_cli(stack, tmp_path, monkeypatch, capsys):  # noqa: F811
     monkeypatch.setenv("MIA_CONFIG", str(manifest))
     seen = {}
 
-    def evaluate(eval_dir, cfg, *, limit=None, run=None, max_suspect=None):
+    def evaluate(eval_dir, cfg, *, limit=None, run=None, suspect_rejects=False):
         seen.update(
-            dir=eval_dir, model=cfg.model, min_confidence=cfg.min_confidence, limit=limit, max_suspect=max_suspect
+            dir=eval_dir,
+            model=cfg.model,
+            min_confidence=cfg.min_confidence,
+            limit=limit,
+            suspect_rejects=suspect_rejects,
         )
         return [
             EvalRow("a", "confocal/none", "approve", "approve", 0.9, 0.2),
@@ -179,7 +205,34 @@ def test_judge_eval_cli(stack, tmp_path, monkeypatch, capsys):  # noqa: F811
 
     monkeypatch.setattr(ops_cli.judge_eval, "evaluate", evaluate)
     assert ops_cli.main(["judge", "eval", "crops", str(tmp_path / "set"), "--limit", "2", "--model", "haiku"]) == 0
-    assert seen == {"dir": tmp_path / "set", "model": "haiku", "min_confidence": 0.5, "limit": 2, "max_suspect": 2}
+    assert seen == {
+        "dir": tmp_path / "set",
+        "model": "haiku",
+        "min_confidence": 0.5,
+        "limit": 2,
+        "suspect_rejects": True,  # the crops gate sends a suspect set back
+    }
     out = capsys.readouterr().out
     assert "a\tconfocal/none\texpected approve\tgot approve\t0.9\t$0.20" in out and "\tgot approve\t0.8\t-" in out
     assert "| confocal/none | 2 | 1 | 1 | 0 | 0 |" in out and "| all | 2 | 1 | 1 | 0 | 0 |" in out
+
+
+def test_release_is_parsed_without_a_manifest(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli.release, "release", lambda tag, **kw: seen.append((tag,)) or 0)
+    monkeypatch.setattr(cli.release, "release_to", lambda tag, target, **kw: seen.append((tag, target)) or 0)
+    monkeypatch.setattr(cli, "load_manifest", lambda _: pytest.fail("release must not load the manifest"))
+    assert cli.main(["release", "v2"]) == 0
+    assert cli.main(["release", "v2", "--to", "h:/r"]) == 0
+    assert seen == [("v2",), ("v2", "h:/r")]
+
+
+def test_release_layout_error_is_one_line(monkeypatch, capsys):
+    from mia_ops.release import LayoutError
+
+    def refuse(tag, **kw):
+        raise LayoutError("not laid out")
+
+    monkeypatch.setattr(cli.release, "release", refuse)
+    with pytest.raises(SystemExit, match="not laid out"):
+        cli.main(["release", "v2"])

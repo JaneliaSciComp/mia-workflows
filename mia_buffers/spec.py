@@ -10,10 +10,19 @@ from __future__ import annotations
 import hashlib
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 class SpecError(ValueError):
@@ -167,12 +176,31 @@ class SamplePlan(_Strict):
     samples: dict[str, PositiveInt] = {}
 
 
+class ContentFilter(_Strict):
+    """A crop must hold an image: not blank, not one value (the crop job's content test)."""
+
+    name: Literal["content"]
+
+
+class LabelledFilter(_Strict):
+    """A crop must hold annotation: a nonzero pixel, a single point being enough, in a label paired with its raw.
+    A raw without a paired label holds none, so a dataset without labels stages nothing."""
+
+    name: Literal["labelled"]
+    min_fraction: float | None = Field(default=None, exclude=True)  # accepted and ignored, see Spec.warnings
+
+
+SampleFilter = Annotated[ContentFilter | LabelledFilter, Field(discriminator="name")]
+
+
 class Sampling(_Strict):
     patch: Patch
     # distinct crops in the whole buffer per split; a dataset stages its weight's share (mia_buffers.plan.crops_for)
     # and the val and test numbers are the lengths of the frozen lists
     crops: dict[str, PositiveInt] = {"train": 100000, "val": 2000, "test": 2000}
     max_crops_per_dataset: PositiveInt = 1024  # in one split; one artifact must stay under limits.stage_bytes
+    # what a crop must hold to be staged, tested by the stage job on its full-resolution box; kept in name order
+    filters: list[SampleFilter] = []
     plan: SamplePlan | None = None  # ignored, see Spec.warnings
     levels: list[int] = [1]
     assume_voxel_size: bool = True  # fill missing voxel sizes from mia_buffers.assume (spec v0.5 §2)
@@ -185,6 +213,14 @@ class Sampling(_Strict):
     dtype: Literal["uint8", "uint16", "bfloat16", "float16", "float32"] = "float32"
     normalize: Normalize = Normalize()
     seed: int = 0
+
+    @field_validator("filters")
+    @classmethod
+    def _filters_named_once_in_name_order(cls, value: list[SampleFilter]) -> list[SampleFilter]:
+        names = [entry.name for entry in value]
+        if repeated := sorted({name for name in names if names.count(name) > 1}):
+            raise ValueError(f"a filter is named once: {', '.join(repeated)}")
+        return sorted(value, key=lambda entry: entry.name)
 
     @field_validator("levels")
     @classmethod
@@ -270,6 +306,10 @@ class Spec(_Strict):
             self.warnings.append("sampling.label_axis is ignored: labels are a separate tensor (spec v0.4 §8.5)")
         if self.sampling.plan is not None:
             self.warnings.append("sampling.plan is ignored: sampling.crops sets the buffer's size")
+        if any(isinstance(entry, LabelledFilter) and entry.min_fraction is not None for entry in self.sampling.filters):
+            self.warnings.append(
+                "sampling.filters: labelled's min_fraction is ignored: any annotation in a crop passes"
+            )
         return self
 
     @model_validator(mode="after")
@@ -309,10 +349,18 @@ class PrepSpec(_Strict):
     catalog: CatalogRef
     records: list[str] = []
     select: Select | None = None
-    again: bool = False  # also give a new round to the datasets that are prepared or that stopped
+    # how the request runs its datasets (spec resume-restart §5): without it each is resumed (one that never ran
+    # starts, one that stopped runs what is left, a prepared one is left alone); with it every one starts over
+    # from scratch, also a prepared one and one at review. A stored request that says `again` reads the same.
+    restart: bool = Field(default=False, validation_alias=AliasChoices("restart", "again"))
     timeout_days: float = Field(default=14, gt=0)  # after this long, the request needs a human
     # each record costs an agent run: more than this many need the number written into the request
     max_records: int = Field(default=25, ge=1, le=MAX_PREP_RECORDS)
+
+    @property
+    def again(self) -> bool:
+        """`restart`, under the name the round's pins carry it by (`PrepPins.again`)."""
+        return self.restart
 
     @model_validator(mode="after")
     def _records_or_select(self) -> PrepSpec:

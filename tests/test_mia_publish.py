@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from mia_data.publish import Conflict, prepared_row, publish, reindex
+from mia_data.publish import SHAPES_FILE, Conflict, prepared_row, publish, raw_shapes, reindex
 
 AGE = 3600
 
@@ -171,6 +171,23 @@ def test_publish_writes_binding_and_manifest_sha(tmp_path):
     assert not list(ds.glob(".tmp-*"))
 
 
+def test_a_conflict_does_not_publish_the_new_binding(tmp_path):
+    """A set that fails its checksum leaves the folder prepared for the earlier binding, or for none."""
+    src, verified = _src(tmp_path)
+    ds, old, new = tmp_path / "ds", tmp_path / "old.yaml", tmp_path / "new.yaml"
+    old.write_text("record: r\n")
+    new.write_text("record: r\nraw: [x]\n")
+    (src / "c2" / "raw.png").write_bytes(b"changed after verify")
+    with pytest.raises(Conflict):
+        publish(ds, src, verified, {}, tmp_max_age_s=AGE, binding=new)  # a fresh folder: no binding at all
+    assert not (ds / "binding.yaml").exists() and prepared_row(ds) is None
+    publish(ds, src, verified[:1], {}, tmp_max_age_s=AGE, binding=old)
+    with pytest.raises(Conflict):
+        publish(ds, src, verified, {}, tmp_max_age_s=AGE, binding=new)
+    assert (ds / "binding.yaml").read_text() == "record: r\n"  # the earlier publication stands
+    assert prepared_row(ds) is not None and json.loads((ds / "manifest.json").read_text())["count"] == 1
+
+
 def test_manifest_without_binding_says_null(tmp_path):
     src, verified = _src(tmp_path)
     publish(tmp_path / "ds", src, verified, {}, tmp_max_age_s=AGE)
@@ -197,6 +214,7 @@ def test_prepared_row_requires_matching_manifest(tmp_path):
         "binding_commit": "4c1d",
         "crops": 2,
         "previews": [],
+        "raw_shapes": None,
     }
     (ds / "binding.yaml").write_bytes(b"snippets_commit: 4c1d\n")  # no record
     reindex(ds, {})
@@ -211,3 +229,41 @@ def test_a_revoked_folder_is_not_prepared(tmp_path):
     assert prepared_row(tmp_path / "f")["state"] == "prepared"
     (tmp_path / "f" / REVOKED_FILE).write_text('{"by": "human:a"}')
     assert prepared_row(tmp_path / "f") is None
+
+
+def test_raw_shapes_reduces_the_crop_report():
+    report = {
+        "source_shapes": {"1": {"axes": "yx", "shape": [817, 686]}, "0": {"axes": "zcyx", "shape": [9, 3, 224, 224]}}
+    }
+    assert raw_shapes(report) == [{"z": 9, "c": 3, "y": 224, "x": 224}, {"y": 817, "x": 686}]
+    for odd in (
+        None,
+        {},
+        {"source_shapes": {}},
+        {"source_shapes": {"1": {"axes": "yx", "shape": [8, 8]}}},  # no raw 0: not every bound array
+        {"source_shapes": {"0": {"axes": "yx", "shape": [8]}}},
+        {"source_shapes": {"0": {"axes": "yx", "shape": [8, "8"]}}},
+        {"source_shapes": {"0": {"axes": "yx", "shape": [8, True]}}},
+        {"source_shapes": {"0": {"axes": "yy", "shape": [8, 8]}}},
+        {"source_shapes": {"0": {"axes": "yx", "shape": [8, 0]}}},
+    ):
+        assert raw_shapes(odd) is None
+
+
+def test_the_bound_shapes_are_saved_for_the_binding_they_were_read_with(tmp_path):
+    ds = tmp_path / "ds"
+    binding = tmp_path / "binding.yaml"
+    binding.write_text("record: r\nraw: [{snippet: a}, {snippet: a}]\n")
+    shapes = [{"y": 224, "x": 224}, {"z": 5, "y": 817, "x": 686}]
+    src, verified = _src(tmp_path)
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE, binding=binding, shapes=shapes)
+    assert prepared_row(ds)["raw_shapes"] == shapes
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE)  # a save without a report keeps what the binding's said
+    assert prepared_row(ds)["raw_shapes"] == shapes
+    binding.write_text("record: r\nraw: [{snippet: b}, {snippet: b}]\n")
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE, binding=binding)  # another binding: they say nothing of it
+    assert prepared_row(ds)["raw_shapes"] is None
+    publish(ds, src, verified, {}, tmp_max_age_s=AGE, shapes=shapes[:1])  # not one shape per bound array
+    assert prepared_row(ds)["raw_shapes"] is None
+    (ds / SHAPES_FILE).write_text("not json")
+    assert prepared_row(ds)["raw_shapes"] is None

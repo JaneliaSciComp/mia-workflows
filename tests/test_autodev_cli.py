@@ -27,10 +27,23 @@ def test_csub_problems_roots_are_path_prefixes():
 
     cfg = SimpleNamespace(agent=SimpleNamespace(allow_hosts=[]), paths=SimpleNamespace(work_root=Path("/x/work2")))
     hosts = ["api.anthropic.com", "claude.ai", "platform.claude.com"]
-    probe = SimpleNamespace(agents=["claude"], allowed_hosts=hosts, allowed_roots=["/x/work"])
+    probe = SimpleNamespace(agents=["claude"], allowed_hosts=hosts, allowed_roots=["/x/work"], env_allow=["MIA_*"])
     assert any("allowed_roots" in m for m in _csub_problems(cfg, probe))
     probe.allowed_roots = ["/x"]
     assert _csub_problems(cfg, probe) == []
+
+
+def test_csub_problems_name_the_transfers_variable():
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from autodev.cli import _csub_problems
+
+    cfg = SimpleNamespace(agent=SimpleNamespace(allow_hosts=[]), paths=SimpleNamespace(work_root=Path("/x/work")))
+    probe = SimpleNamespace(agents=["claude"], allowed_hosts=[], allowed_roots=["/x"], env_allow=["ANTHROPIC_*"])
+    assert _csub_problems(cfg, probe) == [
+        'env not allowed: MIA_HARNESS_TRANSFERS_DIR (broker.toml [broker]: add "MIA_HARNESS_*" to env_allow)'
+    ]
 
 
 async def test_apply_schedule_updates_when_the_server_says_already_registered():
@@ -132,3 +145,37 @@ async def test_apply_schedule_retries_a_server_that_is_still_starting_instead_of
     with pytest.raises(RPCError, match="shard status unknown"):  # still down after the last attempt: surfaces
         await apply_schedule(Client(), "autodev-x-poll", object(), attempts=3)
     assert Handle.deleted == 0
+
+
+async def test_an_autodev_worker_says_what_code_it_started_on(tmp_path):
+    """Incident 2026-11-17: the cleaner compares the code of every worker that reports, and the autodev workers
+    (this repo's and the snippets one) reported nothing, so one on old code was never named."""
+    import asyncio
+
+    from autodev.cli import report_code
+    from mia_core.checkout import code_digest, head_commit
+
+    calls = []
+
+    class Registry:
+        def put_worker(self, service, commit, code):
+            calls.append((service, commit, code))
+
+    report = report_code(Registry(), "snippets", tmp_path)
+    assert isinstance(report, asyncio.Task)
+    await report
+    assert calls == [("snippets", head_commit(), code_digest())]
+    assert report_code(None, "snippets", tmp_path) is None  # a deployment with no buffer-api has nobody to tell
+
+
+def test_every_worker_entry_point_reports_its_code():
+    """A worker that does not report is one the cleaner cannot see."""
+    import inspect
+
+    import autodev.cli
+    import mia_buffers.cli
+    import mia_data.cli
+
+    for module in (autodev.cli, mia_data.cli, mia_buffers.cli):
+        source = inspect.getsource(module)
+        assert "Worker(" in source and "report_worker(" in source, module.__name__
