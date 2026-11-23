@@ -2091,6 +2091,10 @@ class MiaPrep:
             + ([f"not prepared after {pins.timeout_days:g} days: {', '.join(waiting)}"] if waiting else [])
         )
         await self._stage("needs-human", detail)
+        # buffer-api tells a request at `needs-human` of a dataset that settles: one that settled between the look
+        # above and that write is seen by a look now
+        if workflow.patched("prep-stuck-look"):
+            self.look_again = True
 
 
 @workflow.defn(name="MiaCleaner")

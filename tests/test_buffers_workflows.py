@@ -2217,17 +2217,19 @@ async def test_prep_looks_at_every_dataset_once_more_before_it_rests(env):
 
 
 async def test_prep_at_needs_human_moves_to_done_when_told_its_datasets_settled(env):
-    """A request whose round ended `needs-human` is told (`recheck`) when one of its datasets is shelved or becomes
-    prepared: it stays while any is neither, and is done once each is."""
+    """A request whose round ended `needs-human` looks at its datasets once as it rests (one may have settled between
+    its last look and the stage write buffer-api watches) and is told (`recheck`) when one of them is shelved or
+    becomes prepared: it stays while any is neither, and is done once each is."""
     m = PrepMocks(
         outcomes={"a": PrepOutcome("a", "prepared"), "b": PrepOutcome("b", "prepared")},
-        statuses={"a": "prepared", "b": "prepared", "c": ["needs-human", "needs-human", "shelved"]},
+        statuses={"a": "prepared", "b": "prepared", "c": ["needs-human"] * 4 + ["shelved"]},
     )
     async with prep_started(env, m) as h:
         await polled(env, m, 1)
         await prep_settled(h, m, "needs-human")
+        await until(lambda: len(m.of("prep_status")) == 3, m=m)  # the last look of the round, the look at rest
         await h.signal(workflows.MiaPrep.recheck)  # c still needs a human
-        await until(lambda: len(m.of("prep_status")) == 2, m=m)
+        await until(lambda: len(m.of("prep_status")) == 4, m=m)
         assert m.stages == ["requested", "needs-human"]
         await h.signal(workflows.MiaPrep.recheck)  # c was shelved
         await prep_settled(h, m, "done")
@@ -2235,7 +2237,7 @@ async def test_prep_at_needs_human_moves_to_done_when_told_its_datasets_settled(
         await h.signal(workflows.MiaPrep.recheck)  # done already: nothing is read
         await h.signal(workflows.MiaPrep.go, ev("go", "21"))  # a redelivery, sent to see the recheck was handled
         await asyncio.sleep(0.3)
-    assert m.of("prep_status") == [(["c"],), (["a", "b", "c"],), (["a", "b", "c"],)]
+    assert m.of("prep_status") == [(["c"],), *[(["a", "b", "c"],)] * 4]
     detail = "2 of 3 requested datasets are prepared, 1 shelved. prepared: `a`, `b`; shelved: `c`"
     assert m.of("set_prep_stage")[-1] == ("done", detail)
     assert state.stage == "done" and state.settled == {"a": "prepared", "b": "prepared", "c": "shelved"}
@@ -2267,11 +2269,13 @@ async def test_prep_a_failed_nudge_settles_that_record_alone(env):
     async with prep_started(env, m) as h:
         await polled(env, m, 1)
         await prep_settled(h, m, "needs-human")
+        await until(lambda: len(m.of("prep_status")) == 3, m=m)
         state = await h.query(workflows.MiaPrep.status)
     ((_, outcomes),) = m.of("comment_prep")
     assert [(o.record, o.outcome) for o in outcomes] == [("a", "nudged"), ("b", "unknown"), ("c", "done-unpublished")]
     assert "unclear modality" in outcomes[1].note
-    assert m.of("prep_status") == [(["a"],), (["a", "b", "c"],)]  # the poll, then the last look at every record
+    # the poll, the last look at every record, the look as it rests
+    assert m.of("prep_status") == [(["a"],), (["a", "b", "c"],), (["a", "b", "c"],)]
     detail = m.of("set_prep_stage")[-1][1]
     assert "`b`, `c`" in detail and "unclear modality" not in detail  # the outcomes table has each one's reason
     assert "`a`" not in detail and state.settled == {"a": "prepared", "b": "needs-human", "c": "needs-human"}
