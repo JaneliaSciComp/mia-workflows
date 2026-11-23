@@ -481,6 +481,7 @@ export async function viewPreparation() {
       ["needs-human", states["needs-human"] === 1 ? "needs a human" : "need a human"],
       ["prepared", "prepared"],
       ["revoked", "revoked"],
+      ["shelved", "shelved"],
       ["unprepared", "unprepared"],
     ].map(([state, words]) => el("a", { href: "#datasets?state=" + state }, `${num(states[state] || 0)} ${words}`)),
   );
