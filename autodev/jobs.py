@@ -142,8 +142,12 @@ class CsubJobs:
                 if os.path.realpath(getattr(status, "cwd", None) or "/nonexistent") == workspace
             ]
             # same workspace (unique per job): submitted, then the worker died before writing the id file
-            answer = None if running else self.client.submit(request)
-            job_id = running[0].job_id if running else answer.job_id
+            answer = None
+            if running:
+                job_id = running[0].job_id
+            else:
+                answer = self.client.submit(request)
+                job_id = answer.job_id
             write_atomic(id_file, job_id)
             write_submitted(
                 self.work_root,
