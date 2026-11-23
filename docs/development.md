@@ -1144,7 +1144,9 @@ buffer keeps no trace of a peek: the draw has a generator of its own, no consume
 empty answer is counted, the idle clock does not move, and a `val` or `test` crop is one of the split's
 candidates, not a row of its frozen list (`tests/test_buffers_peek.py`). It runs the checkout as it stands, not
 the snapshot the buffer's round pinned. The page shows it on the serve step, under the two lines a training run
-writes: a split, **Next crop**, and nothing asked until the button is pressed.
+writes: a split, **Next crop**, and nothing asked until the button is pressed. A crop that is drawn asks for the
+one after it of the same split (`ahead` in `peek.js`), so the next press shows a crop without waiting for a
+process.
 
 ## The page
 

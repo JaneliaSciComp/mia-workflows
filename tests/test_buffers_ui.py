@@ -2060,8 +2060,9 @@ def test_lengths_read_in_the_unit_that_fits() -> None:
 
 
 def test_next_crop_asks_for_a_peek_of_the_chosen_split_and_draws_it() -> None:
-    """Nothing is asked until Next crop is pressed (a peek costs the service a process); the panel of a buffer is
-    one node, so the crop stays while the page redraws the step; a failure is said in the panel."""
+    """Nothing is asked until Next crop is pressed (a peek costs the service a process); a crop that is drawn
+    brings the one after it, of the same split, which the next press shows without waiting; the panel of a buffer
+    is one node, so the crop stays while the page redraws the step; a failure is said in the panel."""
     out = run_js(
         "const asked = []; let status = 200;"
         "globalThis.fetch = async path => { asked.push(path); return { ok: status < 400, status, statusText: '',"
@@ -2072,17 +2073,20 @@ def test_next_crop_asks_for_a_peek_of_the_chosen_split_and_draws_it() -> None:
         " await settle(); texts.push(textOf(panel)); return during; };"
         "const during = await press(); const pictures = walk(panel).filter(n => n.tag === 'img').length;"
         "walk(panel).find(n => n.tag === 'select').value = 'val'; await press();"
-        "status = 502; await press(); status = 204; await press();"
+        "status = 502; await press(); await press(); status = 204; await press();"
         "print({ before, asked, during, pictures, texts, same: peekPanel('b/1') === panel, other: peekPanel('c') !== panel,"
         " enabled: !byText(panel, 'Next crop').disabled });",
         {"peek.js": "peekPanel"},
         PEEK,
     )
     assert out["before"] == 0 and out["during"] == "Reading…" and out["pictures"] == 8 and out["enabled"]
-    assert out["asked"] == ["/buffers/b%2F1/peek?split=train"] + ["/buffers/b%2F1/peek?split=val"] * 3
+    # train and the one after it; val, the one after it (shown by the third press, whose own next one fails), the
+    # press that asks again and fails, and the one that finds nothing
+    assert out["asked"] == ["/buffers/b%2F1/peek?split=train"] * 2 + ["/buffers/b%2F1/peek?split=val"] * 5
     assert all("nothing is counted as drawn" in text for text in out["texts"])
-    assert "No crop: harness tensorize exited 2" in out["texts"][2]
-    assert "Nothing is servable in val yet." in out["texts"][3]
+    assert "No crop" not in out["texts"][2]
+    assert "No crop: harness tensorize exited 2" in out["texts"][3]
+    assert "Nothing is servable in val yet." in out["texts"][4]
     assert out["same"] and out["other"]
     serve = squeezed(FILES["flow.js"])
     assert has("peekPanel(version.id)", serve) and resolve("GET", "/buffers/x/peek") == "read"

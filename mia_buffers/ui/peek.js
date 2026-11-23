@@ -82,6 +82,10 @@ export function peekView(peek) {
 let kept = { buffer: null, node: null };
 export function peekPanel(buffer) {
   if (kept.buffer === buffer) return kept.node;
+  // a peek costs the service a process of about a second, so the crop after the one on screen is asked for as soon
+  // as that one is drawn: the next press shows it at once. `ahead` is that answer and the split it is of.
+  let ahead = null;
+  const ask = wanted => api(`/buffers/${encodeURIComponent(buffer)}/peek?split=${wanted}`);
   const shown = el("div", {}),
     split = el(
       "select",
@@ -98,11 +102,21 @@ export function peekPanel(buffer) {
           button.disabled = true;
           button.replaceChildren("Reading…");
           const wanted = SPLITS.includes(split.value) ? split.value : SPLITS[0];
+          const answer = ahead?.split === wanted ? ahead.answer : ask(wanted);
+          ahead = null;
           try {
-            const peek = await api(`/buffers/${encodeURIComponent(buffer)}/peek?split=${wanted}`);
+            const peek = await answer;
             shown.replaceChildren(
               peek ? peekView(peek) : el("div", { class: "empty" }, `Nothing is servable in ${wanted} yet.`),
             );
+            if (peek) {
+              const next = ask(wanted);
+              ahead = { split: wanted, answer: next };
+              // one that failed is dropped, so the press asks again
+              next.catch(() => {
+                if (ahead?.answer === next) ahead = null;
+              });
+            }
           } catch (e) {
             shown.replaceChildren(el("div", { class: "notice" }, `No crop: ${e.message}`));
           }
