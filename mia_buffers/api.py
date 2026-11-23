@@ -2541,6 +2541,8 @@ class BufferService:
         # diverged sequence, and a re-PUT that drops `samples` turns the volume legacy, so its new rows are uniform
         # centres over a staged box. Freeze the candidate lists per list if a re-planned record must be re-registered.
         with self._lock:
+            for revoked in self.ledger.quarantined_volumes(buffer):  # never served again: its frozen rows leave too
+                self.ledger.drop_frozen_of(buffer, revoked)
             frozen = self.ledger.frozen(buffer, split)
             # a frozen row stays addressable: a volume flagged missing drops its candidates from `capacity`, not rows
             size = max(size, len(frozen))

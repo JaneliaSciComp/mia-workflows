@@ -1345,6 +1345,27 @@ def test_a_quarantined_volume_is_never_served_nor_counted(tmp_path):
     assert call(s, "GET", "/buffers/b/next", {"n": "2", "consumer": cid})[0] == 200
 
 
+def test_a_quarantined_volume_leaves_the_frozen_lists_while_another_serves_them(tmp_path):
+    """Two volumes share the val list; one is quarantined while the other keeps the split open: the rows frozen
+    from the quarantined one are not handed out and the list closes up around the other volume's rows in their
+    order (here all of its candidates, so the list is exhausted at four)."""
+    s = svc(tmp_path)
+    call(s, "PUT", "/buffers/b", payload={**CFG, "split_sizes": {"val": 8}})
+    approve(s)
+    call(s, "PUT", "/buffers/b/volumes/a", payload={**body("a"), "samples": {"val": CANDS}, "artifact": "art1"})
+    call(s, "PUT", "/buffers/b/volumes/c", payload={**body("c"), "samples": {"val": CANDS}, "artifact": "art2"})
+    cid = call(s, "POST", "/buffers/b/consumers", payload={**CONSUMER, "split": "val"})[1]["consumer_id"]
+    whole = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "8", "consumer": cid})[1]
+    assert whole["size"] == 8 and {d["volume"] for d in whole["descriptors"]} == {"a", "c"}
+    call(s, "PUT", "/assets/staged/art1", payload={"quarantined": True, "quarantined_at": 1.0})
+    status, rest = call(s, "GET", "/buffers/b/split/val", {"from": "0", "n": "8", "consumer": cid})[:2]
+    kept = [d for d in whole["descriptors"] if d["volume"] == "c"]
+    assert status == 200 and rest["size"] == 4 and rest["exhausted"] is True  # c's candidates cap the list
+    assert [d["volume"] for d in rest["descriptors"]] == ["c"] * 4
+    assert [d["seq"] for d in rest["descriptors"]] == [0, 1, 2, 3]
+    assert [d["candidate"] for d in rest["descriptors"]] == [d["candidate"] for d in kept]
+
+
 # --- subjects: what the page acts on (spec webapp-actions §4.1, §8) ---
 
 

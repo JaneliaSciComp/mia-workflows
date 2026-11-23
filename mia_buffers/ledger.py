@@ -1152,6 +1152,8 @@ class Ledger:
             parsed = json.loads(descriptor)
             if parsed.get("volume") != volume_id:
                 kept.setdefault(split, []).append(parsed)
+        if sum(len(descriptors) for descriptors in kept.values()) == len(rows):  # none of its rows: nothing to rewrite
+            return
         for split in {split for split, _idx, _descriptor in rows}:
             db.execute("DELETE FROM frozen WHERE buffer = ? AND split = ?", (buffer, split))
             db.executemany(
@@ -1170,6 +1172,12 @@ class Ledger:
             }
             for volume in self.volumes(buffer)
         ]
+
+    def drop_frozen_of(self, buffer: str, volume_id: str) -> None:
+        """Take the volume's rows out of the buffer's frozen lists while it stays registered: a quarantined volume's
+        rows leave when a list is next served, before the buffer's round unregisters it."""
+        with self._transaction() as db:
+            self._drop_frozen_of(db, buffer, volume_id)
 
     def quarantined_volumes(self, buffer: str) -> list[str]:
         """The ids of the buffer's volumes whose staged artifact is quarantined."""
