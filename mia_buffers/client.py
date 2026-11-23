@@ -49,8 +49,20 @@ class BufferClient:
     """The §5 calls a consumer may make."""
 
     def __init__(self, url: str, buffer: str, *, timeout: float = 30.0):
-        self.url, self.buffer = url.rstrip("/"), buffer
-        self._http = httpx.Client(base_url=self.url, timeout=timeout)
+        self.url, self.buffer, self.timeout = url.rstrip("/"), buffer, timeout
+        self._pool: tuple[int, httpx.Client] | None = None  # (pid, its connections)
+
+    @property
+    def _http(self) -> httpx.Client:
+        """This process's connections, opened on first use. A DataLoader worker gets its own: a forked one never
+        shares its parent's sockets, and a spawned one is sent the client without any."""
+        pid = os.getpid()
+        if self._pool is None or self._pool[0] != pid:
+            self._pool = (pid, httpx.Client(base_url=self.url, timeout=self.timeout))
+        return self._pool[1]
+
+    def __getstate__(self) -> dict:
+        return {**self.__dict__, "_pool": None}
 
     def _get(self, path: str, split: str, **params: Any) -> httpx.Response:
         try:
