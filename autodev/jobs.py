@@ -13,6 +13,7 @@ import inspect
 import logging
 import os
 import re
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,7 @@ from mia_core.jobrecord import RECORDS_DIR, address, write_finished, write_submi
 from mia_core.locks import LockLost
 from mia_core.transfers import TRANSFERS_DIR, TRANSFERS_ENV
 from mia_core.untrusted import read_untrusted as read_untrusted
+from mia_core.untrusted import write_atomic
 
 from .models import JobOutcome
 
@@ -77,6 +79,7 @@ class CsubJobs:
         self.session, self.id_dir, self.work_root = session, Path(id_dir), work_root
         self._factory = client_factory or (lambda: csub_client(session))
         self._client = None
+        self._submitting: dict[str, threading.Lock] = {}  # per job key: see `_submit_once`
         self._sleep, self._poll_s = sleep, poll_s
         # Given a record's address, the rows of the transfers its job made and the service; a worker sets it.
         self.transfers_sink: Callable[[str, list[dict], str], Any] | None = None
@@ -103,13 +106,7 @@ class CsubJobs:
         if callable(spec):
             built = spec()
             spec = await built if inspect.isawaitable(built) else built
-        workspace = os.path.realpath(spec.workspace)
         self._keep_records_apart(key, spec)
-        running = [
-            status
-            for status in await asyncio.to_thread(self.client.status)
-            if os.path.realpath(getattr(status, "cwd", None) or "/nonexistent") == workspace
-        ]
         request = {
             "command": spec.command,
             "shell": True,
@@ -128,28 +125,41 @@ class CsubJobs:
             ],
         }
         request["env"] = {**spec.env, TRANSFERS_ENV: f"{spec.workspace}/{TRANSFERS_DIR}"}
-        answer = None
-        if running:  # same workspace (unique per job): submitted, then the worker died before writing the id file
-            job_id = running[0].job_id
-        else:
-            answer = await asyncio.to_thread(self.client.submit, request)
-            job_id = answer.job_id
-        id_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = id_file.with_suffix(".tmp")
-        tmp.write_text(job_id)
-        tmp.replace(id_file)
-        await asyncio.to_thread(
-            write_submitted,
-            self.work_root,
-            spec.workspace,
-            service=self.session,
-            key=key,
-            job_id=job_id,
-            request=request,
-            submit=answer,
-            prompt_file=spec.prompt_file,
-            transcript_file=spec.transcript_file,
-        )
+        return await asyncio.to_thread(self._submit_once, key, id_file, spec, request)
+
+    def _submit_once(self, key: str, id_file: Path, spec: JobSpec, request: dict) -> str:
+        """Look for the key's job, submit if there is none, and write the id file and the record, as one step no
+        other call for the key runs beside. It runs in a thread to its end: an activity attempt that was cancelled
+        while csub answered still records the job it started, and the attempt after it waits here and finds it."""
+        # ponytail: one lock object per key for the worker's life; drop each after its write if that ever weighs.
+        with self._submitting.setdefault(key, threading.Lock()):
+            if id_file.exists():
+                return id_file.read_text().strip()
+            workspace = os.path.realpath(spec.workspace)
+            running = [
+                status
+                for status in self.client.status()
+                if os.path.realpath(getattr(status, "cwd", None) or "/nonexistent") == workspace
+            ]
+            # same workspace (unique per job): submitted, then the worker died before writing the id file
+            answer = None
+            if running:
+                job_id = running[0].job_id
+            else:
+                answer = self.client.submit(request)
+                job_id = answer.job_id
+            write_atomic(id_file, job_id)
+            write_submitted(
+                self.work_root,
+                spec.workspace,
+                service=self.session,
+                key=key,
+                job_id=job_id,
+                request=request,
+                submit=answer,
+                prompt_file=spec.prompt_file,
+                transcript_file=spec.transcript_file,
+            )
         return job_id
 
     def _keep_records_apart(self, key: str, spec: JobSpec) -> None:

@@ -172,8 +172,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   it). An action can ask a workflow to do something; it cannot write what a workflow found, which stays behind the
   worker token.
 - **The page has no build step.** `mia_buffers/ui/` is `index.html`, `app.css` and ES modules the browser loads as
-  they are. A module imports only modules below it, never in a circle (the table in `docs/development.md`, The
-  page); the tests import the modules under node, so a module must not touch the DOM when it is imported beyond
+  they are. A module imports only modules above it in the table of `docs/development.md` (The page), never in a
+  circle; the tests import the modules under node, so a module must not touch the DOM when it is imported beyond
   what `dom.js` does. What a job or a record wrote is inserted as text, never parsed as HTML.
 - **Only a person's click approves a host.** Brokers read `<csub.policy_dir>/broker.toml`, generated from the operator's
   `csub.base_policy` plus `approved-hosts.jsonl`, which buffer-api alone appends to, on a start action, with hosts

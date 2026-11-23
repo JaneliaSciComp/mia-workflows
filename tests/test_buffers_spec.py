@@ -23,7 +23,17 @@ def test_example_spec_loads():
     assert spec.select.where.license.in_ == ["CC0-1.0", "CC-BY-3.0", "CC-BY-4.0", "MIT", "BSD-3-Clause"]
     assert spec.sampling.weighting.temperature == 0.5
     assert spec.splits.fractions == {"train": 0.8, "val": 0.1, "test": 0.1}
-    assert spec.warnings == ["sampling.label_axis is ignored: labels are a separate tensor (spec v0.4 §8.5)"]
+    assert spec.warnings == [
+        "sampling.label_axis is ignored: labels are a separate tensor (spec v0.4 §8.5)",
+        "set and without effect (nothing reads them): sampling.emit, cache",
+    ]
+    quiet = spec.model_dump(by_alias=True, exclude={"warnings", "cache"})
+    quiet["sampling"] = {"patch": quiet["sampling"]["patch"], "dtype": "float32"}  # the default, said aloud
+    assert Spec.model_validate(quiet).warnings == []
+    quiet["sampling"] |= {"dtype": "uint8", "resample": {"target_voxel_size": {"x": 8}}}
+    assert Spec.model_validate(quiet).warnings == [
+        "set and without effect (nothing reads them): sampling.resample, sampling.dtype"
+    ]
 
 
 def _merge(base: dict, edit: dict) -> dict:

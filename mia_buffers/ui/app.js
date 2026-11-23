@@ -191,7 +191,9 @@ export async function boot() {
     }),
   );
   for (const id of ["subjectBody", "overviewBody"])
-    $(id).addEventListener("input", () => {
+    $(id).addEventListener("input", e => {
+      // the Overview reloads its tables in place, so a search typed there holds nothing back; a note does
+      if (id === "overviewBody" && e.target.type === "search") return;
       $(id).dataset.dirty = "1";
     });
   $("lookup").addEventListener("keydown", e => {

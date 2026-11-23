@@ -1,3 +1,4 @@
+import asyncio
 import gzip
 import json
 import time
@@ -21,6 +22,20 @@ async def test_submit_once_per_key(tmp_path):
     assert (tmp_path / "ids" / "k1.id").read_text() == "777"
     fresh = CsubJobs("dep", tmp_path / "ids", client_factory=lambda: pytest.fail("client used"))
     assert await fresh.submit("k1", spec) == "777" and len(fake.submitted) == 1
+
+
+async def test_overlapping_submits_of_one_key_start_one_job(tmp_path):
+    """An attempt cancelled while csub answers and the attempt after it: the second waits and finds the id."""
+
+    class SlowCsub(FakeCsub):
+        def submit(self, spec):
+            time.sleep(0.2)  # both calls are past the id-file check before either has an answer
+            return super().submit(spec)
+
+    fake, spec = SlowCsub(), JobSpec("j", "true", str(tmp_path / "ws"), 10)
+    jobs = _jobs(tmp_path, fake)
+    assert await asyncio.gather(jobs.submit("k1", spec), jobs.submit("k1", spec)) == ["777", "777"]
+    assert len(fake.submitted) == 1
 
 
 async def test_a_spec_factory_may_be_sync_or_async(tmp_path):

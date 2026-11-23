@@ -230,6 +230,10 @@ class Sampling(_Strict):
         return value
 
 
+# Sampling fields the grammar accepts and nothing reads: a spec that changes one is told so (Spec.warnings).
+UNUSED_SAMPLING = ("output_axes", "missing_axes", "resample", "emit", "dtype")
+
+
 class Splits(_Strict):
     fractions: dict[str, float]
     stratify_by: list[str] = []
@@ -310,6 +314,13 @@ class Spec(_Strict):
             self.warnings.append(
                 "sampling.filters: labelled's min_fraction is ignored: any annotation in a crop passes"
             )
+        unused = [
+            f"sampling.{name}"
+            for name in UNUSED_SAMPLING
+            if getattr(self.sampling, name) != Sampling.model_fields[name].default
+        ]
+        if unused := [*unused, *(["cache"] if self.cache is not None else [])]:
+            self.warnings.append(f"set and without effect (nothing reads them): {', '.join(unused)}")
         return self
 
     @model_validator(mode="after")

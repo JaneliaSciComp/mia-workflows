@@ -695,6 +695,7 @@ async def test_no_job_is_submitted_while_the_operator_has_paused(tmp_path, monke
         with pytest.raises(ApplicationError) as refused:
             await submit(request)
         assert refused.value.non_retryable and "paused by the operator" in str(refused.value)
+    assert await a.poll_issues() == []  # asks GitHub nothing (no client here): a `go` waits for `mia resume`
 
 
 @respx.mock

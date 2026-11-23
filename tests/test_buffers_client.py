@@ -1,5 +1,6 @@
 """BufferClient and the local-mode BufferDataset against a real buffer-api in a thread; tensorize is faked."""
 
+import pickle
 import threading
 from pathlib import Path
 
@@ -132,6 +133,16 @@ def test_worker_reregisters_on_pid_change(buffer_server, monkeypatch):
     monkeypatch.setattr(client_module.os, "getpid", lambda: 999_999)
     ds[1]
     assert [c["pid"] for c in consumers(buffer_server)][-1] == 999_999 and len(consumers(buffer_server)) == 2
+
+
+def test_a_spawned_worker_gets_the_dataset_and_its_own_connections(buffer_server, monkeypatch):
+    ds = BufferDataset(buffer_server, "b", "train", n_samples=5, tensorizers=SNAP, prefetch=2)
+    ds[0]
+    copy = pickle.loads(pickle.dumps(ds))  # what a DataLoader with the spawn start method sends each worker
+    assert copy.client._pool is None and copy[1]["img"].shape == ds[1]["img"].shape
+    parent = ds.client._http
+    monkeypatch.setattr(client_module.os, "getpid", lambda: 999_999)  # a forked worker
+    assert ds.client._http is not parent
 
 
 def test_meta_has_no_none_values(buffer_server, monkeypatch):

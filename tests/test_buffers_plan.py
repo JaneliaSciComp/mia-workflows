@@ -131,6 +131,7 @@ def test_valid_2d_plan(spec_2d):
     assert any(rule.startswith("largest raw array under min_size_voxels") for rule in plan.excluded)
     assert plan.warnings == [
         "sampling.label_axis is ignored: labels are a separate tensor (spec v0.4 §8.5)",
+        "set and without effect (nothing reads them): sampling.emit, cache",
         "dedup.by content_hash is not available; doi used",
     ]
 
