@@ -1164,16 +1164,18 @@ class Activities:
         """The stage job's stage.json, reduced; tolerant of any shape. An ok build naming the expected artifact id is
         published: the building directory renamed to the final one (when that exists already, an identical pyramid
         won: the build is removed and the final one reused). A failed or foreign build stays where it is, for the
-        keeper's `.building-*` rule, and so does one whose check never ran: `harness stage` writes `ok` before
-        `harness check-stage` records its `verification`, so a build with the one and not the other is a job that
-        ended between the two. Idempotent on retry."""
+        keeper's `.building-*` rule. A pyramid is ok only once `harness check-stage` passed it: `harness stage`
+        writes `ok` with a `verification` whose `ok` is null, and the check sets it true, so a report with the one
+        and not the other is a job that ended between the two; neither a build nor a published pyramid with such a
+        report is served. Idempotent on retry."""
         final, building = self._staged_dir(round_id, record), self._building_dir(round_id, record, rebuild)
         report = _stage_json(building if building.exists() else final)
-        if isinstance(report, dict) and report.get("ok") is True and building.exists():
-            if isinstance(report.get("verification"), dict):
-                report = await asyncio.to_thread(self._publish, round_id, record, report, building, final, rebuild > 0)
-            else:
+        if isinstance(report, dict) and report.get("ok") is True:
+            verification = report.get("verification")
+            if not (isinstance(verification, dict) and verification.get("ok") is True):
                 report = {**report, "ok": False, "errors": [UNCHECKED_BUILD, *texts(report.get("errors"))]}
+            elif building.exists():
+                report = await asyncio.to_thread(self._publish, round_id, record, report, building, final, rebuild > 0)
         if not isinstance(report, dict):
             return StageResult(False, errors=["stage.json is missing, unreadable or not a JSON object"])
         fetched = report.get("bytes_fetched")

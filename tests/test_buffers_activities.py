@@ -1434,15 +1434,20 @@ async def test_read_stage_leaves_a_failed_build_for_the_keeper(acts, server):
 
 
 async def test_read_stage_leaves_an_unchecked_build_unpublished(acts, server):
-    """`harness stage` wrote `ok: true`, the job ended before `harness check-stage` recorded its check: no pyramid
-    is published for later rounds to reuse; the build stays for the `.building-*` sweep."""
+    """`harness stage` wrote `ok: true` with its geometry check and a null verification `ok`; the job ended before
+    `harness check-stage` set it true: no pyramid is published for later rounds to reuse, the build stays for the
+    `.building-*` sweep, and a pyramid published with such a report before is not reused either."""
     await planned_and_bound(acts)
     await acts.prepare_stage(7, ROUND, U937)
-    building = acts._building_dir(ROUND, U937)
-    staged_into(building, staged_dir(acts, U937).name, verification=None)
+    building, final = acts._building_dir(ROUND, U937), staged_dir(acts, U937)
+    unchecked = {"checks": {"geometry": {"mismatches": []}}, "ok": None, "harness_commit": None}
+    staged_into(building, final.name, verification=unchecked)
     result = await acts.read_stage(ROUND, U937)
     assert not result.ok and result.errors[0].startswith("stage.json says ok but records no check")
-    assert (building / "stage.json").is_file() and not staged_dir(acts, U937).exists()
+    assert (building / "stage.json").is_file() and not final.exists()
+    building.rename(final)  # published before the check was required: a reuse reads it
+    result = await acts.read_stage(ROUND, U937)
+    assert not result.ok and result.errors[0].startswith("stage.json says ok but records no check")
 
 
 async def test_read_stage_of_a_failed_stage_leaves_the_raw_row_ready_with_its_bytes(acts, server):
