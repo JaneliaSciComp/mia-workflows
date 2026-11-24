@@ -17,7 +17,7 @@ from mia_buffers.api import BufferService, ledger_path, make_server, open_ledger
 from mia_buffers.dispatch import DispatchError
 from mia_buffers.hosts import HostCheck
 from mia_buffers.ledger import Ledger
-from mia_buffers.plan import load_records
+from mia_buffers.plan import NO_LABELS, load_records
 from mia_core.hosts import generate_policy
 from mia_core.jobrecord import record_path
 from mia_core.locks import LockDir
@@ -425,6 +425,16 @@ def test_records_datasets_and_plan(tmp_path):
     out = call(s, "POST", "/plan", payload={"spec": text})[1]
     by_id = {row["id"]: row for row in out["rows"]}
     assert by_id[U937]["prepared"] == "prepared" and by_id[U937]["admitted"] and by_id[U937]["weight"] > 0
+    labelled = yaml.safe_load(text)  # under `labelled`, a dataset whose binding reads no label is left out
+    labelled["sampling"]["filters"] = [{"name": "labelled"}]
+
+    def fit_of_u937() -> dict:
+        rows = call(s, "POST", "/plan", payload={"spec": yaml.safe_dump(labelled)})[1]["rows"]
+        return next(row["fit"] for row in rows if row["id"] == U937)
+
+    assert fit_of_u937()["ok"]
+    call(s, "PUT", f"/datasets/{U937}", payload={"raw_labels": [0]})
+    assert fit_of_u937()["reason"] == NO_LABELS  # the dataset's labels changed: not the plan kept from before
     status, out, _ = call(s, "POST", "/plan", payload={"spec": SPEC_2D_TEXT})  # the fixture's own ref is not synced
     assert status == 409 and "mia-buffers catalog sync --ref ab6a013d5da39c80651ddc845915d034b2eae82a" in out["error"]
     assert call(s, "POST", "/plan", payload={"spec": "schema_version: 2"})[0] == 422
