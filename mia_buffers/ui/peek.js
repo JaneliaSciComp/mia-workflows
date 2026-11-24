@@ -164,10 +164,10 @@ export function peekPanel(buffer) {
     el(
       "div",
       { class: "peekbar" },
+      el("span", {}, "Simulated buffer drawing:"),
       el("label", {}, "split ", split),
       back,
       button,
-      el("span", { class: "sub" }, "A peek: no consumer is registered and nothing is counted as drawn."),
     ),
     shown,
   );

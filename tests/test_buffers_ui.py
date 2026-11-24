@@ -2073,7 +2073,7 @@ def test_next_crop_asks_for_a_peek_of_the_chosen_split_and_draws_it() -> None:
     # train and the one after it; val, the one after it (shown by the third press, whose own next one fails), the
     # press that asks again and fails, and the one that finds nothing
     assert out["asked"] == ["/buffers/b%2F1/peek?split=train"] * 2 + ["/buffers/b%2F1/peek?split=val"] * 5
-    assert all("nothing is counted as drawn" in text for text in out["texts"])
+    assert all(text.startswith("Simulated buffer drawing:") for text in out["texts"])
     assert "No crop" not in out["texts"][2]
     assert "No crop: harness tensorize exited 2" in out["texts"][3]
     assert "Nothing is servable in val yet." in out["texts"][4]
