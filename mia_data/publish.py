@@ -247,11 +247,26 @@ def _bound_shapes(dataset_dir: Path, binding_hash: str, binding: dict) -> list[d
     return shapes if shapes and isinstance(bound, list) and len(shapes) == len(bound) else None
 
 
+def _raw_labels(binding: dict) -> list[int] | None:
+    """How many label arrays the binding pairs with each raw array it reads, in the binding's order; None when it
+    does not list its arrays the way mia-data writes them."""
+    raw, labels = binding.get("raw"), binding.get("labels") or []
+    if not (isinstance(raw, list) and raw and isinstance(labels, list)):
+        return None
+    counts = [0] * len(raw)
+    for label in labels:
+        index = label.get("pairs_with") if isinstance(label, dict) else None
+        if type(index) is not int or not 0 <= index < len(raw):
+            return None
+        counts[index] += 1
+    return counts
+
+
 def prepared_row(dataset_dir: Path) -> dict | None:
     """The registry row of a prepared dataset folder, or None: prepared means a binding.yaml naming its record and
     a manifest.json whose binding sha256 is that file's (a newer binding with crops not yet re-verified is not).
     `raw_shapes` is always in the row, None when the folder does not say them for this binding, so a row never
-    keeps the shapes of an earlier one."""
+    keeps the shapes of an earlier one; `raw_labels` (`_raw_labels` of the binding) likewise."""
     if (
         dataset_dir / REVOKED_FILE
     ).is_file():  # revoked (spec autonomous-gates §6): never prepared, whatever is on disk
@@ -288,4 +303,5 @@ def prepared_row(dataset_dir: Path) -> dict | None:
         "previews": previews,
         "published_at": published.isoformat(),
         "raw_shapes": _bound_shapes(dataset_dir, binding_hash, binding),
+        "raw_labels": _raw_labels(binding),
     }

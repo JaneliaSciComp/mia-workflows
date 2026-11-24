@@ -66,7 +66,7 @@ from .hosts import HostCheck, Needed
 from .jobspec import levels_key
 from .ledger import BOARD_STATUSES, EVENT_KINDS, Ledger, head_of
 from .peek import Peeker, PeekFailed
-from .plan import bound_shapes, build_plan
+from .plan import bound_labels, bound_shapes, build_plan
 from .sampler import Level, Volume, capacity, draw, draw_frozen, fits, servable
 from .spec import SpecError, load_prep_text, load_spec_text, spec_text_hash
 from .specmap import facts
@@ -2317,18 +2317,21 @@ class BufferService:
         ref = spec.catalog.ref
         rows = self.ledger.datasets()
         states = {row["id"]: row.get("state", "unprepared") for row in rows}
-        bound = bound_shapes([row for row in rows if row.get("state") == "prepared"])
+        ready = [row for row in rows if row.get("state") == "prepared"]
+        bound, labels = bound_shapes(ready), bound_labels(ready)
         # the designer asks for the same plan once per page turn and sort: keep the last one while nothing it
-        # depends on has changed (the spec's text, which names the ref, every dataset's state and the shapes of
-        # the arrays the prepared ones' bindings read)
-        key = (text, frozenset(states.items()), json.dumps(bound, sort_keys=True))
+        # depends on has changed (the spec's text, which names the ref, every dataset's state, and the shapes and
+        # labels of the arrays the prepared ones' bindings read)
+        key = (text, frozenset(states.items()), json.dumps([bound, labels], sort_keys=True))
         kept_for, plan = self._last_plan  # read once: another request may replace it meanwhile
         if kept_for != key:
             records = self.ledger.records(ref)
             if not records:
                 raise HttpError(409, f"catalog ref {ref} is not synced; run: mia-buffers catalog sync --ref {ref}")
             prepared = {record for record, state in states.items() if state == "prepared"}
-            plan = build_plan(spec, spec_text_hash(text), ref, records, prepared=prepared, bound=bound).to_dict(states)
+            plan = build_plan(
+                spec, spec_text_hash(text), ref, records, prepared=prepared, bound=bound, labels=labels
+            ).to_dict(states)
             self._last_plan = (key, plan)
         if parsed.page is None:
             return 200, plan, {}

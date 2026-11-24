@@ -184,7 +184,7 @@ class ContentFilter(_Strict):
 
 class LabelledFilter(_Strict):
     """A crop must hold annotation: a nonzero pixel, a single point being enough, in a label paired with its raw.
-    A raw without a paired label holds none, so a dataset without labels stages nothing."""
+    A raw without a paired label holds none, so a dataset whose binding reads no label is out of the plan."""
 
     name: Literal["labelled"]
     min_fraction: float | None = Field(default=None, exclude=True)  # accepted and ignored, see Spec.warnings

@@ -215,6 +215,7 @@ def test_prepared_row_requires_matching_manifest(tmp_path):
         "crops": 2,
         "previews": [],
         "raw_shapes": None,
+        "raw_labels": None,
     }
     (ds / "binding.yaml").write_bytes(b"snippets_commit: 4c1d\n")  # no record
     reindex(ds, {})
@@ -248,6 +249,24 @@ def test_raw_shapes_reduces_the_crop_report():
         {"source_shapes": {"0": {"axes": "yx", "shape": [8, 0]}}},
     ):
         assert raw_shapes(odd) is None
+
+
+def test_the_row_counts_the_labels_the_binding_pairs_with_each_raw(tmp_path):
+    from tests.test_buffers_sync import write_prepared
+
+    def labels_of(name: str, arrays: str) -> list[int] | None:
+        write_prepared(tmp_path / name, "r")
+        (tmp_path / name / "binding.yaml").write_text(f"record: r\n{arrays}\n")
+        reindex(tmp_path / name, {})
+        return prepared_row(tmp_path / name)["raw_labels"]
+
+    raws = "raw: [{snippet: a}, {snippet: a}, {snippet: a}]"
+    assert labels_of("none", raws) == [0, 0, 0]  # classes or paired images: nothing a `labelled` filter passes
+    paired = "labels: [{pairs_with: 2}, {pairs_with: 0}, {pairs_with: 2}]"
+    assert labels_of("some", f"{raws}\n{paired}") == [1, 0, 2]
+    for odd in ("labels: [{pairs_with: 3}]", "labels: [{pairs_with: '0'}]", "labels: [x]", "labels: {a: 1}"):
+        assert labels_of(f"odd{len(odd)}", f"{raws}\n{odd}") is None  # not as mia-data writes them: says nothing
+    assert labels_of("no-raw", "labels: [{pairs_with: 0}]") is None
 
 
 def test_the_bound_shapes_are_saved_for_the_binding_they_were_read_with(tmp_path):
