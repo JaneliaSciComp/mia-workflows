@@ -77,14 +77,20 @@ export function peekView(peek) {
   );
 }
 
-// the split to draw from, Next crop, and the crop it brought. One panel per buffer, kept while the page redraws
-// the step around it, so a crop stays on screen until the next one is asked for.
+const KEPT = 50; // the crops a panel keeps to go back to
+
+// the split to draw from, Previous crop, Next crop, and the crop on screen. One panel per buffer, kept while the
+// page redraws the step around it, so a crop stays on screen until another is asked for.
 let kept = { buffer: null, node: null };
 export function peekPanel(buffer) {
   if (kept.buffer === buffer) return kept.node;
   // a peek costs the service a process of about a second, so the crop after the one on screen is asked for as soon
   // as that one is drawn: the next press shows it at once. `ahead` is that answer and the split it is of.
   let ahead = null;
+  // the service keeps no trace of a peek, so going back is the page's: `seen` is the crops this panel showed,
+  // oldest first, and `at` the place of what is on screen (a message that is no crop stands after the last one)
+  const seen = [];
+  let at = 0;
   const ask = wanted => api(`/buffers/${encodeURIComponent(buffer)}/peek?split=${wanted}`);
   const shown = el("div", {}),
     split = el(
@@ -92,33 +98,58 @@ export function peekPanel(buffer) {
       { "aria-label": "split", title: "The split the crop is drawn from." },
       ...SPLITS.map(name => el("option", { value: name }, name)),
     ),
+    // what is on screen: the crop at `at`, or `message` after the last one
+    show = message => {
+      if (message) at = seen.length;
+      shown.replaceChildren(message || peekView(seen[at]));
+      back.disabled = at <= 0;
+    },
+    back = el(
+      "button",
+      {
+        type: "button",
+        class: "btn",
+        title: `Show the crop that was on screen before this one. The page keeps the last ${KEPT} it showed; the service keeps none.`,
+        onclick: () => {
+          at -= 1;
+          show();
+        },
+      },
+      "Previous crop",
+    ),
     button = el(
       "button",
       {
         type: "button",
         class: "btn",
-        title: "Draw a crop as a training run would and show what the tensorizer returns for it.",
+        title:
+          "Draw a crop as a training run would and show what the tensorizer returns for it. After Previous crop, it steps forward through the crops already shown first.",
         onclick: async () => {
-          button.disabled = true;
-          button.replaceChildren("Reading…");
           const wanted = SPLITS.includes(split.value) ? split.value : SPLITS[0];
+          if (seen[at + 1]?.split === wanted) {
+            at += 1;
+            return show();
+          }
+          button.disabled = back.disabled = true;
+          button.replaceChildren("Reading…");
           const answer = ahead?.split === wanted ? ahead.answer : ask(wanted);
           ahead = null;
           try {
             const peek = await answer;
-            shown.replaceChildren(
-              peek ? peekView(peek) : el("div", { class: "empty" }, `Nothing is servable in ${wanted} yet.`),
-            );
             if (peek) {
+              seen.push(peek);
+              if (seen.length > KEPT) seen.shift();
+              at = seen.length - 1;
+              show();
               const next = ask(wanted);
               ahead = { split: wanted, answer: next };
               // one that failed is dropped, so the press asks again
               next.catch(() => {
                 if (ahead?.answer === next) ahead = null;
               });
-            }
+            } else show(el("div", { class: "empty" }, `Nothing is servable in ${wanted} yet.`));
           } catch (e) {
-            shown.replaceChildren(el("div", { class: "notice" }, `No crop: ${e.message}`));
+            show(el("div", { class: "notice" }, `No crop: ${e.message}`));
           }
           button.replaceChildren("Next crop");
           button.disabled = false;
@@ -126,6 +157,7 @@ export function peekPanel(buffer) {
       },
       "Next crop",
     );
+  back.disabled = true; // nothing shown yet
   const node = el(
     "div",
     { class: "peek" },
@@ -133,6 +165,7 @@ export function peekPanel(buffer) {
       "div",
       { class: "peekbar" },
       el("label", {}, "split ", split),
+      back,
       button,
       el("span", { class: "sub" }, "A peek: no consumer is registered and nothing is counted as drawn."),
     ),

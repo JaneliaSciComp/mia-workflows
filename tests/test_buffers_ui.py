@@ -2059,7 +2059,7 @@ def test_next_crop_asks_for_a_peek_of_the_chosen_split_and_draws_it() -> None:
         " text: async () => status === 204 ? '' : JSON.stringify(status < 400 ? input : { error: 'harness tensorize exited 2' }) }; };"
         "const settle = () => new Promise(done => setTimeout(done, 5));"
         "const panel = peekPanel('b/1'), before = asked.length, texts = [];"
-        "const press = async () => { byText(panel, 'Next crop').fire('click'); const during = textOf(walk(panel).find(n => n.tag === 'button'));"
+        "const press = async () => { byText(panel, 'Next crop').fire('click'); const during = textOf(walk(panel).filter(n => n.tag === 'button').at(-1));"
         " await settle(); texts.push(textOf(panel)); return during; };"
         "const during = await press(); const pictures = walk(panel).filter(n => n.tag === 'img').length;"
         "walk(panel).find(n => n.tag === 'select').value = 'val'; await press();"
@@ -2080,6 +2080,63 @@ def test_next_crop_asks_for_a_peek_of_the_chosen_split_and_draws_it() -> None:
     assert out["same"] and out["other"]
     serve = squeezed(FILES["flow.js"])
     assert has("peekPanel(version.id)", serve) and resolve("GET", "/buffers/x/peek") == "read"
+
+
+def test_previous_crop_steps_back_through_the_crops_the_panel_showed() -> None:
+    """The page keeps the crops it showed: Previous crop steps back through them and Next crop forward again,
+    neither asking the service, until Next crop is past the last one. After a failure Previous crop shows the last
+    crop there was; with another split chosen, Next crop draws a new one, which comes after all that were shown."""
+    out = run_js(
+        r"""
+        const asked = []; let status = 200, count = 0;
+        globalThis.fetch = async path => {
+          asked.push(path);
+          const ok = status < 400, candidate = ok ? count++ : null;
+          const answer = ok
+            ? { ...input, split: path.split("=").pop(), descriptor: { ...input.descriptor, candidate } }
+            : { error: "harness tensorize exited 2" };
+          return { ok, status, statusText: "", text: async () => JSON.stringify(answer) };
+        };
+        const settle = () => new Promise(done => setTimeout(done, 5));
+        const panel = peekPanel("b"), back = () => byText(panel, "Previous crop"), seen = [];
+        const press = async name => {
+          byText(panel, name).fire("click");
+          await settle();
+          seen.push([Number(/sample (\d+) of/.exec(textOf(panel))?.[1]) || null, asked.length, back().disabled]);
+        };
+        const first = back().disabled;
+        for (const name of ["Next crop", "Next crop", "Next crop", "Previous crop", "Previous crop"]) await press(name);
+        for (const name of ["Next crop", "Next crop", "Next crop"]) await press(name);
+        status = 502;
+        for (const name of ["Next crop", "Next crop", "Previous crop", "Previous crop"]) await press(name);
+        status = 200;
+        walk(panel).find(n => n.tag === "select").value = "val";
+        await press("Next crop");
+        const split = /(\w+) split/.exec(textOf(panel))[1];
+        await press("Previous crop");
+        print({ first, seen, split, last: asked.at(-1) });
+        """,
+        {"peek.js": "peekPanel"},
+        PEEK,
+    )
+    assert out["first"]  # nothing shown yet: nothing to go back to
+    assert out["seen"] == [  # the sample on screen, the requests so far, whether Previous crop is disabled
+        [1, 2, True],  # the first crop, and the one after it asked for
+        [2, 3, False],
+        [3, 4, False],
+        [2, 4, False],  # back twice: nothing asked
+        [1, 4, True],
+        [2, 4, False],  # forward through what was shown: nothing asked
+        [3, 4, False],
+        [4, 5, False],  # past the last one: the crop that was asked for ahead
+        [5, 6, False],  # the service starts failing: the one already answered, and the one after it fails
+        [None, 7, False],  # a failure is said, and is not a crop to come back to
+        [5, 7, False],
+        [4, 7, False],
+        [6, 9, False],  # another split: a new crop, though one that was shown comes after this one
+        [5, 9, False],  # it is the newest: the one before it is the last that was shown
+    ]
+    assert out["split"] == "val" and out["last"] == "/buffers/b/peek?split=val"
 
 
 def test_the_lists_of_a_buffers_datasets_are_narrowed_by_their_preparation() -> None:
