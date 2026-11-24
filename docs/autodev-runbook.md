@@ -28,7 +28,7 @@ Trust boundaries:
 ## Run it as yourself (testing)
 
 1. The prerequisites in [`autodev-local-setup.md`](autodev-local-setup.md#prerequisites).
-   csub is pinned to `krokicki/csub` branch `deploy-all` (has the `agent` request field); `pixi install` gets it.
+   csub is pinned to `saalfeldlab/csub` branch `main` (has the `agent` request field); `pixi install` gets it.
 2. `cp mia.yaml.example mia.yaml`, keep the `autodev` service and name it `autodev-<you>` in `services` (the deployment
    is the service name, so your labels, branches and workflows stay apart from the service and from colleagues), and
    set its `paths.work_root` under your csub `allowed_roots`.

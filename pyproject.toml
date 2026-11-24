@@ -45,7 +45,7 @@ cryptography = "*"
 [tool.pixi.pypi-dependencies]
 mia-workflows = { path = ".", editable = true }
 temporalio = ">=1.7"
-csub = { git = "https://github.com/krokicki/csub", branch = "deploy-all" }
+csub = { git = "https://github.com/saalfeldlab/csub", branch = "main" }
 
 [tool.pixi.feature.test.dependencies]
 pytest = "*"

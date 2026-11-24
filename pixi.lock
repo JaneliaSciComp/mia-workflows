@@ -90,7 +90,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
       - pypi: ./
-      - pypi: git+https://github.com/krokicki/csub?branch=deploy-all#ec77ac9b1ea435cc016d96604d47a1d0fece30e9
+      - pypi: git+https://github.com/saalfeldlab/csub?branch=main#01c7a0dd9405e153abcce36da928f9bff6d2bc55
       - pypi: https://files.pythonhosted.org/packages/11/52/6327a5f4fda01207205038a106a99848a41c83e933cd23ea2cab3d2ebc6c/nexus_rpc-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/44/4e/f63e826c68f77ef875506d72f225918800346545ee99847bc28f3394f18d/types_protobuf-7.35.1.20260906-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c1/20/b032d4a0df51d466fd929d8205e1288e83d97a890f021479f43af9bd6f9b/temporalio-1.34.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -292,7 +292,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/zarr-3.4.2-pyhc364b38_0.conda
       - pypi: ./
       - pypi: git+https://github.com/JaneliaSciComp/mia-snippets?subdirectory=harness&branch=training-buffers#80eed04e17c8188f3d7d14d7505941dbeb2ca011
-      - pypi: git+https://github.com/krokicki/csub?branch=deploy-all#ec77ac9b1ea435cc016d96604d47a1d0fece30e9
+      - pypi: git+https://github.com/saalfeldlab/csub?branch=main#01c7a0dd9405e153abcce36da928f9bff6d2bc55
       - pypi: git+https://github.com/weigertlab/muvit#ef182d3f49772ccc74913195c358e188d313c43f
       - pypi: https://files.pythonhosted.org/packages/04/69/6af86ff66492b481c6a4c05dcfd68beb47ed8ba046440a26a2aac76b95c7/opentelemetry_exporter_http_transport-0.66b1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/05/6d/78dc67a9e779e594b49bf62604034d3a6aa428a55afc729cafda4b7333e1/googleapis_common_protos-1.76.0-py3-none-any.whl
@@ -1875,7 +1875,7 @@ packages:
   license: BSD-3-Clause
   license_family: BSD
   purls:
-  - pkg:pypi/markupsafe?source=compressed-mapping
+  - pkg:pypi/markupsafe?source=hash-mapping
   run_exports: {}
   size: 27698
   timestamp: 1793132069552
@@ -1939,7 +1939,7 @@ packages:
   license: Apache-2.0
   license_family: APACHE
   purls:
-  - pkg:pypi/msgpack?source=compressed-mapping
+  - pkg:pypi/msgpack?source=hash-mapping
   run_exports: {}
   size: 121408
   timestamp: 1793105655215
@@ -2030,7 +2030,7 @@ packages:
   license: MIT
   license_family: MIT
   purls:
-  - pkg:pypi/numcodecs?source=compressed-mapping
+  - pkg:pypi/numcodecs?source=hash-mapping
   run_exports: {}
   size: 2236378
   timestamp: 1792548537443
@@ -2717,7 +2717,8 @@ packages:
   - cached_property >=2.0.1,<2.0.2.0a0
   license: BSD-3-Clause
   license_family: BSD
-  purls: []
+  purls:
+  - pkg:pypi/cached-property?source=compressed-mapping
   run_exports: {}
   size: 3720
   timestamp: 1787678456483
@@ -2730,7 +2731,7 @@ packages:
   license: BSD-3-Clause
   license_family: BSD
   purls:
-  - pkg:pypi/cached-property?source=hash-mapping
+  - pkg:pypi/cached-property?source=compressed-mapping
   run_exports: {}
   size: 16597
   timestamp: 1787678456483
@@ -3247,7 +3248,7 @@ packages:
   license: MIT
   license_family: MIT
   purls:
-  - pkg:pypi/platformdirs?source=compressed-mapping
+  - pkg:pypi/platformdirs?source=hash-mapping
   run_exports: {}
   size: 34235
   timestamp: 1793188966477
@@ -3353,7 +3354,7 @@ packages:
   - python
   license: BSD-3-Clause
   purls:
-  - pkg:pypi/pycparser?source=compressed-mapping
+  - pkg:pypi/pycparser?source=hash-mapping
   run_exports: {}
   size: 58624
   timestamp: 1791592610066
@@ -3400,7 +3401,7 @@ packages:
   license: MIT
   license_family: MIT
   purls:
-  - pkg:pypi/pydantic?source=compressed-mapping
+  - pkg:pypi/pydantic?source=hash-mapping
   run_exports: {}
   size: 358514
   timestamp: 1791761552444
@@ -3801,7 +3802,7 @@ packages:
   name: mia-harness
   version: 0.1.0
   requires_python: '>=3.12'
-- pypi: git+https://github.com/krokicki/csub?branch=deploy-all#ec77ac9b1ea435cc016d96604d47a1d0fece30e9
+- pypi: git+https://github.com/saalfeldlab/csub?branch=main#01c7a0dd9405e153abcce36da928f9bff6d2bc55
   name: csub
   version: 0.1.0
   requires_dist:
