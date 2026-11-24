@@ -826,7 +826,9 @@ paired with its raw; a raw without labels fails every draw, so the plan leaves o
 pairs no label with an array that holds the footprint). A `min_fraction` on `labelled` is read and ignored with
 a warning. The list is kept in name order and enters
 the plan rule only when it is not empty, so a definition without filters keeps its plan digests. Only the stage
-job can test a crop: it tests each draw's full-resolution box, the label's before the raw's, and draws again until
+job can test a crop: it tests each draw, the labels over its whole footprint (the coarsest level's box, so
+annotation anywhere in the crop counts and its finest level may hold none) before the raw's full-resolution box,
+and draws again until
 the split's count is kept or 2000 draws in a row were rejected (`plan.GIVE_UP` in the harness; a repeated
 position is one). So with filters a dataset's planned crops are the most it can stage, and the plan says `up to`.
 Rejected draws are read within `limits.job_bytes` like every other read of the job. `stage.json` gives each

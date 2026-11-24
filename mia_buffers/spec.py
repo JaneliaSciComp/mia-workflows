@@ -183,8 +183,9 @@ class ContentFilter(_Strict):
 
 
 class LabelledFilter(_Strict):
-    """A crop must hold annotation: a nonzero pixel, a single point being enough, in a label paired with its raw.
-    A raw without a paired label holds none, so a dataset whose binding reads no label is out of the plan."""
+    """A crop must hold annotation: a nonzero pixel, a single point being enough, in a label paired with its raw,
+    anywhere in the crop's footprint (its coarsest level's box). A raw without a paired label holds none, so a
+    dataset whose binding reads no label is out of the plan."""
 
     name: Literal["labelled"]
     min_fraction: float | None = Field(default=None, exclude=True)  # accepted and ignored, see Spec.warnings
@@ -199,7 +200,7 @@ class Sampling(_Strict):
     # and the val and test numbers are the lengths of the frozen lists
     crops: dict[str, PositiveInt] = {"train": 100000, "val": 2000, "test": 2000}
     max_crops_per_dataset: PositiveInt = 1024  # in one split; one artifact must stay under limits.stage_bytes
-    # what a crop must hold to be staged, tested by the stage job on its full-resolution box; kept in name order
+    # what a crop must hold to be staged, tested by the stage job on each draw; kept in name order
     filters: list[SampleFilter] = []
     plan: SamplePlan | None = None  # ignored, see Spec.warnings
     levels: list[int] = [1]

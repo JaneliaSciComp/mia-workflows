@@ -265,7 +265,8 @@
   demand. A per-job transfer cap still applies, and the raw quota controls when staging waits for space.
 </p>
 <p>
-  Content and label filters run in the stage job on candidate full-resolution boxes. The planned count is an upper
+  Content and label filters run in the stage job on each candidate crop: labels over its whole footprint, image
+  content on its full-resolution box. The planned count is an upper
   bound when filtering is enabled. The staging result records the actual selection, and registration adjusts the
   weight of a short volume. No planner estimate redistributes its missing share.
 </p>
