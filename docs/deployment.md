@@ -128,9 +128,10 @@ running jobs run on, every workflow continues. A release whose `workflows.py` ch
 A developer's checkout that runs the stack becomes the prod installation keeping everything it has: its managed
 Temporal server and `local_root` stay on the host's local disk; the work, crops and staged roots and the harness
 checkout move from their prefix on the cluster filesystem to the data share. Four kinds of absolute path point at the
-prefix that moves: the ledger (`volumes.data`'s `path`, `frozen.descriptor`, `assets.key` and `assets.data`,
-`cases.data`); the workflow states of open rounds (workspaces stored as `str(work_root / ...)`; a round at `review`
-saves its crops from that path when approved); timeline entries (browser links built from the roots' `url` at the
+prefix that moves: the ledger (`volumes.data`'s `path`, `frozen.descriptor`, `draws.descriptor`, `assets.key` and
+`assets.data`, `cases.data`) and the draw archives of retired buffers (`<state_dir>/archive/*.draws.jsonl.gz`,
+which stay as they were written); the workflow states of open rounds (workspaces stored as
+`str(work_root / ...)`; a round at `review` saves its crops from that path when approved); timeline entries (browser links built from the roots' `url` at the
 time); job records are addressed relative to `work_root` and need nothing.
 
 1. `mia pause`; wait until no round is `working` (the Overview); `mia down` (Temporal keeps running).
@@ -140,14 +141,16 @@ time); job records are addressed relative to `work_root` and need nothing.
    ```sql
    UPDATE volumes SET data = replace(data, '/OLD/prefix', '/NEW/prefix');
    UPDATE frozen SET descriptor = replace(descriptor, '/OLD/prefix', '/NEW/prefix');
+   UPDATE draws SET descriptor = replace(descriptor, '/OLD/prefix', '/NEW/prefix');
    UPDATE assets SET key = replace(key, '/OLD/prefix', '/NEW/prefix'), data = replace(data, '/OLD/prefix', '/NEW/prefix');
    UPDATE cases SET data = replace(data, '/OLD/prefix', '/NEW/prefix');
    ```
 
 4. Leave each old root as a symlink to its new place (`mv <old> <old>.moved && ln -s <new> <old>` once the copy is
    verified, or remove the old copy and link), so a worker still reads every absolute path a round holds. The
-   symlinks go when no round that was open at the cutover is open any more. New jobs mount the new paths, and
-   `mia.yaml` names only the new ones. csub refuses a mount that goes through a link, so a round that stopped
+   symlinks go when no round that was open at the cutover is open any more and no archived run is to be replayed
+   through them (an archive's descriptors name the old paths). New jobs mount the new paths, and `mia.yaml` names
+   only the new ones. csub refuses a mount that goes through a link, so a round that stopped
    before the move is restarted, not resumed: a resumed one would mount the workspaces its state holds.
 5. Adopt the layout above: `~/mia-prod/mia.yaml` is the checkout's `mia.yaml` with the new roots and their `url`s,
    `harness.dir`, `host:` and the `csub` block; tag the commit to run; make the first release by hand as the command
