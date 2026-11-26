@@ -138,9 +138,10 @@ time); job records are addressed relative to `work_root` and need nothing.
    ```
 
 4. Leave each old root as a symlink to its new place (`mv <old> <old>.moved && ln -s <new> <old>` once the copy is
-   verified, or remove the old copy and link), so every absolute path a round still holds resolves. The symlinks go
-   when no round that was open at the cutover is open any more. New jobs mount the new paths, which csub requires to
-   be real directories, and `mia.yaml` names only the new ones.
+   verified, or remove the old copy and link), so a worker still reads every absolute path a round holds. The
+   symlinks go when no round that was open at the cutover is open any more. New jobs mount the new paths, and
+   `mia.yaml` names only the new ones. csub refuses a mount that goes through a link, so a round that stopped
+   before the move is restarted, not resumed: a resumed one would mount the workspaces its state holds.
 5. Adopt the layout above: `~/mia-prod/mia.yaml` is the checkout's `mia.yaml` with the new roots and their `url`s,
    `harness.dir`, `host:` and the `csub` block; tag the commit to run; make the first release by hand as the command
    would (`git clone --branch <tag> --depth 1 <origin> ~/mia-prod/releases/<tag>`, `pixi install --locked` there,
