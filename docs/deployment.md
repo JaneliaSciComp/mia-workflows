@@ -44,6 +44,13 @@ disk): what only this host's processes read, and what must not be on NFS.
 | `paths.local_root` | local, required | locks and the ledger; refused on NFS |
 | `temporal.state_dir` (managed) | local, required | the Temporal dev server's SQLite; refused on NFS |
 | `csub.run_dir` | local | the broker or relay socket (default `/scratch/<user>`) |
+
+**Who may write it.** The operator's account alone writes what an installation runs or trusts: the checkout,
+`mia.yaml`, `sandbox_dir`, `harness.dir`, the state and host-local directories, and any script a timer runs for it
+(a backup). The same holds for every directory above them: whoever can write one of these files, or rename a
+directory on the way to it, runs code as the operator at the next start. Jobs write the roots as the operator and
+clients only read, so nothing needs group write: clone and install a release under `umask 022`, and where a parent
+directory belongs to a group, keep what a timer runs on the host's own disk.
 | `github.token_file`, `service.token_file`, the ssh key | local or home | this host's worker, buffer-api and relay |
 
 **GitHub.** Everything an installation writes on GitHub is its own: autodev's `snippets` deployment answers every
