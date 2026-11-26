@@ -446,15 +446,17 @@ class Ledger:
         os.replace(tmp, archive)
 
     def backup(self, dest: Path) -> None:
-        """Write a consistent copy of the ledger to `dest`, atomically (temp file, then rename)."""
+        """Write a consistent copy of the ledger to `dest`, atomically (temp file, then rename), from a read-only
+        connection of its own: the service answers while the copy is written, however slow `dest`'s disk is."""
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".tmp")
+        reader = sqlite3.connect(f"{self._path.resolve().as_uri()}?mode=ro", uri=True)
         target = sqlite3.connect(tmp)
         try:
-            with self._lock:
-                self._db.backup(target)
+            reader.backup(target)
         finally:
             target.close()
+            reader.close()
         os.replace(tmp, dest)
 
     # --- transfers: what jobs asked of each host, per clock minute ---------------------------------
