@@ -158,9 +158,14 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   record's crop count, its weight's share of `sampling.crops` rounded up to a power of two (`plan.crops_for`):
   change that rounding and every pool change restages every record. A definition's `sampling.filters` are in
   the rule only when it has some: never write an empty `filters` key, or every buffer restages.
-- **Only the stage job knows what a filter keeps.** `sampling.filters` (`content`, `labelled`) are tested by the
-  stage job on each draw's full-resolution box, labels before raw; a rejected draw is drawn again until the
-  count or 2000 rejections in a row. The plan's crops are then an upper bound (`up to`), stage.json's
+- **The plan refuses what is already known; only the stage job knows what a filter keeps.** A dataset that its
+  record or its registry row says cannot be staged under the definition is out of the plan with the reason
+  (`plan.fit`: no array that holds the footprint, no voxel size, under a `labelled` filter no label on such an
+  array), and the designer's plan says the same before a round exists. A new check of that kind goes there, with
+  the fact it needs on the prepared row (`mia_data.publish.prepared_row`), never into sourcing.
+  `sampling.filters` (`content`, `labelled`) are tested by the stage job on each draw, the labels over its whole
+  footprint (the coarsest level's box) before the raw's full-resolution box; a rejected draw is drawn again until
+  the count or 2000 rejections in a row. The plan's crops are then an upper bound (`up to`), stage.json's
   `selection` says what was kept, registration scales a short volume's weight by staged / wanted, and the
   record's servable line names the shortfall. A new filter is a function in the harness's `filters.py` and an
   entry of the grammar (`mia_buffers/spec.py`); it adds no planner estimate and hands no share to another volume.

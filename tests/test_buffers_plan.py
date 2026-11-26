@@ -6,10 +6,13 @@ import pytest
 import yaml
 
 from mia_buffers.plan import (
+    NO_LABELLED_FIT,
+    NO_LABELS,
     NOT_PREPARED,
     UNKNOWN_SHAPE_NOTE,
     Fit,
     Plan,
+    bound_labels,
     bound_shapes,
     build_plan,
     crops_for,
@@ -90,6 +93,31 @@ def test_fit_is_refused_when_no_bound_array_holds_the_footprint(spec, spec_2d):
     rows = plan.rows_by_id
     assert not rows[U937].in_pool and rows[U937].fit.reason.endswith("(largest 817×686)")
     assert rows[BCSS].in_pool and rows[BCSS].weight == 1.0  # no shapes on its row: the record's array decides
+
+
+def test_a_labelled_filter_leaves_out_a_dataset_whose_binding_reads_no_label(spec_2d):
+    """Buffer 28161271: 27 datasets whose bindings read no label array each ran a stage job that drew 2000 times
+    per split and failed `no crop passed the filters`."""
+    labelled = spec_with(spec_2d, **{"sampling.filters": [{"name": "labelled"}]})
+    assert fit(F[U937], labelled, labels=[0, 0]).reason == NO_LABELS
+    assert fit(F[U937], labelled, labels=[0, 1]).ok
+    assert fit(F[U937], labelled).ok  # a row that does not say its labels is not refused
+    assert fit(F[U937], spec_2d, labels=[0, 0]).ok  # no such filter: labels are not needed
+    content = spec_with(spec_2d, **{"sampling.filters": [{"name": "content"}]})
+    assert fit(F[U937], content, labels=[0, 0]).ok
+    # the only labelled array is under the footprint, so no draw comes from it
+    shapes = [{"y": 2000, "x": 2000}, {"y": 100, "x": 100}]
+    assert fit(F[U937], labelled, shapes, [0, 1]).reason == NO_LABELLED_FIT
+    assert fit(F[U937], labelled, shapes, [1, 0]).ok
+    plan = build_plan(labelled, "h", None, records(), prepared={U937, BCSS}, labels={U937: [0], BCSS: [2]})
+    rows = plan.rows_by_id
+    assert not rows[U937].in_pool and NO_LABELS in plan.render_markdown()
+    assert rows[BCSS].in_pool and rows[BCSS].weight == 1.0  # the crops are shared among those that can stage
+
+
+def test_bound_shapes_and_labels_take_the_rows_that_have_them():
+    rows = [{"id": "a", "raw_labels": [0, 0]}, {"id": "b", "raw_labels": None}, {"id": "c"}]
+    assert bound_labels(rows) == {"a": [0, 0]}
 
 
 def test_bound_shapes_takes_the_rows_that_have_them():

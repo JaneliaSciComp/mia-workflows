@@ -265,7 +265,8 @@
   demand. A per-job transfer cap still applies, and the raw quota controls when staging waits for space.
 </p>
 <p>
-  Content and label filters run in the stage job on candidate full-resolution boxes. The planned count is an upper
+  Content and label filters run in the stage job on each candidate crop: labels over its whole footprint, image
+  content on its full-resolution box. The planned count is an upper
   bound when filtering is enabled. The staging result records the actual selection, and registration adjusts the
   weight of a short volume. No planner estimate redistributes its missing share.
 </p>
@@ -340,7 +341,8 @@
   result before the worker renames it into place. The pyramid records its derivation under
   <code>attributes.mia</code>. A failed build is not a published artifact. With filters enabled, 2,000 consecutive
   rejected draws stop the search. Labels are checked before image content to avoid unnecessary raw reads. A labelled
-  filter alone does not exclude unlabelled datasets. Dataset selection controls that requirement.
+  filter leaves a dataset out of the plan when its binding reads no label array. Whether a labelled dataset has
+  annotation where its crops fall is known only to the stage job.
 </p>
 <h3>Register and serve</h3>
 <p>

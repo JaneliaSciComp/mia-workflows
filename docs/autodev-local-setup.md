@@ -24,7 +24,7 @@ Run these from a Janelia cluster submit host.
 1. **pixi** on your PATH, and **tmux**.
 2. **agentic-sandbox** checked out next to this repo (`../agentic-sandbox`), or set `sandbox_dir` in `mia.yaml` to
    its `scripts` directory. It needs rootless podman or bwrap set up, per its README.
-3. **csub with Claude support.** The pixi env pins csub to `krokicki/csub` branch `deploy-all`, so `pixi install`
+3. **csub with Claude support.** The pixi env pins csub to `saalfeldlab/csub` branch `main`, so `pixi install`
    provides it, including `csub-broker`.
 4. **Broker policy** in `~/.config/csub/broker.toml` (the `csub.base_policy` of `mia.yaml`; mia reads it and never
    writes it):

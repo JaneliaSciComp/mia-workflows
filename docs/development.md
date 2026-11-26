@@ -628,7 +628,11 @@ the round ends `blocked` saying which host to approve (`NoReachableFiles`).
    footprint, and so must one of the arrays its binding reads, which may be smaller ones (a prepared
    dataset's row carries them as `raw_shapes`: what the crop job measured, saved as `shapes.json` beside
    `manifest.json` with the sha256 of the binding they were read with, `mia_data.publish.prepared_row`). A row
-   without `raw_shapes` is fitted on the record alone. When the registry has never seen the round's catalog ref,
+   without `raw_shapes` is fitted on the record alone. Under a `labelled` filter one of those arrays must also
+   have a label (the row's `raw_labels`: how many labels the binding pairs with each array it reads), or the
+   record is out with `filter labelled: …`: no draw of it could pass. What a dataset's row or its record
+   already says is checked here, in `plan.fit`, and never left for the stage job to find; the designer's plan
+   runs the same checks before a round exists. When the registry has never seen the round's catalog ref,
    the activity
    syncs it first. `plan.md` and `plan.json` land in the round directory and in the browsable
    `work_root/issue-<n>/<round>/`. Everything sourcing needs is checked here: a record mia-data could not place
@@ -818,10 +822,13 @@ candidate when there are fewer.
 
 **Filters.** A definition's `sampling.filters` names what a crop must hold: `{name: content}` (not blank, not one
 value: the crop job's test) and `{name: labelled}` (a nonzero pixel, a single point being enough, in a label
-paired with its raw; a raw without labels fails every draw, so a record with no label array stages nothing). A
-`min_fraction` on `labelled` is read and ignored with a warning. The list is kept in name order and enters
+paired with its raw; a raw without labels fails every draw, so the plan leaves out a dataset whose binding
+pairs no label with an array that holds the footprint). A `min_fraction` on `labelled` is read and ignored with
+a warning. The list is kept in name order and enters
 the plan rule only when it is not empty, so a definition without filters keeps its plan digests. Only the stage
-job can apply them: it tests each draw's full-resolution box, the label's before the raw's, and draws again until
+job can test a crop: it tests each draw, the labels over its whole footprint (the coarsest level's box, so
+annotation anywhere in the crop counts and its finest level may hold none) before the raw's full-resolution box,
+and draws again until
 the split's count is kept or 2000 draws in a row were rejected (`plan.GIVE_UP` in the harness; a repeated
 position is one). So with filters a dataset's planned crops are the most it can stage, and the plan says `up to`.
 Rejected draws are read within `limits.job_bytes` like every other read of the job. `stage.json` gives each
@@ -1145,9 +1152,11 @@ buffer keeps no trace of a peek: the draw has a generator of its own, no consume
 empty answer is counted, the idle clock does not move, and a `val` or `test` crop is one of the split's
 candidates, not a row of its frozen list (`tests/test_buffers_peek.py`). It runs the checkout as it stands, not
 the snapshot the buffer's round pinned. The page shows it on the serve step, under the two lines a training run
-writes: a split, **Next crop**, and nothing asked until the button is pressed. A crop that is drawn asks for the
-one after it of the same split (`ahead` in `peek.js`), so the next press shows a crop without waiting for a
-process.
+writes: a split, **Previous crop**, **Next crop**, and nothing asked until Next crop is pressed. A crop that is
+drawn asks for the one after it of the same split (`ahead` in `peek.js`), so the next press shows a crop without
+waiting for a process. Going back is the page's alone: the panel keeps the last 50 crops it showed (`seen`),
+Previous crop steps back through them and Next crop forward again, asking the service only past the last one or
+when another split is chosen.
 
 ## The page
 

@@ -252,6 +252,7 @@ RULE_GROUPS: list[tuple[re.Pattern[str], str]] = [
         (r"^no array shape", "no array shape"),
         (r"^footprint", "footprint too large"),
         (r"^patch z", "too few z slices"),
+        (r"^filter labelled", "no label"),
         (r"^voxel size unknown", "voxel size unknown"),
         (rf"^{re.escape(NOT_PREPARED)}$", NOT_PREPARED),
     )

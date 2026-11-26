@@ -275,9 +275,10 @@ splits:
   - {name: labelled}</pre>
 <p>
   The content check rejects blank or constant images. The labelled check requires annotation in the crop itself: one
-  annotated pixel is enough, so a point or a thin outline counts. A source with no label array has none, so a
-  dataset whose annotations are only per image (a class, a count) contributes nothing under this filter. A filter
-  may leave a dataset with fewer samples. It does not make another dataset contribute the missing samples.
+  annotated pixel is enough, so a point or a thin outline counts. It looks at the whole area the crop covers at its
+  coarsest level, so the finest level of a crop may hold none. A source with no label array has none, so a
+  dataset whose annotations are only per image (a class, a count) is left out of the plan under this filter, with
+  that reason. A filter may leave a dataset with fewer samples. It does not make another dataset contribute the missing samples.
 </p>
 <h2 id="chapter-guide-4">4. Prepare datasets and review the buffer plan</h2>
 <p>

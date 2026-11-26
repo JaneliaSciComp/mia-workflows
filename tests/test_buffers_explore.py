@@ -64,6 +64,7 @@ def test_mixed_types_in_a_column_do_not_break_the_sort() -> None:
 # --- a plan as the designer shows it: one page of its rows and the numbers over all of them
 
 from mia_buffers.explore import PREPARATIONS, decision_of, plan_view  # noqa: E402
+from mia_buffers.plan import NO_LABELLED_FIT, NO_LABELS  # noqa: E402
 
 
 def plan_row(record: str, **fields) -> dict:
@@ -111,6 +112,8 @@ def test_a_row_decision_is_its_first_reason_in_the_planners_words() -> None:
     assert by_id["c"] == {"group": "not prepared", "reason": "fits; dataset is unprepared"}
     assert by_id["d"]["group"] == "footprint too large" and by_id["e"]["group"] == "record unreadable"
     assert decision_of(plan_row("x", admitted=False, rule="something new", fit=None))["group"] == "something new"
+    for reason in (NO_LABELS, NO_LABELLED_FIT):  # both reasons of the labelled filter are one group
+        assert decision_of(plan_row("y", fit={"ok": False, "reason": reason}))["group"] == "no label"
 
 
 def test_the_plan_summary_counts_over_every_row() -> None:

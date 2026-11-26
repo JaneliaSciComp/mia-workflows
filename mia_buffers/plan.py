@@ -26,6 +26,9 @@ from .specmap import ArrayFacts, Facts, facts
 MANUAL_DROP_NOTE = "download_method other: needs a manual drop (spec v0.4 §3)"
 UNREADABLE = "_unreadable"  # set by load_records on a file that is not a YAML mapping
 NOT_PREPARED = "not prepared"  # the rule of a fitting row whose dataset is not prepared (server-side plans only)
+# why a dataset is out of a plan whose definition has the `labelled` filter: no draw of it could pass
+NO_LABELS = "filter labelled: its binding reads no label array"
+NO_LABELLED_FIT = "filter labelled: no bound array that holds the footprint has a label"
 
 
 def _cell(text: object) -> str:
@@ -242,11 +245,19 @@ def bound_shapes(rows: list[dict]) -> dict[str, list[dict[str, int]]]:
     return {row["id"]: row["raw_shapes"] for row in rows if row.get("raw_shapes")}
 
 
-def fit(f: Facts, spec: Spec, bound: list[dict[str, int]] | None = None) -> Fit:
-    """Whether the spec's coarsest crop fits this record's largest raw array, and whether its box is in nm. With
-    `bound` (the shapes of the arrays the dataset's binding reads), one of them must hold the footprint too: a
-    binding may read smaller arrays than the largest the record lists, and the harness draws no crop from an
-    array under the footprint. `bound` only refuses: a record whose own array is too small stays out."""
+def bound_labels(rows: list[dict]) -> dict[str, list[int]]:
+    """Record id -> how many label arrays its binding pairs with each array it reads, for the dataset rows that
+    say them (`raw_labels`, read from the binding)."""
+    return {row["id"]: row["raw_labels"] for row in rows if row.get("raw_labels")}
+
+
+def fit(f: Facts, spec: Spec, bound: list[dict[str, int]] | None = None, labels: list[int] | None = None) -> Fit:
+    """Whether the definition can stage a crop of this record: its coarsest crop fits the record's largest raw
+    array, and its box is in nm. With `bound` (the shapes of the arrays the dataset's binding reads), one of them
+    must hold the footprint too: a binding may read smaller arrays than the largest the record lists, and the
+    harness draws no crop from an array under the footprint. With `labels` (the label arrays the binding pairs
+    with each of them) and a `labelled` filter, one of those must have a label: the filter rejects every draw from
+    an array without one. `bound` and `labels` only refuse: a record whose own array is too small stays out."""
     patch = spec.patch_for(f.dims or "")
     if patch is None:
         return Fit(False, f"no patch for dims {f.dims}", (0, 0), False)
@@ -267,10 +278,16 @@ def fit(f: Facts, spec: Spec, bound: list[dict[str, int]] | None = None) -> Fit:
     if three_d and patch.get("z", 0) > (largest.extent_z or 0):
         return Fit(False, f"patch z {patch.get('z')} exceeds {largest.extent_z}", footprint, False)
     extents = [(shape.get("y", 0), shape.get("x", 0)) for shape in bound or []]
-    if extents and not any(y >= footprint[0] and x >= footprint[1] for y, x in extents):
+    holds = [y >= footprint[0] and x >= footprint[1] for y, x in extents]
+    if extents and not any(holds):
         y, x = max(extents, key=lambda extent: extent[0] * extent[1])
         reason = f"footprint {footprint[0]}×{footprint[1]} exceeds every bound array (largest {y}×{x})"
         return Fit(False, reason, footprint, False)
+    if labels is not None and any(entry.name == "labelled" for entry in spec.sampling.filters):
+        if not any(labels):
+            return Fit(False, NO_LABELS, footprint, False)
+        if len(holds) == len(labels) and not any(held and count for held, count in zip(holds, labels, strict=True)):
+            return Fit(False, NO_LABELLED_FIT, footprint, False)
     _, assumed = voxel_size(f)
     if assumed and not spec.sampling.assume_voxel_size:
         return Fit(False, "voxel size unknown", footprint, False)
@@ -503,11 +520,13 @@ def build_plan(
     prepared: set[str] | None = None,
     stage_bytes: float | None = None,
     bound: dict[str, list[dict[str, int]]] | None = None,
+    labels: dict[str, list[int]] | None = None,
 ) -> Plan:
     """Fit, weigh and split the records the spec admits. With `prepared` (the ids of prepared datasets), a row
     that fits but is not prepared is out of the pool with the rule `not prepared`; None skips that rule. With
     `stage_bytes` (the deployment's cap on one staged artifact), rows estimated over it are a warning. With
-    `bound` (`bound_shapes` of the dataset rows), a record is also fitted against the arrays its binding reads."""
+    `bound` (`bound_shapes` of the dataset rows), a record is also fitted against the arrays its binding reads;
+    with `labels` (`bound_labels` of them), against the labels a `labelled` filter needs."""
     all_facts: list[Facts] = []
     rows: list[Row] = []
     for path, record in sorted(records, key=lambda item: item[0]):
@@ -540,7 +559,7 @@ def build_plan(
             bytes=f.size_bytes,
         )
         if decision.admitted:
-            row.fit = fit(f, spec, (bound or {}).get(f.id))
+            row.fit = fit(f, spec, (bound or {}).get(f.id), (labels or {}).get(f.id))
             row.voxel_size_nm, row.assumed = voxel_size(f)
             if largest is not None and spec.sampling.patch.c in (1, 3):
                 recipes = channel_recipes(largest.channels, f.family, f.modality_group)

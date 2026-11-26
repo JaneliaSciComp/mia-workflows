@@ -233,6 +233,19 @@ async def test_plan_leaves_out_a_dataset_whose_bound_arrays_are_under_the_footpr
     assert [d.record for d in result.pool] == [BCSS]
 
 
+async def test_plan_leaves_out_a_dataset_the_labelled_filter_cannot_pass(acts):
+    """Buffer 28161271: datasets whose bindings read no label array were planned under a `labelled` filter."""
+    round_spec = acts.cfg.paths.state_dir / "rounds" / ROUND / "spec.yaml"
+    pins = await admitted(acts)
+    spec = yaml.safe_load(round_spec.read_text())
+    spec["sampling"]["filters"] = [{"name": "labelled"}]
+    round_spec.write_text(yaml.safe_dump(spec))
+    acts.registry.put_dataset(U937, raw_labels=[0])
+    acts.registry.put_dataset(BCSS, raw_labels=[1])
+    result = await acts.plan(7, ROUND, pins)
+    assert [d.record for d in result.pool] == [BCSS]
+
+
 async def test_plan_warns_of_datasets_over_the_stage_cap(acts):
     acts.cfg.limits.stage_bytes = 1
     await acts.plan(7, ROUND, await admitted(acts))
