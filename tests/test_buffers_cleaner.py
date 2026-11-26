@@ -74,6 +74,13 @@ def test_a_worker_on_another_commit_than_the_checkout_owes_a_restart():
     assert findings(workers={"mia-data": old}, checkout=None) == {}  # the checkout cannot be read
 
 
+def test_incident_2026_11_26_a_worker_row_of_a_service_that_left_the_installation_owes_no_restart():
+    """The ledger kept the last heartbeat of an `autodev` service that `mia.yaml` no longer names. Once the
+    checkout's code moved on, every sweep said that worker owed a restart, which nobody could give it."""
+    old = {"commit": "a" * 40, "code": "0" * 16}
+    assert findings(workers={"autodev": old, "mia-data": {"commit": "c" * 40, "code": "b" * 40}}) == {}
+
+
 def test_a_schedule_three_intervals_late_and_the_pause_are_findings():
     found = findings(schedules=[{"id": "mia-data-poll", "every_s": 120.0, "last": NOW - 400}], pause=True)
     assert found["schedule mia-data-poll"]["kinds"] == [] and found["pause"]["kinds"] == [*ALL_KINDS, SNIPPETS]

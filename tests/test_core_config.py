@@ -187,6 +187,25 @@ def test_pause_is_a_text_edit_that_keeps_comments(tmp_path):
     assert paused(tmp_path / "missing.yaml") is False
 
 
+def test_set_pause_edits_the_file_a_release_links_to_and_keeps_its_inode(tmp_path):
+    """A release's mia.yaml is a link to the installation's copy, and a worker's sandbox binds that copy as one
+    file: a pause written by rename would replace the link and never reach the worker."""
+    from mia_core.autonomy import paused, set_pause
+
+    shared = tmp_path / "mia.yaml"
+    shared.write_text("autonomy:\n  pause: false   # lifted\nhost: here\n")
+    link = tmp_path / "release" / "mia.yaml"
+    link.parent.mkdir()
+    link.symlink_to("../mia.yaml")
+    inode = shared.stat().st_ino
+    with shared.open() as held:  # what a process that opened the file before the edit reads afterwards
+        set_pause(link, True)
+        assert "pause: true   # lifted" in held.read()
+    assert link.is_symlink() and paused(shared) and shared.stat().st_ino == inode
+    set_pause(link, False)  # the shorter text leaves nothing of the longer one behind
+    assert shared.read_text() == "autonomy:\n  pause: false   # lifted\nhost: here\n"
+
+
 def test_set_pause_survives_blank_lines_comments_and_a_nested_pause(tmp_path):
     from mia_core.autonomy import paused, set_pause
 

@@ -200,6 +200,18 @@ def test_backup_is_a_consistent_copy(tmp_path):
     assert not (tmp_path / "bk" / "copy.tmp").exists()
 
 
+def test_backup_does_not_take_the_service_lock(tmp_path):
+    """The copy goes to a shared disk; a request must not wait for it, nor the copy for a request."""
+    led = Ledger(tmp_path / "l.sqlite")
+    led.put_buffer("b", {"x": 1})
+    copier = threading.Thread(target=led.backup, args=(tmp_path / "copy.sqlite",), daemon=True)
+    with led._lock:
+        copier.start()
+        copier.join(timeout=30)
+        assert not copier.is_alive()
+    assert Ledger(tmp_path / "copy.sqlite").buffer("b") == {"x": 1}
+
+
 def test_put_asset_merges_and_filters(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite")
     ledger.put_asset("raw", "rec", {"state": "waiting-drop", "job": "1", "path": "/netfs/lab/raw/rec"})

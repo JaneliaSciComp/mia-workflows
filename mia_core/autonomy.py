@@ -9,8 +9,6 @@ from pathlib import Path
 
 import yaml
 
-from mia_core.untrusted import write_atomic
-
 log = logging.getLogger(__name__)
 PAUSE_LINE_RE = re.compile(r"^(\s*pause:\s*)\S+")
 
@@ -39,8 +37,9 @@ def _block_end(lines: list[str], start: int) -> int:
 
 def set_pause(manifest: Path, value: bool) -> None:
     """Write `autonomy.pause: <value>` into the manifest: the block's own `pause` line is edited in place (its trailing
-    comment stays), else the key is added as the block's first child, else the block is appended. The result is read
-    back; a file the edit did not flip raises instead of reporting a pause that is not there."""
+    comment stays), else the key is added as the block's first child, else the block is appended. The file keeps
+    its identity (a link stays a link, the inode stays the inode), so every process that holds it sees the edit. The
+    result is read back; a file the edit did not flip raises instead of reporting a pause that is not there."""
     text = manifest.read_text()
     flag = "true" if value else "false"
     lines = text.split("\n")
@@ -63,6 +62,12 @@ def set_pause(manifest: Path, value: bool) -> None:
         else:
             lines.insert(start + 1, f"{' ' * indent}pause: {flag}")
         out = "\n".join(lines)
-    write_atomic(manifest, out)
+    # ponytail: written in place, never by rename: a release's mia.yaml is a link to the installation's one copy,
+    # and a worker's sandbox binds that file itself, so a file renamed over it would reach neither. A reader in
+    # the instant of the write can see a torn file, which `paused` reads as not paused; a flag file of its own in
+    # a directory the sandbox mounts is the upgrade.
+    with manifest.open("r+") as handle:
+        handle.write(out)
+        handle.truncate()
     if paused(manifest) is not value:
         raise RuntimeError(f"{manifest}: autonomy.pause did not become {flag}; edit the file by hand")
