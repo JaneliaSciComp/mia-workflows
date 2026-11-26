@@ -116,7 +116,8 @@ def service_findings(
             findings.append({"id": f"worker {queue}", "text": text, "kinds": queue_kinds.get(queue, [])})
     for service, row in sorted(workers.items()):
         code = row.get("code")
-        if code and checkout and code != checkout and health.get("queues", {}).get(service, True):
+        # health names a queue for every service of the installation: a row with none is of a service that left it
+        if code and checkout and code != checkout and health.get("queues", {}).get(service):
             text = (
                 f"the `{service}` worker runs the code of commit `{(row.get('commit') or '?')[:7]}`, and the "
                 f"checkout's code has changed since: a restart is owed (`mia restart {service}`)"
