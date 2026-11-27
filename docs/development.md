@@ -919,22 +919,21 @@ Volumes and the config stay for the page. Both thresholds travel in the buffer c
 `mia exec mia-buffers retire <buffer>` does it by hand (refs, archive, then the `retired` event, so consumers get
 410; the spec's stage stays as it is) and exits 1 when buffer-api refuses.
 
-**A person's retire.** The `retire` action is accepted at every stage but `retired`, also from a shelved
-buffer, and always ends at `retired`. The workflow keeps it in a queue of its own (`retire_events`), so no
-step of a round refuses it, and acts on it where the buffer is: a round in progress or at a gate is ended
-as a `cancel` ends it (`_guard`, `_cancel_round`), and so is the tail of a round whose late datasets still
-source behind a `ready` buffer (`_round_open`); a buffer that serves abandons a rebuild, whose running job is
-not killed; one that rests has nothing to end. Then `_retire_all` reads from the registry which versions of the buffer are still
-registered (`live_buffers`: the buffers whose id names the subject and whose latest event is not
-`retired`), retires each, and writes `retired` with who retired it and what was released, or that nothing
-was registered. It reads the registry and not its state, so a run that began with the retire releases what
-earlier runs registered. A round whose job could not be killed ends `needs-human` saying so, and a retire
-sent there finishes it. A retire of a buffer that is `retired` is refused, and one whose event the workflow
-handled before is dropped where it arrives. A run with no round writes the sentence as an entry of its own. When `retired` is written,
-buffer-api ends the buffer's hold in the same transaction, with an entry (`Ledger.append_entry`), whoever
-wrote the stage. The signal handler decides by `workflow.patched("retire-anywhere")`: a run whose history
-already holds a person's retire as a lifecycle signal keeps handling them that way (acted on at `ready` or
-`idle`, refused elsewhere) until it rolls over.
+**A person's retire.** The `retire` action is accepted at every stage but `retired`, also from a shelved buffer, and
+always ends at `retired`. The workflow keeps it in a queue of its own (`retire_events`), so no step of a round refuses
+it, and acts on it where the buffer is: a round in progress or at a gate is ended as a `cancel` ends it (`_guard`,
+`_cancel_round`), and so is the tail of a round whose late datasets still source behind a `ready` buffer
+(`_round_open`); a buffer that serves abandons a rebuild, whose running job is not killed; one that rests has nothing
+to end. Then `_retire_all` reads from the registry which versions of the buffer are still registered (`live_buffers`:
+the buffers whose id names the subject and whose latest event is not `retired`), retires each, and writes `retired`
+with who retired it and what was released, or that nothing was registered. It reads the registry and not its state, so
+a run that began with the retire releases what earlier runs registered. A round whose job could not be killed ends
+`needs-human` saying so, and a retire sent there finishes it. A retire of a buffer that is `retired` is refused, and
+one whose event the workflow handled before is dropped where it arrives. A run with no round writes the sentence as an
+entry of its own. When `retired` is written, buffer-api ends the buffer's hold in the same transaction, with an entry
+(`Ledger.append_entry`), whoever wrote the stage. The signal handler decides by `workflow.patched("retire-anywhere")`:
+a run whose history already holds a person's retire as a lifecycle signal keeps handling them that way (acted on at
+`ready` or `idle`, refused elsewhere) until it rolls over.
 
 **One live buffer per spec.** A new go after a `needs-human` or cancelled round retires that round's buffer
 before planning (refs released, `retired` event, an entry); a go at a gate retires the staged buffer. The page
