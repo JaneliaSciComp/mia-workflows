@@ -2803,6 +2803,21 @@ async def test_retire_at_the_plan_gate_drops_the_plan_and_rests_at_retired(env):
     assert not m.of("kill_job") and not m.of("retire_buffer") and not m.of("create_buffer")
 
 
+async def test_a_retire_that_arrives_as_a_rollover_falls_due_is_not_lost(env, monkeypatch):
+    """A run that continues as new drops its queued signals: none does while a person's retire waits."""
+    from temporalio import workflow
+
+    due = {"now": False}
+    monkeypatch.setattr(workflows, "_rollover_due", lambda: due["now"] and workflow.info().continued_run_id is None)
+    m = Mocks()
+    async with started(env, m, runner=UnsandboxedWorkflowRunner()) as h:
+        await idle(h, m, "plan-review")
+        due["now"] = True  # the retire's own event is what makes the rollover due
+        await h.signal(MiaBuffer.retire, ev("retire", "21"))
+        await idle(h, m, "retired")
+    assert m.stages == ["planning", "plan-review", "retired"]
+
+
 async def test_retire_of_a_serving_buffer_releases_the_version_an_earlier_plan_left_serving(env):
     m = Mocks(plan=ONLY_U937, live=["i7-e11", "i7-e15"])
     async with started(env, m, signal="go") as h:

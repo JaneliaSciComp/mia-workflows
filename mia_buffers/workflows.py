@@ -399,8 +399,9 @@ class MiaBuffer:
             self.in_flight -= of_round
 
     def _roll_due(self) -> bool:
-        """Whether to continue as new now: never with a cancel queued, which a new run would not hear."""
-        return _rollover_due() and not self.cancel_events
+        """Whether to continue as new now: never with a cancel or a person's retire queued, which a new run
+        would not hear."""
+        return _rollover_due() and not self.cancel_events and not self.retire_events
 
     async def _limits(self) -> SourcingLimits:
         if self.limits is None:
