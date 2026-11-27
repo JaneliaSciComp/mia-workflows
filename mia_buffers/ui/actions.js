@@ -96,7 +96,8 @@ export const ACTION_HELP = {
         ? "Accept the plan and start the jobs: the pool's datasets are staged, then the round stops for your approval."
         : "Serve the buffer as the board shows it. The share each weighting group has now becomes the floor it is judged against.",
     keep: "Keep this idle buffer: it goes back to ready instead of being retired.",
-    retire: "Release the buffer's staged data: training jobs are refused from then on, and the space can be reclaimed.",
+    retire:
+      "Retire the buffer from wherever it is: a round in progress is cancelled, every version still registered is released and training jobs are refused from then on. The space can be reclaimed.",
     cancel: "Stop the round in progress: its cluster jobs are killed and its buffer is retired.",
     stop: "For a run that does not answer Cancel: the workflow is terminated and the buffer's versions are retired. A cluster job already running is not killed.",
   },
@@ -161,9 +162,33 @@ export const actionWord = (subject, action) =>
             : action === "go" && (subject.kind === "dataset" || subject.kind === "prep")
               ? "Restart" // from scratch; Resume, where it is offered, goes on with what stopped
               : ACTION_WORDS[action] || action;
+// What a retire does to this buffer, for its confirmation: what happens where the buffer is now, then what
+// every retire does. Built from what the subject view carries; `serving` is there only in a list.
+const RETIRE_NOW = {
+  planning: "Its round in progress is cancelled first: its cluster jobs are killed and the work so far is not kept.",
+  sourcing: "Its round in progress is cancelled first: its cluster jobs are killed and the work so far is not kept.",
+  staged: "The round at its approval gate is ended and what it staged is released.",
+  "plan-review": "The plan under review is dropped; no job has run for it.",
+  ready: s => `${s.serving ? `Version ${s.serving}` : "The version being served"} stops serving.`,
+  idle: s => `${s.serving ? `Version ${s.serving}` : "The version being served"} stops serving.`,
+};
+export function retireConfirm(subject) {
+  const now =
+    RETIRE_NOW[subject.stage] ||
+    "No round is open: this marks the buffer retired and releases what earlier rounds left registered, if anything.";
+  return [
+    "Retire this buffer?",
+    "",
+    typeof now === "function" ? now(subject) : now,
+    "",
+    "Every version of it that is still registered is released, also one an earlier plan left serving: training jobs that read one are refused from now on. The draws are archived and the keeper may reclaim the staged data.",
+    ...(subject.shelved ? ["It comes off the shelf."] : []),
+    "It can be planned again at any time.",
+  ].join("\n");
+}
 const ACTION_CONFIRM = {
   revoke: "Revoke this dataset's saved crops? Buffers that drew from it are degraded; nothing is deleted.",
-  retire: "Retire this buffer? Training jobs reading it are refused and its staged data is released.",
+  retire: retireConfirm,
   cancel: s =>
     s.kind === "prep"
       ? "Cancel the request's round in progress? The dataset rounds it started are stopped too."
