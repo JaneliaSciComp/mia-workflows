@@ -2724,10 +2724,12 @@ async def test_retire_at_rest_releases_what_the_registry_holds(env):
         await h.signal(MiaBuffer.retire, ev("retire", "22"))
         await until(lambda: m.of("refuse_label"), m=m)
     assert m.stages == ["retired"] and state.retired and m.of("retire_buffer") == [("i7-e5",), ("i7-e9",)]
-    assert m.of("set_stage")[-1][1] == (
+    said = (
         f"Retired by alice: released `i7-e5` (draws archived to {archive('i7-e5')}), "
         f"`i7-e9` (draws archived to {archive('i7-e9')})."
     )
+    # a run with no round: the stage write carries no entry, so the sentence is an entry of its own
+    assert m.of("set_stage")[-1][1] == said and m.of("comment") == [(said, "retired by 11")]
     assert m.of("refuse_label") == [("buffer:retire", "the buffer is already retired", "22")]
 
 
@@ -2775,10 +2777,18 @@ async def test_retire_while_sourcing_ends_the_round_as_a_cancel_does_and_rests_a
     taken = {a[2] for a in m.of("take_lock")}
     assert {a[2] for a in m.of("release_lock")} == taken and taken  # every raw lock is released
     assert [a[1] for a in m.of("settle")] == [a[0] for a in m.of("submit")]  # no reservation left open
-    # the round's own buffer as a cancelled round's, then the version an earlier plan had left registered
-    assert m.of("retire_buffer") == [("i7-e11",), ("i7-e5",)] and state.retired and state.superseded == []
+    # the version an earlier plan had left registered, then the round's own: one entry names both
+    assert m.of("retire_buffer") == [("i7-e5",), ("i7-e11",)] and state.retired and state.superseded == []
     assert m.stages == ["planning", "sourcing", "retired"] and not m.of("refuse_label")
-    assert m.of("set_stage")[-1][1] == f"Retired by alice: released `i7-e5` (draws archived to {archive('i7-e5')})."
+    assert m.of("set_stage")[-1][1] == (
+        f"Retired by alice: released `i7-e5` (draws archived to {archive('i7-e5')}), "
+        f"`i7-e11` (draws archived to {archive('i7-e11')})."
+    )
+    assert {d.record: d.reason for d in state.datasets} == {
+        "u937": "abandoned: the buffer was retired",
+        "bcss": "abandoned: the buffer was retired",
+    }
+    assert not any(marker.startswith("retired i7") for _, marker in m.of("comment"))  # no "cancelled round" entry
     # the pass the retire ended writes its own result: the write that sets `retired` carries it, with the killed job
     assert m.of("result")[-1] == ("sourcing", "", "retired", ["/w/i7-e11/stage-u937"])
 
@@ -2847,6 +2857,37 @@ async def test_a_retire_that_cannot_kill_a_job_stops_at_needs_human_and_a_second
         await h.signal(MiaBuffer.retire, ev("retire", "13"))
         await idle(h, m, "retired")
     assert m.stages[-2:] == ["needs-human", "retired"]
+
+
+async def test_retire_of_a_ready_buffer_whose_late_dataset_still_waits_ends_that_too(env):
+    """Approved at the gate while bcss waits for its files: the buffer is ready and the round's task still waits
+    for the straggler. A retire ends it as a cancel ends a round, at once, not when the files arrive."""
+    m = Mocks()
+    async with started(env, m, signal="go") as h:
+        await until(lambda: m.of("register_dataset") and m.of("comment_drop"), m=m)
+        await ready(h, m)
+        await h.signal(MiaBuffer.retire, ev("retire", "21"))
+        await idle(h, m, "retired")
+        state = await h.query(MiaBuffer.status)
+    assert m.of("retire_buffer") == [("i7-e11",)] and state.retired and not m.of("refuse_label")
+    assert dataset(state, "bcss").reason == "abandoned: the buffer was retired"
+    assert dataset(state, "u937").status == "servable" and m.stages[-2:] == ["ready", "retired"]
+
+
+async def test_a_redelivered_retire_does_not_end_a_later_round(env):
+    """The retire that retired the buffer is sent again (a stale Retry) while a new round sources: the round
+    goes on, no job is killed."""
+    m = Mocks(gate=asyncio.Event(), gate_on="stage-u937")
+    async with started(env, m, first=ev("retire", "21"), signal="retire") as h:
+        await idle(h, m, "retired")
+        await h.signal(MiaBuffer.go, ev("go", "22"))
+        await until(lambda: m.of("await") and m.of("comment_drop"), m=m)
+        await h.signal(MiaBuffer.retire, ev("retire", "21"))
+        await asyncio.sleep(0.5)
+        assert (await h.describe()).status.name == "RUNNING" and not m.of("kill_job")
+        m.gate.set()
+        await idle(h, m, "staged")
+    assert m.stages == ["retired", "planning", "sourcing", "staged"] and not m.of("retire_buffer")
 
 
 async def test_a_redelivered_retire_is_dropped(env):

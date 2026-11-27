@@ -2,7 +2,9 @@
 
 **Status:** v0.2 · 2026-11-26 · approved by the user 2026-11-26 (as v0.1) and built. v0.2 says what the build
 settled: the patch is taken where the signal arrives (§3.2), the entry of a round the retire ended is worded as
-a cancel's is (§3.2), and the confirmation names the serving version only where the page has it (§3.5).
+a cancel's is (§3.2), a ready buffer whose late datasets still source counts as a round to end (§3.2), a
+redelivered retire is dropped where it arrives (§3.2), a rebuild's job is not killed (§3.6), and the
+confirmation names the serving version only where the page has it (§3.5).
 
 ## 1. Intent
 
@@ -65,7 +67,8 @@ whose history already holds a person's retire as a lifecycle signal keeps that h
 | Where the buffer is | What happens |
 |---|---|
 | a round works or waits at a gate (`planning`, `plan-review`, `sourcing`, `staged`) | The round is ended as a `cancel` ends it (`_cancel_round`: jobs killed, locks released, reservations settled, the round's buffer retired), then §3.3, then the stage is `retired`. A job that could not be killed ends the round at `needs-human` saying so, as a cancel does; a retire sent there finishes it. |
-| it serves (`ready`, `idle`) | A rebuild in progress is abandoned as now, then §3.3, then `retired`. |
+| it is `ready` and late datasets of its round still source | As the row above: their tasks are cancelled, their jobs killed and their locks released, then §3.3, then `retired`. |
+| it serves (`ready`, `idle`) | A rebuild in progress is abandoned, then §3.3, then `retired`. |
 | it rests (`new`, `needs-human`, `cancelled`) | §3.3, then `retired`. |
 | `retired` | Refused: the click crossed a retire. |
 
@@ -74,8 +77,12 @@ a round from `retired` as it does today.
 
 The entry that writes `retired` says who retired the buffer and what was released: each version with the
 archive of its draws, or that nothing was registered. Where a round was open, the stage write carries the open
-pass's result as a cancel's does, so the pass ends saying how. The round's own buffer is retired by the cancel
-path, with its own entry, before the others.
+pass's result as a cancel's does, so the pass ends saying how. The round's own buffer is released with the
+others and named in the same entry. A run with no round (the retire started it) writes the sentence as an entry
+of its own, since its stage write carries none.
+
+A retire whose event the workflow has handled before (a stale Retry) is dropped by the signal handler: it ends
+no round and retires nothing.
 
 Afterwards the state holds `retired = True`, no `superseded` versions and no `idle_since`.
 
@@ -125,6 +132,10 @@ The button's tooltip and the `retire` line of the guide say the same in one sent
 
 The keeper's `idle` and `retire` signals and their rules; the force stop; `cancel`, which still ends a round at
 `cancelled` (and that buffer then takes a retire); the repair agent's rules and menu; datasets and requests.
+
+**Known gap.** A retire of a serving buffer abandons a rebuild as a go does: the rebuild's tasks are cancelled,
+but a stage job one of them had running is not killed and runs to its end under a buffer that reads `retired`.
+Ending it needs the rebuild to unwind as a round does (`_cancel_round`), which is not part of this change.
 
 ## 4. Build notes
 

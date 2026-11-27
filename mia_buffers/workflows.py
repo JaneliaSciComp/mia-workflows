@@ -313,7 +313,8 @@ class MiaBuffer:
         (`buffer`) after retire_after_days of idleness, about that one version."""
         label = _label(event)
         if label is not None and workflow.patched("retire-anywhere"):
-            self.retire_events.append(label)
+            if label.event_id not in self.state.handled:  # a redelivery ends no round and retires nothing
+                self.retire_events.append(label)
         else:
             self.lifecycle.append(("retire", label, buffer))
 
@@ -427,7 +428,7 @@ class MiaBuffer:
                 if round_task.done():
                     await round_task  # re-raises what ended it: a failure below, or a continue-as-new
                     break
-                if self.state.stage in CANCELLABLE:
+                if self.state.stage in CANCELLABLE or (self.retire_events and self._round_open()):
                     await self._cancel_round(round_task)
                     break
                 await self._refuse_cancels()
@@ -466,9 +467,10 @@ class MiaBuffer:
                 if not self._seen(event):
                     await self._refuse(CANCEL, ROUND_ENDED, event)
             return
+        why = RETIRED_WHILE if self.retire_events else CANCELLED
         for dataset in state.datasets if tasks else []:  # a sourcing pass was under way
             if dataset.status not in SETTLED:
-                self._set(dataset, "failed", CANCELLED)  # before the cancel: its task then ends without a comment
+                self._set(dataset, "failed", why)  # before the cancel: its task then ends without a comment
         running: list[asyncio.Future] = [round_task, *tasks]
         for waiting in running:  # waiting somewhere: stop it there
             if not waiting.done() and waiting not in self.unwinding:
@@ -483,12 +485,13 @@ class MiaBuffer:
         for event in events:
             self._seen(event)
         retire = self._retire_asked()
-        if state.buffer_id and not state.retired:
+        by = retire.actor if retire else events[-1].actor if events else "an action handled before"
+        if state.buffer_id and not state.retired and not retire:  # a retire releases it with the other versions
             await self._retire_failed(state.buffer_id, "cancelled")
             state.retired = True
         if self.unkilled:
             jobs = "; ".join(self.unkilled)
-            how = f"retire by {retire.actor} ended the round" if retire else f"cancelled by {events[-1].actor}"
+            how = f"retire by {by} ended the round" if retire else f"cancelled by {by}"
             return await self._finish(
                 "needs-human", f"{how}, but a job could not be killed and may still be running: {jobs}"
             )
@@ -496,7 +499,7 @@ class MiaBuffer:
             await self._retire_all(retire)
             await self._refuse_queued()
             return await self._refuse_lifecycle()
-        await self._finish("cancelled", f"cancelled by {events[-1].actor}")
+        await self._finish("cancelled", f"cancelled by {by}")
 
     async def _kill(self, job_id: str) -> None:
         """Kill a job of a round being cancelled; a failure is kept for the round's last word, never raised."""
@@ -519,9 +522,14 @@ class MiaBuffer:
         )
 
     def _ending_asked(self) -> bool:
-        """A cancel is queued, or a person's retire while a round is in progress or at a gate: `_guard` ends the
-        round for either. A retire of a buffer that serves or rests is left to the step that runs there."""
-        return bool(self.cancel_events) or (bool(self.retire_events) and self.state.stage in CANCELLABLE)
+        """A cancel is queued, or a person's retire while a round is open: `_guard` ends the round for either.
+        A retire of a buffer that serves or rests is left to the step that runs there."""
+        return bool(self.cancel_events) or (bool(self.retire_events) and self._round_open())
+
+    def _round_open(self) -> bool:
+        """A round is in progress or at a gate, or the buffer is ready and late datasets of its round still
+        source: tasks, jobs and locks that a retire ends as a cancel would."""
+        return self.state.stage in CANCELLABLE or any(not task.done() for task in self.sourcing_tasks)
 
     def _retire_asked(self) -> LabelEvent | None:
         """The person's retire that is queued, taken from the queue; None when there is none (a redelivery is
@@ -532,8 +540,8 @@ class MiaBuffer:
 
     async def _retire_all(self, event: LabelEvent) -> None:
         """A person's retire (spec retire-anywhere §3.3): every version of the buffer that is still registered
-        is released, the round's own too when it never was, and the buffer rests at `retired`, also when there
-        was nothing to release. The versions are read from the registry, so a run that began with this retire
+        is released, the round's own too, and the buffer rests at `retired`, also when there was nothing to
+        release. The versions are read from the registry, so a run that began with this retire
         releases what earlier runs registered; running it again finds none."""
         state = self.state
         versions = await self._act("live_buffers", state.issue, seconds=300, result_type=list[str])
@@ -545,7 +553,10 @@ class MiaBuffer:
             released.append(f"`{buffer}` (draws archived to {retired.get('archive') or 'none'})")
         state.retired, state.idle_since, state.superseded = True, None, []
         what = "released " + ", ".join(released) if released else "nothing was registered to release"
-        await self._stage("retired", RETIRED_BY.format(actor=event.actor, what=what))
+        said = RETIRED_BY.format(actor=event.actor, what=what)
+        if not state.round_id:  # no round: the stage write has no entry to carry the sentence
+            await self._comment(said, f"retired by {event.event_id}")
+        await self._stage("retired", said)
 
     def _seen(self, event: LabelEvent) -> bool:
         if event.event_id in self.state.handled:
