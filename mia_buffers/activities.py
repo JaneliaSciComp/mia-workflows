@@ -220,6 +220,7 @@ class Activities:
             self.staged_summary,
             self.buffer_event,
             self.retire_buffer,
+            self.live_buffers,
             self.raw_ready,
             self.missing_records,
             self.comment_drop,
@@ -1472,6 +1473,22 @@ class Activities:
             lambda: registry.event(buffer_id, kind, issue=_issue_of(buffer_id), event_id=None, detail=detail[:200]),
             f"{kind} event of {buffer_id}",
             log,
+        )
+
+    @activity.defn(name="live_buffers")
+    @mia_permanent_errors
+    async def live_buffers(self, issue: int) -> list[str]:
+        """The versions of a buffer that are still registered: the ids of the registry's buffers that are rounds
+        of `issue` and whose latest event is not `retired`. What a person's retire releases (spec retire-anywhere
+        §3.3): read from the registry, so a run that began with the retire finds what earlier runs registered."""
+        buffers = await asyncio.to_thread(self.registry.buffers)
+        return sorted(
+            buffer["id"]
+            for buffer in buffers
+            if ROUND_RE.fullmatch(buffer["id"])
+            and buffer["id"].startswith("i")
+            and _issue_of(buffer["id"]) == issue
+            and (buffer.get("latest_event") or {}).get("kind") != "retired"
         )
 
     @activity.defn(name="retire_buffer")

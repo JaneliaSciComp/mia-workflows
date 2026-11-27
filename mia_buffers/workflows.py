@@ -89,6 +89,8 @@ IDLE = (
     "No consumer for {hours:g} hours: idle. Keep returns it to ready; Retire or {days:g} days of idleness retires it."
 )
 RETIRED = "Retired: refs released; draws archived to {path}"
+RETIRED_BY = "Retired by {actor}: {what}."
+ALREADY_RETIRED = "the buffer is already retired"
 RAW_GONE = "pyramid missing and raw cache gone"
 NOT_PREPARED = "not prepared: prepare it first (Prepare these datasets, on the page)"
 PREP_GO = "prep:go"
@@ -245,6 +247,9 @@ class MiaBuffer:
         self.degraded_reason = ""
         self.paused_round = False  # a job of this round met autonomy.pause: the round stops once nothing runs
         self.cancel_events: list[LabelEvent] = []
+        # a person's retire (spec retire-anywhere): acted on wherever the buffer is, so it waits in a queue of
+        # its own and no lifecycle step of a round refuses it
+        self.retire_events: list[LabelEvent] = []
         self.sourcing_tasks: list[asyncio.Task] = []  # the dataset tasks of the sourcing pass in progress
         # a cancel in progress (see _cancel_round): no task starts a new activity, those in flight answer
         self.cancelling = False
@@ -304,8 +309,13 @@ class MiaBuffer:
 
     @workflow.signal
     def retire(self, event: LabelEvent | None = None, buffer: str = "") -> None:
-        """`buffer:retire` (an event), or the keeper (`buffer`) after retire_after_days of idleness."""
-        self.lifecycle.append(("retire", _label(event), buffer))
+        """A person's retire (an event): every version of the buffer is released, wherever it is. Or the keeper's
+        (`buffer`) after retire_after_days of idleness, about that one version."""
+        label = _label(event)
+        if label is not None and workflow.patched("retire-anywhere"):
+            self.retire_events.append(label)
+        else:
+            self.lifecycle.append(("retire", label, buffer))
 
     @workflow.query
     def status(self) -> BufferState:
@@ -321,16 +331,16 @@ class MiaBuffer:
         elif self.lifecycle_on and state.stage in ("ready", "idle") and state.buffer_id:  # rolled over serving
             await self._guard(self._steady())
         while True:
-            await workflow.wait_condition(
-                lambda: (
-                    bool(self.go_events or self.approve_events or self._lifecycle() or self.cancel_events)
-                    or self._roll_due()
-                )
-            )
-            if not (self.go_events or self.approve_events or self._lifecycle() or self.cancel_events):
+            await workflow.wait_condition(lambda: self._queued() or self._roll_due())
+            if not self._queued():
                 workflow.continue_as_new(self.state)  # idle, nothing queued
             await self._refuse_cancels()  # idle: no round to cancel
             await self._refuse_queued(gos=False)  # idle: an approve has no plan under review to apply to
+            if retire := self._retire_asked():  # at rest: whatever is still registered is released
+                if self.state.stage == "retired":
+                    await self._refuse("buffer:retire", ALREADY_RETIRED, retire)
+                else:
+                    await self._guard(self._retire_all(retire))
             await self._refuse_lifecycle()  # nor a lifecycle signal a buffer to act on
             if not self.go_events:
                 continue
@@ -339,7 +349,7 @@ class MiaBuffer:
                 continue
             rounds += 1
             await self._guard(self._round(event))
-            queued = self.go_events or self.approve_events or self.cancel_events
+            queued = self.go_events or self.approve_events or self.cancel_events or self.retire_events
             if (rounds >= MAX_ROUNDS_PER_EXECUTION or self._roll_due()) and not queued:
                 workflow.continue_as_new(self.state)
 
@@ -402,12 +412,13 @@ class MiaBuffer:
 
         The step runs as a task so a `cancel` can end it wherever it waits (spec webapp-actions §5). A cancel
         counts only while a round is in progress or at a gate (`CANCELLABLE`): a buffer that is ready or idle is
-        being served, so there the cancel is refused and the step goes on."""
+        being served, so there the cancel is refused and the step goes on. A person's retire ends a round the
+        same way, and where there is none the step that serves or rests acts on it."""
         await self._refuse_cancels()  # sent before this step began: not aimed at it
         round_task = asyncio.ensure_future(step)
         try:
             while True:
-                cancel = asyncio.ensure_future(workflow.wait_condition(lambda: bool(self.cancel_events)))
+                cancel = asyncio.ensure_future(workflow.wait_condition(self._ending_asked))
                 try:
                     await workflow.wait([round_task, cancel], return_when=asyncio.FIRST_COMPLETED)
                 finally:
@@ -437,7 +448,8 @@ class MiaBuffer:
         gate) is cancelled there. A cluster job is killed first (`_await_job`), then its reservation settled
         and its raw lock released: one writer per raw cache holds until the job is dead. The round's
         unfinished buffer is retired as a failed round's is, and the spec ends `cancelled`; a job that cannot
-        be killed makes it `needs-human`, saying so."""
+        be killed makes it `needs-human`, saying so. A round a person's retire ended goes on to release every
+        other version of the buffer and ends `retired` (`_retire_all`)."""
         state = self.state
         events, self.cancel_events = self.cancel_events, []
         self.cancelling, self.unkilled = True, []
@@ -469,15 +481,20 @@ class MiaBuffer:
         self.cancelling, self.unwinding = False, set()
         for event in events:
             self._seen(event)
+        retire = self._retire_asked()
         if state.buffer_id and not state.retired:
             await self._retire_failed(state.buffer_id, "cancelled")
             state.retired = True
         if self.unkilled:
             jobs = "; ".join(self.unkilled)
+            how = f"retire by {retire.actor} ended the round" if retire else f"cancelled by {events[-1].actor}"
             return await self._finish(
-                "needs-human",
-                f"cancelled by {events[-1].actor}, but a job could not be killed and may still be running: {jobs}",
+                "needs-human", f"{how}, but a job could not be killed and may still be running: {jobs}"
             )
+        if retire:
+            await self._retire_all(retire)
+            await self._refuse_queued()
+            return await self._refuse_lifecycle()
         await self._finish("cancelled", f"cancelled by {events[-1].actor}")
 
     async def _kill(self, job_id: str) -> None:
@@ -493,6 +510,41 @@ class MiaBuffer:
         for event in events:
             if not self._seen(event):
                 await self._refuse(CANCEL, NO_ROUND, event)
+
+    def _queued(self) -> bool:
+        """Something waits for the main loop: a go, an approve, a cancel, a retire or a lifecycle signal."""
+        return bool(
+            self.go_events or self.approve_events or self._lifecycle() or self.cancel_events or self.retire_events
+        )
+
+    def _ending_asked(self) -> bool:
+        """A cancel is queued, or a person's retire while a round is in progress or at a gate: `_guard` ends the
+        round for either. A retire of a buffer that serves or rests is left to the step that runs there."""
+        return bool(self.cancel_events) or (bool(self.retire_events) and self.state.stage in CANCELLABLE)
+
+    def _retire_asked(self) -> LabelEvent | None:
+        """The person's retire that is queued, taken from the queue; None when there is none (a redelivery is
+        none)."""
+        events, self.retire_events = self.retire_events, []
+        fresh = [event for event in events if not self._seen(event)]
+        return fresh[-1] if fresh else None
+
+    async def _retire_all(self, event: LabelEvent) -> None:
+        """A person's retire (spec retire-anywhere §3.3): every version of the buffer that is still registered
+        is released, the round's own too when it never was, and the buffer rests at `retired`, also when there
+        was nothing to release. The versions are read from the registry, so a run that began with this retire
+        releases what earlier runs registered; running it again finds none."""
+        state = self.state
+        versions = await self._act("live_buffers", state.issue, seconds=300, result_type=list[str])
+        if state.buffer_id and not state.retired and state.buffer_id not in versions:
+            versions.append(state.buffer_id)
+        released = []
+        for buffer in versions:
+            retired = await self._act("retire_buffer", buffer, buffer, seconds=900, result_type=dict)
+            released.append(f"`{buffer}` (draws archived to {retired.get('archive') or 'none'})")
+        state.retired, state.idle_since, state.superseded = True, None, []
+        what = "released " + ", ".join(released) if released else "nothing was registered to release"
+        await self._stage("retired", RETIRED_BY.format(actor=event.actor, what=what))
 
     def _seen(self, event: LabelEvent) -> bool:
         if event.event_id in self.state.handled:
@@ -1041,7 +1093,7 @@ class MiaBuffer:
         while True:
             await workflow.wait_condition(
                 lambda: (
-                    bool(self.lifecycle or self.go_events or self.approve_events)
+                    bool(self.lifecycle or self.go_events or self.approve_events or self.retire_events)
                     or self._rebuilt()
                     or (self._roll_due() and not self.rebuild)
                 )
@@ -1050,8 +1102,11 @@ class MiaBuffer:
                 if not await self._end_rebuild():
                     return
                 continue
-            if not (self.lifecycle or self.go_events or self.approve_events):
+            if not (self.lifecycle or self.go_events or self.approve_events or self.retire_events):
                 workflow.continue_as_new(self.state)  # stage ready or idle: run() comes back here
+            if retire := self._retire_asked():  # a person's: this version and every other one still registered
+                await self._cancel_rebuild(RETIRED_WHILE)
+                return await self._retire_all(retire)
             await self._refuse_queued(gos=False)
             self.go_events = [go for go in self.go_events if go.event_id not in self.state.handled]
             if self.go_events:
