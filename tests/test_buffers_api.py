@@ -2003,6 +2003,32 @@ def test_shelving_covers_specs_requests_and_a_dataset_that_never_ran(tmp_path):
     assert call(s, "GET", "/datasets/rec-a")[0] == 404  # the made-up row goes with the hold
 
 
+def test_a_shelved_buffer_takes_retire_and_reaching_retired_ends_its_hold(tmp_path):
+    """A buffer is retired from wherever it is, also from the shelf, and a retired one is not shelved (spec
+    retire-anywhere §3.1, §3.4): buffer-api ends the hold with the stage write, whoever wrote it."""
+    s, gateway = _acting(tmp_path)
+    worker(s, "PUT", "/subjects/buffer/8", {"key": "pool", "stage": "cancelled"})
+    worker(s, "PUT", "/subjects/dataset/7", {"key": "rec-a"})
+    assert act(s, "/specs/pool/actions", {"action": "shelve", "note": "n"})[0] == 202
+    assert act(s, "/datasets/rec-a/actions", {"action": "shelve", "note": "n"})[0] == 202
+    assert call(s, "GET", "/subjects/buffer/pool")[1]["actions"] == ["retire", "unshelve"]
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["actions"] == ["unshelve"]  # a dataset has no retire
+    assert act(s, "/specs/pool/actions", {"action": "retire"})[0] == 202
+    assert [sent[:3] for sent in gateway.sent] == [("buffer", 8, "retire")]
+    worker(s, "POST", "/timeline/buffer/8", {"stage": "needs-human", "body": "stopped", "marker": "m1"})
+    assert call(s, "GET", "/subjects/buffer/pool")[1]["status"] == "shelved"  # no other stage ends a hold
+    worker(s, "POST", "/timeline/buffer/8", {"stage": "retired", "body": "Retired by page.", "marker": "m2"})
+    view = call(s, "GET", "/subjects/buffer/pool")[1]
+    assert (view["stage"], view["status"], view["shelved"]) == ("retired", "done", None)
+    assert view["actions"] == ["edit", "go", "shelve"]  # a retired buffer has nothing left to retire
+    said = [entry["body"].splitlines()[0] for entry in call(s, "GET", "/timeline/buffer/8")[1]["entries"]]
+    assert said[-2:] == ["Retired by page.", "unshelved: the buffer was retired"]
+    worker(s, "POST", "/timeline/buffer/8", {"stage": "retired", "body": "Retired again.", "marker": "m3"})
+    said = [entry["body"].splitlines()[0] for entry in call(s, "GET", "/timeline/buffer/8")[1]["entries"]]
+    assert said.count("unshelved: the buffer was retired") == 1  # nothing to end: no entry
+    assert call(s, "GET", "/subjects/dataset/rec-a")[1]["status"] == "shelved"
+
+
 def test_decisions_show_what_the_person_wrote_with_their_verdict(tmp_path):
     """An assessment names the action it came from, and the note is read from that action, whatever else the
     person did before or after."""
@@ -2400,8 +2426,9 @@ def test_buffer_actions_follow_the_stage_table(tmp_path):
         status == 202 and action["payload"] == {"spec": SPEC_TEXT} and gateway.sent[-1][:3] == ("buffer", number, "go")
     )
     _stage(s, "buffer", number, "sourcing")
-    for refused in ("go", "retire", "approve", "revoke", "keep"):
+    for refused in ("go", "approve", "revoke", "keep"):
         assert act(s, SPEC_ACTIONS, {"action": refused, "revision": 1, "records": ["rec-a"]})[0] == 409, refused
+    assert act(s, SPEC_ACTIONS, {"action": "retire"})[0] == 202  # a retire ends a round in progress too
     revision = _stage(s, "buffer", number, "staged")
     assert act(s, SPEC_ACTIONS, {"action": "approve", "revision": revision - 1})[0] == 409  # an older board
     assert act(s, SPEC_ACTIONS, {"action": "approve", "revision": revision})[0] == 202
@@ -2412,7 +2439,9 @@ def test_buffer_actions_follow_the_stage_table(tmp_path):
     assert status == 202 and action["payload"] == {"records": ["rec-a", "rec-b"]}
     _stage(s, "buffer", number, "idle")
     assert act(s, SPEC_ACTIONS, {"action": "keep"})[0] == 202 and act(s, SPEC_ACTIONS, {"action": "retire"})[0] == 202
-    assert [sent[2] for sent in gateway.sent] == ["go", "approve", "revoke", "keep", "retire"]
+    assert [sent[2] for sent in gateway.sent] == ["go", "retire", "approve", "revoke", "keep", "retire"]
+    _stage(s, "buffer", number, "retired")
+    assert act(s, SPEC_ACTIONS, {"action": "retire"})[0] == 409  # nothing is left to retire
     assert act(s, "/specs/nope/actions", {"action": "go"})[0] == 404
 
 

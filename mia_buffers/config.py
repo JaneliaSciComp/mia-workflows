@@ -54,24 +54,26 @@ PREP_HUMAN_LABELS = {
     "resume": ("0e8a16", "Prepare the datasets this request names: each runs what it has left"),
 }
 # stage -> (phase, the actions it accepts), as `mia_data.config.STAGE_ACTIONS` (spec webapp-actions §5.1).
-# A round in progress (`working`) accepts `cancel`, what feeds it (`dropped`) and the force stop; a new go, a
-# revoke or a retire waits until it has ended or been cancelled. `ready` takes `dropped` too: a dataset that
-# waited for its files at the approve keeps its place and joins when they land. The workflow stays the code that
-# carries a round out, and two things a stage does not say stay its refusal: a `staged` buffer whose late
+# A round in progress (`working`) accepts `cancel`, `retire` (which ends the round as a cancel does, then
+# releases every version the buffer still has), what feeds it (`dropped`) and the force stop; a new go or a
+# revoke waits until it has ended or been cancelled. `retire` is accepted at every stage but `retired` (spec
+# retire-anywhere): it always ends there, also with nothing to release. `ready` takes `dropped` too: a dataset
+# that waited for its files at the approve keeps its place and joins when they land. The workflow stays the code
+# that carries a round out, and two things a stage does not say stay its refusal: a `staged` buffer whose late
 # datasets still have a job running refuses a go, and a `ready` buffer rebuilding a lost volume abandons the
 # rebuild on a go or retire. `edit` replaces the definition text where the buffer rests: no round is open and it
 # does not serve. buffer-api settles it itself, so the workflow hears of none.
 STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {
-    "new": ("not started", frozenset({"edit", "go"})),
-    "planning": ("working", frozenset({"cancel", "stop"})),
-    "plan-review": ("waiting", frozenset({"approve", "go", "cancel", "stop"})),
-    "sourcing": ("working", frozenset({"cancel", "dropped", "stop"})),
-    "staged": ("waiting", frozenset({"approve", "go", "dropped", "cancel", "stop"})),
+    "new": ("not started", frozenset({"edit", "go", "retire"})),
+    "planning": ("working", frozenset({"cancel", "retire", "stop"})),
+    "plan-review": ("waiting", frozenset({"approve", "go", "cancel", "retire", "stop"})),
+    "sourcing": ("working", frozenset({"cancel", "dropped", "retire", "stop"})),
+    "staged": ("waiting", frozenset({"approve", "go", "dropped", "cancel", "retire", "stop"})),
     "ready": ("done", frozenset({"go", "revoke", "retire", "dropped", "stop"})),
     "idle": ("waiting", frozenset({"keep", "retire", "go", "revoke", "stop"})),
     "retired": ("done", frozenset({"edit", "go"})),
-    "needs-human": ("stopped", frozenset({"edit", "go"})),
-    "cancelled": ("done", frozenset({"edit", "go"})),
+    "needs-human": ("stopped", frozenset({"edit", "go", "retire"})),
+    "cancelled": ("done", frozenset({"edit", "go", "retire"})),
 }
 CANCELLABLE = ("planning", "plan-review", "sourcing", "staged")  # the buffer stages `cancel` ends a round at
 PREP_STAGE_ACTIONS: dict[str, tuple[str, frozenset[str]]] = {

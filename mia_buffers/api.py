@@ -1148,10 +1148,11 @@ class BufferService:
         """A subject's phase and the actions it accepts: its stage's (`SUBJECT_RULES`), without `go` for a
         dataset whose record cannot be run (`gaps`: no Start until a synced catalog holds one that can), with
         `shelve` while no round is working and none was just asked for (a round that waits for a verdict is
-        cancelled by the shelve, `_hold`). A shelved subject (`hold`) keeps its phase and takes `unshelve` alone."""
+        cancelled by the shelve, `_hold`). A shelved subject (`hold`) keeps its phase and takes `unshelve` alone,
+        a buffer also the `retire` its stage takes (spec retire-anywhere §3.1: reaching `retired` ends the hold)."""
         phase, actions = SUBJECT_RULES[row["kind"]][row["stage"]]
         if hold is not None:
-            return phase, frozenset({"unshelve"})
+            return phase, frozenset({"unshelve"}) | (actions & {"retire"})
         if gaps:
             actions = actions - {"go", "resume"}
         if row["kind"] == "dataset":

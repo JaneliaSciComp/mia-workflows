@@ -217,7 +217,9 @@ def test_every_buffer_and_prep_stage_has_a_rule():
     # a round in progress takes cancel and nothing that starts or ends something else; a serving buffer no cancel
     assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "cancel" in actions} == set(CANCELLABLE)
     for status, actions in STAGE_ACTIONS.values():
-        assert status != "working" or actions <= {"cancel", "dropped", "stop"}
+        assert status != "working" or actions <= {"cancel", "dropped", "retire", "stop"}
+    # a buffer is retired from wherever it is, and a retired one has nothing left to retire (spec retire-anywhere)
+    assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "retire" not in actions} == {"retired"}
     # a dataset can wait for its files from sourcing until it lands, which may be after the approve
     assert {stage for stage, (_, actions) in STAGE_ACTIONS.items() if "dropped" in actions} == {
         "sourcing",
