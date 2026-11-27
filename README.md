@@ -62,8 +62,10 @@ servable; a round started from the page stops at its plan (*Plan*, then *Run*) a
 it (*Approve*), and the buffer is `ready` once every weighting group reaches the spec's minimum. A staged artifact is
 addressed by its recipe, so a later buffer with the same binding, levels and plan reuses it instead of staging
 again. After that the buffer lives until it is retired: idle when no consumer has drawn for a while, *Keep* to
-hold it, *Retire* to release what it references, *Revoke* to withdraw single records; a round in progress takes
-only *Cancel*. A keeper evicts unreferenced caches under the configured quotas and is the only code that deletes.
+hold it, *Revoke* to withdraw single records. *Retire* releases every version it references and works from
+any state: it ends a round in progress first, and a buffer with nothing to release is still marked retired.
+A round in progress otherwise takes only *Cancel*. A keeper evicts unreferenced caches under the configured
+quotas and is the only code that deletes.
 A repair agent looks every few minutes for rounds that read "in progress" with nothing running, rounds that stopped
 for a reason with a known remedy, and jobs, issues and pull requests a round left behind; it says what is wrong
 with the installation, resolves what it can through the same actions the page's buttons send, and leaves the

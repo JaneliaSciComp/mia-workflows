@@ -1,7 +1,8 @@
 # MIA: retiring a buffer from any state — Spec
 
-**Status:** v0.1 · 2026-11-26 · the design was approved by the user in conversation on 2026-11-26; this text
-awaits approval. Nothing is built.
+**Status:** v0.2 · 2026-11-26 · approved by the user 2026-11-26 (as v0.1) and built. v0.2 says what the build
+settled: the patch is taken where the signal arrives (§3.2), the entry of a round the retire ended is worded as
+a cancel's is (§3.2), and the confirmation names the serving version only where the page has it (§3.5).
 
 ## 1. Intent
 
@@ -57,7 +58,9 @@ shelved dataset or request takes `unshelve` alone, as now.
 ### 3.2 What the workflow does with a person's retire
 
 A person's retire is the `retire` signal that carries the action's event; the keeper's carries a buffer id and
-no event and is handled as today. Under `workflow.patched("retire-anywhere")`:
+no event and is handled as a lifecycle signal. The signal handler takes `workflow.patched("retire-anywhere")`
+and puts a person's retire in a queue of its own (`retire_events`), which no step of a round refuses. A run
+whose history already holds a person's retire as a lifecycle signal keeps that handling until it rolls over.
 
 | Where the buffer is | What happens |
 |---|---|
@@ -70,16 +73,17 @@ A cancel and a retire that are both queued end the round once, at `retired`. A `
 a round from `retired` as it does today.
 
 The entry that writes `retired` says who retired the buffer and what was released: each version with the
-archive of its draws, or that nothing was registered. Where a round was open, that sentence is the open pass's
-result (`_found`), so the pass ends saying how.
+archive of its draws, or that nothing was registered. Where a round was open, the stage write carries the open
+pass's result as a cancel's does, so the pass ends saying how. The round's own buffer is retired by the cancel
+path, with its own entry, before the others.
 
 Afterwards the state holds `retired = True`, no `superseded` versions and no `idle_since`.
 
 ### 3.3 Releasing every version
 
-The workflow asks the registry which versions of this buffer are still registered (a new read activity: the
-buffers whose id names this subject, `_issue_of`, and whose latest event is not `retired`) and runs the existing
-`retire_buffer` activity for each. It reads the registry, not its own state, so a workflow that the retire
+The workflow asks the registry which versions of this buffer are still registered (the read activity
+`live_buffers`: the buffers whose id names this subject, `_issue_of`, and whose latest event is not `retired`)
+and runs the `retire_buffer` activity for each, and for the round's own buffer when it was never registered. It reads the registry, not its own state, so a workflow that the retire
 itself started (no run was open) releases what an earlier run registered. Running it again finds nothing, so
 the step can run again at any point.
 
@@ -95,23 +99,24 @@ status `done`.
 
 The *Retire* button needs no logic of its own: the page offers what the subject's `actions` list holds. Its
 confirmation is the page's usual `confirm()`, and its text is built from what the subject view already carries
-(`stage`, `serving`, `shelved`), one sentence per fact that applies:
+(`stage`, `shelved`, and `serving` where a list gave it), one sentence per fact that applies
+(`retireConfirm` in `mia_buffers/ui/actions.js`):
 
 ```
 Retire this buffer?
 
 <one of>
   Its round in progress is cancelled first: its cluster jobs are killed and the work so far is not kept.
-  The round that waits for your approval is ended and what it staged is released.
+  The round at its approval gate is ended and what it staged is released.
   The plan under review is dropped; no job has run for it.
-  Version <serving> stops serving: training jobs that read it are refused from now on.
-  No round is open and nothing is served: this marks the buffer retired and releases what a stopped
-  round left registered, if anything.
+  Version <serving> stops serving.            (or: The version being served stops serving.)
+  No round is open: this marks the buffer retired and releases what earlier rounds left registered,
+  if anything.
 
-Every version of it that is still registered is released, also one an earlier plan left serving. Their
-draws are archived and the keeper may reclaim the staged data.
+Every version of it that is still registered is released, also one an earlier plan left serving: training
+jobs that read one are refused from now on. The draws are archived and the keeper may reclaim the staged data.
 <if shelved> It comes off the shelf.
-Run builds it again whenever you want.
+It can be planned again at any time.
 ```
 
 The button's tooltip and the `retire` line of the guide say the same in one sentence.
@@ -123,8 +128,9 @@ The keeper's `idle` and `retire` signals and their rules; the force stop; `cance
 
 ## 4. Build notes
 
-- **Workflow determinism.** Every new branch is behind `workflow.patched("retire-anywhere")`; the recorded
-  buffer fixtures replay unchanged, and a new one records a retire at rest and a retire of a round in progress.
+- **Workflow determinism.** Every new branch runs only for an event in `retire_events`, which only a patched
+  signal fills; the recorded buffer fixtures replay unchanged, and `buffer_history_retire.json` records a
+  retire of a round in progress followed by a retire of the retired buffer.
 - **Tests.** The stage table (`working` takes nothing beyond `cancel`, `retire`, `dropped`, `stop`; every stage
   but `retired` takes `retire`); `_rules` for a shelved buffer; the hold ending with the `retired` write; the
   workflow at `new`, at `needs-human` with a buffer registered, at `cancelled`, in `sourcing`, at `staged`, at
@@ -138,7 +144,7 @@ The keeper's `idle` and `retire` signals and their rules; the force stop; `cance
 
 ## 5. Calls made while writing this
 
-Each is the builder's proposal, to be corrected here rather than in code.
+Each is the builder's call; none was corrected before the build.
 
 1. A retire is not offered at `retired`.
 2. A cancel and a retire queued together end at `retired`, not `cancelled`.
@@ -146,3 +152,5 @@ Each is the builder's proposal, to be corrected here rather than in code.
 4. buffer-api writes the entry that says the hold ended (§3.4).
 5. The confirmation names the version being served but does not list the other versions it releases: the
    subject view does not carry them, and the general sentence covers them.
+6. A go and a retire that both wait while the buffer rests are taken retire first: the round then starts from
+   `retired`. The page sends one action at a time, so the two do not meet there.
