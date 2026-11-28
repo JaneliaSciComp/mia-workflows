@@ -114,6 +114,7 @@ ACTION_COLUMNS = ("id", "kind", "number", "action", "actor", "at", "key", "paylo
 NUMBER_EPOCH = 1767225600  # 2026-01-01T00:00:00Z: a new subject's number is the whole seconds since then
 
 TIMELINE_COLUMNS = ("seq", "at", "round", "stage", "body", "marker", "mirrored_at", "comment_url")
+UNSHELVED_BY_RETIRE = "unshelved: the buffer was retired"  # the entry of a hold that ended with a `retired` write
 
 SUBJECT_COLUMNS = ("kind", "number", "key", "stage", "revision", "issue", "data", "updated")
 
@@ -687,7 +688,9 @@ class Ledger:
         """Write a stage, an entry or both, in one transaction: (subject, entry), or None without such a subject.
         A `stage` always becomes the subject's and raises its revision. A `body` is appended once per marker: a
         second write with the marker (a retried activity, a stage entered twice in a round) returns the first
-        entry and appends nothing. Each key of `data` replaces that key of the subject's data; the others stay."""
+        entry and appends nothing. Each key of `data` replaces that key of the subject's data; the others stay.
+        A buffer that reaches `retired` is no longer shelved (spec retire-anywhere §3.4): its hold is deleted
+        here and an entry says so."""
         key = (kind, number)
         with self._transaction() as db:
             if not (found := self._subjects(db, "WHERE kind = ? AND number = ?", key)):
@@ -704,14 +707,26 @@ class Ledger:
                 )
             entry = None
             if body:
-                seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM timeline WHERE kind = ? AND number = ?", key)
-                db.execute(
-                    "INSERT OR IGNORE INTO timeline (kind, number, seq, at, round, stage, body, marker) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (*key, seq.fetchone()[0], datetime.now(UTC).isoformat(), round_id, stage, body, marker),
-                )
+                self._add_entry(db, key, round_id, stage, body, marker)
                 entry = self._entries(db, "WHERE kind = ? AND number = ? AND marker = ?", (*key, marker))[0]
-            return self._subjects(db, "WHERE kind = ? AND number = ?", key)[0], entry
+            subject = self._subjects(db, "WHERE kind = ? AND number = ?", key)[0]
+            if (kind, stage) == ("buffer", "retired"):
+                if db.execute("DELETE FROM shelved WHERE kind = ? AND number = ?", key).rowcount:
+                    unshelved = f"<!-- mia: unshelved by retire {subject['revision']} -->"
+                    self._add_entry(db, key, round_id, None, f"{UNSHELVED_BY_RETIRE}\n\n{unshelved}", unshelved)
+            return subject, entry
+
+    @staticmethod
+    def _add_entry(
+        db: sqlite3.Connection, key: tuple[str, int], round_id: str | None, stage: str | None, body: str, marker: str
+    ) -> None:
+        """Append an entry to a subject's timeline, once per marker."""
+        seq = db.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM timeline WHERE kind = ? AND number = ?", key)
+        db.execute(
+            "INSERT OR IGNORE INTO timeline (kind, number, seq, at, round, stage, body, marker) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (*key, seq.fetchone()[0], datetime.now(UTC).isoformat(), round_id, stage, body, marker),
+        )
 
     def timeline(self, kind: str, number: int) -> list[dict]:
         with self._lock:

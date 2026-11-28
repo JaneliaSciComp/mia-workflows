@@ -1108,6 +1108,31 @@ def test_reject_asks_for_its_feedback_in_a_dialog() -> None:
     assert has("Send rejection") and has("sendButton.disabled = !note.value.trim()")
 
 
+def test_retire_asks_first_and_says_what_it_does_to_this_buffer() -> None:
+    """A retire is accepted wherever the buffer is (spec retire-anywhere §3.5), so its confirmation says what it
+    ends there: the round, the plan, the version being served, or nothing but the name."""
+    subjects = [
+        {"kind": "buffer", "stage": "sourcing"},
+        {"kind": "buffer", "stage": "staged"},
+        {"kind": "buffer", "stage": "plan-review"},
+        {"kind": "buffer", "stage": "ready", "serving": "i7-e11"},
+        {"kind": "buffer", "stage": "idle"},
+        {"kind": "buffer", "stage": "cancelled", "shelved": {"reason": "later"}},
+        {"kind": "buffer", "stage": "needs-human"},
+    ]
+    texts = run_js("print(input.map(subject => retireConfirm(subject)));", {"actions.js": "retireConfirm"}, subjects)
+    assert all(text.startswith("Retire this buffer?\n\n") for text in texts)
+    assert all("Every version of it that is still registered is released" in text for text in texts)
+    said = [text.split("\n")[2] for text in texts]
+    assert said[0].startswith("Its round in progress is cancelled first: its cluster jobs are killed")
+    assert said[1] == "The round at its approval gate is ended and what it staged is released."
+    assert said[2] == "The plan under review is dropped; no job has run for it."
+    assert said[3] == "Version i7-e11 stops serving." and said[4] == "The version being served stops serving."
+    assert said[5] == said[6] and said[5].startswith("No round is open: this marks the buffer retired")
+    assert ["It comes off the shelf." in text for text in texts] == [False] * 5 + [True, False]
+    assert has("retire: retireConfirm,") and has("!confirm(actionConfirm(subject, action))")
+
+
 def test_shelving_is_offered_for_every_kind_and_asks_for_its_reason() -> None:
     """Shelve is a button of the action bar like any other the service offers; it opens a dialog for the reason,
     which cannot be sent empty. A shelved subject says who, when and why, and Needs you has a toggle for them."""

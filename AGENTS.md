@@ -49,13 +49,20 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
 - **The stage tables are the state machine.** `STAGE_ACTIONS` beside each `STAGES` (`mia_data/config.py`,
   `mia_buffers/config.py`) says which actions a stage accepts and whether a round is in progress there.
   buffer-api refuses any other action and the page offers only these; a round in progress accepts only `cancel`
-  and, for a run that cannot answer one, `stop` (a dataset at `debugging` also the `go` of its next round). A
+  and, for a run that cannot answer one, `stop` (a dataset at `debugging` also the `go` of its next round; a
+  buffer's also `retire`, which ends the round as a cancel does). A
   dataset's verdict names its `set`, and buffer-api refuses one for a set the stage does not let it be about
   (`_names_its_set`: at `review` the set under review, at `done` a `reject` of the saved set). Any
   action may name the `revision` it was decided at and is refused once the subject moved. A buffer's `edit`
   (a changed definition, where the buffer rests) is in the table too, and buffer-api carries it out itself.
   A new stage or action goes into the table first. Every stage write is awaited, so the registry's stage is the
   workflow's.
+- **A buffer is retired from wherever it is.** `retire` is in every buffer stage but `retired`, and a person's
+  retire always ends there. The workflow keeps it in `retire_events`, beside `cancel_events`: a round is ended
+  as a cancel ends it, a serving or resting buffer has nothing to end, and `_retire_all` then releases every
+  version the registry still holds for the subject (`live_buffers`), not only the one in the workflow's state.
+  A new place where a buffer's workflow waits counts `retire_events` as queued, so a continue-as-new cannot
+  drop one. The keeper's retire is about one version and stays a lifecycle signal.
 - **A round is resumed or restarted.** A dataset and a request take two actions that run them again. `go`
   (*Restart*) wipes the round's state and pins anew. `resume` (*Resume*) keeps the round id, the pins and every
   result on the state, and starts at the first step with none (`resume_step` in `mia_data/models.py`, the one
@@ -76,7 +83,8 @@ CI runs lint, typecheck and test. Keep them clean; do not add `type: ignore` or 
   its own.
 - **Shelving is beside the stage tables, and only buffer-api writes it.** A subject with no round open also takes
   `shelve` (with a reason); a shelved one reads the status `shelved` and takes `unshelve` alone (`_rules` in
-  `mia_buffers/api.py`). The subject's workflow hears of neither, except that a shelve of a subject whose round
+  `mia_buffers/api.py`), a buffer also `retire`: writing `retired` ends its hold. The subject's workflow hears
+  of neither, except that a shelve of a subject whose round
   waits for a verdict (a dataset at `review`) sends that round a `cancel` first; a request resting at `needs-human` is told to
   look again (`recheck`) when a dataset it names is shelved or prepared and when buffer-api starts, and is `done`
   when each is one of the two. The hold is a row of the ledger's `shelved` table; a shelved dataset reads `state: shelved` from

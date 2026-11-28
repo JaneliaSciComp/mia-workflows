@@ -1543,6 +1543,7 @@ async def test_mark_dataset_and_retire(acts, server):
     assert buffer["config"]["plan_hash"] == plan_hash(plan_text)
     assert buffer["config"]["recipe"]["harness_commit"] == pins.harness_commit
     assert acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"] == []  # create_buffer writes none
+    assert await acts.live_buffers(7) == [ROUND] and await acts.live_buffers(70) == []  # this subject's alone
     await acts.mark_dataset(ROUND, U937, "staging", job="j1")
     await acts.mark_dataset(ROUND, U937, "exploded")  # refused by the service: logged, not raised
     assert [(row["record"], row["status"], row["job"]) for row in acts.registry.buffer_datasets(ROUND)] == [
@@ -1554,6 +1555,7 @@ async def test_mark_dataset_and_retire(acts, server):
     idle, retired = acts.registry.request("GET", f"/buffers/{ROUND}/events")["events"]
     assert (idle["kind"], idle["issue"], idle["detail"]) == ("idle", 7, "superseded")
     assert (retired["kind"], retired["issue"], retired["detail"]) == ("retired", 7, "archive none")
+    assert await acts.live_buffers(7) == []  # a retired version is not one a retire still has to release
     acts.registry = Registry("http://127.0.0.1:9")
     await acts.mark_dataset(ROUND, U937, "staging")
     await acts.buffer_event(ROUND, "idle")  # best effort: logged, not raised
